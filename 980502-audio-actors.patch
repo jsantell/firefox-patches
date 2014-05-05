@@ -1,0 +1,1067 @@
+From 077e00ab27145c428531d221343d5cf7c8b404ba Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 26 Mar 2014 15:28:24 -0700
+Subject: Bug 980502 - Implement web audio actors and audio node actors, r=vp
+
+---
+ browser/app/profile/firefox.js                     |   3 +
+ browser/devtools/moz.build                         |   3 +-
+ browser/devtools/webaudioeditor/moz.build          |  12 +
+ browser/devtools/webaudioeditor/test/browser.ini   |  12 +
+ .../test/browser_audionode-actor-get-set-param.js  |  51 +++
+ .../test/browser_audionode-actor-get-type.js       |  29 ++
+ .../test/browser_audionode-actor-is-source.js      |  28 ++
+ .../test/browser_webaudio-actor-simple.js          |  35 ++
+ .../webaudioeditor/test/doc_complex-context.html   |  44 +++
+ .../webaudioeditor/test/doc_simple-context.html    |  26 ++
+ .../test/doc_simple-node-creation.html             |  28 ++
+ browser/devtools/webaudioeditor/test/head.js       | 160 ++++++++
+ browser/devtools/webaudioeditor/test/moz.build     |   6 +
+ toolkit/devtools/server/actors/call-watcher.js     |   2 +-
+ toolkit/devtools/server/actors/webaudio.js         | 431 +++++++++++++++++++++
+ toolkit/devtools/server/main.js                    |   1 +
+ 16 files changed, 869 insertions(+), 2 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/moz.build
+ create mode 100644 browser/devtools/webaudioeditor/test/browser.ini
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-get-type.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-is-source.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_webaudio-actor-simple.js
+ create mode 100644 browser/devtools/webaudioeditor/test/doc_complex-context.html
+ create mode 100644 browser/devtools/webaudioeditor/test/doc_simple-context.html
+ create mode 100644 browser/devtools/webaudioeditor/test/doc_simple-node-creation.html
+ create mode 100644 browser/devtools/webaudioeditor/test/head.js
+ create mode 100644 browser/devtools/webaudioeditor/test/moz.build
+ create mode 100644 toolkit/devtools/server/actors/webaudio.js
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index ee2bd80..89e0b7a 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1203,16 +1203,19 @@ pref("devtools.styleeditor.source-maps-enabled", false);
+ pref("devtools.styleeditor.autocompletion-enabled", true);
+ 
+ // Enable the Shader Editor.
+ pref("devtools.shadereditor.enabled", false);
+ 
+ // Enable the Canvas Debugger.
+ pref("devtools.canvasdebugger.enabled", false);
+ 
++// Enable the Web Audio Editor
++pref("devtools.webaudioeditor.enabled", false);
++
+ // Enable tools for Chrome development.
+ pref("devtools.chrome.enabled", false);
+ 
+ // Default theme ("dark" or "light")
+ pref("devtools.theme", "light");
+ 
+ // Display the introductory text
+ pref("devtools.gcli.hideIntro", false);
+diff --git a/browser/devtools/moz.build b/browser/devtools/moz.build
+index ce16ea3..fc99cd2 100644
+--- a/browser/devtools/moz.build
++++ b/browser/devtools/moz.build
+@@ -19,17 +19,18 @@ DIRS += [
+     'responsivedesign',
+     'scratchpad',
+     'shadereditor',
+     'shared',
+     'sourceeditor',
+     'styleeditor',
+     'styleinspector',
+     'tilt',
++    'webaudioeditor',
+     'webconsole',
+ ]
+ 
+ EXTRA_COMPONENTS += [
+     'devtools-clhandler.js',
+     'devtools-clhandler.manifest',
+ ]
+ 
+-JAR_MANIFESTS += ['jar.mn']
+\ No newline at end of file
++JAR_MANIFESTS += ['jar.mn']
+diff --git a/browser/devtools/webaudioeditor/moz.build b/browser/devtools/webaudioeditor/moz.build
+new file mode 100644
+index 0000000..91a9dd1
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/moz.build
+@@ -0,0 +1,12 @@
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++TEST_DIRS += ['test']
++
++JS_MODULES_PATH = 'modules/devtools/webaudioeditor'
++
++EXTRA_JS_MODULES += [
++]
++
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+new file mode 100644
+index 0000000..db3344e
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -0,0 +1,12 @@
++[DEFAULT]
++
++support-files =
++  doc_simple-context.html
++  doc_complex-context.html
++  doc_simple-node-creation.html
++  head.js
++
++[browser_webaudio-actor-simple.js]
++[browser_audionode-actor-get-set-param.js]
++[browser_audionode-actor-is-source.js]
++[browser_audionode-actor-get-type.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js
+new file mode 100644
+index 0000000..ecfe79e
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js
+@@ -0,0 +1,51 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode#getParam() / AudioNode#setParam()
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(SIMPLE_CONTEXT_URL);
++  let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
++    front.setup({ reload: true }),
++    get3(front, "create-node")
++  ]);
++
++  let freq = yield oscNode.getParam("frequency");
++  info(typeof freq);
++  ise(freq, 440, "AudioNode:getParam correctly fetches AudioParam");
++
++  let type = yield oscNode.getParam("type");
++  ise(type, "sine", "AudioNode:getParam correctly fetches non-AudioParam");
++
++  let type = yield oscNode.getParam("not-a-valid-param");
++  is(type, undefined, "AudioNode:getParam correctly returns false for invalid param");
++
++  let resSuccess = yield oscNode.setParam("frequency", 220);
++  let freq = yield oscNode.getParam("frequency");
++  ise(freq, 220, "AudioNode:setParam correctly sets a `number` AudioParam");
++  is(resSuccess, undefined, "AudioNode:setParam returns undefined for correctly set AudioParam");
++
++  resSuccess = yield oscNode.setParam("type", "square");
++  let type = yield oscNode.getParam("type");
++  ise(type, "square", "AudioNode:setParam correctly sets a `string` non-AudioParam");
++  is(resSuccess, undefined, "AudioNode:setParam returns undefined for correctly set AudioParam");
++
++  resSuccess = yield oscNode.setParam("type", "\"triangle\"");
++  type = yield oscNode.getParam("type");
++  ise(type, "triangle", "AudioNode:setParam correctly removes quotes in `string` non-AudioParam");
++
++  try {
++    yield oscNode.setParam("frequency", "hello");
++    ok(false, "setParam with invalid types should throw");
++  } catch (e) {
++    ok(/is not a finite floating-point/.test(e.message), "AudioNode:setParam returns error with correct message when attempting an invalid assignment");
++    is(e.type, "TypeError", "AudioNode:setParam returns error with correct type when attempting an invalid assignment");
++    freq = yield oscNode.getParam("frequency");
++    ise(freq, 220, "AudioNode:setParam does not modify value when an error occurs");
++  }
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-type.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-type.js
+new file mode 100644
+index 0000000..c4ac400
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-type.js
+@@ -0,0 +1,29 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode#getType()
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(SIMPLE_NODES_URL);
++  let [_, nodes] = yield Promise.all([
++    front.setup({ reload: true }),
++    getN(front, "create-node", 14)
++  ]);
++
++  let actualTypes = yield Promise.all(nodes.map(node => node.getType()));
++  let expectedTypes = [
++    "AudioDestinationNode",
++    "AudioBufferSourceNode", "ScriptProcessorNode", "AnalyserNode", "GainNode",
++    "DelayNode", "BiquadFilterNode", "WaveShaperNode", "PannerNode", "ConvolverNode",
++    "ChannelSplitterNode", "ChannelMergerNode", "DynamicsCompressorNode", "OscillatorNode"
++  ];
++
++  expectedTypes.forEach((type, i) => {
++    is(actualTypes[i], type, type + " successfully created with correct type");
++  });
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-is-source.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-is-source.js
+new file mode 100644
+index 0000000..942edde
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-is-source.js
+@@ -0,0 +1,28 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode#isSource()
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(SIMPLE_NODES_URL);
++  let [_, nodes] = yield Promise.all([
++    front.setup({ reload: true }),
++    getN(front, "create-node", 14)
++  ]);
++
++  let actualTypes = yield Promise.all(nodes.map(node => node.getType()));
++  let isSourceResult = yield Promise.all(nodes.map(node => node.isSource()));
++
++  actualTypes.forEach((type, i) => {
++    let shouldBeSource = type === "AudioBufferSourceNode" || type === "OscillatorNode";
++    if (shouldBeSource)
++      is(isSourceResult[i], true, type + "'s isSource() yields into `true`");
++    else
++      is(isSourceResult[i], false, type + "'s isSource() yields into `false`");
++  });
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_webaudio-actor-simple.js b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-simple.js
+new file mode 100644
+index 0000000..86dead3
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-simple.js
+@@ -0,0 +1,35 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test basic communication of Web Audio actor
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(SIMPLE_CONTEXT_URL);
++  let [_, __, [destNode, oscNode, gainNode], [connect1, connect2]] = yield Promise.all([
++    front.setup({ reload: true }),
++    once(front, "start-context"),
++    get3(front, "create-node"),
++    get2(front, "connect-node")
++  ]);
++
++  let destType = yield destNode.getType();
++  let oscType = yield oscNode.getType();
++  let gainType = yield gainNode.getType();
++
++  is(destType, "AudioDestinationNode", "WebAudioActor:create-node returns AudioNodeActor for AudioDestination");
++  is(oscType, "OscillatorNode", "WebAudioActor:create-node returns AudioNodeActor");
++  is(gainType, "GainNode", "WebAudioActor:create-node returns AudioNodeActor");
++
++  let { source, dest } = connect1;
++  is(source.actorID, oscNode.actorID, "WebAudioActor:connect-node returns correct actor with ID on source (osc->gain)");
++  is(dest.actorID, gainNode.actorID, "WebAudioActor:connect-node returns correct actor with ID on dest (osc->gain)");
++
++  let { source, dest } = connect2;
++  is(source.actorID, gainNode.actorID, "WebAudioActor:connect-node returns correct actor with ID on source (gain->dest)");
++  is(dest.actorID, destNode.actorID, "WebAudioActor:connect-node returns correct actor with ID on dest (gain->dest)");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_complex-context.html b/browser/devtools/webaudioeditor/test/doc_complex-context.html
+new file mode 100644
+index 0000000..396bbce
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_complex-context.html
+@@ -0,0 +1,44 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++/*
++         ↱   proc
++  osc    →   gain   →
++  osc    →   gain   →  destination
++  buffer →↳  filter →
++*/
++      let ctx = new AudioContext();
++      let osc1 = ctx.createOscillator();
++      let gain1 = ctx.createGain();
++      let proc = ctx.createScriptProcessor();
++      osc1.connect(gain1);
++      osc1.connect(proc);
++      gain1.connect(ctx.destination);
++
++      let osc2 = ctx.createOscillator();
++      let gain2 = ctx.createGain();
++      osc2.connect(gain2);
++      gain2.connect(ctx.destination);
++
++      let buf = ctx.createBufferSource();
++      let filter = ctx.createBiquadFilter();
++      buf.connect(filter);
++      osc2.connect(filter);
++      filter.connect(ctx.destination);
++
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/doc_simple-context.html b/browser/devtools/webaudioeditor/test/doc_simple-context.html
+new file mode 100644
+index 0000000..d6d8e70
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_simple-context.html
+@@ -0,0 +1,26 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++      let gain = ctx.createGain();
++      gain.gain.value = 0;
++      osc.connect(gain);
++      gain.connect(ctx.destination);
++      osc.start(0);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/doc_simple-node-creation.html b/browser/devtools/webaudioeditor/test/doc_simple-node-creation.html
+new file mode 100644
+index 0000000..9599166
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_simple-node-creation.html
+@@ -0,0 +1,28 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let NODE_CREATION_METHODS = [
++          "createBufferSource", "createScriptProcessor", "createAnalyser",
++          "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
++          "createPanner", "createConvolver", "createChannelSplitter", "createChannelMerger",
++          "createDynamicsCompressor", "createOscillator"
++      ];
++      let nodes = NODE_CREATION_METHODS.map(method => ctx[method]());
++
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+new file mode 100644
+index 0000000..7ed9214
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -0,0 +1,160 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++"use strict";
++
++const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++
++let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
++
++// Enable logging for all the tests. Both the debugger server and frontend will
++// be affected by this pref.
++let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
++Services.prefs.setBoolPref("devtools.debugger.log", true);
++
++let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
++let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
++let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
++let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
++let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
++let { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.jsm", {});
++
++let { WebAudioFront } = devtools.require("devtools/server/actors/webaudio");
++let TargetFactory = devtools.TargetFactory;
++let Toolbox = devtools.Toolbox;
++
++const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
++const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
++const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
++const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
++
++// All tests are asynchronous.
++waitForExplicitFinish();
++
++let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
++
++registerCleanupFunction(() => {
++  info("finish() was called, cleaning up...");
++  Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
++  Services.prefs.setBoolPref("devtools.webaudioeditor.enabled", gToolEnabled);
++  Cu.forceGC();
++});
++
++function addTab(aUrl, aWindow) {
++  info("Adding tab: " + aUrl);
++
++  let deferred = Promise.defer();
++  let targetWindow = aWindow || window;
++  let targetBrowser = targetWindow.gBrowser;
++
++  targetWindow.focus();
++  let tab = targetBrowser.selectedTab = targetBrowser.addTab(aUrl);
++  let linkedBrowser = tab.linkedBrowser;
++
++  linkedBrowser.addEventListener("load", function onLoad() {
++    linkedBrowser.removeEventListener("load", onLoad, true);
++    info("Tab added and finished loading: " + aUrl);
++    deferred.resolve(tab);
++  }, true);
++
++  return deferred.promise;
++}
++
++function removeTab(aTab, aWindow) {
++  info("Removing tab.");
++
++  let deferred = Promise.defer();
++  let targetWindow = aWindow || window;
++  let targetBrowser = targetWindow.gBrowser;
++  let tabContainer = targetBrowser.tabContainer;
++
++  tabContainer.addEventListener("TabClose", function onClose(aEvent) {
++    tabContainer.removeEventListener("TabClose", onClose, false);
++    info("Tab removed and finished closing.");
++    deferred.resolve();
++  }, false);
++
++  targetBrowser.removeTab(aTab);
++  return deferred.promise;
++}
++
++function handleError(aError) {
++  ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++  finish();
++}
++
++function once(aTarget, aEventName, aUseCapture = false) {
++  info("Waiting for event: '" + aEventName + "' on " + aTarget + ".");
++
++  let deferred = Promise.defer();
++
++  for (let [add, remove] of [
++    ["on", "off"], // Use event emitter before DOM events for consistency
++    ["addEventListener", "removeEventListener"],
++    ["addListener", "removeListener"]
++  ]) {
++    if ((add in aTarget) && (remove in aTarget)) {
++      aTarget[add](aEventName, function onEvent(...aArgs) {
++        aTarget[remove](aEventName, onEvent, aUseCapture);
++        deferred.resolve(...aArgs);
++      }, aUseCapture);
++      break;
++    }
++  }
++
++  return deferred.promise;
++}
++
++function test () {
++  Task.spawn(spawnTest).then(finish, handleError);
++}
++
++function initBackend(aUrl) {
++  info("Initializing a web audio editor front.");
++
++  if (!DebuggerServer.initialized) {
++    DebuggerServer.init(() => true);
++    DebuggerServer.addBrowserActors();
++  }
++
++  return Task.spawn(function*() {
++    let tab = yield addTab(aUrl);
++    let target = TargetFactory.forTab(tab);
++    let debuggee = target.window.wrappedJSObject;
++
++    yield target.makeRemote();
++
++    let front = new WebAudioFront(target.client, target.form);
++    return [target, debuggee, front];
++  });
++}
++
++// Due to web audio will fire most events synchronously back-to-back,
++// and we can't yield them in a chain without missing actors, this allows
++// us to listen for `n` events and return a promise resolving to them.
++//
++// Takes a `front` object that is an event emitter, the number of
++// programs that should be listened to and waited on, and an optional
++// `onAdd` function that calls with the entire actors array on program link
++function getN (front, eventName, count, spread) {
++  let actors = [];
++  let deferred = Promise.defer();
++  front.on(eventName, function onEvent (...args) {
++    let actor = args[0];
++    if (actors.length !== count) {
++      actors.push(spread ? args : actor);
++    }
++    if (actors.length === count) {
++      front.off(eventName, onEvent);
++      deferred.resolve(actors);
++    }
++  });
++  return deferred.promise;
++}
++
++function get (front, eventName) { return getN(front, eventName, 1); }
++function get2 (front, eventName) { return getN(front, eventName, 2); }
++function get3 (front, eventName) { return getN(front, eventName, 3); }
++function getSpread (front, eventName) { return getN(front, eventName, 1, true); }
++function get2Spread (front, eventName) { return getN(front, eventName, 2, true); }
++function get3Spread (front, eventName) { return getN(front, eventName, 3, true); }
++function getNSpread (front, eventName, count) { return getN(front, eventName, count, true); }
+diff --git a/browser/devtools/webaudioeditor/test/moz.build b/browser/devtools/webaudioeditor/test/moz.build
+new file mode 100644
+index 0000000..a21913e
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/moz.build
+@@ -0,0 +1,6 @@
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++BROWSER_CHROME_MANIFESTS += ['browser.ini']
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index 3c66b1a..82a2d69 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -74,17 +74,17 @@ let FunctionCallActor = protocol.ActorClass({
+ 
+     this.details = {
+       window: window,
+       caller: caller,
+       type: type,
+       name: name,
+       stack: stack,
+       args: args,
+-      return: result
++      result: result
+     };
+ 
+     this.meta = {
+       global: -1,
+       previews: { caller: "", args: "" }
+     };
+ 
+     if (global == "WebGLRenderingContext") {
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+new file mode 100644
+index 0000000..9717f37
+--- /dev/null
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -0,0 +1,431 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const {Cc, Ci, Cu, Cr} = require("chrome");
++
++const Services = require("Services");
++
++const events = require("sdk/event/core");
++const protocol = require("devtools/server/protocol");
++const { CallWatcherActor, CallWatcherFront } = require("devtools/server/actors/call-watcher");
++
++const { on, once, off, emit } = events;
++const { method, Arg, Option, RetVal } = protocol;
++
++exports.register = function(handle) {
++  handle.addTabActor(WebAudioActor, "webaudioActor");
++};
++
++exports.unregister = function(handle) {
++  handle.removeTabActor(WebAudioActor);
++};
++
++const AUDIO_GLOBALS = [
++  "AudioContext", "AudioNode"
++];
++
++const NODE_CREATION_METHODS = [
++  "createBufferSource", "createMediaElementSource", "createMediaStreamSource",
++  "createMediaStreamDestination", "createScriptProcessor", "createAnalyser",
++  "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
++  "createPanner", "createConvolver", "createChannelSplitter", "createChannelMerger",
++  "createDynamicsCompressor", "createOscillator"
++];
++
++const NODE_ROUTING_METHODS = [
++  "connect", "disconnect"
++];
++
++
++/**
++ * An Audio Node actor allowing communication to a specific audio node in the
++ * Audio Context graph.
++ */
++let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
++  typeName: "audionode",
++
++  /**
++   * Create the Audio Node actor.
++   *
++   * @param DebuggerServerConnection conn
++   *        The server connection.
++   * @param AudioNode node
++   *        The AudioNode that was created.
++   */
++  initialize: function (conn, node) {
++    protocol.Actor.prototype.initialize.call(this, conn);
++    this.node = unwrap(node);
++    try {
++      this.type = this.node.toString().match(/\[object (.*)\]$/)[1];
++    } catch (e) {
++      this.type = "";
++    }
++  },
++
++  /**
++   * Returns the name of the audio type.
++   * Examples: "OscillatorNode", "MediaElementAudioSourceNode"
++   */
++  getType: method(function () {
++    return this.type;
++  }, {
++    response: { type: RetVal("string") }
++  }),
++
++  /**
++   * Returns a boolean indicating if the node is a source node,
++   * like BufferSourceNode, MediaElementAudioSourceNode, OscillatorNode, etc.
++   */
++  isSource: method(function () {
++    return !!~this.type.indexOf("Source") || this.type === "OscillatorNode";
++  }, {
++    response: { source: RetVal("boolean") }
++  }),
++
++  /**
++   * Changes a param on the audio node. Responds with a `string` that's either
++   * an empty string `""` on success, or a description of the error upon
++   * param set failure.
++   *
++   * @param String param
++   *        Name of the AudioParam to change.
++   * @param String value
++   *        Value to change AudioParam to.
++   */
++  setParam: method(function (param, value) {
++    // Strip quotes because sometimes UIs include that for strings
++    if (typeof value === "string") {
++      value = value.replace(/[\'\"]*/g, "");
++    }
++    try {
++      if (isAudioParam(this.node, param))
++        this.node[param].value = value;
++      else
++        this.node[param] = value;
++      return undefined;
++    } catch (e) {
++      return constructError(e);
++    }
++  }, {
++    request: {
++      param: Arg(0, "string"),
++      value: Arg(1, "nullable:primitive")
++    },
++    response: { error: RetVal("nullable:json") }
++  }),
++
++  /**
++   * Gets a param on the audio node.
++   *
++   * @param String param
++   *        Name of the AudioParam to fetch.
++   */
++  getParam: method(function (param) {
++    // If property does not exist, just return "undefined"
++    if (!this.node[param])
++      return undefined;
++    let value = isAudioParam(this.node, param) ? this.node[param].value : this.node[param];
++    let type = typeof type;
++    return value;
++    return { type: type, value: value };
++  }, {
++    request: {
++      param: Arg(0, "string")
++    },
++    response: { text: RetVal("nullable:primitive") }
++  }),
++});
++
++/**
++ * The corresponding Front object for the AudioNodeActor.
++ */
++let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
++  initialize: function (client, form) {
++    protocol.Front.prototype.initialize.call(this, client, form);
++    client.addActorPool(this);
++    this.manage(this);
++  }
++});
++
++/**
++ * The Web Audio Actor handles simple interaction with an AudioContext
++ * high-level methods. After instantiating this actor, you'll need to set it
++ * up by calling setup().
++ */
++let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
++  typeName: "webaudio",
++  initialize: function(conn, tabActor) {
++    protocol.Actor.prototype.initialize.call(this, conn);
++    this.tabActor = tabActor;
++    this._onContentFunctionCall = this._onContentFunctionCall.bind(this);
++  },
++
++  destroy: function(conn) {
++    protocol.Actor.prototype.destroy.call(this, conn);
++    this.finalize();
++  },
++
++  /**
++   * Starts waiting for the current tab actor's document global to be
++   * created, in order to instrument the Canvas context and become
++   * aware of everything the content does with Web Audio.
++   *
++   * See ContentObserver and WebAudioInstrumenter for more details.
++   */
++  setup: method(function({ reload }) {
++    if (this._initialized) {
++      return;
++    }
++    this._initialized = true;
++
++    // Weak map mapping audio nodes to their corresponding actors
++    this._nodeActors = new Map();
++
++    this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
++    this._callWatcher.onCall = this._onContentFunctionCall;
++    this._callWatcher.setup({
++      tracedGlobals: AUDIO_GLOBALS,
++      startRecording: true,
++      performReload: reload
++    });
++
++    // Used to track when something is happening with the web audio API
++    // the first time, to ultimately fire `start-context` event
++    this._firstNodeCreated = false;
++  }, {
++    request: { reload: Option(0, "boolean") },
++    oneway: true
++  }),
++
++  /**
++   * Invoked whenever an instrumented function is called, like an AudioContext
++   * method or an AudioNode method.
++   */
++  _onContentFunctionCall: function(functionCall) {
++    let { name } = functionCall.details;
++
++    // All Web Audio nodes inherit from AudioNode's prototype, so
++    // hook into the `connect` and `disconnect` methods
++    if (WebAudioFront.NODE_ROUTING_METHODS.has(name)) {
++      this._handleRoutingCall(functionCall);
++    }
++    else if (WebAudioFront.NODE_CREATION_METHODS.has(name)) {
++      this._handleCreationCall(functionCall);
++    }
++  },
++
++  _handleRoutingCall: function(functionCall) {
++    let { caller, args, window, name } = functionCall.details;
++    let source = unwrap(caller);
++    let dest = unwrap(args[0]);
++    let isAudioParam = dest instanceof unwrap(window.AudioParam);
++
++    // audionode.connect(param)
++    if (name === "connect" && isAudioParam) {
++      this._onConnectParam(source, dest);
++    }
++    // audionode.connect(node)
++    else if (name === "connect") {
++      this._onConnectNode(source, dest);
++    }
++    // audionode.disconnect()
++    else if (name === "disconnect") {
++      this._onDisconnectNode(source);
++    }
++  },
++
++  _handleCreationCall: function (functionCall) {
++    let { caller, result } = functionCall.details;
++    // Keep track of the first node created, so we can alert
++    // the front end that an audio context is being used since
++    // we're not hooking into the constructor itself, just its
++    // instance's methods.
++    if (!this._firstNodeCreated) {
++      // Fire the start-up event if this is the first node created
++      // and trigger a `create-node` event for the context destination
++      this._onStartContext();
++      this._onCreateNode(unwrap(caller.destination));
++      this._firstNodeCreated = true;
++    }
++    this._onCreateNode(result);
++  },
++
++  /**
++   * Stops listening for document global changes and puts this actor
++   * to hibernation. This method is called automatically just before the
++   * actor is destroyed.
++   */
++  finalize: method(function() {
++    if (!this._initialized) {
++      return;
++    }
++    this._initialized = false;
++    this._callWatcher.eraseRecording();
++
++    this._callWatcher.finalize();
++    this._callWatcher = null;
++  }, {
++   oneway: true
++  }),
++
++  /**
++   * Events emitted by this actor.
++   */
++  events: {
++    "start-context": {
++      type: "startContext"
++    },
++    "connect-node": {
++      type: "connectNode",
++      source: Option(0, "audionode"),
++      dest: Option(0, "audionode")
++    },
++    "disconnect-node": {
++      type: "disconnectNode",
++      source: Arg(0, "audionode")
++    },
++    "connect-param": {
++      type: "connectParam",
++      source: Arg(0, "audionode"),
++      param: Arg(1, "string")
++    },
++    "change-param": {
++      type: "changeParam",
++      source: Option(0, "audionode"),
++      param: Option(0, "string"),
++      value: Option(0, "string")
++    },
++    "create-node": {
++      type: "createNode",
++      source: Arg(0, "audionode")
++    }
++  },
++
++  /**
++   * Helper for constructing an AudioNodeActor, assigning to
++   * internal weak map, and tracking via `manage` so it is assigned
++   * an `actorID`.
++   */
++  _constructAudioNode: function (node) {
++    let actor = new AudioNodeActor(this.conn, node);
++    this.manage(actor);
++    this._nodeActors.set(node, actor);
++    return actor;
++  },
++
++  /**
++   * Takes an AudioNode and returns the stored actor for it.
++   * In some cases, we won't have an actor stored (for example,
++   * connecting to an AudioDestinationNode, since it's implicitly
++   * created), so make a new actor and store that.
++   */
++  _actorFor: function (node) {
++    let actor = this._nodeActors.get(node);
++    if (!actor) {
++      actor = this._constructAudioNode(node);
++    }
++    return actor;
++  },
++
++  /**
++   * Called on first audio node creation, signifying audio context usage
++   */
++  _onStartContext: function () {
++    events.emit(this, "start-context");
++  },
++
++  /**
++   * Called when one audio node is connected to another.
++   */
++  _onConnectNode: function (source, dest) {
++    let sourceActor = this._actorFor(source);
++    let destActor = this._actorFor(dest);
++    events.emit(this, "connect-node", {
++      source: sourceActor,
++      dest: destActor
++    });
++  },
++
++  /**
++   * Called when an audio node is connected to an audio param.
++   * Implement in bug 986705
++   */
++  _onConnectParam: function (source, dest) {
++    // TODO bug 986705
++  },
++
++  /**
++   * Called when an audio node is disconnected.
++   */
++  _onDisconnectNode: function (node) {
++    let actor = this._actorFor(node);
++    events.emit(this, "disconnect-node", actor);
++  },
++
++  /**
++   * Called when a parameter changes on an audio node
++   */
++  _onParamChange: function (node, param, value) {
++    let actor = this._actorFor(node);
++    events.emit(this, "param-change", {
++      source: actor,
++      param: param,
++      value: value
++    });
++  },
++
++  /**
++   * Called on node creation.
++   */
++  _onCreateNode: function (node) {
++    let actor = this._constructAudioNode(node);
++    events.emit(this, "create-node", actor);
++  }
++});
++
++/**
++ * The corresponding Front object for the WebAudioActor.
++ */
++let WebAudioFront = exports.WebAudioFront = protocol.FrontClass(WebAudioActor, {
++  initialize: function(client, { webaudioActor }) {
++    protocol.Front.prototype.initialize.call(this, client, { actor: webaudioActor });
++    client.addActorPool(this);
++    this.manage(this);
++  }
++});
++
++WebAudioFront.NODE_CREATION_METHODS = new Set(NODE_CREATION_METHODS);
++WebAudioFront.NODE_ROUTING_METHODS = new Set(NODE_ROUTING_METHODS);
++
++/**
++ * Determines whether or not property is an AudioParam.
++ *
++ * @param AudioNode node
++ *        An AudioNode.
++ * @param String prop
++ *        Property of `node` to evaluate to see if it's an AudioParam.
++ * @return Boolean
++ */
++function isAudioParam (node, prop) {
++  return /AudioParam/.test(node[prop].toString());
++}
++
++/**
++ * Takes an `Error` object and constructs a JSON-able response
++ *
++ * @param Error err
++ *        A TypeError, RangeError, etc.
++ * @return Object
++ */
++function constructError (err) {
++  return {
++    message: err.message,
++    type: err.constructor.name
++  };
++}
++
++function unwrap (obj) {
++  return XPCNativeWrapper.unwrap(obj);
++}
+diff --git a/toolkit/devtools/server/main.js b/toolkit/devtools/server/main.js
+index f1a8e16..1228126 100644
+--- a/toolkit/devtools/server/main.js
++++ b/toolkit/devtools/server/main.js
+@@ -391,16 +391,17 @@ var DebuggerServer = {
+    */
+   addTabActors: function() {
+     this.addActors("resource://gre/modules/devtools/server/actors/script.js");
+     this.addActors("resource://gre/modules/devtools/server/actors/webconsole.js");
+     this.registerModule("devtools/server/actors/inspector");
+     this.registerModule("devtools/server/actors/call-watcher");
+     this.registerModule("devtools/server/actors/canvas");
+     this.registerModule("devtools/server/actors/webgl");
++    this.registerModule("devtools/server/actors/webaudio");
+     this.registerModule("devtools/server/actors/stylesheets");
+     this.registerModule("devtools/server/actors/styleeditor");
+     this.registerModule("devtools/server/actors/storage");
+     this.registerModule("devtools/server/actors/gcli");
+     this.registerModule("devtools/server/actors/tracer");
+     this.registerModule("devtools/server/actors/memory");
+     this.registerModule("devtools/server/actors/eventlooplag");
+     if ("nsIProfiler" in Ci) {
+-- 
+1.8.4.2
+

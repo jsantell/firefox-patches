@@ -1,0 +1,710 @@
+From b4e109b04af60fd003a55a2381874f3d79b7b8e1 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 7 Mar 2014 00:09:14 -0800
+Subject: Bug 899052 Implement Addon Thread Actor
+
+---
+ .../addon-source/browser_dbg_addon3/lib/main.js    |  13 +++
+ .../addon-source/browser_dbg_addon3/package.json   |   9 ++
+ browser/devtools/debugger/test/addon3.xpi          | Bin 0 -> 7423 bytes
+ browser/devtools/debugger/test/browser.ini         |   2 +
+ .../debugger/test/browser_dbg_addonactor.js        |  99 +++++++++++++++++++++
+ browser/devtools/debugger/test/head.js             |  12 +++
+ js/src/vm/Debugger.cpp                             |   7 ++
+ toolkit/components/telemetry/Histograms.json       |  14 +++
+ toolkit/devtools/client/dbg-client.jsm             |  69 +++++++++++++-
+ toolkit/devtools/server/actors/script.js           |  90 +++++++++++++++++++
+ toolkit/devtools/server/actors/webbrowser.js       |  73 +++++++++++++++
+ 11 files changed, 385 insertions(+), 3 deletions(-)
+ create mode 100644 browser/devtools/debugger/test/addon-source/browser_dbg_addon3/lib/main.js
+ create mode 100644 browser/devtools/debugger/test/addon-source/browser_dbg_addon3/package.json
+ create mode 100644 browser/devtools/debugger/test/addon3.xpi
+ create mode 100644 browser/devtools/debugger/test/browser_dbg_addonactor.js
+
+diff --git a/browser/devtools/debugger/test/addon-source/browser_dbg_addon3/lib/main.js b/browser/devtools/debugger/test/addon-source/browser_dbg_addon3/lib/main.js
+new file mode 100644
+index 0000000..fc00b60
+--- /dev/null
++++ b/browser/devtools/debugger/test/addon-source/browser_dbg_addon3/lib/main.js
+@@ -0,0 +1,13 @@
++var { Cc, Ci } = require("chrome");
++var { once } = require("sdk/system/events");
++
++var observerService = Cc["@mozilla.org/observer-service;1"].getService(Ci.nsIObserverService);
++var observer = {
++  observe: function () {
++    debugger;
++  }
++};
++
++once("sdk:loader:destroy", () => observerService.removeObserver(observer, "debuggerAttached"));
++
++observerService.addObserver(observer, "debuggerAttached", false);
+diff --git a/browser/devtools/debugger/test/addon-source/browser_dbg_addon3/package.json b/browser/devtools/debugger/test/addon-source/browser_dbg_addon3/package.json
+new file mode 100644
+index 0000000..4bf1bed
+--- /dev/null
++++ b/browser/devtools/debugger/test/addon-source/browser_dbg_addon3/package.json
+@@ -0,0 +1,9 @@
++{
++  "name": "browser_dbg_addon3",
++  "title": "browser_dbg_addon3",
++  "id": "jid1-ami3akps3baaeg",
++  "description": "a basic add-on",
++  "author": "",
++  "license": "MPL 2.0",
++  "version": "0.1"
++}
+diff --git a/browser/devtools/debugger/test/addon3.xpi b/browser/devtools/debugger/test/addon3.xpi
+new file mode 100644
+index 0000000000000000000000000000000000000000..673b31b9d1748647f72e94801e16591fecf7122b
+GIT binary patch
+literal 7423
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/browser/devtools/debugger/test/browser.ini b/browser/devtools/debugger/test/browser.ini
+index 6ad9916..891d468 100644
+--- a/browser/devtools/debugger/test/browser.ini
++++ b/browser/devtools/debugger/test/browser.ini
+@@ -2,6 +2,7 @@
+ support-files =
+   addon1.xpi
+   addon2.xpi
++  addon3.xpi
+   code_binary_search.coffee
+   code_binary_search.js
+   code_binary_search.map
+@@ -78,6 +79,7 @@ support-files =
+   testactors.js
+ 
+ [browser_dbg_aaa_run_first_leaktest.js]
++[browser_dbg_addonactor.js]
+ [browser_dbg_auto-pretty-print-01.js]
+ [browser_dbg_auto-pretty-print-02.js]
+ [browser_dbg_bfcache.js]
+diff --git a/browser/devtools/debugger/test/browser_dbg_addonactor.js b/browser/devtools/debugger/test/browser_dbg_addonactor.js
+new file mode 100644
+index 0000000..319881b
+--- /dev/null
++++ b/browser/devtools/debugger/test/browser_dbg_addonactor.js
+@@ -0,0 +1,99 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Make sure we can attach to addon actors.
++
++const ADDON3_URL = EXAMPLE_URL + "addon3.xpi";
++const ADDON_MODULE_URL = "resource://jid1-ami3akps3baaeg-at-jetpack/browser_dbg_addon3/lib/main.js";
++
++var gAddon, gClient, gThreadClient;
++
++function test() {
++  if (!DebuggerServer.initialized) {
++    DebuggerServer.init(() => true);
++    DebuggerServer.addBrowserActors();
++  }
++
++  let transport = DebuggerServer.connectPipe();
++  gClient = new DebuggerClient(transport);
++  gClient.connect((aType, aTraits) => {
++    is(aType, "browser",
++      "Root actor should identify itself as a browser.");
++
++    installAddon()
++      .then(attachAddonActorForUrl.bind(null, gClient, ADDON3_URL))
++      .then(attachAddonThread)
++      .then(testDebugger)
++      .then(testSources)
++      .then(uninstallAddon)
++      .then(closeConnection)
++      .then(finish)
++      .then(null, aError => {
++        ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++      });
++  });
++}
++
++function installAddon () {
++  return addAddon(ADDON3_URL).then(aAddon => {
++    gAddon = aAddon;
++  });
++}
++
++function attachAddonThread ([aGrip, aResponse]) {
++  info("attached addon actor for URL");
++  let deferred = promise.defer();
++
++  gClient.attachThread(aResponse.threadActor, (aResponse, aThreadClient) => {
++    info("attached thread");
++    gThreadClient = aThreadClient;
++    gThreadClient.resume(deferred.resolve);
++  });
++  return deferred.promise;
++}
++
++function testDebugger() {
++  info('Entering testDebugger');
++  let deferred = promise.defer();
++
++  once(gClient, "paused").then(() => {
++    ok(true, "Should be able to attach to addon actor");
++    gThreadClient.resume(deferred.resolve)
++  });
++
++  Services.obs.notifyObservers(null, "debuggerAttached", null);
++
++  return deferred.promise;
++}
++
++function testSources() {
++  let deferred = promise.defer();
++
++  gThreadClient.getSources(aResponse => {
++    // source URLs contain launch-specific temporary directory path,
++    // hence the ".contains" call.
++    const matches = aResponse.sources.filter(s =>
++      s.url.contains(ADDON_MODULE_URL));
++    is(matches.length, 1,
++      "the main script of the addon is present in the source list");
++    deferred.resolve();
++  });
++
++  return deferred.promise;
++}
++
++function uninstallAddon() {
++  return removeAddon(gAddon);
++}
++
++function closeConnection () {
++  let deferred = promise.defer();
++  gClient.close(deferred.resolve);
++  return deferred.promise;
++}
++
++registerCleanupFunction(function() {
++  gClient = null;
++  gAddon = null;
++  gThreadClient = null;
++});
+diff --git a/browser/devtools/debugger/test/head.js b/browser/devtools/debugger/test/head.js
+index bf0ed6d..b6cc6c1 100644
+--- a/browser/devtools/debugger/test/head.js
++++ b/browser/devtools/debugger/test/head.js
+@@ -153,6 +153,7 @@ function getTabActorForUrl(aClient, aUrl) {
+ }
+ 
+ function getAddonActorForUrl(aClient, aUrl) {
++  info("Get addon actor for URL: " + aUrl);
+   let deferred = promise.defer();
+ 
+   aClient.listAddons(aResponse => {
+@@ -660,3 +661,14 @@ function filterTraces(aPanel, f) {
+   return Array.filter(traces, f);
+ }
+ 
++function attachAddonActorForUrl(aClient, aUrl) {
++  let deferred = promise.defer();
++
++  getAddonActorForUrl(aClient, aUrl).then(aGrip => {
++    aClient.attachAddon(aGrip.actor, aResponse => {
++      deferred.resolve([aGrip, aResponse]);
++    });
++  });
++
++  return deferred.promise;
++}
+diff --git a/js/src/vm/Debugger.cpp b/js/src/vm/Debugger.cpp
+index b2240ab..4e0589f 100644
+--- a/js/src/vm/Debugger.cpp
++++ b/js/src/vm/Debugger.cpp
+@@ -2746,9 +2746,16 @@ Debugger::findAllGlobals(JSContext *cx, unsigned argc, Value *vp)
+         return false;
+ 
+     for (CompartmentsIter c(cx->runtime(), SkipAtoms); !c.done(); c.next()) {
++        if (c->options().invisibleToDebugger())
++            continue;
++
+         c->zone()->scheduledForDestruction = false;
+ 
+         GlobalObject *global = c->maybeGlobal();
++
++        if (cx->runtime()->isSelfHostingGlobal(global))
++            continue;
++
+         if (global) {
+             /*
+              * We pulled |global| out of nowhere, so it's possible that it was
+diff --git a/toolkit/components/telemetry/Histograms.json b/toolkit/components/telemetry/Histograms.json
+index 1a88fb4..cb0ab7c 100644
+--- a/toolkit/components/telemetry/Histograms.json
++++ b/toolkit/components/telemetry/Histograms.json
+@@ -4901,6 +4901,20 @@
+     "n_buckets": "1000",
+     "description": "The time (in milliseconds) that it took a 'detach' request to go round trip."
+   },
++  "DEVTOOLS_DEBUGGER_RDP_LOCAL_ADDONDETACH_MS": {
++    "expires_in_version": "never",
++    "kind": "exponential",
++    "high": "10000",
++    "n_buckets": "1000",
++    "description": "The time (in milliseconds) that it took a 'detach' request to go round trip."
++  },
++  "DEVTOOLS_DEBUGGER_RDP_REMOTE_ADDONDETACH_MS": {
++    "expires_in_version": "never",
++    "kind": "exponential",
++    "high": "10000",
++    "n_buckets": "1000",
++    "description": "The time (in milliseconds) that it took a 'detach' request to go round trip."
++  },
+   "DEVTOOLS_DEBUGGER_RDP_LOCAL_TABDETACH_MS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+diff --git a/toolkit/devtools/client/dbg-client.jsm b/toolkit/devtools/client/dbg-client.jsm
+index efc4975..8a615b2 100644
+--- a/toolkit/devtools/client/dbg-client.jsm
++++ b/toolkit/devtools/client/dbg-client.jsm
+@@ -237,6 +237,7 @@ this.DebuggerClient = function (aTransport)
+ 
+   // Map actor ID to client instance for each actor type.
+   this._threadClients = new Map;
++  this._addonClients = new Map;
+   this._tabClients = new Map;
+   this._tracerClients = new Map;
+   this._consoleClients = new Map;
+@@ -413,8 +414,10 @@ DebuggerClient.prototype = {
+     detachClients(this._consoleClients, () => {
+       detachClients(this._threadClients, () => {
+         detachClients(this._tabClients, () => {
+-          this._transport.close();
+-          this._transport = null;
++          detachClients(this._addonClients, () => {
++            this._transport.close();
++            this._transport = null;
++          });
+         });
+       });
+     });
+@@ -467,6 +470,31 @@ DebuggerClient.prototype = {
+   },
+ 
+   /**
++   * Attach to an addon actor.
++   *
++   * @param string aAddonActor
++   *        The actor ID for the addon to attach.
++   * @param function aOnResponse
++   *        Called with the response packet and a AddonClient
++   *        (which will be undefined on error).
++   */
++  attachAddon: function DC_attachAddon(aAddonActor, aOnResponse) {
++    let packet = {
++      to: aAddonActor,
++      type: "attach"
++    };
++    this.request(packet, aResponse => {
++      let addonClient;
++      if (!aResponse.error) {
++        addonClient = new AddonClient(this, aAddonActor);
++        this._addonClients[aAddonActor] = addonClient;
++        this.activeAddon = addonClient;
++      }
++      aOnResponse(aResponse, addonClient);
++    });
++  },
++
++  /**
+    * Attach to a Web Console actor.
+    *
+    * @param string aConsoleActor
+@@ -743,7 +771,12 @@ DebuggerClient.prototype = {
+       if (pool.has(actorID)) return pool;
+     }
+     return null;
+-  }
++  },
++
++  /**
++   * Currently attached addon.
++   */
++  activeAddon: null
+ }
+ 
+ eventSource(DebuggerClient.prototype);
+@@ -1049,6 +1082,36 @@ TabClient.prototype = {
+ 
+ eventSource(TabClient.prototype);
+ 
++function AddonClient(aClient, aActor) {
++  this._client = aClient;
++  this._actor = aActor;
++  this.request = this._client.request;
++}
++
++AddonClient.prototype = {
++  get actor() { return this._actor; },
++  get _transport() { return this._client._transport; },
++
++  /**
++   * Detach the client from the addon actor.
++   *
++   * @param function aOnResponse
++   *        Called with the response packet.
++   */
++  detach: DebuggerClient.requester({
++    type: "detach"
++  }, {
++    after: function(aResponse) {
++      if (this._client.activeAddon === this._client._addonClients[this.actor]) {
++        this._client.activeAddon = null
++      }
++      delete this._client._addonClients[this.actor];
++      return aResponse;
++    },
++    telemetry: "ADDONDETACH"
++  })
++};
++
+ /**
+  * A RootClient object represents a root actor on the server. Each
+  * DebuggerClient keeps a RootClient instance representing the root actor
+diff --git a/toolkit/devtools/server/actors/script.js b/toolkit/devtools/server/actors/script.js
+index 1ea86c6..9e76947 100644
+--- a/toolkit/devtools/server/actors/script.js
++++ b/toolkit/devtools/server/actors/script.js
+@@ -4556,6 +4556,96 @@ update(ChromeDebuggerActor.prototype, {
+   }
+ });
+ 
++/**
++ * Creates an actor for handling add-on debugging. AddonThreadActor is
++ * a thin wrapper over ThreadActor.
++ *
++ * @param aConnection object
++ *        The DebuggerServerConnection with which this AddonThreadActor
++ *        is associated. (Currently unused, but required to make this
++ *        constructor usable with addGlobalActor.)
++ *
++ * @param aHooks object
++ *        An object with preNest and postNest methods for calling
++ *        when entering and exiting a nested event loops.
++ *
++ * @param aAddonID string
++ *        ID of the add-on this actor will debug. It will be used to
++ *        filter out globals marked for debugging.
++ */
++
++function AddonThreadActor(aConnect, aHooks, aAddonID) {
++  this.addonID = aAddonID;
++  ThreadActor.call(this, aHooks);
++}
++
++AddonThreadActor.prototype = Object.create(ThreadActor.prototype);
++
++update(AddonThreadActor.prototype, {
++  constructor: AddonThreadActor,
++
++  // A constant prefix that will be used to form the actor ID by the server.
++  actorPrefix: "addonThread",
++
++  /**
++   * Override the eligibility check for scripts and sources to make
++   * sure every script and source with a URL is stored when debugging
++   * add-ons.
++   */
++  _allowSource: (aSourceURL) => !!aSourceURL,
++
++  /**
++   * An object that will be used by ThreadActors to tailor their
++   * behaviour depending on the debugging context being required (chrome,
++   * addon or content). The methods that this object provides must
++   * be bound to the ThreadActor before use.
++   */
++  globalManager: {
++    findGlobals: function ADA_findGlobals() {
++      for (let global of this.dbg.findAllGlobals()) {
++        if (this._checkGlobal(global)) {
++          this.dbg.addDebuggee(global);
++        }
++      }
++    },
++
++    /**
++     * A function that the engine calls when a new global object
++     * has been created.
++     *
++     * @param aGlobal Debugger.Object
++     *        The new global object that was created.
++     */
++    onNewGlobal: function ADA_onNewGlobal(aGlobal) {
++      if (this._checkGlobal(aGlobal)) {
++        this.addDebuggee(aGlobal);
++        // Notify the client.
++        this.conn.send({
++          from: this.actorID,
++          type: "newGlobal",
++          // TODO: after bug 801084 lands see if we need to JSONify this.
++          hostAnnotations: aGlobal.hostAnnotations
++        });
++      }
++    }
++  },
++
++  /**
++   * Checks if the provided global belongs to the debugged add-on.
++   *
++   * @param aGlobal Debugger.Object
++   */
++  _checkGlobal: function ADA_checkGlobal(aGlobal) {
++    let metadata;
++    try {
++      // This will fail for non-Sandbox objects, hence the try-catch block.
++      metadata = Cu.getSandboxMetadata(aGlobal.unsafeDereference());
++    } catch (e) {
++    }
++
++    return metadata && metadata.addonID === this.addonID;
++  }
++});
+ 
+ /**
+  * Manages the sources for a thread. Handles source maps, locations in the
+diff --git a/toolkit/devtools/server/actors/webbrowser.js b/toolkit/devtools/server/actors/webbrowser.js
+index 5cf4e22..34ac6d2 100644
+--- a/toolkit/devtools/server/actors/webbrowser.js
++++ b/toolkit/devtools/server/actors/webbrowser.js
+@@ -993,12 +993,18 @@ BrowserAddonList.prototype.onUninstalled = function (aAddon) {
+ function BrowserAddonActor(aConnection, aAddon) {
+   this.conn = aConnection;
+   this._addon = aAddon;
++  this._contextPool = null;
++  this._threadActor = null;
+   AddonManager.addAddonListener(this);
+ }
+ 
+ BrowserAddonActor.prototype = {
+   actorPrefix: "addon",
+ 
++  get exited() {
++    return !this._addon;
++  },
++
+   get id() {
+     return this._addon.id;
+   },
+@@ -1007,6 +1013,10 @@ BrowserAddonActor.prototype = {
+     return this._addon.sourceURI ? this._addon.sourceURI.spec : undefined;
+   },
+ 
++  get attached() {
++    return this._threadActor;
++  },
++
+   form: function BAA_form() {
+     dbg_assert(this.actorID, "addon should have an actorID.");
+ 
+@@ -1024,9 +1034,72 @@ BrowserAddonActor.prototype = {
+   onUninstalled: function BAA_onUninstalled(aAddon) {
+     if (aAddon != this._addon)
+       return;
++
++    if (this.attached) {
++      this.onDetach();
++      this.conn.send({ from: this.actorID, type: "tabDetached" });
++    }
++
+     this._addon = null;
+     AddonManager.removeAddonListener(this);
+   },
++
++  onAttach: function BAA_onAttach() {
++    if (this.exited) {
++      return { type: "exited" };
++    }
++
++    if (!this.attached) {
++      this._contextPool = new ActorPool(this.conn);
++      this.conn.addActorPool(this._contextPool);
++
++      this._threadActor = new AddonThreadActor(this.conn, this,
++                                               this._addon.id);
++      this._contextPool.addActor(this._threadActor);
++    }
++
++    return { type: "tabAttached", threadActor: this._threadActor.actorID };
++  },
++
++  onDetach: function BAA_onDetach() {
++    if (!this.attached) {
++      return { error: "wrongState" };
++    }
++
++    this.conn.removeActorPool(this._contextPool);
++    this._contextPool = null;
++
++    this._threadActor = null;
++
++    return { type: "detached" };
++  },
++
++  preNest: function() {
++    let e = Services.wm.getEnumerator(null);
++    while (e.hasMoreElements()) {
++      let win = e.getNext();
++      let windowUtils = win.QueryInterface(Ci.nsIInterfaceRequestor)
++                           .getInterface(Ci.nsIDOMWindowUtils);
++      windowUtils.suppressEventHandling(true);
++      windowUtils.suspendTimeouts();
++    }
++  },
++
++  postNest: function() {
++    let e = Services.wm.getEnumerator(null);
++    while (e.hasMoreElements()) {
++      let win = e.getNext();
++      let windowUtils = win.QueryInterface(Ci.nsIInterfaceRequestor)
++                           .getInterface(Ci.nsIDOMWindowUtils);
++      windowUtils.resumeTimeouts();
++      windowUtils.suppressEventHandling(false);
++    }
++  }
++};
++
++BrowserAddonActor.prototype.requestTypes = {
++  "attach": BrowserAddonActor.prototype.onAttach,
++  "detach": BrowserAddonActor.prototype.onDetach
+ };
+ 
+ /**
+-- 
+1.8.4.2
+

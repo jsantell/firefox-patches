@@ -1,0 +1,414 @@
+From fd5ce8ed0b0ea536988e87f0ea07b45ad83e9cd5 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 17 Jan 2014 11:15:59 -0800
+Subject: [PATCH 1/1] Bug 858278: Add addon-sdk tests outside of the SDK
+ environment to ensure loader works anywhere, r+=mossop, gps
+
+---
+ addon-sdk/moz.build                                |  1 +
+ addon-sdk/test/Math.jsm                            | 11 +++
+ addon-sdk/test/browser.ini                         | 14 ++++
+ addon-sdk/test/browser_sdk_loader_chrome.js        | 24 +++++++
+ addon-sdk/test/browser_sdk_loader_chrome_in_sdk.js | 19 ++++++
+ addon-sdk/test/browser_sdk_loader_js_modules.js    | 33 +++++++++
+ addon-sdk/test/browser_sdk_loader_jsm_modules.js   | 31 +++++++++
+ addon-sdk/test/browser_sdk_loader_json.js          | 23 +++++++
+ .../test/browser_sdk_loader_sdk_gui_modules.js     | 18 +++++
+ addon-sdk/test/browser_sdk_loader_sdk_modules.js   | 22 ++++++
+ addon-sdk/test/data.json                           |  6 ++
+ addon-sdk/test/head.js                             | 79 ++++++++++++++++++++++
+ addon-sdk/test/invalid.json                        |  1 +
+ addon-sdk/test/math.js                             |  7 ++
+ 14 files changed, 289 insertions(+)
+ create mode 100644 addon-sdk/test/Math.jsm
+ create mode 100644 addon-sdk/test/browser.ini
+ create mode 100644 addon-sdk/test/browser_sdk_loader_chrome.js
+ create mode 100644 addon-sdk/test/browser_sdk_loader_chrome_in_sdk.js
+ create mode 100644 addon-sdk/test/browser_sdk_loader_js_modules.js
+ create mode 100644 addon-sdk/test/browser_sdk_loader_jsm_modules.js
+ create mode 100644 addon-sdk/test/browser_sdk_loader_json.js
+ create mode 100644 addon-sdk/test/browser_sdk_loader_sdk_gui_modules.js
+ create mode 100644 addon-sdk/test/browser_sdk_loader_sdk_modules.js
+ create mode 100644 addon-sdk/test/data.json
+ create mode 100644 addon-sdk/test/head.js
+ create mode 100644 addon-sdk/test/invalid.json
+ create mode 100644 addon-sdk/test/math.js
+
+diff --git a/addon-sdk/moz.build b/addon-sdk/moz.build
+index 895d119..1f094a9 100644
+--- a/addon-sdk/moz.build
++++ b/addon-sdk/moz.build
+@@ -4,3 +4,4 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
++BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/addon-sdk/test/Math.jsm b/addon-sdk/test/Math.jsm
+new file mode 100644
+index 0000000..095f338
+--- /dev/null
++++ b/addon-sdk/test/Math.jsm
+@@ -0,0 +1,11 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++this.EXPORTED_SYMBOLS = ["Math"];
++
++this.Math = {
++  square: function (x) { return x * x; }
++};
+diff --git a/addon-sdk/test/browser.ini b/addon-sdk/test/browser.ini
+new file mode 100644
+index 0000000..213698b
+--- /dev/null
++++ b/addon-sdk/test/browser.ini
+@@ -0,0 +1,14 @@
++[DEFAULT]
++support-files =
++  head.js
++  Math.jsm
++  math.js
++  data.json
++  invalid.json
++[browser_sdk_loader_sdk_modules.js]
++[browser_sdk_loader_sdk_gui_modules.js]
++[browser_sdk_loader_jsm_modules.js]
++[browser_sdk_loader_js_modules.js]
++[browser_sdk_loader_json.js]
++[browser_sdk_loader_chrome.js]
++[browser_sdk_loader_chrome_in_sdk.js]
+diff --git a/addon-sdk/test/browser_sdk_loader_chrome.js b/addon-sdk/test/browser_sdk_loader_chrome.js
+new file mode 100644
+index 0000000..d1794db
+--- /dev/null
++++ b/addon-sdk/test/browser_sdk_loader_chrome.js
+@@ -0,0 +1,24 @@
++function test () {
++  let loader = makeLoader();
++  let module = Module("./main", gTestPath);
++  let require = Require(loader, module);
++
++  const { Ci, Cc, Cu, components } = require("chrome");
++
++  let { generateUUID } = Cc["@mozilla.org/uuid-generator;1"]
++                         .getService(Ci.nsIUUIDGenerator);
++  ok(isUUID(generateUUID()), "chrome.Cc and chrome.Ci works");
++  
++  let { ID: parseUUID } = components;
++  let uuidString = "00001111-2222-3333-4444-555566667777";
++  let parsed = parseUUID(uuidString);
++  is(parsed, "{" + uuidString + "}", "chrome.components works");
++
++  const { defer } = Cu.import("resource://gre/modules/Promise.jsm").Promise;
++  let { promise, resolve } = defer();
++  resolve(5);
++  promise.then(val => {
++    is(val, 5, "chrome.Cu works");
++    finish();
++  });
++}
+diff --git a/addon-sdk/test/browser_sdk_loader_chrome_in_sdk.js b/addon-sdk/test/browser_sdk_loader_chrome_in_sdk.js
+new file mode 100644
+index 0000000..02a8c52
+--- /dev/null
++++ b/addon-sdk/test/browser_sdk_loader_chrome_in_sdk.js
+@@ -0,0 +1,19 @@
++function test () {
++  let loader = makeLoader();
++  let module = Module("./main", gTestPath);
++  let require = Require(loader, module);
++
++  // sdk/util/uuid uses Cc, Ci, components
++  const { uuid } = require("sdk/util/uuid");
++
++  ok(isUUID(uuid()), "chrome.Cc and chrome.Ci works in SDK includes");
++
++  let uuidString = '00001111-2222-3333-4444-555566667777';
++  let parsed = uuid(uuidString);
++  is(parsed, '{' + uuidString + '}', "chrome.components works in SDK includes");
++
++  // sdk/base64 uses Cu
++  const { encode } = require("sdk/base64");
++  is(encode("hello"), "aGVsbG8=", "chrome.Cu works in SDK includes");
++  finish();
++}
+diff --git a/addon-sdk/test/browser_sdk_loader_js_modules.js b/addon-sdk/test/browser_sdk_loader_js_modules.js
+new file mode 100644
+index 0000000..5616959
+--- /dev/null
++++ b/addon-sdk/test/browser_sdk_loader_js_modules.js
+@@ -0,0 +1,33 @@
++function test () {
++  let loader = makeLoader();
++  let module = Module("./main", gTestPath);
++  let require = Require(loader, module);
++
++  try {
++    let Model = require("./cant-find-me");
++    ok(false, "requiring a JS module that doesn't exist should throw");
++  }
++  catch (e) {
++    ok(e, "requiring a JS module that doesn't exist should throw");
++  }
++
++
++  /*
++   * Relative resource:// URI of JS
++   */
++
++  let { square } = require("./math");
++  is(square(5), 25, "loads relative URI of JS");
++
++  /*
++   * Absolute resource:// URI of JS
++   */
++
++  let { has } = require("resource://gre/modules/commonjs/sdk/util/array");
++  let testArray = ['rock', 'paper', 'scissors'];
++
++  ok(has(testArray, 'rock'), "loads absolute resource:// URI of JS");
++  ok(!has(testArray, 'dragon'), "loads absolute resource:// URI of JS");
++
++  finish();
++}
+diff --git a/addon-sdk/test/browser_sdk_loader_jsm_modules.js b/addon-sdk/test/browser_sdk_loader_jsm_modules.js
+new file mode 100644
+index 0000000..97dea9c
+--- /dev/null
++++ b/addon-sdk/test/browser_sdk_loader_jsm_modules.js
+@@ -0,0 +1,31 @@
++function test () {
++  let loader = makeLoader();
++  let module = Module("./main", gTestPath);
++  let require = Require(loader, module);
++
++  try {
++    let Model = require("resource://gre/modules/BlinkTag.jsm");
++    ok(false, "requiring a JS module that doesn't exist should throw");
++  }
++  catch (e) {
++    ok(e, "requiring a JS module that doesn't exist should throw");
++  }
++
++  /*
++   * Relative resource:// URI of JSM
++   */
++
++  let { square } = require("./Math.jsm").Math;
++  is(square(5), 25, "loads relative URI of JSM");
++
++  /*
++   * Absolute resource:// URI of JSM
++   */
++  let { defer } = require("resource://gre/modules/Promise.jsm").Promise;
++  let { resolve, promise } = defer();
++  resolve(5);
++  promise.then(val => {
++    is(val, 5, "loads absolute resource:// URI of JSM");
++  }).then(finish);
++
++}
+diff --git a/addon-sdk/test/browser_sdk_loader_json.js b/addon-sdk/test/browser_sdk_loader_json.js
+new file mode 100644
+index 0000000..19f92ce
+--- /dev/null
++++ b/addon-sdk/test/browser_sdk_loader_json.js
+@@ -0,0 +1,23 @@
++function test () {
++  let loader = makeLoader();
++  let module = Module("./main", gTestPath);
++  let require = Require(loader, module);
++
++  /*
++   * Relative resource:// URI of json
++   */
++
++  let data = require("./data.json");
++  is(data.title, "jetpack mochitests", "loads relative JSON");
++  is(data.dependencies.underscore, "1.0.0", "loads relative JSON");
++
++  try {
++    let data = require("./invalid.json");
++    ok(false, "parsing an invalid JSON should throw");
++  }
++  catch (e) {
++    ok(e, "parsing an invalid JSON should throw");
++  }
++
++  finish();
++}
+diff --git a/addon-sdk/test/browser_sdk_loader_sdk_gui_modules.js b/addon-sdk/test/browser_sdk_loader_sdk_gui_modules.js
+new file mode 100644
+index 0000000..965dd81
+--- /dev/null
++++ b/addon-sdk/test/browser_sdk_loader_sdk_gui_modules.js
+@@ -0,0 +1,18 @@
++function test () {
++  // Load `constructor` as global since tabs uses `traits`
++  // that use this module
++  let loader = makeLoader({ globals: constructor });
++  let module = Module("./main", "scratchpad://");
++  let require = Require(loader, module);
++
++  let tabs = require("sdk/tabs");
++
++  tabs.open({
++    url: "about:blank",
++    onReady: function (tab) {
++      is(tab.url, "about:blank", "correct uri for tab");
++      is(tabs.activeTab, tab, "correctly active tab");
++      tab.close(finish);
++    }
++  });
++}
+diff --git a/addon-sdk/test/browser_sdk_loader_sdk_modules.js b/addon-sdk/test/browser_sdk_loader_sdk_modules.js
+new file mode 100644
+index 0000000..4206332
+--- /dev/null
++++ b/addon-sdk/test/browser_sdk_loader_sdk_modules.js
+@@ -0,0 +1,22 @@
++function test () {
++  let loader = makeLoader();
++  let module = Module("./main", "scratchpad://");
++  let require = Require(loader, module);
++
++  let { has } = require("sdk/util/array");
++  let { extend } = require("sdk/util/object");
++  let testArray = [1, 'hello', 2, 'hi'];
++
++  ok(has(testArray, 1), 'loader loading simple array utils');
++  ok(has(testArray, 'hello'), 'loader loading simple array utils');
++  ok(!has(testArray, 4), 'loader loading simple array utils');
++
++  let testObj1 = { strings: 6, prop: [] };
++  let testObj2 = { name: 'Tosin Abasi', strings: 8 };
++  let extended = extend(testObj1, testObj2);
++
++  is(extended.name, 'Tosin Abasi', 'loader loading simple object utils');
++  is(extended.strings, 8, 'loader loading simple object utils');
++  is(extended.prop, testObj1.prop, 'loader loading simple object utils');
++  finish();
++}
+diff --git a/addon-sdk/test/data.json b/addon-sdk/test/data.json
+new file mode 100644
+index 0000000..cb2aade
+--- /dev/null
++++ b/addon-sdk/test/data.json
+@@ -0,0 +1,6 @@
++{
++  "title": "jetpack mochitests",
++  "dependencies": {
++    "underscore": "1.0.0"
++  }
++}
+diff --git a/addon-sdk/test/head.js b/addon-sdk/test/head.js
+new file mode 100644
+index 0000000..44fe40e
+--- /dev/null
++++ b/addon-sdk/test/head.js
+@@ -0,0 +1,79 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { utils: Cu } = Components;
++const { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
++const LoaderModule = Cu.import("resource://gre/modules/commonjs/toolkit/loader.js", {}).Loader;
++const { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
++let {
++  Loader, main, Module, Require, unload
++} = LoaderModule;
++
++let CURRENT_DIR = gTestPath.replace(/\/[^\/]*\.js$/,'/');
++let loaders = [];
++
++// All tests are asynchronous.
++waitForExplicitFinish();
++
++let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
++Services.prefs.setBoolPref("devtools.debugger.log", true);
++
++registerCleanupFunction(() => {
++  info("finish() was called, cleaning up...");
++  loaders.forEach(unload);
++  Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
++});
++
++function makePaths (root) {
++  return {
++    './': CURRENT_DIR,
++    '': 'resource://gre/modules/commonjs/'
++  };
++}
++
++function makeLoader (options) {
++  let { paths, globals } = options || {};
++
++  // We have to have `console` as a global, otherwise
++  // many SDK modules will fail
++  // bug 961252
++  let globalDefaults = {
++    console: console
++  };
++
++  let loader = Loader({
++    paths: paths || makePaths(),
++    globals: extend({}, globalDefaults, globals) || null,
++    modules: {
++      // Needed because sdk/ modules reference utilities in
++      // `toolkit/loader`, until Bug 961194 is completed
++      'toolkit/loader': LoaderModule
++    },
++    // We need rootURI due to `sdk/self` (or are using native loader)
++    // which overloads with pseudo modules
++    // bug 961245
++    rootURI: CURRENT_DIR,
++    // We also need metadata dummy object
++    // bug 961245
++    metadata: {}
++  });
++
++  loaders.push(loader);
++  return loader;
++}
++
++function isUUID (string) {
++  return /^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$/.test(string);
++}
++
++function extend (...objs) {
++  if (objs.length === 0 || objs.length === 1)
++    return objs[0] || {};
++
++  for (let i = objs.length; i > 1; i--) {
++    for (var prop in objs[i - 1])
++      objs[0][prop] = objs[i - 1][prop];
++  }
++  return objs[0];
++}
+diff --git a/addon-sdk/test/invalid.json b/addon-sdk/test/invalid.json
+new file mode 100644
+index 0000000..9f25538
+--- /dev/null
++++ b/addon-sdk/test/invalid.json
+@@ -0,0 +1 @@
++this isnt json
+diff --git a/addon-sdk/test/math.js b/addon-sdk/test/math.js
+new file mode 100644
+index 0000000..1e89ad7
+--- /dev/null
++++ b/addon-sdk/test/math.js
+@@ -0,0 +1,7 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++exports.square = function square (x) { return x * x; }
+-- 
+1.8.4.2
+

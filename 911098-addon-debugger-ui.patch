@@ -1,0 +1,1032 @@
+From 8af4148dc10f18bf67e39442ee93169cb66382d5 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 25 Mar 2014 10:59:14 -0700
+Subject: Bug 911098 - Implement Addon Debugger UI, r=fitzgen,harthur,mossop
+
+---
+ browser/devtools/debugger/debugger-controller.js   |  36 ++++++-
+ browser/devtools/debugger/debugger-panes.js        |  17 +++-
+ browser/devtools/debugger/test/browser.ini         |   1 +
+ .../debugger/test/browser_dbg_addon-sources.js     | 108 ++++++++++++++++++++
+ browser/devtools/debugger/test/head.js             |  29 ++++++
+ browser/devtools/framework/ToolboxProcess.jsm      |  31 ++++--
+ .../devtools/framework/toolbox-process-window.js   |  18 +++-
+ modules/libpref/src/init/all.js                    |   3 +
+ .../en-US/chrome/mozapps/extensions/extensions.dtd |   1 +
+ toolkit/mozapps/extensions/content/extensions.js   |  55 +++++++---
+ toolkit/mozapps/extensions/content/extensions.xml  |  31 +++++-
+ toolkit/mozapps/extensions/content/extensions.xul  |   6 ++
+ .../mozapps/extensions/internal/XPIProvider.jsm    |   4 +
+ .../extensions/internal/XPIProviderUtils.js        |   2 +-
+ .../test/addons/test_jetpack/bootstrap.js          |  17 ++++
+ .../test/addons/test_jetpack/harness-options.json  |   1 +
+ .../test/addons/test_jetpack/install.rdf           |  28 ++++++
+ .../extensions/test/browser/browser-common.ini     |   1 +
+ .../test/browser/browser_debug_button.js           | 112 +++++++++++++++++++++
+ toolkit/mozapps/extensions/test/browser/head.js    |   3 +
+ .../extensions/test/xpcshell/test_isDebuggable.js  |  36 +++++++
+ .../extensions/test/xpcshell/xpcshell-shared.ini   |   1 +
+ 22 files changed, 508 insertions(+), 33 deletions(-)
+ create mode 100644 browser/devtools/debugger/test/browser_dbg_addon-sources.js
+ create mode 100644 toolkit/mozapps/extensions/test/addons/test_jetpack/bootstrap.js
+ create mode 100644 toolkit/mozapps/extensions/test/addons/test_jetpack/harness-options.json
+ create mode 100644 toolkit/mozapps/extensions/test/addons/test_jetpack/install.rdf
+ create mode 100644 toolkit/mozapps/extensions/test/browser/browser_debug_button.js
+ create mode 100644 toolkit/mozapps/extensions/test/xpcshell/test_isDebuggable.js
+
+diff --git a/browser/devtools/debugger/debugger-controller.js b/browser/devtools/debugger/debugger-controller.js
+index 0a111f0..758410d 100644
+--- a/browser/devtools/debugger/debugger-controller.js
++++ b/browser/devtools/debugger/debugger-controller.js
+@@ -191,13 +191,15 @@ let DebuggerController = {
+     this._connection = startedDebugging.promise;
+ 
+     let target = this._target;
+-    let { client, form: { chromeDebugger, traceActor } } = target;
++    let { client, form: { chromeDebugger, traceActor, addonActor } } = target;
+     target.on("close", this._onTabDetached);
+     target.on("navigate", this._onTabNavigated);
+     target.on("will-navigate", this._onTabNavigated);
+     this.client = client;
+ 
+-    if (target.chrome) {
++    if (addonActor) {
++      this._startAddonDebugging(addonActor, startedDebugging.resolve);
++    } else if (target.chrome) {
+       this._startChromeDebugging(chromeDebugger, startedDebugging.resolve);
+     } else {
+       this._startDebuggingTab(startedDebugging.resolve);
+@@ -310,6 +312,20 @@ let DebuggerController = {
+   },
+ 
+   /**
++   * Sets up an addon debugging session.
++   *
++   * @param object aAddonActor
++   *        The actor for the addon that is being debugged.
++   * @param function aCallback
++   *        A function to invoke once the client attaches to the active thread.
++   */
++  _startAddonDebugging: function(aAddonActor, aCallback) {
++    this.client.attachAddon(aAddonActor, (aResponse) => {
++      return this._startChromeDebugging(aResponse.threadActor, aCallback);
++    });
++  },
++
++  /**
+    * Sets up a chrome debugging session.
+    *
+    * @param object aChromeDebugger
+@@ -2160,6 +2176,22 @@ Object.defineProperties(window, {
+ });
+ 
+ /**
++ * Helper method for parsing a resource URI, like
++ * `resource://gre/modules/commonjs/sdk/tabs.js`, and pulling out `sdk/tabs.js`
++ * if it's in the SDK, or `null` otherwise.
++ *
++ * @param string url
++ * @return string|null
++ */
++function getSDKModuleName(url) {
++  let match = (url || "").match(/^resource:\/\/gre\/modules\/commonjs\/(.*)/);
++  if (match) {
++    return match[1];
++  }
++  return null;
++}
++
++/**
+  * Helper method for debugging.
+  * @param string
+  */
+diff --git a/browser/devtools/debugger/debugger-panes.js b/browser/devtools/debugger/debugger-panes.js
+index 6c5b36d..52334fb 100644
+--- a/browser/devtools/debugger/debugger-panes.js
++++ b/browser/devtools/debugger/debugger-panes.js
+@@ -126,10 +126,17 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
+    *        - staged: true to stage the item to be appended later
+    */
+   addSource: function(aSource, aOptions = {}) {
+-    let url = aSource.url;
+-    let label = SourceUtils.getSourceLabel(url.split(" -> ").pop());
+-    let group = SourceUtils.getSourceGroup(url.split(" -> ").pop());
+-    let unicodeUrl = NetworkHelper.convertToUnicode(unescape(url));
++    let fullUrl = aSource.url;
++    let url = fullUrl.split(" -> ").pop();
++    let label = SourceUtils.getSourceLabel(url);
++    let group = SourceUtils.getSourceGroup(url);
++    let unicodeUrl = NetworkHelper.convertToUnicode(unescape(fullUrl));
++
++    let sdkModuleName = getSDKModuleName(url);
++    if (sdkModuleName) {
++      label = sdkModuleName;
++      group = "Add-on SDK";
++    }
+ 
+     let contents = document.createElement("label");
+     contents.className = "plain dbg-source-item";
+@@ -139,7 +146,7 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
+     contents.setAttribute("tooltiptext", unicodeUrl);
+ 
+     // Append a source item to this container.
+-    this.push([contents, url], {
++    this.push([contents, fullUrl], {
+       staged: aOptions.staged, /* stage the item to be appended later? */
+       attachment: {
+         label: label,
+diff --git a/browser/devtools/debugger/test/browser.ini b/browser/devtools/debugger/test/browser.ini
+index 42813a7..28094b4 100644
+--- a/browser/devtools/debugger/test/browser.ini
++++ b/browser/devtools/debugger/test/browser.ini
+@@ -82,6 +82,7 @@ support-files =
+ 
+ [browser_dbg_aaa_run_first_leaktest.js]
+ [browser_dbg_addonactor.js]
++[browser_dbg_addon-sources.js]
+ [browser_dbg_auto-pretty-print-01.js]
+ [browser_dbg_auto-pretty-print-02.js]
+ [browser_dbg_bfcache.js]
+diff --git a/browser/devtools/debugger/test/browser_dbg_addon-sources.js b/browser/devtools/debugger/test/browser_dbg_addon-sources.js
+new file mode 100644
+index 0000000..7bb8998
+--- /dev/null
++++ b/browser/devtools/debugger/test/browser_dbg_addon-sources.js
+@@ -0,0 +1,108 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Ensure that the sources listed when debugging an addon are either from the 
++// addon itself, or the SDK, with proper groups and labels.
++
++const ADDON3_URL = EXAMPLE_URL + "addon3.xpi";
++
++let gAddon, gClient, gThreadClient, gDebugger, gSources;
++
++function test() {
++  Task.spawn(function () {
++    if (!DebuggerServer.initialized) {
++      DebuggerServer.init(() => true);
++      DebuggerServer.addBrowserActors();
++    }
++
++    gBrowser.selectedTab = gBrowser.addTab();
++    let iframe = document.createElement("iframe");
++    document.documentElement.appendChild(iframe);
++
++    let transport = DebuggerServer.connectPipe();
++    gClient = new DebuggerClient(transport);
++
++    let connected = promise.defer();
++    gClient.connect(connected.resolve);
++    yield connected.promise;
++
++    yield installAddon();
++    let debuggerPanel = yield initAddonDebugger(gClient, ADDON3_URL, iframe);
++    gDebugger = debuggerPanel.panelWin;
++    gThreadClient = gDebugger.gThreadClient;
++    gSources = gDebugger.DebuggerView.Sources;
++
++    yield testSources();
++    yield uninstallAddon();
++    yield closeConnection();
++    yield debuggerPanel._toolbox.destroy();
++    iframe.remove();
++    finish();
++  });
++}
++
++function installAddon () {
++  return addAddon(ADDON3_URL).then(aAddon => {
++    gAddon = aAddon;
++  });
++}
++
++function testSources() {
++  let deferred = promise.defer();
++  let foundAddonModule = false;
++  let foundSDKModule = 0;
++
++  gThreadClient.getSources(({sources}) => {
++    ok(sources.length, "retrieved sources");
++
++    sources.forEach(source => {
++      let url = source.url.split(" -> ").pop();
++      info(source.url + "\n\n\n" + url);
++      let { label, group } = gSources.getItemByValue(source.url).attachment;
++
++      if (url.indexOf("resource://gre/modules/commonjs/sdk") === 0) {
++        is(label.indexOf("sdk/"), 0, "correct truncated label");
++        is(group, "Add-on SDK", "correct SDK group");
++        foundSDKModule++;
++      } else if (url.indexOf("resource://gre/modules/commonjs/method") === 0) {
++        is(label.indexOf("method/"), 0, "correct truncated label");
++        is(group, "Add-on SDK", "correct SDK group");
++        foundSDKModule++;
++      } else if (url.indexOf("resource://jid1-ami3akps3baaeg-at-jetpack") === 0) {
++        is(label, "main.js", "correct label for addon code");
++        is(group, "resource://jid1-ami3akps3baaeg-at-jetpack", "addon code is in its own group");
++        foundAddonModule = true;
++      } else {
++        throw new Error("Found source outside of the SDK or addon");
++      }
++    });
++
++    ok(foundAddonModule, "found code for the addon in the list");
++    // Be flexible in this number, as SDK changes could change the exact number of
++    // built-in browser SDK modules
++    ok(foundSDKModule > 10, "SDK modules are listed");
++
++    deferred.resolve();
++  });
++
++  return deferred.promise;
++}
++
++function uninstallAddon() {
++  return removeAddon(gAddon);
++}
++
++function closeConnection () {
++  let deferred = promise.defer();
++  gClient.close(deferred.resolve);
++  return deferred.promise;
++}
++
++registerCleanupFunction(function() {
++  gClient = null;
++  gAddon = null;
++  gDebugger = null;
++  gSources = null;
++  while (gBrowser.tabs.length > 1)
++    gBrowser.removeCurrentTab();
++});
+diff --git a/browser/devtools/debugger/test/head.js b/browser/devtools/debugger/test/head.js
+index 2472a02..1258ff9 100644
+--- a/browser/devtools/debugger/test/head.js
++++ b/browser/devtools/debugger/test/head.js
+@@ -164,6 +164,7 @@ function getAddonActorForUrl(aClient, aUrl) {
+ 
+   aClient.listAddons(aResponse => {
+     let addonActor = aResponse.addons.filter(aGrip => aGrip.url == aUrl).pop();
++    info("got addon actor for URL: " + addonActor.actor);
+     deferred.resolve(addonActor);
+   });
+ 
+@@ -500,6 +501,34 @@ function initDebugger(aTarget, aWindow) {
+   });
+ }
+ 
++function initAddonDebugger(aClient, aUrl, aFrame) {
++  info("Initializing an addon debugger panel.");
++
++  return getAddonActorForUrl(aClient, aUrl).then(({actor}) => {
++    let targetOptions = {
++      form: { addonActor: actor },
++      client: aClient,
++      chrome: true
++    };
++
++    let toolboxOptions = {
++      customIframe: aFrame
++    };
++
++    let target = devtools.TargetFactory.forTab(targetOptions);
++    return gDevTools.showToolbox(target, "jsdebugger", devtools.Toolbox.HostType.CUSTOM, toolboxOptions);
++  }).then(aToolbox => {
++    info("Addon debugger panel shown successfully.");
++
++    let debuggerPanel = aToolbox.getCurrentPanel();
++
++    // Wait for the initial resume...
++    return waitForClientEvents(debuggerPanel, "resumed")
++      .then(() => prepareDebugger(debuggerPanel))
++      .then(() => debuggerPanel);
++  });
++}
++
+ function initChromeDebugger(aOnClose) {
+   info("Initializing a chrome debugger process.");
+ 
+diff --git a/browser/devtools/framework/ToolboxProcess.jsm b/browser/devtools/framework/ToolboxProcess.jsm
+index 7bebce2..5492a45 100644
+--- a/browser/devtools/framework/ToolboxProcess.jsm
++++ b/browser/devtools/framework/ToolboxProcess.jsm
+@@ -26,10 +26,22 @@ this.EXPORTED_SYMBOLS = ["BrowserToolboxProcess"];
+  *        A function called when the process stops running.
+  * @param function aOnRun [optional]
+  *        A function called when the process starts running.
++ * @param object aOptions [optional]
++ *        An object with properties for configuring BrowserToolboxProcess.
+  */
+-this.BrowserToolboxProcess = function BrowserToolboxProcess(aOnClose, aOnRun) {
+-  this._closeCallback = aOnClose;
+-  this._runCallback = aOnRun;
++this.BrowserToolboxProcess = function BrowserToolboxProcess(aOnClose, aOnRun, aOptions) {
++  // If first argument is an object, use those properties instead of
++  // all three arguments
++  if (typeof aOnClose === "object") {
++    this._closeCallback = aOnClose.onClose;
++    this._runCallback = aOnClose.onRun;
++    this._options = aOnClose;
++  } else {
++    this._closeCallback = aOnClose;
++    this._runCallback = aOnRun;
++    this._options = aOptions || {};
++  }
++
+   this._telemetry = new Telemetry();
+ 
+   this.close = this.close.bind(this);
+@@ -43,8 +55,8 @@ this.BrowserToolboxProcess = function BrowserToolboxProcess(aOnClose, aOnRun) {
+  * Initializes and starts a chrome toolbox process.
+  * @return object
+  */
+-BrowserToolboxProcess.init = function(aOnClose, aOnRun) {
+-  return new BrowserToolboxProcess(aOnClose, aOnRun);
++BrowserToolboxProcess.init = function(aOnClose, aOnRun, aOptions) {
++  return new BrowserToolboxProcess(aOnClose, aOnRun, aOptions);
+ };
+ 
+ BrowserToolboxProcess.prototype = {
+@@ -143,8 +155,15 @@ BrowserToolboxProcess.prototype = {
+     let process = this._dbgProcess = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
+     process.init(Services.dirsvc.get("XREExeF", Ci.nsIFile));
+ 
++    let xulURI = DBG_XUL;
++
++    if (this._options.addonID) {
++      xulURI += "?addonID=" + this._options.addonID;
++    }
++
+     dumpn("Running chrome debugging process.");
+-    let args = ["-no-remote", "-foreground", "-P", this._dbgProfile.name, "-chrome", DBG_XUL];
++    let args = ["-no-remote", "-foreground", "-P", this._dbgProfile.name, "-chrome", xulURI];
++
+     process.runwAsync(args, args.length, { observe: () => this.close() });
+ 
+     this._telemetry.toolOpened("jsbrowserdebugger");
+diff --git a/browser/devtools/framework/toolbox-process-window.js b/browser/devtools/framework/toolbox-process-window.js
+index f6d710b..dd15884 100644
+--- a/browser/devtools/framework/toolbox-process-window.js
++++ b/browser/devtools/framework/toolbox-process-window.js
+@@ -32,7 +32,16 @@ function connect() {
+   );
+   gClient = new DebuggerClient(transport);
+   gClient.connect(() => {
+-    gClient.listTabs(openToolbox);
++    let addonID = getParameterByName("addonID");
++
++    if (addonID) {
++      gClient.listAddons(({addons}) => {
++        let addonActor = addons.filter(addon => addon.id === addonID).pop();
++        openToolbox({ addonActor: addonActor.actor });
++      });
++    } else {
++      gClient.listTabs(openToolbox);
++    }
+   });
+ }
+ 
+@@ -106,3 +115,10 @@ function quitApp() {
+     Services.startup.quit(Ci.nsIAppStartup.eForceQuit);
+   }
+ }
++
++function getParameterByName (name) {
++  let name = name.replace(/[\[]/, "\\\[").replace(/[\]]/, "\\\]");
++  let regex = new RegExp("[\\?&]" + name + "=([^&#]*)");
++  let results = regex.exec(window.location.search);
++  return results == null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
++}
+diff --git a/modules/libpref/src/init/all.js b/modules/libpref/src/init/all.js
+index 2d350cd..256a17f 100644
+--- a/modules/libpref/src/init/all.js
++++ b/modules/libpref/src/init/all.js
+@@ -565,6 +565,9 @@ pref("devtools.debugger.prompt-connection", true);
+ // Block tools from seeing / interacting with certified apps
+ pref("devtools.debugger.forbid-certified-apps", true);
+ 
++// Disable add-on debugging
++pref("devtools.debugger.addon-enabled", false);
++
+ // DevTools default color unit
+ pref("devtools.defaultColorUnit", "hex");
+ 
+diff --git a/toolkit/locales/en-US/chrome/mozapps/extensions/extensions.dtd b/toolkit/locales/en-US/chrome/mozapps/extensions/extensions.dtd
+index f2ae127..bbbd7bd 100644
+--- a/toolkit/locales/en-US/chrome/mozapps/extensions/extensions.dtd
++++ b/toolkit/locales/en-US/chrome/mozapps/extensions/extensions.dtd
+@@ -101,6 +101,7 @@
+ <!ENTITY cmd.installAddon.accesskey           "I">
+ <!ENTITY cmd.uninstallAddon.label             "Remove">
+ <!ENTITY cmd.uninstallAddon.accesskey         "R">
++<!ENTITY cmd.debugAddon.label                 "Debug">
+ <!ENTITY cmd.showPreferencesWin.label         "Options">
+ <!ENTITY cmd.showPreferencesWin.tooltip       "Change this add-on's options">
+ <!ENTITY cmd.showPreferencesUnix.label        "Preferences">
+diff --git a/toolkit/mozapps/extensions/content/extensions.js b/toolkit/mozapps/extensions/content/extensions.js
+index aa2139f..b047674 100644
+--- a/toolkit/mozapps/extensions/content/extensions.js
++++ b/toolkit/mozapps/extensions/content/extensions.js
+@@ -16,7 +16,10 @@ Cu.import("resource://gre/modules/PluralForm.jsm");
+ Cu.import("resource://gre/modules/DownloadUtils.jsm");
+ Cu.import("resource://gre/modules/AddonManager.jsm");
+ Cu.import("resource://gre/modules/addons/AddonRepository.jsm");
+-
++XPCOMUtils.defineLazyGetter(this, "BrowserToolboxProcess", function () {
++  return Cu.import("resource:///modules/devtools/ToolboxProcess.jsm", {}).
++         BrowserToolboxProcess;
++});
+ 
+ const PREF_DISCOVERURL = "extensions.webservice.discoverURL";
+ const PREF_DISCOVER_ENABLED = "extensions.getAddons.showPane";
+@@ -26,6 +29,8 @@ const PREF_GETADDONS_CACHE_ENABLED = "extensions.getAddons.cache.enabled";
+ const PREF_GETADDONS_CACHE_ID_ENABLED = "extensions.%ID%.getAddons.cache.enabled";
+ const PREF_UI_TYPE_HIDDEN = "extensions.ui.%TYPE%.hidden";
+ const PREF_UI_LASTCATEGORY = "extensions.ui.lastCategory";
++const PREF_ADDON_DEBUGGING_ENABLED = "devtools.debugger.addon-enabled";
++const PREF_REMOTE_DEBUGGING_ENABLED = "devtools.debugger.remote-enabled";
+ 
+ const LOADING_MSG_DELAY = 100;
+ 
+@@ -143,6 +148,9 @@ function initialize(event) {
+   }
+ 
+   gViewController.loadInitialView(view);
++
++  Services.prefs.addObserver(PREF_ADDON_DEBUGGING_ENABLED, debuggingPrefChanged, false);
++  Services.prefs.addObserver(PREF_REMOTE_DEBUGGING_ENABLED, debuggingPrefChanged, false);
+ }
+ 
+ function notifyInitialized() {
+@@ -163,6 +171,8 @@ function shutdown() {
+   gEventManager.shutdown();
+   gViewController.shutdown();
+   Services.obs.removeObserver(sendEMPong, "EM-ping");
++  Services.prefs.removeObserver(PREF_ADDON_DEBUGGING_ENABLED, debuggingPrefChanged);
++  Services.prefs.removeObserver(PREF_REMOTE_DEBUGGING_ENABLED, debuggingPrefChanged);
+ }
+ 
+ function sendEMPong(aSubject, aTopic, aData) {
+@@ -372,7 +382,7 @@ var gEventManager = {
+     contextMenu.addEventListener("popupshowing", function contextMenu_onPopupshowing() {
+       var addon = gViewController.currentViewObj.getSelectedAddon();
+       contextMenu.setAttribute("addontype", addon.type);
+-      
++
+       var menuSep = document.getElementById("addonitem-menuseparator");
+       var countEnabledMenuCmds = 0;
+       for (let child of contextMenu.children) {
+@@ -381,10 +391,10 @@ var gEventManager = {
+             countEnabledMenuCmds++;
+         }
+       }
+-      
++
+       // with only one menu item, we hide the menu separator
+       menuSep.hidden = (countEnabledMenuCmds <= 1);
+-      
++
+     }, false);
+   },
+ 
+@@ -460,14 +470,14 @@ var gEventManager = {
+       }
+     }
+   },
+-  
++
+   refreshGlobalWarning: function gEM_refreshGlobalWarning() {
+     var page = document.getElementById("addons-page");
+ 
+     if (Services.appinfo.inSafeMode) {
+       page.setAttribute("warning", "safemode");
+       return;
+-    } 
++    }
+ 
+     if (AddonManager.checkUpdateSecurityDefault &&
+         !AddonManager.checkUpdateSecurity) {
+@@ -945,6 +955,20 @@ var gViewController = {
+       }
+     },
+ 
++    cmd_debugItem: {
++      doCommand: function cmd_debugItem_doCommand(aAddon) {
++        BrowserToolboxProcess.init({ addonID: aAddon.id });
++      },
++
++      isEnabled: function cmd_debugItem_isEnabled(aAddon) {
++        let debuggerEnabled = Services.prefs.
++                              getBoolPref(PREF_ADDON_DEBUGGING_ENABLED);
++        let remoteEnabled = Services.prefs.
++                            getBoolPref(PREF_REMOTE_DEBUGGING_ENABLED);
++        return aAddon && aAddon.isDebuggable && debuggerEnabled && remoteEnabled;
++      }
++    },
++
+     cmd_showItemPreferences: {
+       isEnabled: function cmd_showItemPreferences_isEnabled(aAddon) {
+         if (!aAddon || !aAddon.isActive || !aAddon.optionsURL)
+@@ -1282,7 +1306,7 @@ function openOptionsInTab(optionsURL) {
+                          .getInterface(Ci.nsIWebNavigation)
+                          .QueryInterface(Ci.nsIDocShellTreeItem)
+                          .rootTreeItem.QueryInterface(Ci.nsIInterfaceRequestor)
+-                         .getInterface(Ci.nsIDOMWindow); 
++                         .getInterface(Ci.nsIDOMWindow);
+   if ("switchToTabHavingURI" in mainWindow) {
+     mainWindow.switchToTabHavingURI(optionsURL, true);
+     return true;
+@@ -1979,7 +2003,7 @@ var gDiscoverView = {
+     this._loadURL(this.homepageURL.spec, aIsRefresh,
+                   gViewController.notifyViewChanged.bind(gViewController));
+   },
+-  
++
+   canRefresh: function gDiscoverView_canRefresh() {
+     if (this._browser.currentURI &&
+         this._browser.currentURI.spec == this._browser.homePage)
+@@ -2279,7 +2303,7 @@ var gSearchView = {
+       }
+     });
+   },
+-  
++
+   showLoading: function gSearchView_showLoading(aLoading) {
+     this._loading.hidden = !aLoading;
+     this._listBox.hidden = aLoading;
+@@ -2620,7 +2644,7 @@ var gDetailView = {
+       self._addon.applyBackgroundUpdates = self._autoUpdate.value;
+     }, true);
+   },
+-  
++
+   shutdown: function gDetailView_shutdown() {
+     AddonManager.removeManagerListener(this);
+   },
+@@ -2791,7 +2815,7 @@ var gDetailView = {
+ 
+     document.getElementById("detail-prefs-btn").hidden = !aIsRemote &&
+       !gViewController.commands.cmd_showItemPreferences.isEnabled(aAddon);
+-    
++
+     var gridRows = document.querySelectorAll("#detail-grid rows row");
+     let first = true;
+     for (let gridRow of gridRows) {
+@@ -3108,7 +3132,7 @@ var gDetailView = {
+     if (firstRow) {
+       let top = firstRow.boxObject.y;
+       top -= parseInt(window.getComputedStyle(firstRow, null).getPropertyValue("margin-top"));
+-      
++
+       let detailViewBoxObject = gDetailView.node.boxObject;
+       top -= detailViewBoxObject.y;
+ 
+@@ -3348,7 +3372,7 @@ var gUpdatesView = {
+         notifyInitialized();
+     });
+   },
+-  
++
+   maybeDisableUpdateSelected: function gUpdatesView_maybeDisableUpdateSelected() {
+     for (let item of this._listBox.childNodes) {
+       if (item.includeUpdate) {
+@@ -3411,6 +3435,11 @@ var gUpdatesView = {
+   }
+ };
+ 
++function debuggingPrefChanged() {
++  gViewController.updateState();
++  gViewController.updateCommands();
++  gViewController.notifyViewChanged();
++}
+ 
+ var gDragDrop = {
+   onDragOver: function gDragDrop_onDragOver(aEvent) {
+diff --git a/toolkit/mozapps/extensions/content/extensions.xml b/toolkit/mozapps/extensions/content/extensions.xml
+index 92871ec..d41bcba 100644
+--- a/toolkit/mozapps/extensions/content/extensions.xml
++++ b/toolkit/mozapps/extensions/content/extensions.xml
+@@ -196,7 +196,7 @@
+           this._status.value = val;
+         ]]></setter>
+       </property>
+-      
++
+       <method name="cancel">
+         <body><![CDATA[
+           this.mInstall.cancel();
+@@ -867,6 +867,11 @@
+                             tooltiptext="&cmd.showPreferencesUnix.tooltip;"
+ #endif
+                             oncommand="document.getBindingParent(this).showPreferences();"/>
++                            <!-- label="&cmd.debugAddon.label;" -->
++                <xul:button anonid="debug-btn" class="addon-control debug"
++                            label="&cmd.debugAddon.label;"
++                            oncommand="document.getBindingParent(this).debug();"/>
++
+                 <xul:button anonid="enable-btn"  class="addon-control enable"
+                             label="&cmd.enableAddon.label;"
+                             oncommand="document.getBindingParent(this).userDisabled = false;"/>
+@@ -1003,6 +1008,10 @@
+         document.getAnonymousElementByAttribute(this, "anonid",
+                                                 "enable-btn");
+       </field>
++      <field name="_debugBtn">
++        document.getAnonymousElementByAttribute(this, "anonid",
++                                                "debug-btn");
++      </field>
+       <field name="_disableBtn">
+         document.getAnonymousElementByAttribute(this, "anonid",
+                                                 "disable-btn");
+@@ -1332,6 +1341,12 @@
+           var showProgress = this.mAddon.purchaseURL || (this.mAddon.install &&
+                              this.mAddon.install.state != AddonManager.STATE_INSTALLED);
+           this._showStatus(showProgress ? "progress" : "none");
++
++          let debuggable = this.mAddon.isDebuggable &&
++                           Services.prefs.getBoolPref('devtools.debugger.addon-enabled') &&
++                           Services.prefs.getBoolPref('devtools.debugger.remote-enabled');
++
++          this._debugBtn.disabled = this._debugBtn.hidden = !debuggable
+         ]]></body>
+       </method>
+ 
+@@ -1353,11 +1368,11 @@
+           }
+ 
+           var relNotesData = null, transformData = null;
+- 
++
+           this._relNotesLoaded = true;
+           this._relNotesLoading.hidden = false;
+           this._relNotesError.hidden = true;
+-          
++
+           function sendToggleEvent() {
+             var event = document.createEvent("Events");
+             event.initEvent("RelNotesToggle", true, true);
+@@ -1492,6 +1507,12 @@
+         ]]></body>
+       </method>
+ 
++      <method name="debug">
++        <body><![CDATA[
++          gViewController.doCommand("cmd_debugItem", this.mAddon);
++        ]]></body>
++      </method>
++
+       <method name="showPreferences">
+         <body><![CDATA[
+           gViewController.doCommand("cmd_showItemPreferences", this.mAddon);
+@@ -1880,7 +1901,7 @@
+             this._icon.src = this.mAddon.iconURL ||
+                              (this.mInstall ? this.mInstall.iconURL : "");
+             this._name.value = this.mAddon.name;
+-            
++
+             if (this.mAddon.version) {
+               this._version.value = this.mAddon.version;
+               this._version.hidden = false;
+@@ -1931,7 +1952,7 @@
+           }
+         ]]></body>
+       </method>
+-      
++
+       <method name="retryInstall">
+         <body><![CDATA[
+           this.mInstall.install();
+diff --git a/toolkit/mozapps/extensions/content/extensions.xul b/toolkit/mozapps/extensions/content/extensions.xul
+index e5be5ac..d561371 100644
+--- a/toolkit/mozapps/extensions/content/extensions.xul
++++ b/toolkit/mozapps/extensions/content/extensions.xul
+@@ -52,6 +52,8 @@
+       <menuitem id="menuitem_uninstallItem" command="cmd_uninstallItem"
+                 label="&cmd.uninstallAddon.label;"
+                 accesskey="&cmd.uninstallAddon.accesskey;"/>
++      <menuitem id="menuitem_debugItem" command="cmd_debugItem"
++                label="&cmd.debugAddon.label;"/>
+       <menuseparator id="addonitem-menuseparator" />
+       <menuitem id="menuitem_preferences" command="cmd_showItemPreferences"
+ #ifdef XP_WIN
+@@ -96,6 +98,7 @@
+     <command id="cmd_findItemUpdates"/>
+     <command id="cmd_showItemPreferences"/>
+     <command id="cmd_showItemAbout"/>
++    <command id="cmd_debugItem"/>
+     <command id="cmd_enableItem"/>
+     <command id="cmd_disableItem"/>
+     <command id="cmd_installItem"/>
+@@ -597,6 +600,9 @@
+ #endif
+                             command="cmd_showItemPreferences"/>
+                     <spacer flex="1"/>
++                    <button id="detail-debug-btn" class="addon-control debug"
++                            label="Debug"
++                            command="cmd_debugItem" />
+                     <button id="detail-enable-btn" class="addon-control enable"
+                             label="&cmd.enableAddon.label;"
+                             accesskey="&cmd.enableAddon.accesskey;"
+diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.jsm b/toolkit/mozapps/extensions/internal/XPIProvider.jsm
+index 5f7c005..0416ae7 100644
+--- a/toolkit/mozapps/extensions/internal/XPIProvider.jsm
++++ b/toolkit/mozapps/extensions/internal/XPIProvider.jsm
+@@ -6479,6 +6479,10 @@ function AddonWrapper(aAddon) {
+     return ops;
+   });
+ 
++  this.__defineGetter__("isDebuggable", function AddonWrapper_isDebuggable() {
++    return this.isActive && aAddon.bootstrap;
++  });
++
+   this.__defineGetter__("permissions", function AddonWrapper_permisionsGetter() {
+     let permissions = 0;
+ 
+diff --git a/toolkit/mozapps/extensions/internal/XPIProviderUtils.js b/toolkit/mozapps/extensions/internal/XPIProviderUtils.js
+index 5a59a8a..3c11ba3 100644
+--- a/toolkit/mozapps/extensions/internal/XPIProviderUtils.js
++++ b/toolkit/mozapps/extensions/internal/XPIProviderUtils.js
+@@ -1072,7 +1072,7 @@ this.XPIDatabase = {
+       })
+     .then(null,
+         error => {
+-          logger.error("getAddonList failed", e);
++          logger.error("getAddonList failed", error);
+           makeSafe(aCallback)([]);
+         });
+   },
+diff --git a/toolkit/mozapps/extensions/test/addons/test_jetpack/bootstrap.js b/toolkit/mozapps/extensions/test/addons/test_jetpack/bootstrap.js
+new file mode 100644
+index 0000000..2449bae
+--- /dev/null
++++ b/toolkit/mozapps/extensions/test/addons/test_jetpack/bootstrap.js
+@@ -0,0 +1,17 @@
++Components.utils.import("resource://gre/modules/Services.jsm");
++
++function install(data, reason) {
++  Services.prefs.setIntPref("jetpacktest.installed_version", 1);
++}
++
++function startup(data, reason) {
++  Services.prefs.setIntPref("jetpacktest.active_version", 1);
++}
++
++function shutdown(data, reason) {
++  Services.prefs.setIntPref("jetpacktest.active_version", 0);
++}
++
++function uninstall(data, reason) {
++  Services.prefs.setIntPref("jetpacktest.installed_version", 0);
++}
+diff --git a/toolkit/mozapps/extensions/test/addons/test_jetpack/harness-options.json b/toolkit/mozapps/extensions/test/addons/test_jetpack/harness-options.json
+new file mode 100644
+index 0000000..9e26dfe
+--- /dev/null
++++ b/toolkit/mozapps/extensions/test/addons/test_jetpack/harness-options.json
+@@ -0,0 +1 @@
++{}
+\ No newline at end of file
+diff --git a/toolkit/mozapps/extensions/test/addons/test_jetpack/install.rdf b/toolkit/mozapps/extensions/test/addons/test_jetpack/install.rdf
+new file mode 100644
+index 0000000..e88794a
+--- /dev/null
++++ b/toolkit/mozapps/extensions/test/addons/test_jetpack/install.rdf
+@@ -0,0 +1,28 @@
++<?xml version="1.0"?>
++
++<RDF xmlns="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
++     xmlns:em="http://www.mozilla.org/2004/em-rdf#">
++
++  <Description about="urn:mozilla:install-manifest">
++    <em:id>jetpack@tests.mozilla.org</em:id>
++    <em:version>1.0</em:version>
++    <em:bootstrap>true</em:bootstrap>
++
++    <!-- Front End MetaData -->
++    <em:name>Test jetpack</em:name>
++    <em:description>Test Description</em:description>
++
++    <em:iconURL>chrome://foo/skin/icon.png</em:iconURL>
++    <em:aboutURL>chrome://foo/content/about.xul</em:aboutURL>
++    <em:optionsURL>chrome://foo/content/options.xul</em:optionsURL>
++
++    <em:targetApplication>
++      <Description>
++        <em:id>xpcshell@tests.mozilla.org</em:id>
++        <em:minVersion>1</em:minVersion>
++        <em:maxVersion>1</em:maxVersion>
++      </Description>
++    </em:targetApplication>
++
++  </Description>
++</RDF>
+diff --git a/toolkit/mozapps/extensions/test/browser/browser-common.ini b/toolkit/mozapps/extensions/test/browser/browser-common.ini
+index e58ccbe..22a440a 100644
+--- a/toolkit/mozapps/extensions/test/browser/browser-common.ini
++++ b/toolkit/mozapps/extensions/test/browser/browser-common.ini
+@@ -29,6 +29,7 @@ support-files =
+ [browser_bug679604.js]
+ [browser_bug714593.js]
+ [browser_bug590347.js]
++[browser_debug_button.js]
+ [browser_details.js]
+ [browser_discovery.js]
+ [browser_dragdrop.js]
+diff --git a/toolkit/mozapps/extensions/test/browser/browser_debug_button.js b/toolkit/mozapps/extensions/test/browser/browser_debug_button.js
+new file mode 100644
+index 0000000..743703d
+--- /dev/null
++++ b/toolkit/mozapps/extensions/test/browser/browser_debug_button.js
+@@ -0,0 +1,112 @@
++/* Any copyright is dedicated to the Public Domain.
++ * http://creativecommons.org/publicdomain/zero/1.0/
++ */
++
++/**
++ * Tests debug button for addons in list view
++ */
++
++let { Promise } = Components.utils.import("resource://gre/modules/Promise.jsm", {});
++let { Task } = Components.utils.import("resource://gre/modules/Task.jsm", {});
++
++const getDebugButton = node =>
++    node.ownerDocument.getAnonymousElementByAttribute(node, "anonid", "debug-btn");
++const addonDebuggingEnabled = bool =>
++  Services.prefs.setBoolPref("devtools.debugger.addon-enabled", !!bool);
++const remoteDebuggingEnabled = bool =>
++  Services.prefs.setBoolPref("devtools.debugger.remote-enabled", !!bool);
++
++function test() {
++  requestLongerTimeout(2);
++
++  waitForExplicitFinish();
++
++
++  var gProvider = new MockProvider();
++  gProvider.createAddons([{
++    id: "non-debuggable@tests.mozilla.org",
++    name: "No debug",
++    description: "foo"
++  },
++  {
++    id: "debuggable@tests.mozilla.org",
++    name: "Debuggable",
++    description: "bar",
++    isDebuggable: true
++  }]);
++
++  Task.spawn(function* () {
++    addonDebuggingEnabled(false);
++    remoteDebuggingEnabled(false);
++
++    yield testDOM((nondebug, debuggable) => {
++      is(nondebug.disabled, true,
++        "addon:disabled::remote:disabled button is disabled for legacy addons");
++      is(nondebug.hidden, true,
++        "addon:disabled::remote:disabled button is hidden for legacy addons");
++      is(debuggable.disabled, true,
++        "addon:disabled::remote:disabled button is disabled for debuggable addons");
++      is(debuggable.hidden, true,
++        "addon:disabled::remote:disabled button is hidden for debuggable addons");
++    });
++    
++    addonDebuggingEnabled(true);
++    remoteDebuggingEnabled(false);
++
++    yield testDOM((nondebug, debuggable) => {
++      is(nondebug.disabled, true,
++        "addon:enabled::remote:disabled button is disabled for legacy addons");
++      is(nondebug.disabled, true,
++        "addon:enabled::remote:disabled button is hidden for legacy addons");
++      is(debuggable.disabled, true,
++        "addon:enabled::remote:disabled button is disabled for debuggable addons");
++      is(debuggable.disabled, true,
++        "addon:enabled::remote:disabled button is hidden for debuggable addons");
++    });
++    
++    addonDebuggingEnabled(false);
++    remoteDebuggingEnabled(true);
++
++    yield testDOM((nondebug, debuggable) => {
++      is(nondebug.disabled, true,
++        "addon:disabled::remote:enabled button is disabled for legacy addons");
++      is(nondebug.disabled, true,
++        "addon:disabled::remote:enabled button is hidden for legacy addons");
++      is(debuggable.disabled, true,
++        "addon:disabled::remote:enabled button is disabled for debuggable addons");
++      is(debuggable.disabled, true,
++        "addon:disabled::remote:enabled button is hidden for debuggable addons");
++    });
++    
++    addonDebuggingEnabled(true);
++    remoteDebuggingEnabled(true);
++
++    yield testDOM((nondebug, debuggable) => {
++      is(nondebug.disabled, true,
++        "addon:enabled::remote:enabled button is disabled for legacy addons");
++      is(nondebug.disabled, true,
++        "addon:enabled::remote:enabled button is hidden for legacy addons");
++      is(debuggable.disabled, false,
++        "addon:enabled::remote:enabled button is enabled for debuggable addons");
++      is(debuggable.hidden, false,
++        "addon:enabled::remote:enabled button is visible for debuggable addons");
++    });
++
++    finish();
++  });
++
++  function testDOM (testCallback) {
++    let deferred = Promise.defer();
++    open_manager("addons://list/extension", function(aManager) {
++      const {document} = aManager;
++      const addonList = document.getElementById("addon-list");
++      const nondebug = addonList.querySelector("[name='No debug']");
++      const debuggable = addonList.querySelector("[name='Debuggable']");
++
++      testCallback.apply(null, [nondebug, debuggable].map(getDebugButton));
++
++      close_manager(aManager, deferred.resolve);
++    });
++    return deferred.promise;
++  }
++}
+diff --git a/toolkit/mozapps/extensions/test/browser/head.js b/toolkit/mozapps/extensions/test/browser/head.js
+index f2fcc8a..7edae8b 100644
+--- a/toolkit/mozapps/extensions/test/browser/head.js
++++ b/toolkit/mozapps/extensions/test/browser/head.js
+@@ -68,6 +68,8 @@ var gRestorePrefs = [{name: PREF_LOGGING_ENABLED},
+                      {name: "extensions.getAddons.search.browseURL"},
+                      {name: "extensions.getAddons.search.url"},
+                      {name: "extensions.getAddons.cache.enabled"},
++                     {name: "devtools.debugger.addon-enabled"},
++                     {name: "devtools.debugger.remote-enabled"},
+                      {name: PREF_SEARCH_MAXRESULTS},
+                      {name: PREF_STRICT_COMPAT},
+                      {name: PREF_CHECK_COMPATIBILITY}];
+@@ -950,6 +952,7 @@ function MockAddon(aId, aName, aType, aOperationsRequiringRestart) {
+   this.type = aType || "extension";
+   this.version = "";
+   this.isCompatible = true;
++  this.isDebuggable = false;
+   this.providesUpdatesSecurely = true;
+   this.blocklistState = 0;
+   this._appDisabled = false;
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/test_isDebuggable.js b/toolkit/mozapps/extensions/test/xpcshell/test_isDebuggable.js
+new file mode 100644
+index 0000000..d4f8a48
+--- /dev/null
++++ b/toolkit/mozapps/extensions/test/xpcshell/test_isDebuggable.js
+@@ -0,0 +1,36 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
++ */
++
++var ADDONS = [
++  "test_bootstrap2_1", // restartless addon
++  "test_bootstrap1_4", // old-school addon
++  "test_jetpack"       // sdk addon
++];
++
++var IDS = [
++  "bootstrap1@tests.mozilla.org",
++  "bootstrap2@tests.mozilla.org",
++  "jetpack@tests.mozilla.org"
++];
++
++function run_test() {
++  do_test_pending();
++  
++  createAppInfo("xpcshell@tests.mozilla.org", "XPCShell", "2", "2");
++
++  startupManager();
++  AddonManager.checkCompatibility = false;
++
++  installAllFiles(ADDONS.map(do_get_addon), function () {
++    restartManager();
++
++    AddonManager.getAddonsByIDs(IDS, function([a1, a2, a3]) {
++      do_check_eq(a1.isDebuggable, false);
++      do_check_eq(a2.isDebuggable, true);
++      do_check_eq(a3.isDebuggable, true);
++      do_test_finished();
++    });
++  }, true);
++}
+diff --git a/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini b/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini
+index f17c3bd..d0ced77 100644
+--- a/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini
++++ b/toolkit/mozapps/extensions/test/xpcshell/xpcshell-shared.ini
+@@ -194,6 +194,7 @@ skip-if = os == "android"
+ # Bug 676992: test consistently hangs on Android
+ skip-if = os == "android"
+ run-sequentially = Uses hardcoded ports in xpi files.
++[test_isDebuggable.js]
+ [test_locale.js]
+ [test_locked.js]
+ [test_locked2.js]
+-- 
+1.8.4.2
+

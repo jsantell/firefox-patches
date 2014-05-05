@@ -1,0 +1,98 @@
+From ce75188908e2fbcaa6281ea40504f7cd284a65b2 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 2 Apr 2014 16:28:18 -0700
+Subject: Bug 991347 - Hide the displaying of the canvas editor when debugging an addon target, r=vp
+
+---
+ .../devtools/debugger/test/browser_dbg_addon-panels.js  | 17 ++++++++++++++++-
+ browser/devtools/main.js                                |  2 +-
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/browser/devtools/debugger/test/browser_dbg_addon-panels.js b/browser/devtools/debugger/test/browser_dbg_addon-panels.js
+index 498b04b..bfcb495 100644
+--- a/browser/devtools/debugger/test/browser_dbg_addon-panels.js
++++ b/browser/devtools/debugger/test/browser_dbg_addon-panels.js
+@@ -2,24 +2,36 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Ensure that only panels that are relevant to the addon debugger
+ // display in the toolbox
+ 
+ const ADDON3_URL = EXAMPLE_URL + "addon3.xpi";
+ 
+ let gAddon, gClient, gThreadClient, gDebugger, gSources;
+-
++let PREFS = [
++  "devtools.canvasdebugger.enabled",
++  "devtools.shadereditor.enabled",
++  "devtools.profiler.enabled",
++  "devtools.netmonitor.enabled"
++];
+ function test() {
+   Task.spawn(function () {
+     if (!DebuggerServer.initialized) {
+       DebuggerServer.init(() => true);
+       DebuggerServer.addBrowserActors();
+     }
+ 
++    // Store and enable all optional dev tools panels
++    let originalPrefs = PREFS.map(pref => {
++      let original = Services.prefs.getBoolPref(pref);
++      Services.prefs.setBoolPref(pref, true)
++      return original;
++    });
++
+     gBrowser.selectedTab = gBrowser.addTab();
+     let iframe = document.createElement("iframe");
+     document.documentElement.appendChild(iframe);
+ 
+     let transport = DebuggerServer.connectPipe();
+     gClient = new DebuggerClient(transport);
+ 
+     let connected = promise.defer();
+@@ -32,16 +44,19 @@ function test() {
+     gThreadClient = gDebugger.gThreadClient;
+     gSources = gDebugger.DebuggerView.Sources;
+ 
+     testPanels(iframe);
+     yield uninstallAddon();
+     yield closeConnection();
+     yield debuggerPanel._toolbox.destroy();
+     iframe.remove();
++
++    PREFS.forEach((pref, i) => Services.prefs.setBoolPref(pref, originalPrefs[i]));
++
+     finish();
+   });
+ }
+ 
+ function installAddon () {
+   return addAddon(ADDON3_URL).then(aAddon => {
+     gAddon = aAddon;
+   });
+diff --git a/browser/devtools/main.js b/browser/devtools/main.js
+index b0496a5..842c45d 100644
+--- a/browser/devtools/main.js
++++ b/browser/devtools/main.js
+@@ -209,17 +209,17 @@ Tools.canvasDebugger = {
+   visibilityswitch: "devtools.canvasdebugger.enabled",
+   icon: "chrome://browser/skin/devtools/tool-styleeditor.svg",
+   invertIconForLightTheme: true,
+   url: "chrome://browser/content/devtools/canvasdebugger.xul",
+   label: l10n("ToolboxCanvasDebugger.label", canvasDebuggerStrings),
+   tooltip: l10n("ToolboxCanvasDebugger.tooltip", canvasDebuggerStrings),
+ 
+   isTargetSupported: function(target) {
+-    return true;
++    return !target.isAddon;
+   },
+ 
+   build: function(iframeWindow, toolbox) {
+     let panel = new CanvasDebuggerPanel(iframeWindow, toolbox);
+     return panel.open();
+   }
+ };
+ 
+-- 
+1.8.4.2
+
