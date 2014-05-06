@@ -1,0 +1,197 @@
+From d979edcfa223b119c20bcb232f8ac41ec38d6cdb Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 6 May 2014 12:02:38 -0700
+Subject: Bug 1006283 - Set and display proper type on AudioParams for
+ web audio editor
+
+---
+ .../test/browser_audionode-actor-get-set-param.js    |  4 ----
+ .../test/browser_wa_params_view_edit.js              | 20 ++++++++++++++------
+ browser/devtools/webaudioeditor/test/head.js         |  4 ++--
+ .../devtools/webaudioeditor/webaudioeditor-view.js   | 13 +++++++++++--
+ toolkit/devtools/server/actors/webaudio.js           |  9 ++-------
+ 5 files changed, 29 insertions(+), 21 deletions(-)
+
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js
+index ecfe79e..4748217 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-set-param.js
+@@ -27,20 +27,16 @@ function spawnTest () {
+   ise(freq, 220, "AudioNode:setParam correctly sets a `number` AudioParam");
+   is(resSuccess, undefined, "AudioNode:setParam returns undefined for correctly set AudioParam");
+ 
+   resSuccess = yield oscNode.setParam("type", "square");
+   let type = yield oscNode.getParam("type");
+   ise(type, "square", "AudioNode:setParam correctly sets a `string` non-AudioParam");
+   is(resSuccess, undefined, "AudioNode:setParam returns undefined for correctly set AudioParam");
+ 
+-  resSuccess = yield oscNode.setParam("type", "\"triangle\"");
+-  type = yield oscNode.getParam("type");
+-  ise(type, "triangle", "AudioNode:setParam correctly removes quotes in `string` non-AudioParam");
+-
+   try {
+     yield oscNode.setParam("frequency", "hello");
+     ok(false, "setParam with invalid types should throw");
+   } catch (e) {
+     ok(/is not a finite floating-point/.test(e.message), "AudioNode:setParam returns error with correct message when attempting an invalid assignment");
+     is(e.type, "TypeError", "AudioNode:setParam returns error with correct type when attempting an invalid assignment");
+     freq = yield oscNode.getParam("frequency");
+     ise(freq, 220, "AudioNode:setParam does not modify value when an error occurs");
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_params_view_edit.js b/browser/devtools/webaudioeditor/test/browser_wa_params_view_edit.js
+index d1ead4f..9a05d9e 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_params_view_edit.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_params_view_edit.js
+@@ -14,29 +14,37 @@ function spawnTest() {
+ 
+   reload(target);
+ 
+   let [[dest, osc, gain], [[_, destID], [_, oscID], [_, gainID]]] = yield Promise.all([
+     get3(gFront, "create-node"),
+     get3Spread(panel.panelWin, EVENTS.UI_ADD_NODE_LIST)
+   ]);
+ 
++  let setAndCheck = setAndCheckVariable(panel.panelWin, gVars);
+ 
+   checkVariableView(gVars, 1, {
+     "type": "\"sine\"",
+     "frequency": 440,
+     "detune": 0
+-  });
++  }, "default loaded string");
+ 
+   checkVariableView(gVars, 2, {
+     "gain": 0
+-  });
++  }, "default loaded number");
+ 
+-  yield modifyVariableView(panel.panelWin, gVars, 1, "type", "square");
++  yield setAndCheck(1, "type", "\"square\"", "\"square\"", "sets string as string");
+ 
+-  checkVariableView(gVars, 1, {
+-    "type": "\"square\""
+-  });
++  yield setAndCheck(2, "gain", 0.005, 0.005, "sets number as number");
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
++function setAndCheckVariable (panelWin, gVars) {
++  return Task.async(function (varNum, prop, value, expected, desc) {
++    yield modifyVariableView(panelWin, gVars, varNum, prop, value);
++    var props = {};
++    props[prop] = expected;
++    checkVariableView(gVars, varNum, props, desc);
++  });
++}
++
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index b9e310d..5863381 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -206,25 +206,25 @@ function waitForGraphRendered (front, nodeCount, edgeCount) {
+     if (nodes === nodeCount && edges === edgeCount) {
+       front.off(eventName, onGraphRendered);
+       deferred.resolve();
+     }
+   });
+   return deferred.promise;
+ }
+ 
+-function checkVariableView (view, index, hash) {
++function checkVariableView (view, index, hash, description = "") {
+   let scope = view.getScopeAtIndex(index);
+   let variables = Object.keys(hash);
+   variables.forEach(variable => {
+     let aVar = scope.get(variable);
+     is(aVar.target.querySelector(".name").getAttribute("value"), variable,
+       "Correct property name for " + variable);
+     is(aVar.target.querySelector(".value").getAttribute("value"), hash[variable],
+-      "Correct property value of " + hash[variable] + " for " + variable);
++      "Correct property value of " + hash[variable] + " for " + variable + " " + description);
+   });
+ }
+ 
+ function modifyVariableView (win, view, index, prop, value) {
+   let deferred = Promise.defer();
+   let scope = view.getScopeAtIndex(index);
+   let aVar = scope.get(prop);
+   scope.expand();
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index 7c87c81..22c5771 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -264,22 +264,31 @@ let WebAudioParamView = {
+ 
+   /**
+    * Executed when an audio param is changed in the UI.
+    */
+   _onEval: Task.async(function* (variable, value) {
+     let ownerScope = variable.ownerView;
+     let node = getViewNodeById(ownerScope.actorID);
+     let propName = variable.name;
+-    let errorMessage = yield node.actor.setParam(propName, value);
++    let error;
++
++    // Cast value to proper type
++    try {
++      value = eval(value);
++      error = yield node.actor.setParam(propName, value);
++    }
++    catch (e) {
++      error = e;
++    }
+ 
+     // TODO figure out how to handle and display set param errors
+     // and enable `test/brorwser_wa_params_view_edit_error.js`
+     // Bug 994258
+-    if (!errorMessage) {
++    if (!error) {
+       ownerScope.get(propName).setGrip(value);
+       window.emit(EVENTS.UI_SET_PARAM, node.id, propName, value);
+     } else {
+       window.emit(EVENTS.UI_SET_PARAM_ERROR, node.id, propName, value);
+     }
+   }),
+ 
+   /**
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 40a881b..8118ee6 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -150,30 +150,25 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+    */
+   isSource: method(function () {
+     return !!~this.type.indexOf("Source") || this.type === "OscillatorNode";
+   }, {
+     response: { source: RetVal("boolean") }
+   }),
+ 
+   /**
+-   * Changes a param on the audio node. Responds with a `string` that's either
+-   * an empty string `""` on success, or a description of the error upon
+-   * param set failure.
++   * Changes a param on the audio node. Responds with either `undefined`
++   * on success, or a description of the error upon param set failure.
+    *
+    * @param String param
+    *        Name of the AudioParam to change.
+    * @param String value
+    *        Value to change AudioParam to.
+    */
+   setParam: method(function (param, value) {
+-    // Strip quotes because sometimes UIs include that for strings
+-    if (typeof value === "string") {
+-      value = value.replace(/[\'\"]*/g, "");
+-    }
+     try {
+       if (isAudioParam(this.node, param))
+         this.node[param].value = value;
+       else
+         this.node[param] = value;
+       return undefined;
+     } catch (e) {
+       return constructError(e);
+-- 
+1.8.4.2
+
