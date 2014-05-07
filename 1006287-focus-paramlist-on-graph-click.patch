@@ -1,0 +1,259 @@
+From 4b194a15a1400837e8db0ef5be3b51da2d4f0328 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 6 May 2014 15:48:36 -0700
+Subject: Bug 1006287 Clicking a graph node in the audio dev tool
+ focuses the param view for the node, r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  2 +-
+ .../webaudioeditor/test/browser_wa_graph_click.js  | 58 ++++++++++++++++++++++
+ .../test/browser_wa_graph_mouseover.js             | 42 ----------------
+ .../devtools/webaudioeditor/webaudioeditor-view.js | 34 ++++++++++---
+ 4 files changed, 87 insertions(+), 49 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_graph_click.js
+ delete mode 100644 browser/devtools/webaudioeditor/test/browser_wa_graph_mouseover.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 6420cfb..3a5cae5 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -11,15 +11,15 @@ support-files =
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params.js]
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_webaudio-actor-simple.js]
+ 
+ [browser_wa_first-run.js]
+ 
+-[browser_wa_graph_mouseover.js]
++[browser_wa_graph_click.js]
+ [browser_wa_graph_render_01.js]
+ [browser_wa_graph_render_02.js]
+ 
+ [browser_wa_params_view_edit.js]
+ [browser_wa_params_view_events.js]
+ [browser_wa_params_view_mouseover.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph_click.js b/browser/devtools/webaudioeditor/test/browser_wa_graph_click.js
+new file mode 100644
+index 0000000..cfe4b99
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph_click.js
+@@ -0,0 +1,58 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the ParamsList view opens the correct node when clicking
++ * on the node in the GraphView
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(COMPLEX_CONTEXT_URL);
++  let panelWin = panel.panelWin;
++  let { gFront, $, $$, EVENTS, WebAudioParamView } = panelWin;
++  let gVars = WebAudioParamView._paramsView;
++
++  let started = once(gFront, "start-context");
++
++  reload(target);
++
++  let [_, nodes, _] = yield Promise.all([
++    getN(gFront, "create-node", 8),
++    getNSpread(panel.panelWin, EVENTS.UI_ADD_NODE_LIST, 8),
++    waitForGraphRendered(panel.panelWin, 8, 8)
++  ]);
++
++  let nodeIds = nodes.map(([e, id]) => id);
++
++  for (let i = 0; i < 8; i++) {
++    ok(!isExpanded(gVars, i), "no views expanded on default");
++  }
++
++  click(panel.panelWin, findGraphNode(panelWin, nodeIds[1]));
++  ok(isExpanded(gVars, 1), "params view expanded on click");
++
++  var allClosed = true;
++  for (let i = 0; i < 8; i++) {
++    if (i === 1) continue;
++    if (isExpanded(gVars, i))
++      allClosed = false;
++  }
++  ok(allClosed, "all other param views are still minimized");
++
++  click(panel.panelWin, findGraphNode(panelWin, nodeIds[2]));
++  ok(isExpanded(gVars, 2), "second params view expanded on click");
++
++  click(panel.panelWin, $("rect", findGraphNode(panelWin, nodeIds[3])));
++  ok(isExpanded(gVars, 3), "param view opens when clicking `<rect>`");
++
++  click(panel.panelWin, $("tspan", findGraphNode(panelWin, nodeIds[4])));
++  ok(isExpanded(gVars, 4), "param view opens when clicking `<tspan>`");
++
++  yield teardown(panel);
++  finish();
++}
++
++function isExpanded (view, index) {
++  let scope = view.getScopeAtIndex(index);
++  return scope.expanded;
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph_mouseover.js b/browser/devtools/webaudioeditor/test/browser_wa_graph_mouseover.js
+deleted file mode 100644
+index 454a580..0000000
+--- a/browser/devtools/webaudioeditor/test/browser_wa_graph_mouseover.js
++++ /dev/null
+@@ -1,42 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the shader editor shows the appropriate UI when opened.
+- */
+-
+-function spawnTest() {
+-  let [target, debuggee, panel] = yield initWebAudioEditor(COMPLEX_CONTEXT_URL);
+-  let { gFront, $, $$, EVENTS, WebAudioParamView } = panel.panelWin;
+-  let gVars = WebAudioParamView._paramsView;
+-
+-  let started = once(gFront, "start-context");
+-
+-  reload(target);
+-
+-  yield Promise.all([
+-    getN(gFront, "create-node", 8),
+-    getNSpread(panel.panelWin, EVENTS.UI_ADD_NODE_LIST, 8),
+-    waitForGraphRendered(panel.panelWin, 8, 8)
+-  ]);
+-
+-  let $items = $$(".variables-view-scope");
+-  let $graphNodes = $$(".nodes > g");
+-
+-  for (let $item of $items) {
+-    mouseOver(panel.panelWin, $(".devtools-toolbar", $item));
+-    // Get actorID from id of variable scope
+-    let id = $item.id.match(/\(([^\)]*)\)/)[1];
+-
+-    // Go over all graph nodes and check only the selected one is highlighted
+-    for (let $node of $graphNodes) {
+-      let shouldBeSelected = id === $node.getAttribute("data-id");
+-      ok($node.classList.contains("selected") === shouldBeSelected,
+-        "graph node correctly " + (shouldBeSelected ? "" : "not ") + "highlighted on param view mouseover");
+-    }
+-  }
+-
+-  yield teardown(panel);
+-  finish();
+-}
+-
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index 7c87c81..ca1d0b9 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -35,25 +35,27 @@ const GENERIC_VARIABLES_VIEW_SETTINGS = {
+  */
+ let WebAudioGraphView = {
+   /**
+    * Initialization function, called when the tool is started.
+    */
+   initialize: function() {
+     this._onGraphNodeClick = this._onGraphNodeClick.bind(this);
+     this.draw = debounce(this.draw.bind(this), GRAPH_DEBOUNCE_TIMER);
++    $('#graph-target').addEventListener('click', this._onGraphNodeClick, false);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     if (this._zoomBinding) {
+       this._zoomBinding.on("zoom", null);
+     }
++    $('#graph-target').removeEventListener('click', this._onGraphNodeClick, false);
+   },
+ 
+   /**
+    * Called when a page is reloaded and waiting for a "start-context" event
+    * and clears out old content
+    */
+   resetUI: function () {
+     $("#reload-notice").hidden = true;
+@@ -135,17 +137,17 @@ let WebAudioGraphView = {
+     let renderer = new dagreD3.Renderer();
+ 
+     // Post-render manipulation of the nodes
+     let oldDrawNodes = renderer.drawNodes();
+     renderer.drawNodes(function(graph, root) {
+       let svgNodes = oldDrawNodes(graph, root);
+       svgNodes.attr("class", (n) => {
+         let node = graph.node(n);
+-        return "type-" + node.label;
++        return "audionode type-" + node.label;
+       });
+       svgNodes.attr("data-id", (n) => {
+         let node = graph.node(n);
+         return node.id;
+       });
+       return svgNodes;
+     });
+ 
+@@ -209,22 +211,26 @@ let WebAudioGraphView = {
+ 
+   /**
+    * Event handlers
+    */
+ 
+   /**
+    * Fired when a node in the svg graph is clicked. Used to handle triggering the AudioNodePane.
+    *
+-   * @param Object AudioNodeView
+-   *        The object stored in `AudioNodes` which contains render information, but most importantly,
+-   *        the actorID under `id` property.
++   * @param Event e
++   *        Click event.
+    */
+-  _onGraphNodeClick: function (node) {
+-    WebAudioParamView.focusNode(node.id);
++  _onGraphNodeClick: function (e) {
++    let node = findGraphNodeParent(e.target);
++    // If node not found (clicking outside of an audio node in the graph),
++    // then ignore this event
++    if (!node)
++      return;
++    WebAudioParamView.focusNode(node.getAttribute('data-id'));
+   }
+ };
+ 
+ let WebAudioParamView = {
+   _paramsView: null,
+ 
+   /**
+    * Initialization function called when the tool starts up.
+@@ -356,8 +362,24 @@ let WebAudioParamView = {
+   /**
+    * Called when `DESTROY_NODE` is fired to remove the node from params view.
+    * TODO bug 994263, dependent on node GC events
+    */
+   removeNode: Task.async(function* (viewNode) {
+ 
+   })
+ };
++
++/**
++ * Takes an element in an SVG graph and iterates over
++ * ancestors until it finds the graph node container. If not found,
++ * returns null.
++ */
++
++function findGraphNodeParent (el) {
++  while (!el.classList.contains("nodes")) {
++    if (el.classList.contains("audionode"))
++      return el;
++    else
++      el = el.parentNode;
++  }
++  return null;
++}
+-- 
+1.8.4.2
+
