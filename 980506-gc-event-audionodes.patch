@@ -1,0 +1,413 @@
+From e31189cd6e33ca7753c21c03a9137e6281bfa46c Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 7 May 2014 00:35:59 -0700
+Subject: [PATCH] Bug 980506 - Fire GC event when audio node GC'd in web audio
+ editor
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  2 +
+ .../test/browser_webaudio-actor-destroy-node.js    | 30 +++++++++
+ browser/devtools/webaudioeditor/test/doc_gc.html   | 22 +++++++
+ browser/devtools/webaudioeditor/test/head.js       |  1 +
+ toolkit/devtools/server/actors/webaudio.js         | 74 ++++++++++++++++++----
+ 5 files changed, 116 insertions(+), 13 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_webaudio-actor-destroy-node.js
+ create mode 100644 browser/devtools/webaudioeditor/test/doc_gc.html
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 6420cfb..af28db2 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -1,23 +1,25 @@
+ [DEFAULT]
+ skip-if = e10s # Bug ?????? - devtools tests disabled with e10s
+ subsuite = devtools
+ support-files =
+   doc_simple-context.html
+   doc_complex-context.html
+   doc_simple-node-creation.html
++  doc_gc.html
+   head.js
+ 
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params.js]
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_webaudio-actor-simple.js]
++[browser_webaudio-actor-destroy-node.js]
+ 
+ [browser_wa_first-run.js]
+ 
+ [browser_wa_graph_mouseover.js]
+ [browser_wa_graph_render_01.js]
+ [browser_wa_graph_render_02.js]
+ 
+ [browser_wa_params_view_edit.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_webaudio-actor-destroy-node.js b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-destroy-node.js
+new file mode 100644
+index 0000000..5c4c41a
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-destroy-node.js
+@@ -0,0 +1,30 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test `destroy-node` event on WebAudioActor.
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(GC_URL);
++  
++  let waitUntilDestroyed = getN(front, "destroy-node", 10);
++  let [_, _, createdNodes] = yield Promise.all([
++    front.setup({ reload: true }),
++    once(front, "start-context"),
++    // Should create 1 destination node and 10 disposable oscillator nodes
++    getN(front, "create-node", 11)
++  ]);
++
++  info("FORCE GC\n\n\n\n\n");
++  // Force GC so we can ensure it's run to clear out dead AudioNodes
++  Cu.forceGC();
++
++  let destroyedNodes = yield waitUntilDestroyed;
++
++  info(createdNodes);
++  info(destroyedNodes);
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_gc.html b/browser/devtools/webaudioeditor/test/doc_gc.html
+new file mode 100644
+index 0000000..4361eb2
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_gc.html
+@@ -0,0 +1,22 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      for (let i = 0; i < 10; i++)
++        ctx.createOscillator();
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index b9e310d..cf2e30d 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -19,16 +19,17 @@ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.j
+ 
+ let { WebAudioFront } = devtools.require("devtools/server/actors/webaudio");
+ let TargetFactory = devtools.TargetFactory;
+ 
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
++const GC_URL = EXAMPLE_URL + "doc_gc.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 40a881b..4bcebf8 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -2,32 +2,41 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ 
+ const Services = require("Services");
+ 
++const { XPCOMUtils } = Cu.import("resource://gre/modules/XPCOMUtils.jsm", {});
+ const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const events = require("sdk/event/core");
+ const protocol = require("devtools/server/protocol");
+ const { CallWatcherActor, CallWatcherFront } = require("devtools/server/actors/call-watcher");
+-
+ const { on, once, off, emit } = events;
+ const { method, Arg, Option, RetVal } = protocol;
++XPCOMUtils.defineLazyServiceGetter(this, "FinalizationWitnessService",
++                                   "@mozilla.org/toolkit/finalizationwitness;1",
++                                   "nsIFinalizationWitnessService");
+ 
+ exports.register = function(handle) {
+   handle.addTabActor(WebAudioActor, "webaudioActor");
+ };
+ 
+ exports.unregister = function(handle) {
+   handle.removeTabActor(WebAudioActor);
+ };
+ 
++// Constant used to attach a "private" property containing the
++// FinalizationWitness on the AudioNode so we can be alerted during
++// garbage collection. While not guaranteed that properties are inaccessible by
++// other code, it provides sufficient protection to accidently using them.
++const N_WITNESS = "{private:witness:" + (Math.floor(Math.random() * 100)) + "}";
++
+ const AUDIO_GLOBALS = [
+   "AudioContext", "AudioNode"
+ ];
+ 
+ const NODE_CREATION_METHODS = [
+   "createBufferSource", "createMediaElementSource", "createMediaStreamSource",
+   "createMediaStreamDestination", "createScriptProcessor", "createAnalyser",
+   "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
+@@ -102,38 +111,51 @@ const NODE_PROPERTIES = {
+     "frequencyBinCount": { "readonly": true },
+   },
+   "AudioDestinationNode": {},
+   "ChannelSplitterNode": {},
+   "ChannelMergerNode": {}
+ };
+ 
+ /**
+- * Track an array of audio nodes
+-
+-/**
+  * An Audio Node actor allowing communication to a specific audio node in the
+  * Audio Context graph.
+  */
+ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+   typeName: "audionode",
+ 
+   /**
++   * Weak reference to the underlying unwrapped AudioNode.
++   */
++  node: null,
++  
++  /**
++   * Name of the type of underyling AudioNode.
++   */
++  type: "",
++
++  /**
+    * Create the Audio Node actor.
+    *
+    * @param DebuggerServerConnection conn
+    *        The server connection.
+    * @param AudioNode node
+    *        The AudioNode that was created.
+    */
+   initialize: function (conn, node) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+-    this.node = unwrap(node);
++    this.node = Cu.getWeakReference(node);
+     try {
+-      this.type = this.node.toString().match(/\[object (.*)\]$/)[1];
++      // AudioDestinationNodes become re-XrayWrapper (?!) when pulling
++      // from the weak reference, even though initial stored node was
++      // originally unwrapped.
++      if (/AudioDestinationNode/.test(node.toString()))
++        this.type = "AudioDestinationNode";
++      else
++        this.type = this.node.get().toString().match(/\[object (.*)\]$/)[1];
+     } catch (e) {
+       this.type = "";
+     }
+   },
+ 
+   /**
+    * Returns the name of the audio type.
+    * Examples: "OscillatorNode", "MediaElementAudioSourceNode"
+@@ -160,25 +182,26 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+    * param set failure.
+    *
+    * @param String param
+    *        Name of the AudioParam to change.
+    * @param String value
+    *        Value to change AudioParam to.
+    */
+   setParam: method(function (param, value) {
++    let node = this.node.get();
+     // Strip quotes because sometimes UIs include that for strings
+     if (typeof value === "string") {
+       value = value.replace(/[\'\"]*/g, "");
+     }
+     try {
+-      if (isAudioParam(this.node, param))
+-        this.node[param].value = value;
++      if (isAudioParam(node, param))
++        node[param].value = value;
+       else
+-        this.node[param] = value;
++        node[param] = value;
+       return undefined;
+     } catch (e) {
+       return constructError(e);
+     }
+   }, {
+     request: {
+       param: Arg(0, "string"),
+       value: Arg(1, "nullable:primitive")
+@@ -188,20 +211,21 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+ 
+   /**
+    * Gets a param on the audio node.
+    *
+    * @param String param
+    *        Name of the AudioParam to fetch.
+    */
+   getParam: method(function (param) {
++    let node = this.node.get();
+     // If property does not exist, just return "undefined"
+-    if (!this.node[param])
++    if (!node[param])
+       return undefined;
+-    let value = isAudioParam(this.node, param) ? this.node[param].value : this.node[param];
++    let value = isAudioParam(node, param) ? node[param].value : node[param];
+     return value;
+   }, {
+     request: {
+       param: Arg(0, "string")
+     },
+     response: { text: RetVal("nullable:primitive") }
+   }),
+ 
+@@ -250,20 +274,25 @@ let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
+  * up by calling setup().
+  */
+ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   typeName: "webaudio",
+   initialize: function(conn, tabActor) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+     this.tabActor = tabActor;
+     this._onContentFunctionCall = this._onContentFunctionCall.bind(this);
++    this._onDestroyNode = this._onDestroyNode.bind(this);
++    Services.obs.addObserver(this._onDestroyNode,
++      "webaudio-node-finalization-witness", false);
+   },
+ 
+   destroy: function(conn) {
+     protocol.Actor.prototype.destroy.call(this, conn);
++    Services.obs.removeObserver(this._onDestroyNode,
++      "webaudio-node-finalization-witness");
+     this.finalize();
+   },
+ 
+   /**
+    * Starts waiting for the current tab actor's document global to be
+    * created, in order to instrument the Canvas context and become
+    * aware of everything the content does with Web Audio.
+    *
+@@ -271,17 +300,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+    */
+   setup: method(function({ reload }) {
+     if (this._initialized) {
+       return;
+     }
+     this._initialized = true;
+ 
+     // Weak map mapping audio nodes to their corresponding actors
+-    this._nodeActors = new Map();
++    this._nodeActors = new WeakMap();
+ 
+     this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: AUDIO_GLOBALS,
+       startRecording: true,
+       performReload: reload
+     });
+@@ -390,27 +419,32 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+       type: "changeParam",
+       source: Option(0, "audionode"),
+       param: Option(0, "string"),
+       value: Option(0, "string")
+     },
+     "create-node": {
+       type: "createNode",
+       source: Arg(0, "audionode")
++    },
++    "destroy-node": {
++      type: "destroyNode",
++      id: Arg(0, "string")
+     }
+   },
+ 
+   /**
+    * Helper for constructing an AudioNodeActor, assigning to
+    * internal weak map, and tracking via `manage` so it is assigned
+-   * an `actorID`.
++   * an `actorID`. Takes an unwrapped AudioNode `node` as an argument.
+    */
+   _constructAudioNode: function (node) {
+     let actor = new AudioNodeActor(this.conn, node);
+     this.manage(actor);
++    bindWitness(node, actor.actorID);
+     this._nodeActors.set(node, actor);
+     return actor;
+   },
+ 
+   /**
+    * Takes an AudioNode and returns the stored actor for it.
+    * In some cases, we won't have an actor stored (for example,
+    * connecting to an AudioDestinationNode, since it's implicitly
+@@ -472,17 +506,25 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   },
+ 
+   /**
+    * Called on node creation.
+    */
+   _onCreateNode: function (node) {
+     let actor = this._constructAudioNode(node);
+     events.emit(this, "create-node", actor);
++  },
++
++  /**
++   * Called when a node is destroyed (garbage collected) via FinalizationWitness.
++   */
++  _onDestroyNode: function (id) {
++    events.emit(this, "destroy-node", id);
+   }
++
+ });
+ 
+ /**
+  * The corresponding Front object for the WebAudioActor.
+  */
+ let WebAudioFront = exports.WebAudioFront = protocol.FrontClass(WebAudioActor, {
+   initialize: function(client, { webaudioActor }) {
+     protocol.Front.prototype.initialize.call(this, client, { actor: webaudioActor });
+@@ -519,8 +561,14 @@ function constructError (err) {
+     message: err.message,
+     type: err.constructor.name
+   };
+ }
+ 
+ function unwrap (obj) {
+   return XPCNativeWrapper.unwrap(obj);
+ }
++
++function bindWitness (node, id) {
++  Object.defineProperty(node, N_WITNESS, { writable: true });
++  let witness = FinalizationWitnessService.make("webaudio-node-finalization-witness", id);
++  node[N_WITNESS] = witness;
++}
+-- 
+1.8.4.2
+
