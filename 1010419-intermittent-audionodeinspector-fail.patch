@@ -1,0 +1,229 @@
+From a13c00bea8480dd9ca4540fb1b9745d6c76653ec Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 15 May 2014 11:30:00 -0700
+Subject: [PATCH] Bug 1010419 fix race condition in web audio editor graph
+ click opening inspector tests.
+
+---
+ .../webaudioeditor/test/browser_wa_graph-click.js  | 39 ++++++++++++++++------
+ .../devtools/webaudioeditor/webaudioeditor-view.js | 25 +++++++++-----
+ 2 files changed, 45 insertions(+), 19 deletions(-)
+
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
+index 33d2cd8..40c0147 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
+@@ -1,53 +1,72 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that the clicking on a node in the GraphView opens and sets
+  * the correct node in the InspectorView
+  */
+ 
++let EVENTS = null;
++
+ function spawnTest() {
+   let [target, debuggee, panel] = yield initWebAudioEditor(COMPLEX_CONTEXT_URL);
+   let panelWin = panel.panelWin;
+-  let { gFront, $, $$, EVENTS, WebAudioInspectorView } = panelWin;
++  let { gFront, $, $$, WebAudioInspectorView } = panelWin;
++  EVENTS = panelWin.EVENTS;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   let [actors, _] = yield Promise.all([
+     getN(gFront, "create-node", 8),
+     waitForGraphRendered(panel.panelWin, 8, 8)
+   ]);
+ 
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   ok(!WebAudioInspectorView.isVisible(), "InspectorView hidden on start.");
+ 
+-  click(panel.panelWin, findGraphNode(panelWin, nodeIds[1]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED);
++  yield clickGraphNode(panelWin, nodeIds[1], true);
+ 
+   ok(WebAudioInspectorView.isVisible(), "InspectorView visible after selecting a node.");
+   is(WebAudioInspectorView.getCurrentNode().id, nodeIds[1], "InspectorView has correct node set.");
+ 
+-  click(panel.panelWin, findGraphNode(panelWin, nodeIds[2]));
++  yield clickGraphNode(panelWin, nodeIds[2]);
++
+   ok(WebAudioInspectorView.isVisible(), "InspectorView still visible after selecting another node.");
+   is(WebAudioInspectorView.getCurrentNode().id, nodeIds[2], "InspectorView has correct node set on second node.");
+ 
+-  click(panel.panelWin, findGraphNode(panelWin, nodeIds[2]));
++  yield clickGraphNode(panelWin, nodeIds[2]);
+   is(WebAudioInspectorView.getCurrentNode().id, nodeIds[2], "Clicking the same node again works (idempotent).");
+ 
+-  click(panel.panelWin, $("rect", findGraphNode(panelWin, nodeIds[3])));
++  yield clickGraphNode(panelWin, $("rect", findGraphNode(panelWin, nodeIds[3])));
+   is(WebAudioInspectorView.getCurrentNode().id, nodeIds[3], "Clicking on a <rect> works as expected.");
+ 
+-  click(panel.panelWin, $("tspan", findGraphNode(panelWin, nodeIds[4])));
++  yield clickGraphNode(panelWin, $("tspan", findGraphNode(panelWin, nodeIds[4])));
+   is(WebAudioInspectorView.getCurrentNode().id, nodeIds[4], "Clicking on a <tspan> works as expected.");
+ 
++  ok(WebAudioInspectorView.isVisible(),
++    "InspectorView still visible after several nodes have been clicked.");
++
+   yield teardown(panel);
+   finish();
+ }
+ 
+-function isExpanded (view, index) {
+-  let scope = view.getScopeAtIndex(index);
+-  return scope.expanded;
++function clickGraphNode (panelWin, el, waitForToggle = false) {
++  let { promise, resolve } = Promise.defer();
++  let promises = [
++    once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET)
++  ];
++
++  if (waitForToggle) {
++    promises.push(once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED));
++  }
++
++  // Use `el` as the element if it is one, otherwise
++  // assume it's an ID and find the related graph node
++  let element = el.tagName ? el : findGraphNode(panelWin, el);
++  click(panelWin, element);
++
++  return Promise.all(promises);
+ }
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index 37fc75f..72ecac5 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -227,17 +227,17 @@ let WebAudioGraphView = {
+    */
+   _onGraphNodeClick: function (e) {
+     let node = findGraphNodeParent(e.target);
+     // If node not found (clicking outside of an audio node in the graph),
+     // then ignore this event
+     if (!node)
+       return;
+ 
+-    window.emit(EVENTS.UI_SELECT_NODE, node.getAttribute('data-id'));
++    window.emit(EVENTS.UI_SELECT_NODE, node.getAttribute("data-id"));
+   }
+ };
+ 
+ let WebAudioInspectorView = {
+ 
+   _propsView: null,
+ 
+   _currentNode: null,
+@@ -251,17 +251,17 @@ let WebAudioInspectorView = {
+    */
+   initialize: function () {
+     this._inspectorPane = $("#web-audio-inspector");
+     this._inspectorPaneToggleButton = $("#inspector-pane-toggle");
+     this._tabsPane = $("#web-audio-editor-tabs");
+ 
+     // Hide inspector view on startup
+     this._inspectorPane.setAttribute("width", INSPECTOR_WIDTH);
+-    this.toggleInspector(false);
++    this.toggleInspector({ visible: false, delayed: false, animated: false });
+ 
+     this._onEval = this._onEval.bind(this);
+     this._onNodeSelect = this._onNodeSelect.bind(this);
+     this._onTogglePaneClick = this._onTogglePaneClick.bind(this);
+ 
+     this._inspectorPaneToggleButton.addEventListener("mousedown", this._onTogglePaneClick, false);
+     this._propsView = new VariablesView($("#properties-tabpanel-content"), GENERIC_VARIABLES_VIEW_SETTINGS);
+     this._propsView.eval = this._onEval;
+@@ -279,29 +279,33 @@ let WebAudioInspectorView = {
+     this._inspectorPane = null;
+     this._inspectorPaneToggleButton = null;
+     this._tabsPane = null;
+   },
+ 
+   /**
+    * Toggles the visibility of the AudioNode Inspector.
+    *
+-   * @param boolean visible
+-   *        A flag indicating whether or not the AudioNode Inspector should be shown.
++   * @param object visible
++   *        - visible: boolean indicating whether the panel should be shown or not
++   *        - animated: boolean indiciating whether the pane should be animated
++   *        - delayed: boolean indicating whether the pane's opening should wait
++   *                   a few cycles or not
++   *        - index: the index of the tab to be selected inside the inspector
+    * @param number index
+    *        Index of the tab that should be selected when shown.
+    */
+-  toggleInspector: function (visible, index) {
++  toggleInspector: function ({ visible, animated, delayed, index }) {
+     let pane = this._inspectorPane;
+     let button = this._inspectorPaneToggleButton;
+ 
+     let flags = {
+       visible: visible,
+-      animated: true,
+-      delayed: true,
++      animated: animated != null ? animated : true,
++      delayed: delayed != null ? delayed : true,
+       callback: () => window.emit(EVENTS.UI_INSPECTOR_TOGGLED, visible)
+     };
+ 
+     ViewHelpers.togglePane(flags, pane);
+ 
+     if (flags.visible) {
+       button.removeAttribute("pane-collapsed");
+       button.setAttribute("tooltiptext", COLLAPSE_INSPECTOR_STRING);
+@@ -357,16 +361,19 @@ let WebAudioInspectorView = {
+ 
+   /**
+    * Empties out the props view.
+    */
+   resetUI: function () {
+     this._propsView.empty();
+     // Set current node to empty to load empty view
+     this.setCurrentAudioNode();
++
++    // Reset AudioNode inspector and hide
++    this.toggleInspector({ visible: false, animated: false, delayed: false });
+   },
+ 
+   /**
+    * Sets the title of the Inspector view
+    */
+   _setTitle: function () {
+     let node = this._currentNode;
+     let title = node.type + " (" + node.id + ")";
+@@ -452,24 +459,24 @@ let WebAudioInspectorView = {
+   /**
+    * Called on EVENTS.UI_SELECT_NODE, and takes an actorID `id`
+    * and calls `setCurrentAudioNode` to scaffold the inspector view.
+    */
+   _onNodeSelect: function (_, id) {
+     this.setCurrentAudioNode(getViewNodeById(id));
+ 
+     // Ensure inspector is visible when selecting a new node
+-    this.toggleInspector(true);
++    this.toggleInspector({ visible: true });
+   },
+ 
+   /**
+    * Called when clicking on the toggling the inspector into view.
+    */
+   _onTogglePaneClick: function () {
+-    this.toggleInspector(!this.isVisible());
++    this.toggleInspector({ visible: !this.isVisible() });
+   },
+ 
+   /**
+    * Called when `DESTROY_NODE` is fired to remove the node from props view.
+    * TODO bug 994263, dependent on node GC events
+    */
+   removeNode: Task.async(function* (viewNode) {
+ 
+-- 
+1.8.4.2
+
