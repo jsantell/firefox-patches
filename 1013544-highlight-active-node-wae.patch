@@ -1,0 +1,270 @@
+From 20efaa6b581e666bf123d2788dfe4aaedca42d00 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 22 May 2014 12:44:41 -0700
+Subject: Bug 1013544 - Highlight active node in web audio editor. r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  1 +
+ .../webaudioeditor/test/browser_wa_graph-click.js  | 18 --------
+ .../test/browser_wa_graph-selected.js              | 52 ++++++++++++++++++++++
+ browser/devtools/webaudioeditor/test/head.js       | 23 ++++++++++
+ .../devtools/webaudioeditor/webaudioeditor-view.js | 25 ++++++-----
+ 5 files changed, 91 insertions(+), 28 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_graph-selected.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 84c5479..7d1a5f7 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -15,14 +15,15 @@ support-files =
+ [browser_webaudio-actor-simple.js]
+ 
+ [browser_wa_first-run.js]
+ 
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-markers.js]
++[browser_wa_graph-selected.js]
+ 
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-edit.js]
+ 
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
+index 40c0147..9ce825d 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
+@@ -47,26 +47,8 @@ function spawnTest() {
+   is(WebAudioInspectorView.getCurrentNode().id, nodeIds[4], "Clicking on a <tspan> works as expected.");
+ 
+   ok(WebAudioInspectorView.isVisible(),
+     "InspectorView still visible after several nodes have been clicked.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+-
+-function clickGraphNode (panelWin, el, waitForToggle = false) {
+-  let { promise, resolve } = Promise.defer();
+-  let promises = [
+-    once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET)
+-  ];
+-
+-  if (waitForToggle) {
+-    promises.push(once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED));
+-  }
+-
+-  // Use `el` as the element if it is one, otherwise
+-  // assume it's an ID and find the related graph node
+-  let element = el.tagName ? el : findGraphNode(panelWin, el);
+-  click(panelWin, element);
+-
+-  return Promise.all(promises);
+-}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-selected.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-selected.js
+new file mode 100644
+index 0000000..bd667d7
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-selected.js
+@@ -0,0 +1,52 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that SVG nodes and edges were created for the Graph View.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS } = panelWin;
++
++  let started = once(gFront, "start-context");
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  let [destId, oscId, gainId] = actors.map(actor => actor.actorID);
++
++  ok(!findGraphNode(panelWin, destId).classList.contains("selected"),
++    "No nodes selected on start. (destination)");
++  ok(!findGraphNode(panelWin, oscId).classList.contains("selected"),
++    "No nodes selected on start. (oscillator)");
++  ok(!findGraphNode(panelWin, gainId).classList.contains("selected"),
++    "No nodes selected on start. (gain)");
++
++  yield clickGraphNode(panelWin, oscId);
++
++  ok(findGraphNode(panelWin, oscId).classList.contains("selected"),
++    "Selected node has class 'selected'.");
++  ok(!findGraphNode(panelWin, destId).classList.contains("selected"),
++    "Non-selected nodes do not have class 'selected'.");
++  ok(!findGraphNode(panelWin, gainId).classList.contains("selected"),
++    "Non-selected nodes do not have class 'selected'.");
++
++  yield clickGraphNode(panelWin, gainId);
++
++  ok(!findGraphNode(panelWin, oscId).classList.contains("selected"),
++    "Previously selected node no longer has class 'selected'.");
++  ok(!findGraphNode(panelWin, destId).classList.contains("selected"),
++    "Non-selected nodes do not have class 'selected'.");
++  ok(findGraphNode(panelWin, gainId).classList.contains("selected"),
++    "Newly selected node now has class 'selected'.");
++
++  yield teardown(panel);
++  finish();
++}
++
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index d9d6f6b..b3e80f0 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -288,16 +288,39 @@ function isVisible (element) {
+ function wait (n) {
+   let { promise, resolve } = Promise.defer();
+   setTimeout(resolve, n);
+   info("Waiting " + n/1000 + " seconds.");
+   return promise;
+ }
+ 
+ /**
++ * Clicks a graph node based on actorID or passing in an element.
++ * Returns a promise that resolves once
++ * UI_INSPECTOR_NODE_SET is fired.
++ */
++function clickGraphNode (panelWin, el, waitForToggle = false) {
++  let { promise, resolve } = Promise.defer();
++  let promises = [
++    once(panelWin, panelWin.EVENTS.UI_INSPECTOR_NODE_SET)
++  ];
++
++  if (waitForToggle) {
++    promises.push(once(panelWin, panelWin.EVENTS.UI_INSPECTOR_TOGGLED));
++  }
++
++  // Use `el` as the element if it is one, otherwise
++  // assume it's an ID and find the related graph node
++  let element = el.tagName ? el : findGraphNode(panelWin, el);
++  click(panelWin, element);
++
++  return Promise.all(promises);
++}
++
++/**
+  * List of audio node properties to test against expectations of the AudioNode actor
+  */
+ 
+ const NODE_PROPERTIES = {
+   "OscillatorNode": ["type", "frequency", "detune"],
+   "GainNode": ["gain"],
+   "DelayNode": ["delayTime"],
+   "AudioBufferSourceNode": ["buffer", "playbackRate", "loop", "loopStart", "loopEnd"],
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index e23d7e9..e89c921 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -47,32 +47,35 @@ const GENERIC_VARIABLES_VIEW_SETTINGS = {
+  */
+ let WebAudioGraphView = {
+   /**
+    * Initialization function, called when the tool is started.
+    */
+   initialize: function() {
+     this._onGraphNodeClick = this._onGraphNodeClick.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
++    this._onNodeSelect = this._onNodeSelect.bind(this);
+ 
+     this.draw = debounce(this.draw.bind(this), GRAPH_DEBOUNCE_TIMER);
+     $('#graph-target').addEventListener('click', this._onGraphNodeClick, false);
+ 
+     window.on(EVENTS.THEME_CHANGE, this._onThemeChange);
++    window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     if (this._zoomBinding) {
+       this._zoomBinding.on("zoom", null);
+     }
+     $('#graph-target').removeEventListener('click', this._onGraphNodeClick, false);
+     window.off(EVENTS.THEME_CHANGE, this._onThemeChange);
++    window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
+   },
+ 
+   /**
+    * Called when a page is reloaded and waiting for a "start-context" event
+    * and clears out old content
+    */
+   resetUI: function () {
+     $("#reload-notice").hidden = true;
+@@ -96,30 +99,28 @@ let WebAudioGraphView = {
+    * Clears out the rendered graph, called when resetting the SVG elements to draw again,
+    * or when resetting the entire UI tool
+    */
+   resetGraph: function () {
+     $("#graph-target").innerHTML = "";
+   },
+ 
+   /**
+-   * Makes the corresponding graph node appear "focused", called from WebAudioParamView
++   * Makes the corresponding graph node appear "focused", removing
++   * focused styles from all other nodes. If no `actorID` specified,
++   * make all nodes appear unselected.
++   * Called from UI_INSPECTOR_NODE_SELECT.
+    */
+   focusNode: function (actorID) {
+     // Remove class "selected" from all nodes
+-    Array.prototype.forEach.call($$(".nodes > g"), $node => $node.classList.remove("selected"));
++    Array.forEach($$(".nodes > g"), $node => $node.classList.remove("selected"));
+     // Add to "selected"
+-    this._getNodeByID(actorID).classList.add("selected");
+-  },
+-
+-  /**
+-   * Unfocuses the corresponding graph node, called from WebAudioParamView
+-   */
+-  blurNode: function (actorID) {
+-    this._getNodeByID(actorID).classList.remove("selected");
++    if (actorID) {
++      this._getNodeByID(actorID).classList.add("selected");
++    }
+   },
+ 
+   /**
+    * Takes an actorID and returns the corresponding DOM SVG element in the graph
+    */
+   _getNodeByID: function (actorID) {
+     return $(".nodes > g[data-id='" + actorID + "']");
+   },
+@@ -229,16 +230,20 @@ let WebAudioGraphView = {
+       d3.select("svg").call(this._zoomBinding);
+     }
+   },
+ 
+   /**
+    * Event handlers
+    */
+ 
++  _onNodeSelect: function (eventName, id) {
++    this.focusNode(id);
++  },
++
+   /**
+    * Fired when the devtools theme changes.
+    */
+   _onThemeChange: function (eventName, theme) {
+     let markerColor = MARKER_STYLING[theme];
+     let marker = $("#arrowhead");
+     if (marker) {
+       marker.setAttribute("style", "fill: " + markerColor);
+-- 
+1.8.4.2
+
