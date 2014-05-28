@@ -1,0 +1,461 @@
+From e12dbe0476435d59614b115bb0faf6642e65e26d Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 28 May 2014 00:39:33 -0400
+Subject: Bug 1006912 - Fix the web audio dev tools to work after a tab
+ refresh
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  3 ++
+ .../webaudioeditor/test/browser_wa_reset-01.js     | 59 ++++++++++++++++++++++
+ .../webaudioeditor/test/browser_wa_reset-02.js     | 38 ++++++++++++++
+ .../webaudioeditor/test/browser_wa_reset-03.js     | 49 ++++++++++++++++++
+ browser/devtools/webaudioeditor/test/head.js       | 10 ++++
+ .../webaudioeditor/webaudioeditor-controller.js    | 20 ++++++--
+ .../devtools/webaudioeditor/webaudioeditor-view.js | 25 ++++-----
+ toolkit/devtools/server/actors/webaudio.js         |  8 +--
+ 8 files changed, 191 insertions(+), 21 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_reset-02.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 4fb8915..3616124 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -13,16 +13,19 @@ support-files =
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_webaudio-actor-simple.js]
+ 
+ [browser_wa_first-run.js]
++[browser_wa_reset-01.js]
++[browser_wa_reset-02.js]
++[browser_wa_reset-03.js]
+ 
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-selected.js]
+ 
+ [browser_wa_inspector.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js b/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
+new file mode 100644
+index 0000000..b5769da
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
+@@ -0,0 +1,59 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that reloading a tab will properly listen for the `start-context`
++ * event and reshow the tools after reloading.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { gFront, $ } = panel.panelWin;
++
++  is($("#reload-notice").hidden, false,
++    "The 'reload this page' notice should initially be visible.");
++  is($("#waiting-notice").hidden, true,
++    "The 'waiting for an audio context' notice should initially be hidden.");
++  is($("#content").hidden, true,
++    "The tool's content should initially be hidden.");
++
++  let navigating = once(target, "will-navigate");
++  let started = once(gFront, "start-context");
++
++  reload(target);
++
++  yield navigating;
++
++  is($("#reload-notice").hidden, true,
++    "The 'reload this page' notice should be hidden when navigating.");
++  is($("#waiting-notice").hidden, false,
++    "The 'waiting for an audio context' notice should be visible when navigating.");
++  is($("#content").hidden, true,
++    "The tool's content should still be hidden.");
++
++  yield started;
++
++  is($("#reload-notice").hidden, true,
++    "The 'reload this page' notice should be hidden after context found.");
++  is($("#waiting-notice").hidden, true,
++    "The 'waiting for an audio context' notice should be hidden after context found.");
++  is($("#content").hidden, false,
++    "The tool's content should not be hidden anymore.");
++
++  let navigating = once(target, "will-navigate");
++  let started = once(gFront, "start-context");
++
++  reload(target);
++
++  yield Promise.all([navigating, started]);
++
++  is($("#reload-notice").hidden, true,
++    "The 'reload this page' notice should be hidden after context found after reload.");
++  is($("#waiting-notice").hidden, true,
++    "The 'waiting for an audio context' notice should be hidden after context found after reload.");
++  is($("#content").hidden, false,
++    "The tool's content should reappear without closing and reopening the toolbox.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_reset-02.js b/browser/devtools/webaudioeditor/test/browser_wa_reset-02.js
+new file mode 100644
+index 0000000..29fe7bb
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_reset-02.js
+@@ -0,0 +1,38 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests reloading a tab with the tools open properly cleans up
++ * the graph.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $ } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  let { nodes, edges } = countGraphObjects(panelWin);
++  ise(nodes, 3, "should only be 3 nodes.");
++  ise(edges, 2, "should only be 2 edges.");
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  let { nodes, edges } = countGraphObjects(panelWin);
++  ise(nodes, 3, "after reload, should only be 3 nodes.");
++  ise(edges, 2, "after reload, should only be 2 edges.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js b/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
+new file mode 100644
+index 0000000..2734b9f
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
+@@ -0,0 +1,49 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests reloading a tab with the tools open properly cleans up
++ * the inspector and selected node.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, WebAudioInspectorView } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++  let nodeIds = actors.map(actor => actor.actorID);
++
++  yield clickGraphNode(panelWin, nodeIds[1], true);
++  ok(WebAudioInspectorView.isVisible(), "InspectorView visible after selecting a node.");
++  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[1], "InspectorView has correct node set.");
++
++  /**
++   * Reload
++   */
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++  let nodeIds = actors.map(actor => actor.actorID);
++
++  ok(!WebAudioInspectorView.isVisible(), "InspectorView hidden on start.");
++  ise(WebAudioInspectorView.getCurrentNode(), null,
++    "InspectorView has no current node set on reset.");
++
++  yield clickGraphNode(panelWin, nodeIds[2], true);
++  ok(WebAudioInspectorView.isVisible(),
++    "InspectorView visible after selecting a node after a reset.");
++  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[2], "InspectorView has correct node set upon clicking graph node after a reset.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index b656947..386ab2b 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -347,16 +347,26 @@ function getGripValue (value) {
+     case "NaN": return NaN;
+     case "-0": return -0;
+     case "null": return null;
+     default: return value;
+   }
+ }
+ 
+ /**
++ * Counts how many nodes and edges are currently in the graph.
++ */
++function countGraphObjects (win) {
++  return {
++    nodes: win.document.querySelectorAll(".nodes > .audionode").length,
++    edges: win.document.querySelectorAll(".edgePaths > .edgePath").length
++  }
++}
++
++/**
+  * List of audio node properties to test against expectations of the AudioNode actor
+  */
+ 
+ const NODE_DEFAULT_VALUES = {
+   "AudioDestinationNode": {},
+   "AudioBufferSourceNode": {
+     "playbackRate": 1,
+     "loop": false,
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-controller.js b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+index d288eeb..1155582 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-controller.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+@@ -178,16 +178,28 @@ let WebAudioEditorController = {
+     gFront.off("change-param", this._onChangeParam);
+     window.off(EVENTS.CREATE_NODE, this._onUpdatedContext);
+     window.off(EVENTS.CONNECT_NODE, this._onUpdatedContext);
+     window.off(EVENTS.DISCONNECT_NODE, this._onUpdatedContext);
+     gDevTools.off("pref-changed", this._onThemeChange);
+   },
+ 
+   /**
++   * Called when page is reloaded to show the reload notice and waiting
++   * for an audio context notice.
++   */
++  reset: function () {
++    $("#reload-notice").hidden = true;
++    $("#waiting-notice").hidden = false;
++    $("#content").hidden = true;
++    WebAudioGraphView.resetUI();
++    WebAudioInspectorView.resetUI();
++  },
++
++  /**
+    * Called when a new audio node is created, or the audio context
+    * routing changes.
+    */
+   _onUpdatedContext: function () {
+     WebAudioGraphView.draw();
+   },
+ 
+   /**
+@@ -198,26 +210,26 @@ let WebAudioEditorController = {
+   _onThemeChange: function (event, data) {
+     window.emit(EVENTS.THEME_CHANGE, data.newValue);
+   },
+ 
+   /**
+    * Called for each location change in the debugged tab.
+    */
+   _onTabNavigated: function(event) {
++    let controller = this;
+     switch (event) {
+       case "will-navigate": {
+         Task.spawn(function() {
+           // Make sure the backend is prepared to handle audio contexts.
+           yield gFront.setup({ reload: false });
+ 
+           // Reset UI to show "Waiting for Audio Context..." and clear out
+           // current UI.
+-          WebAudioGraphView.resetUI();
+-          WebAudioInspectorView.resetUI();
++          controller.reset();
+ 
+           // Clear out stored audio nodes
+           AudioNodes.length = 0;
+           AudioNodeConnections.clear();
+         }).then(() => window.emit(EVENTS.UI_RESET));
+         break;
+       }
+       case "navigate": {
+@@ -228,17 +240,19 @@ let WebAudioEditorController = {
+     }
+   },
+ 
+   /**
+    * Called after the first audio node is created in an audio context,
+    * signaling that the audio context is being used.
+    */
+   _onStartContext: function() {
+-    WebAudioGraphView.showContent();
++    $("#reload-notice").hidden = true;
++    $("#waiting-notice").hidden = true;
++    $("#content").hidden = false;
+     window.emit(EVENTS.START_CONTEXT);
+   },
+ 
+   /**
+    * Called when a new node is created. Creates an `AudioNodeView` instance
+    * for tracking throughout the editor.
+    */
+   _onCreateNode: Task.async(function* (nodeActor) {
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index e89c921..123cb3f 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -48,59 +48,48 @@ const GENERIC_VARIABLES_VIEW_SETTINGS = {
+ let WebAudioGraphView = {
+   /**
+    * Initialization function, called when the tool is started.
+    */
+   initialize: function() {
+     this._onGraphNodeClick = this._onGraphNodeClick.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
+     this._onNodeSelect = this._onNodeSelect.bind(this);
++    this._onStartContext = this._onStartContext.bind(this);
+ 
+     this.draw = debounce(this.draw.bind(this), GRAPH_DEBOUNCE_TIMER);
+     $('#graph-target').addEventListener('click', this._onGraphNodeClick, false);
+ 
+     window.on(EVENTS.THEME_CHANGE, this._onThemeChange);
+     window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
++    window.on(EVENTS.START_CONTEXT, this._onStartContext);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     if (this._zoomBinding) {
+       this._zoomBinding.on("zoom", null);
+     }
+     $('#graph-target').removeEventListener('click', this._onGraphNodeClick, false);
+     window.off(EVENTS.THEME_CHANGE, this._onThemeChange);
+     window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
++    window.off(EVENTS.START_CONTEXT, this._onStartContext);
+   },
+ 
+   /**
+    * Called when a page is reloaded and waiting for a "start-context" event
+    * and clears out old content
+    */
+   resetUI: function () {
+-    $("#reload-notice").hidden = true;
+-    $("#waiting-notice").hidden = false;
+-    $("#content").hidden = true;
+     this.resetGraph();
+   },
+ 
+   /**
+-   * Called once "start-context" is fired, indicating that there is audio context
+-   * activity to view and inspect
+-   */
+-  showContent: function () {
+-    $("#reload-notice").hidden = true;
+-    $("#waiting-notice").hidden = true;
+-    $("#content").hidden = false;
+-    this.draw();
+-  },
+-
+-  /**
+    * Clears out the rendered graph, called when resetting the SVG elements to draw again,
+    * or when resetting the entire UI tool
+    */
+   resetGraph: function () {
+     $("#graph-target").innerHTML = "";
+   },
+ 
+   /**
+@@ -230,16 +219,24 @@ let WebAudioGraphView = {
+       d3.select("svg").call(this._zoomBinding);
+     }
+   },
+ 
+   /**
+    * Event handlers
+    */
+ 
++  /**
++   * Called once "start-context" is fired, indicating that there is an audio
++   * context being created to view so render the graph.
++   */
++  _onStartContext: function () {
++    this.draw();
++  },
++
+   _onNodeSelect: function (eventName, id) {
+     this.focusNode(id);
+   },
+ 
+   /**
+    * Fired when the devtools theme changes.
+    */
+   _onThemeChange: function (eventName, theme) {
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index a2925d9..c0ab879 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -273,35 +273,35 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   /**
+    * Starts waiting for the current tab actor's document global to be
+    * created, in order to instrument the Canvas context and become
+    * aware of everything the content does with Web Audio.
+    *
+    * See ContentObserver and WebAudioInstrumenter for more details.
+    */
+   setup: method(function({ reload }) {
++    // Used to track when something is happening with the web audio API
++    // the first time, to ultimately fire `start-context` event
++    this._firstNodeCreated = false;
++
+     if (this._initialized) {
+       return;
+     }
+     this._initialized = true;
+ 
+     // Weak map mapping audio nodes to their corresponding actors
+     this._nodeActors = new Map();
+ 
+     this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: AUDIO_GLOBALS,
+       startRecording: true,
+       performReload: reload
+     });
+-
+-    // Used to track when something is happening with the web audio API
+-    // the first time, to ultimately fire `start-context` event
+-    this._firstNodeCreated = false;
+   }, {
+     request: { reload: Option(0, "boolean") },
+     oneway: true
+   }),
+ 
+   /**
+    * Invoked whenever an instrumented function is called, like an AudioContext
+    * method or an AudioNode method.
+-- 
+1.8.4.2
+
