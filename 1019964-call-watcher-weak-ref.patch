@@ -1,0 +1,51 @@
+From e85b853089cf8a5fc1b4c44b2c587be479e20916 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 5 Jun 2014 13:42:24 -0700
+Subject: Bug 1019964 - Fix call-watcher actor to not store strong
+ references in FunctionCallActor
+
+---
+ toolkit/devtools/server/actors/call-watcher.js | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index 3c986d9..c77c92c 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -67,25 +67,31 @@ let FunctionCallActor = protocol.ActorClass({
+    * @param array args
+    *        The called function's arguments.
+    * @param any result
+    *        The value returned by the function call.
+    */
+   initialize: function(conn, [window, global, caller, type, name, stack, args, result]) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+ 
+-    this.details = {
++    // Store a weak reference to all objects so we don't
++    // prevent natural GC.
++    let weakDetails = Cu.getWeakReference({
+       window: window,
+       caller: caller,
+       type: type,
+       name: name,
+       stack: stack,
+       args: args,
+       result: result
+-    };
++    });
++
++    Object.defineProperty(this, "details", {
++      get: () => weakDetails.get() || {}
++    });
+ 
+     this.meta = {
+       global: -1,
+       previews: { caller: "", args: "" }
+     };
+ 
+     if (global == "WebGLRenderingContext") {
+       this.meta.global = CallWatcherFront.CANVAS_WEBGL_CONTEXT;
+-- 
+1.8.4.2
+
