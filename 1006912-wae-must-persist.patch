@@ -1,8 +1,8 @@
-From e12dbe0476435d59614b115bb0faf6642e65e26d Mon Sep 17 00:00:00 2001
+From 74d9384e2c0f69189ebe64000e275916115b3850 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
 Date: Wed, 28 May 2014 00:39:33 -0400
 Subject: Bug 1006912 - Fix the web audio dev tools to work after a tab
- refresh
+ refresh. r=vp
 
 ---
  browser/devtools/webaudioeditor/test/browser.ini   |  3 ++
@@ -10,10 +10,10 @@ Subject: Bug 1006912 - Fix the web audio dev tools to work after a tab
  .../webaudioeditor/test/browser_wa_reset-02.js     | 38 ++++++++++++++
  .../webaudioeditor/test/browser_wa_reset-03.js     | 49 ++++++++++++++++++
  browser/devtools/webaudioeditor/test/head.js       | 10 ++++
- .../webaudioeditor/webaudioeditor-controller.js    | 20 ++++++--
+ .../webaudioeditor/webaudioeditor-controller.js    | 44 ++++++++++------
  .../devtools/webaudioeditor/webaudioeditor-view.js | 25 ++++-----
  toolkit/devtools/server/actors/webaudio.js         |  8 +--
- 8 files changed, 191 insertions(+), 21 deletions(-)
+ 8 files changed, 202 insertions(+), 34 deletions(-)
  create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
  create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_reset-02.js
  create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
@@ -238,7 +238,7 @@ index b656947..386ab2b 100644
      "playbackRate": 1,
      "loop": false,
 diff --git a/browser/devtools/webaudioeditor/webaudioeditor-controller.js b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
-index d288eeb..1155582 100644
+index d288eeb..0c5a99c 100644
 --- a/browser/devtools/webaudioeditor/webaudioeditor-controller.js
 +++ b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
 @@ -178,16 +178,28 @@ let WebAudioEditorController = {
@@ -270,7 +270,8 @@ index d288eeb..1155582 100644
    },
  
    /**
-@@ -198,26 +210,26 @@ let WebAudioEditorController = {
+@@ -197,48 +209,48 @@ let WebAudioEditorController = {
+    */
    _onThemeChange: function (event, data) {
      window.emit(EVENTS.THEME_CHANGE, data.newValue);
    },
@@ -278,30 +279,44 @@ index d288eeb..1155582 100644
    /**
     * Called for each location change in the debugged tab.
     */
-   _onTabNavigated: function(event) {
-+    let controller = this;
+-  _onTabNavigated: function(event) {
++  _onTabNavigated: Task.async(function* (event) {
      switch (event) {
        case "will-navigate": {
-         Task.spawn(function() {
-           // Make sure the backend is prepared to handle audio contexts.
-           yield gFront.setup({ reload: false });
- 
-           // Reset UI to show "Waiting for Audio Context..." and clear out
-           // current UI.
+-        Task.spawn(function() {
+-          // Make sure the backend is prepared to handle audio contexts.
+-          yield gFront.setup({ reload: false });
+-
+-          // Reset UI to show "Waiting for Audio Context..." and clear out
+-          // current UI.
 -          WebAudioGraphView.resetUI();
 -          WebAudioInspectorView.resetUI();
-+          controller.reset();
- 
-           // Clear out stored audio nodes
-           AudioNodes.length = 0;
-           AudioNodeConnections.clear();
-         }).then(() => window.emit(EVENTS.UI_RESET));
+-
+-          // Clear out stored audio nodes
+-          AudioNodes.length = 0;
+-          AudioNodeConnections.clear();
+-        }).then(() => window.emit(EVENTS.UI_RESET));
++        // Make sure the backend is prepared to handle audio contexts.
++        yield gFront.setup({ reload: false });
++
++        // Reset UI to show "Waiting for Audio Context..." and clear out
++        // current UI.
++        this.reset();
++
++        // Clear out stored audio nodes
++        AudioNodes.length = 0;
++        AudioNodeConnections.clear();
++        window.emit(EVENTS.UI_RESET);
          break;
        }
        case "navigate": {
-@@ -228,17 +240,19 @@ let WebAudioEditorController = {
+         // TODO Case of bfcache, needs investigating
+         // bug 994250
+         break;
+       }
      }
-   },
+-  },
++  }),
  
    /**
     * Called after the first audio node is created in an audio context,
