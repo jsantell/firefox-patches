@@ -1,15 +1,15 @@
-From 48a3134e5b421dce11d73de05d4f809ec6747a32 Mon Sep 17 00:00:00 2001
+From 1294c85435179fa3a9a3410cdff377caf0cf9b94 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 9 Jun 2014 15:31:17 -0700
-Subject: Bug 1022917 - Do not store strong references in web audio
- editor
+Date: Wed, 11 Jun 2014 10:06:54 -0700
+Subject: Bug 1022917 - Do not store any strong references in the web
+ audio editor. r=vp
 
 ---
- toolkit/devtools/server/actors/webaudio.js | 98 ++++++++++++++++++++----------
- 1 file changed, 65 insertions(+), 33 deletions(-)
+ toolkit/devtools/server/actors/webaudio.js | 114 +++++++++++++++++++----------
+ 1 file changed, 77 insertions(+), 37 deletions(-)
 
 diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
-index c0ab879..80069c0 100644
+index c0ab879..9e7523a 100644
 --- a/toolkit/devtools/server/actors/webaudio.js
 +++ b/toolkit/devtools/server/actors/webaudio.js
 @@ -103,38 +103,41 @@ const NODE_PROPERTIES = {
@@ -59,7 +59,7 @@ index c0ab879..80069c0 100644
    /**
     * Returns the name of the audio type.
     * Examples: "OscillatorNode", "MediaElementAudioSourceNode"
-@@ -160,21 +163,22 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+@@ -160,21 +163,27 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
     * on success, or a description of the error upon param set failure.
     *
     * @param String param
@@ -69,6 +69,11 @@ index c0ab879..80069c0 100644
     */
    setParam: method(function (param, value) {
 +    let node = this.node.get();
++
++    if (node === null) {
++      return CollectedAudioNodeError();
++    }
++
      try {
 -      if (isAudioParam(this.node, param))
 -        this.node[param].value = value;
@@ -85,7 +90,7 @@ index c0ab879..80069c0 100644
      request: {
        param: Arg(0, "string"),
        value: Arg(1, "nullable:primitive")
-@@ -184,19 +188,21 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+@@ -184,19 +193,25 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
  
    /**
     * Gets a param on the audio node.
@@ -95,6 +100,10 @@ index c0ab879..80069c0 100644
     */
    getParam: method(function (param) {
 +    let node = this.node.get();
++
++    if (node === null) {
++      return CollectedAudioNodeError();
++    }
 +
      // Check to see if it's an AudioParam -- if so,
      // return the `value` property of the parameter.
@@ -108,7 +117,7 @@ index c0ab879..80069c0 100644
      // without using real grips and managing via actor pools.
      let grip;
      try {
-@@ -257,16 +263,18 @@ let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
+@@ -257,17 +272,23 @@ let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
   * high-level methods. After instantiating this actor, you'll need to set it
   * up by calling setup().
   */
@@ -117,9 +126,13 @@ index c0ab879..80069c0 100644
    initialize: function(conn, tabActor) {
      protocol.Actor.prototype.initialize.call(this, conn);
      this.tabActor = tabActor;
-+    this.conn = conn;
 +
      this._onContentFunctionCall = this._onContentFunctionCall.bind(this);
++
++    // Store ChromeOnly ID (`nativeID` property on AudioNodeActor) mapped
++    // to the associated actorID, so we don't have to expose `nativeID`
++    // to the client in any way.
++    this._nativeToActorID = new Map();
    },
  
    destroy: function(conn) {
@@ -127,7 +140,8 @@ index c0ab879..80069c0 100644
      this.finalize();
    },
  
-@@ -277,23 +285,32 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   /**
+@@ -277,23 +298,25 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
     *
     * See ContentObserver and WebAudioInstrumenter for more details.
     */
@@ -138,22 +152,16 @@ index c0ab879..80069c0 100644
  
 +    // Clear out stored nativeIDs on reload as we do not want to track
 +    // AudioNodes that are no longer on this document.
-+    if (this._nativeToActorID) {
-+      this._nativeToActorID.clear();
-+    }
++    this._nativeToActorID.clear();
 +
      if (this._initialized) {
        return;
      }
-+
-     this._initialized = true;
+-    this._initialized = true;
  
 -    // Weak map mapping audio nodes to their corresponding actors
 -    this._nodeActors = new Map();
-+    // Store ChromeOnly ID (`nativeID` property on AudioNodeActor) mapped
-+    // to the associated actorID, so we don't have to expose `nativeID`
-+    // to the client in any way.
-+    this._nativeToActorID = new Map();
++    this._initialized = true;
  
      this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
      this._callWatcher.onCall = this._onContentFunctionCall;
@@ -162,7 +170,7 @@ index c0ab879..80069c0 100644
        startRecording: true,
        performReload: reload
      });
-@@ -316,19 +333,19 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -316,19 +339,19 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
      }
      else if (WebAudioFront.NODE_CREATION_METHODS.has(name)) {
        this._handleCreationCall(functionCall);
@@ -174,9 +182,9 @@ index c0ab879..80069c0 100644
 -    let source = unwrap(caller);
 -    let dest = unwrap(args[0]);
 -    let isAudioParam = dest instanceof unwrap(window.AudioParam);
-+    let source = wrap(caller);
-+    let dest = wrap(args[0]);
-+    let isAudioParam = dest instanceof wrap(window.AudioParam);
++    let source = caller;
++    let dest = args[0];
++    let isAudioParam = dest instanceof window.AudioParam;
  
      // audionode.connect(param)
      if (name === "connect" && isAudioParam) {
@@ -185,7 +193,7 @@ index c0ab879..80069c0 100644
      // audionode.connect(node)
      else if (name === "connect") {
        this._onConnectNode(source, dest);
-@@ -344,34 +361,36 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -344,34 +367,35 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
      // Keep track of the first node created, so we can alert
      // the front end that an audio context is being used since
      // we're not hooking into the constructor itself, just its
@@ -195,11 +203,10 @@ index c0ab879..80069c0 100644
        // and trigger a `create-node` event for the context destination
        this._onStartContext();
 -      this._onCreateNode(unwrap(caller.destination));
-+      this._onCreateNode(wrap(caller.destination));
++      this._onCreateNode(caller.destination);
        this._firstNodeCreated = true;
      }
--    this._onCreateNode(result);
-+    this._onCreateNode(wrap(result));
+     this._onCreateNode(result);
    },
  
    /**
@@ -211,7 +218,6 @@ index c0ab879..80069c0 100644
      if (!this._initialized) {
        return;
      }
-+    this.conn = null;
 +    this.tabActor = null;
      this._initialized = false;
 +    this._nativeToActorID = null;
@@ -225,13 +231,18 @@ index c0ab879..80069c0 100644
  
    /**
     * Events emitted by this actor.
-@@ -409,48 +428,55 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -407,50 +431,55 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   },
+ 
    /**
     * Helper for constructing an AudioNodeActor, assigning to
     * internal weak map, and tracking via `manage` so it is assigned
     * an `actorID`.
     */
    _constructAudioNode: function (node) {
++    // Ensure AudioNode is wrapped.
++    node = new XPCNativeWrapper(node);
++
      let actor = new AudioNodeActor(this.conn, node);
      this.manage(actor);
 -    this._nodeActors.set(node, actor);
@@ -249,16 +260,12 @@ index c0ab879..80069c0 100644
 -    let actor = this._nodeActors.get(node);
 -    if (!actor) {
 -      actor = this._constructAudioNode(node);
+-    }
 +  _getActorByNativeID: function (nativeID) {
 +    // Ensure we have a Number, rather than a string
 +    // return via notification.
 +    nativeID = ~~nativeID;
 +
-+    // Ensure that this doesn't attempt to fetch actors after
-+    // clean up.
-+    if (!this._nativeToActorID) {
-+      return null;
-     }
 +    let actorID = this._nativeToActorID.get(nativeID);
 +    let actor = actorID != null ? this.conn.getActor(actorID) : null;
      return actor;
@@ -290,7 +297,7 @@ index c0ab879..80069c0 100644
    /**
     * Called when an audio node is connected to an audio param.
     * Implement in bug 986705
-@@ -458,38 +484,38 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -458,38 +487,38 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
    _onConnectParam: function (source, dest) {
      // TODO bug 986705
    },
@@ -334,7 +341,8 @@ index c0ab879..80069c0 100644
   */
  let WebAudioFront = exports.WebAudioFront = protocol.FrontClass(WebAudioActor, {
    initialize: function(client, { webaudioActor }) {
-@@ -526,22 +552,23 @@ function constructError (err) {
+@@ -525,23 +554,37 @@ function isAudioParam (node, prop) {
+ function constructError (err) {
    return {
      message: err.message,
      type: err.constructor.name
@@ -342,6 +350,19 @@ index c0ab879..80069c0 100644
  }
  
  /**
++ * Creates and returns a JSON-able response used to indicate
++ * attempt to access an AudioNode that has been GC'd.
++ *
++ * @return Object
++ */
++function CollectedAudioNodeError () {
++  return {
++    message: "AudioNode has been garbage collected and can no longer be reached.",
++    type: "UnreachableAudioNode"
++  };
++}
++
++/**
   * Takes an object and converts it's `toString()` form, like
 - * "[object OscillatorNode]" or "[object Float32Array]"
 + * "[object OscillatorNode]" or "[object Float32Array]",
@@ -360,7 +381,7 @@ index c0ab879..80069c0 100644
   * without tracking them in an actor pool.
   */
  function createObjectGrip (value) {
-@@ -549,11 +576,16 @@ function createObjectGrip (value) {
+@@ -549,11 +592,8 @@ function createObjectGrip (value) {
      type: "object",
      preview: {
        kind: "ObjectWithText",
@@ -369,14 +390,9 @@ index c0ab879..80069c0 100644
      class: getConstructorName(value)
    };
  }
-+
- function unwrap (obj) {
-   return XPCNativeWrapper.unwrap(obj);
- }
-+
-+function wrap (obj) {
-+  return new XPCNativeWrapper(obj);
-+}
+-function unwrap (obj) {
+-  return XPCNativeWrapper.unwrap(obj);
+-}
 -- 
 1.8.4.2
 
