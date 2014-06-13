@@ -1,0 +1,97 @@
+From ed00accd6460b98e4c9fe7b5e8058a1769766a10 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 12 Jun 2014 23:04:29 -0700
+Subject: Bug 978964 - Render combined bitmasks correctly in the canvas debugger.
+
+---
+ toolkit/devtools/server/actors/call-watcher.js | 47 +++++++++++++++++++-------
+ 1 file changed, 34 insertions(+), 13 deletions(-)
+
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index 3c986d9..eb688ac 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -183,21 +183,20 @@ let FunctionCallActor = protocol.ActorClass({
+       }
+       if (typeof arg == "function") {
+         return "Function";
+       }
+       if (typeof arg == "object") {
+         return "Object";
+       }
+       if (global == CallWatcherFront.CANVAS_WEBGL_CONTEXT) {
+-        // XXX: This doesn't handle combined bitmasks. Bug 978964.
+-        return getEnumsLookupTable("webgl", caller)[arg] || arg;
++        return getBitToEnumValue("webgl", caller, arg);
+       }
+       if (global == CallWatcherFront.CANVAS_2D_CONTEXT) {
+-        return getEnumsLookupTable("2d", caller)[arg] || arg;
++        return getBitToEnumValue("2d", caller, arg);
+       }
+       return arg;
+     });
+ 
+     return serializeArgs().join(", ");
+   }
+ });
+ 
+@@ -536,24 +535,46 @@ CallWatcherFront.CANVAS_2D_CONTEXT = 3;
+  * assuming they look LIKE_THIS most of the time.
+  *
+  * For example, when gl.clear(gl.COLOR_BUFFER_BIT) is called, the actual passed
+  * argument's value is 16384, which we want identified as "COLOR_BUFFER_BIT".
+  */
+ var gEnumRegex = /^[A-Z_]+$/;
+ var gEnumsLookupTable = {};
+ 
+-function getEnumsLookupTable(type, object) {
+-  let cachedEnum = gEnumsLookupTable[type];
+-  if (cachedEnum) {
+-    return cachedEnum;
+-  }
++function getBitToEnumValue(type, object, arg) {
++  let table = gEnumsLookupTable[type];
+ 
+-  let table = gEnumsLookupTable[type] = {};
++  // If mapping not yet created, do it on first run.
++  if (!table) {
++    table = gEnumsLookupTable[type] = {};
+ 
+-  for (let key in object) {
+-    if (key.match(gEnumRegex)) {
+-      table[object[key]] = key;
++    for (let key in object) {
++      if (key.match(gEnumRegex)) {
++        // Maps `16384` to `"COLOR_BUFFER_BIT"`
++        table[object[key]] = key;
++      }
+     }
+   }
+ 
+-  return table;
++  // If a single bit-value, just return it.
++  if (table[arg]) {
++    return table[arg];
++  }
++  // Otherwise, attempt to reduce it to the original bit flags:
++  // `16640` -> "COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT"
++  else {
++    let flags = [];
++    for (let key in table) {
++      if (table[key] === "NONE") {
++        continue;
++      }
++
++      key = ~~key;
++      if ((arg & key) === key) {
++        flags.push(table[key]);
++      }
++    }
++
++    // Cache the combined bitmask value
++    return table[arg] = flags.join(" | ") || arg;
++  }
+ }
+-- 
+1.8.4.2
+
