@@ -1,0 +1,152 @@
+From 4a0c95c8d1dc06859b941b22eb820e0bb83c3406 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 12 Jun 2014 17:00:01 -0700
+Subject: Bug 1024787 - Fix uncaught promise rejections in devtools/framework. r=jryans
+
+---
+ .../framework/test/browser_devtools_api.js         | 23 +++++++++++++++++++---
+ .../test/browser_new_activation_workflow.js        | 12 ++++++-----
+ 2 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/browser/devtools/framework/test/browser_devtools_api.js b/browser/devtools/framework/test/browser_devtools_api.js
+index 938c3a3..f1349f9 100644
+--- a/browser/devtools/framework/test/browser_devtools_api.js
++++ b/browser/devtools/framework/test/browser_devtools_api.js
+@@ -33,21 +33,28 @@ function runTests(aTab) {
+   is(gDevTools.getToolDefinitionMap().has(toolId), false,
+     "The tool is not registered");
+ 
+   gDevTools.registerTool(toolDefinition);
+   is(gDevTools.getToolDefinitionMap().has(toolId), true,
+     "The tool is registered");
+ 
+   let target = TargetFactory.forTab(gBrowser.selectedTab);
++
+   gDevTools.showToolbox(target, toolId).then(function(toolbox) {
++    // Wait for the test tool to be visible and selected.
++    let { promise: testToolShown, resolve } = promise.defer();
++    toolbox.once("test-tool-selected", resolve);
++
++    return testToolShown.then(() => toolbox);
++  }).then(function (toolbox) {
+     is(toolbox.target, target, "toolbox target is correct");
+     is(toolbox._host.hostTab, gBrowser.selectedTab, "toolbox host is correct");
+     continueTests(toolbox);
+-  }).then(null, console.error);
++  });
+ }
+ 
+ function continueTests(toolbox, panel) {
+   ok(toolbox.getCurrentPanel(), "panel value is correct");
+   is(toolbox.currentToolId, toolId, "toolbox _currentToolId is correct");
+ 
+   ok(!toolbox.doc.getElementById("toolbox-tab-" + toolId).hasAttribute("icon-invertable"),
+     "The tool tab does not have the invertable attribute");
+@@ -60,23 +67,33 @@ function continueTests(toolbox, panel) {
+ 
+   let toolDefinition = toolDefinitions.get(toolId);
+   is(toolDefinition.id, toolId, "toolDefinition id is correct");
+ 
+   gDevTools.unregisterTool(toolId);
+   is(gDevTools.getToolDefinitionMap().has(toolId), false,
+     "The tool is no longer registered");
+ 
++  // Wait for unregisterTool to select the next tool before
++  // attempting to destroy.
++  toolbox.on("select", function selectListener (_, id) {
++    if (id !== "test-tool") {
++      toolbox.off("select", selectListener);
++      destroyToolbox(toolbox);
++    }
++  });
++}
++
++function destroyToolbox(toolbox) {
+   toolbox.destroy().then(function() {
+     let target = TargetFactory.forTab(gBrowser.selectedTab);
+     ok(gDevTools._toolboxes.get(target) == null, "gDevTools doesn't know about target");
+     ok(toolbox._target == null, "toolbox doesn't know about target.");
+-
+     finishUp();
+-  }).then(null, console.error);
++  });
+ }
+ 
+ function finishUp() {
+   tempScope = null;
+   gBrowser.removeCurrentTab();
+   finish();
+ }
+ 
+diff --git a/browser/devtools/framework/test/browser_new_activation_workflow.js b/browser/devtools/framework/test/browser_new_activation_workflow.js
+index 16b426c..96fe179 100644
+--- a/browser/devtools/framework/test/browser_new_activation_workflow.js
++++ b/browser/devtools/framework/test/browser_new_activation_workflow.js
+@@ -9,38 +9,38 @@ let toolbox, target;
+ 
+ let tempScope = {};
+ 
+ function test() {
+   addTab("about:blank", function(aBrowser, aTab) {
+     target = TargetFactory.forTab(gBrowser.selectedTab);
+     loadWebConsole(aTab).then(function() {
+       console.log('loaded');
+-    }, console.error);
++    });
+   });
+ }
+ 
+ function loadWebConsole(aTab) {
+   ok(gDevTools, "gDevTools exists");
+ 
+   return gDevTools.showToolbox(target, "webconsole").then(function(aToolbox) {
+     toolbox = aToolbox;
+     checkToolLoading();
+-  }, console.error);
++  });
+ }
+ 
+ function checkToolLoading() {
+   is(toolbox.currentToolId, "webconsole", "The web console is selected");
+   ok(toolbox.isReady, "toolbox is ready")
+ 
+   selectAndCheckById("jsdebugger").then(function() {
+     selectAndCheckById("styleeditor").then(function() {
+       testToggle();
+     });
+-  }, console.error);
++  });
+ }
+ 
+ function selectAndCheckById(id) {
+   let doc = toolbox.frame.contentDocument;
+ 
+   return toolbox.selectTool(id).then(function() {
+     let tab = doc.getElementById("toolbox-tab-" + id);
+     is(tab.hasAttribute("selected"), true, "The " + id + " tab is selected");
+@@ -48,18 +48,20 @@ function selectAndCheckById(id) {
+ }
+ 
+ function testToggle() {
+   toolbox.once("destroyed", function() {
+     // Cannot reuse a target after it's destroyed.
+     target = TargetFactory.forTab(gBrowser.selectedTab);
+     gDevTools.showToolbox(target, "styleeditor").then(function(aToolbox) {
+       toolbox = aToolbox;
+-      is(toolbox.currentToolId, "styleeditor", "The style editor is selected");
+-      finishUp();
++      aToolbox.once("styleeditor-selected", () => {
++        is(toolbox.currentToolId, "styleeditor", "The style editor is selected");
++        finishUp();
++      });
+     });
+   }.bind(this));
+ 
+   toolbox.destroy();
+ }
+ 
+ function finishUp() {
+   toolbox.destroy().then(function() {
+-- 
+1.8.4.2
+

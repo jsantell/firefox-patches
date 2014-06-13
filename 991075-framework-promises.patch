@@ -1,0 +1,123 @@
+From 89dbd3d40f20036b48be067d1b0512c38318a92a Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 12 Jun 2014 16:47:06 -0700
+Subject: Bug 991075 - Fix unhandled promise errors. r=jryans
+
+---
+ browser/devtools/framework/gDevTools.jsm           |  2 ++
+ .../devtools/framework/test/browser_keybindings.js | 24 +++++++++++-----------
+ 2 files changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/browser/devtools/framework/gDevTools.jsm b/browser/devtools/framework/gDevTools.jsm
+index 7e9d767..92f8be9 100644
+--- a/browser/devtools/framework/gDevTools.jsm
++++ b/browser/devtools/framework/gDevTools.jsm
+@@ -496,22 +496,24 @@ let gDevToolsBrowser = {
+     {
+       toolbox.fireCustomKey(toolId);
+ 
+       if (toolDefinition.preventClosingOnKey || toolbox.hostType == devtools.Toolbox.HostType.WINDOW) {
+         toolbox.raise();
+       } else {
+         toolbox.destroy();
+       }
++      gDevTools.emit("select-tool-command", toolId);
+     } else {
+       gDevTools.showToolbox(target, toolId).then(() => {
+         let target = devtools.TargetFactory.forTab(gBrowser.selectedTab);
+         let toolbox = gDevTools.getToolbox(target);
+ 
+         toolbox.fireCustomKey(toolId);
++        gDevTools.emit("select-tool-command", toolId);
+       });
+     }
+   },
+ 
+   /**
+    * Open a tab to allow connects to a remote browser
+    */
+   openConnectScreen: function(gBrowser) {
+diff --git a/browser/devtools/framework/test/browser_keybindings.js b/browser/devtools/framework/test/browser_keybindings.js
+index b367303..7cecfac 100644
+--- a/browser/devtools/framework/test/browser_keybindings.js
++++ b/browser/devtools/framework/test/browser_keybindings.js
+@@ -53,64 +53,64 @@ function test()
+ 
+   function setupKeyBindingsTest()
+   {
+     for (let win of gDevToolsBrowser._trackedBrowserWindows) {
+       buildDevtoolsKeysetMap(win.document.getElementById("devtoolsKeyset"));
+     }
+ 
+     gDevTools.once("toolbox-ready", (e, toolbox) => {
+-      inspectorShouldBeOpenAndHighlighting(toolbox.getCurrentPanel(), toolbox)
++      inspectorShouldBeOpenAndHighlighting(toolbox.getCurrentPanel(), toolbox);
+     });
+ 
+     keysetMap.inspector.synthesizeKey();
+   }
+ 
+   function inspectorShouldBeOpenAndHighlighting(aInspector, aToolbox)
+   {
+     is (aToolbox.currentToolId, "inspector", "Correct tool has been loaded");
+ 
+     aToolbox.once("picker-started", () => {
+       ok(true, "picker-started event received, highlighter started");
+       keysetMap.inspector.synthesizeKey();
+ 
+       aToolbox.once("picker-stopped", () => {
+         ok(true, "picker-stopped event received, highlighter stopped");
+-        aToolbox.once("webconsole-ready", (e, panel) => {
+-          webconsoleShouldBeSelected(aToolbox, panel);
++        gDevTools.once("select-tool-command", () => {
++          webconsoleShouldBeSelected(aToolbox);
+         });
+         keysetMap.webconsole.synthesizeKey();
+       });
+     });
+   }
+ 
+-  function webconsoleShouldBeSelected(aToolbox, panel)
++  function webconsoleShouldBeSelected(aToolbox)
+   {
+-      is (aToolbox.currentToolId, "webconsole");
++      is (aToolbox.currentToolId, "webconsole", "webconsole should be selected.");
+ 
+-      aToolbox.once("jsdebugger-ready", (e, panel) => {
+-        jsdebuggerShouldBeSelected(aToolbox, panel);
++      gDevTools.once("select-tool-command", () => {
++        jsdebuggerShouldBeSelected(aToolbox);
+       });
+       keysetMap.jsdebugger.synthesizeKey();
+   }
+ 
+-  function jsdebuggerShouldBeSelected(aToolbox, panel)
++  function jsdebuggerShouldBeSelected(aToolbox)
+   {
+-      is (aToolbox.currentToolId, "jsdebugger");
++      is (aToolbox.currentToolId, "jsdebugger", "jsdebugger should be selected.");
+ 
+-      aToolbox.once("netmonitor-ready", (e, panel) => {
+-        netmonitorShouldBeSelected(aToolbox, panel);
++      gDevTools.once("select-tool-command", () => {
++        netmonitorShouldBeSelected(aToolbox);
+       });
+ 
+       keysetMap.netmonitor.synthesizeKey();
+   }
+ 
+   function netmonitorShouldBeSelected(aToolbox, panel)
+   {
+-      is (aToolbox.currentToolId, "netmonitor");
++      is (aToolbox.currentToolId, "netmonitor", "netmonitor should be selected.");
+       finishUp();
+   }
+ 
+   function finishUp() {
+     doc = node = inspector = keysetMap = null;
+     gBrowser.removeCurrentTab();
+     finish();
+   }
+-- 
+1.8.4.2
+
