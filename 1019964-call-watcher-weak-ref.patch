@@ -1,18 +1,19 @@
-From 5ea9527a6dd28ded4cd70a9bf4ffda807feaeaf1 Mon Sep 17 00:00:00 2001
+From a798f2127e534b086b51226793b1a5cb55651d7d Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 9 Jun 2014 14:29:01 -0700
-Subject: Bug 1019964 - CallWatcherActor no longer holds strong
- references in FunctionCallActor, r=vp
+Date: Fri, 13 Jun 2014 15:55:35 -0700
+Subject: [PATCH] Bug 1019964 - Ensure CallWatcherActor does not store strong
+ references if specified.
 
 ---
- toolkit/devtools/server/actors/call-watcher.js | 20 ++++++++++++++++----
- 1 file changed, 16 insertions(+), 4 deletions(-)
+ toolkit/devtools/server/actors/call-watcher.js | 33 ++++++++++++++++++++++----
+ toolkit/devtools/server/actors/webaudio.js     |  3 ++-
+ 2 files changed, 30 insertions(+), 6 deletions(-)
 
 diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
-index 3c986d9..6aacbc1 100644
+index 3c986d9..864fc44 100644
 --- a/toolkit/devtools/server/actors/call-watcher.js
 +++ b/toolkit/devtools/server/actors/call-watcher.js
-@@ -68,25 +68,37 @@ let FunctionCallActor = protocol.ActorClass({
+@@ -68,25 +68,47 @@ let FunctionCallActor = protocol.ActorClass({
     *        The called function's arguments.
     * @param any result
     *        The value returned by the function call.
@@ -31,20 +32,30 @@ index 3c986d9..6aacbc1 100644
      };
  
 +    // Store a weak reference to all objects so we don't
-+    // prevent natural GC.
-+    let weakRefs = {
-+      window: Cu.getWeakReference(window),
-+      caller: Cu.getWeakReference(caller),
-+      result: Cu.getWeakReference(result),
-+      args: Cu.getWeakReference(args)
-+    };
++    // prevent natural GC if `holdWeak` was passed into
++    // setup as truthy. Used in the Web Audio Editor.
++    if (this._holdWeak) {
++      let weakRefs = {
++        window: Cu.getWeakReference(window),
++        caller: Cu.getWeakReference(caller),
++        result: Cu.getWeakReference(result),
++        args: Cu.getWeakReference(args)
++      };
 +
-+    Object.defineProperties(this.details, {
-+      window: { get: () => weakRefs.window.get() },
-+      caller: { get: () => weakRefs.caller.get() },
-+      result: { get: () => weakRefs.result.get() },
-+      args: { get: () => weakRefs.args.get() }
-+    });
++      Object.defineProperties(this.details, {
++        window: { get: () => weakRefs.window.get() },
++        caller: { get: () => weakRefs.caller.get() },
++        result: { get: () => weakRefs.result.get() },
++        args: { get: () => weakRefs.args.get() }
++      });
++    }
++    // Otherwise, hold strong references to the objects.
++    else {
++      this.details.window = window;
++      this.details.caller = caller;
++      this.details.result = result;
++      this.details.args = args;
++    }
 +
      this.meta = {
        global: -1,
@@ -54,6 +65,58 @@ index 3c986d9..6aacbc1 100644
      if (global == "WebGLRenderingContext") {
        this.meta.global = CallWatcherFront.CANVAS_WEBGL_CONTEXT;
      } else if (global == "CanvasRenderingContext2D") {
+@@ -241,25 +263,26 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+     this.finalize();
+   },
+ 
+   /**
+    * Starts waiting for the current tab actor's document global to be
+    * created, in order to instrument the specified objects and become
+    * aware of everything the content does with them.
+    */
+-  setup: method(function({ tracedGlobals, tracedFunctions, startRecording, performReload }) {
++  setup: method(function({ tracedGlobals, tracedFunctions, startRecording, performReload, holdWeak }) {
+     if (this._initialized) {
+       return;
+     }
+     this._initialized = true;
+ 
+     this._functionCalls = [];
+     this._tracedGlobals = tracedGlobals || [];
+     this._tracedFunctions = tracedFunctions || [];
++    this._holdWeak = !!holdWeak;
+     this._contentObserver = new ContentObserver(this.tabActor);
+ 
+     on(this._contentObserver, "global-created", this._onGlobalCreated);
+     on(this._contentObserver, "global-destroyed", this._onGlobalDestroyed);
+ 
+     if (startRecording) {
+       this.resumeRecording();
+     }
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 9e7523a..b3fc7e5 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -313,17 +313,18 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+ 
+     this._initialized = true;
+ 
+     this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: AUDIO_GLOBALS,
+       startRecording: true,
+-      performReload: reload
++      performReload: reload,
++      holdWeak: true
+     });
+   }, {
+     request: { reload: Option(0, "boolean") },
+     oneway: true
+   }),
+ 
+   /**
+    * Invoked whenever an instrumented function is called, like an AudioContext
 -- 
 1.8.4.2
 
