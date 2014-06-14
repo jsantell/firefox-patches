@@ -1,0 +1,311 @@
+From eb3ed1cf3ff07a530297c74976a1d96ca8b5bd79 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 13 Jun 2014 16:48:30 -0700
+Subject: Bug 1025311 - Add telemetry for canvas debugger.
+
+---
+ browser/devtools/canvasdebugger/canvasdebugger.js  |   4 +
+ browser/devtools/shared/telemetry.js               |   5 +
+ browser/devtools/shared/test/browser.ini           |   1 +
+ ...browser_telemetry_toolboxtabs_canvasdebugger.js | 117 +++++++++++++++++++++
+ toolkit/components/telemetry/Histograms.json       |  17 +++
+ 5 files changed, 144 insertions(+)
+ create mode 100644 browser/devtools/shared/test/browser_telemetry_toolboxtabs_canvasdebugger.js
+
+diff --git a/browser/devtools/canvasdebugger/canvasdebugger.js b/browser/devtools/canvasdebugger/canvasdebugger.js
+index 9211919..b813154 100644
+--- a/browser/devtools/canvasdebugger/canvasdebugger.js
++++ b/browser/devtools/canvasdebugger/canvasdebugger.js
+@@ -10,16 +10,18 @@ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource:///modules/devtools/SideMenuWidget.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ 
+ const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const { CallWatcherFront } = require("devtools/server/actors/call-watcher");
+ const { CanvasFront } = require("devtools/server/actors/canvas");
++const Telemetry = require("devtools/shared/telemetry");
++const telemetry = new Telemetry();
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "Task",
+   "resource://gre/modules/Task.jsm");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "PluralForm",
+   "resource://gre/modules/PluralForm.jsm");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "FileUtils",
+@@ -114,25 +116,27 @@ function shutdownCanvasDebugger() {
+ /**
+  * Functions handling target-related lifetime events.
+  */
+ let EventsHandler = {
+   /**
+    * Listen for events emitted by the current tab target.
+    */
+   initialize: function() {
++    telemetry.toolOpened("canvasdebugger");
+     this._onTabNavigated = this._onTabNavigated.bind(this);
+     gTarget.on("will-navigate", this._onTabNavigated);
+     gTarget.on("navigate", this._onTabNavigated);
+   },
+ 
+   /**
+    * Remove events emitted by the current tab target.
+    */
+   destroy: function() {
++    telemetry.toolClosed("canvasdebugger");
+     gTarget.off("will-navigate", this._onTabNavigated);
+     gTarget.off("navigate", this._onTabNavigated);
+   },
+ 
+   /**
+    * Called for each location change in the debugged tab.
+    */
+   _onTabNavigated: function(event) {
+diff --git a/browser/devtools/shared/telemetry.js b/browser/devtools/shared/telemetry.js
+index b5832b3..02143ef 100644
+--- a/browser/devtools/shared/telemetry.js
++++ b/browser/devtools/shared/telemetry.js
+@@ -120,16 +120,21 @@ Telemetry.prototype = {
+       userHistogram: "DEVTOOLS_STYLEEDITOR_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_STYLEEDITOR_TIME_ACTIVE_SECONDS"
+     },
+     shadereditor: {
+       histogram: "DEVTOOLS_SHADEREDITOR_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_SHADEREDITOR_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_SHADEREDITOR_TIME_ACTIVE_SECONDS"
+     },
++    canvasdebugger: {
++      histogram: "DEVTOOLS_CANVASDEBUGGER_OPENED_BOOLEAN",
++      userHistogram: "DEVTOOLS_CANVASDEBUGGER_OPENED_PER_USER_FLAG",
++      timerHistogram: "DEVTOOLS_CANVASDEBUGGER_TIME_ACTIVE_SECONDS"
++    },
+     jsprofiler: {
+       histogram: "DEVTOOLS_JSPROFILER_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_JSPROFILER_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_JSPROFILER_TIME_ACTIVE_SECONDS"
+     },
+     netmonitor: {
+       histogram: "DEVTOOLS_NETMONITOR_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_NETMONITOR_OPENED_PER_USER_FLAG",
+diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
+index fb05fe8..b053bb1 100644
+--- a/browser/devtools/shared/test/browser.ini
++++ b/browser/devtools/shared/test/browser.ini
+@@ -29,16 +29,17 @@ support-files =
+ [browser_require_basic.js]
+ [browser_telemetry_button_paintflashing.js]
+ [browser_telemetry_button_responsive.js]
+ [browser_telemetry_button_scratchpad.js]
+ [browser_telemetry_button_tilt.js]
+ [browser_telemetry_sidebar.js]
+ [browser_telemetry_toolbox.js]
+ [browser_telemetry_toolboxtabs_inspector.js]
++[browser_telemetry_toolboxtabs_canvasdebugger.js]
+ [browser_telemetry_toolboxtabs_jsdebugger.js]
+ [browser_telemetry_toolboxtabs_jsprofiler.js]
+ [browser_telemetry_toolboxtabs_netmonitor.js]
+ [browser_telemetry_toolboxtabs_options.js]
+ [browser_telemetry_toolboxtabs_styleeditor.js]
+ [browser_telemetry_toolboxtabs_webconsole.js]
+ [browser_templater_basic.js]
+ [browser_toolbar_basic.js]
+diff --git a/browser/devtools/shared/test/browser_telemetry_toolboxtabs_canvasdebugger.js b/browser/devtools/shared/test/browser_telemetry_toolboxtabs_canvasdebugger.js
+new file mode 100644
+index 0000000..7735ef8
+--- /dev/null
++++ b/browser/devtools/shared/test/browser_telemetry_toolboxtabs_canvasdebugger.js
+@@ -0,0 +1,117 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++const TEST_URI = "data:text/html;charset=utf-8,<p>browser_telemetry_toolboxtabs_canvasdebugger.js</p>";
++
++// Because we need to gather stats for the period of time that a tool has been
++// opened we make use of setTimeout() to create tool active times.
++const TOOL_DELAY = 200;
++
++let {Promise: promise} = Cu.import("resource://gre/modules/devtools/deprecated-sync-thenables.js", {});
++let {Services} = Cu.import("resource://gre/modules/Services.jsm", {});
++
++let require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
++let Telemetry = require("devtools/shared/telemetry");
++let originalPref = Services.prefs.getBoolPref("devtools.canvasdebugger.enabled");
++Services.prefs.setBoolPref("devtools.canvasdebugger.enabled", true);
++
++function init() {
++  Telemetry.prototype.telemetryInfo = {};
++  Telemetry.prototype._oldlog = Telemetry.prototype.log;
++  Telemetry.prototype.log = function(histogramId, value) {
++    if (!this.telemetryInfo) {
++      // Can be removed when Bug 992911 lands (see Bug 1011652 Comment 10)
++      return;
++    }
++    if (histogramId) {
++      if (!this.telemetryInfo[histogramId]) {
++        this.telemetryInfo[histogramId] = [];
++      }
++
++      this.telemetryInfo[histogramId].push(value);
++    }
++  }
++
++  openToolboxTabTwice("canvasdebugger", false);
++}
++
++function openToolboxTabTwice(id, secondPass) {
++  let target = TargetFactory.forTab(gBrowser.selectedTab);
++
++  gDevTools.showToolbox(target, id).then(function(toolbox) {
++    info("Toolbox tab " + id + " opened");
++
++    toolbox.once("destroyed", function() {
++      if (secondPass) {
++        checkResults();
++      } else {
++        openToolboxTabTwice(id, true);
++      }
++    });
++    // We use a timeout to check the tools active time
++    setTimeout(function() {
++      gDevTools.closeToolbox(target);
++    }, TOOL_DELAY);
++  }).then(null, reportError);
++}
++
++function checkResults() {
++  let result = Telemetry.prototype.telemetryInfo;
++
++  for (let [histId, value] of Iterator(result)) {
++    if (histId.endsWith("OPENED_PER_USER_FLAG")) {
++      ok(value.length === 1 && value[0] === true,
++         "Per user value " + histId + " has a single value of true");
++    } else if (histId.endsWith("OPENED_BOOLEAN")) {
++      ok(value.length > 1, histId + " has more than one entry");
++
++      let okay = value.every(function(element) {
++        return element === true;
++      });
++
++      ok(okay, "All " + histId + " entries are === true");
++    } else if (histId.endsWith("TIME_ACTIVE_SECONDS")) {
++      ok(value.length > 1, histId + " has more than one entry");
++
++      let okay = value.every(function(element) {
++        return element > 0;
++      });
++
++      ok(okay, "All " + histId + " entries have time > 0");
++    }
++  }
++
++  finishUp();
++}
++
++function reportError(error) {
++  let stack = "    " + error.stack.replace(/\n?.*?@/g, "\n    JS frame :: ");
++
++  ok(false, "ERROR: " + error + " at " + error.fileName + ":" +
++            error.lineNumber + "\n\nStack trace:" + stack);
++  finishUp();
++}
++
++function finishUp() {
++  gBrowser.removeCurrentTab();
++
++  Telemetry.prototype.log = Telemetry.prototype._oldlog;
++  delete Telemetry.prototype._oldlog;
++  delete Telemetry.prototype.telemetryInfo;
++  Services.prefs.setBoolPref("devtools.canvasdebugger.enabled", originalPref);
++
++  TargetFactory = Services = promise = require = null;
++
++  finish();
++}
++
++function test() {
++  waitForExplicitFinish();
++  gBrowser.selectedTab = gBrowser.addTab();
++  gBrowser.selectedBrowser.addEventListener("load", function() {
++    gBrowser.selectedBrowser.removeEventListener("load", arguments.callee, true);
++    waitForFocus(init, content);
++  }, true);
++
++  content.location = TEST_URI;
++}
+diff --git a/toolkit/components/telemetry/Histograms.json b/toolkit/components/telemetry/Histograms.json
+index e00a112..ee73821 100644
+--- a/toolkit/components/telemetry/Histograms.json
++++ b/toolkit/components/telemetry/Histograms.json
+@@ -5704,16 +5704,21 @@
+     "kind": "boolean",
+     "description": "How many times has the devtool's Style Editor been opened?"
+   },
+   "DEVTOOLS_SHADEREDITOR_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+     "description": "How many times has the devtool's Shader Editor been opened?"
+   },
++  "DEVTOOLS_CANVASDEBUGGER_OPENED_BOOLEAN": {
++    "expires_in_version": "never",
++    "kind": "boolean",
++    "description": "How many times has the devtool's Canvas Debugger been opened?"
++  },
+   "DEVTOOLS_JSPROFILER_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+     "description": "How many times has the devtool's JS Profiler been opened?"
+   },
+   "DEVTOOLS_NETMONITOR_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+@@ -5809,16 +5814,21 @@
+     "kind": "flag",
+     "description": "How many users have opened the devtool's Style Editor?"
+   },
+   "DEVTOOLS_SHADEREDITOR_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+     "description": "How many users have opened the devtool's Shader Editor?"
+   },
++  "DEVTOOLS_CANVASDEBUGGER_OPENED_PER_USER_FLAG": {
++    "expires_in_version": "never",
++    "kind": "flag",
++    "description": "How many users have opened the devtool's Canvas Debugger?"
++  },
+   "DEVTOOLS_JSPROFILER_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+     "description": "How many users have opened the devtool's JS Profiler?"
+   },
+   "DEVTOOLS_NETMONITOR_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+@@ -5940,16 +5950,23 @@
+   },
+   "DEVTOOLS_SHADEREDITOR_TIME_ACTIVE_SECONDS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000000",
+     "n_buckets": 100,
+     "description": "How long has the Shader Editor been active (seconds)"
+   },
++  "DEVTOOLS_CANVASDEBUGGER_TIME_ACTIVE_SECONDS": {
++    "expires_in_version": "never",
++    "kind": "exponential",
++    "high": "10000000",
++    "n_buckets": 100,
++    "description": "How long has the Canvas Debugger been active (seconds)"
++  },
+   "DEVTOOLS_JSPROFILER_TIME_ACTIVE_SECONDS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000000",
+     "n_buckets": 100,
+     "description": "How long has the JS profiler been active (seconds)"
+   },
+   "DEVTOOLS_NETMONITOR_TIME_ACTIVE_SECONDS": {
+-- 
+1.8.4.2
+

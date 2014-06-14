@@ -1,0 +1,320 @@
+From 1e28c92f25088f7279686c1a2af68ea03a050d9c Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 13 Jun 2014 16:19:26 -0700
+Subject: Bug 1025310 - Add telemetry to the web audio editor
+
+---
+ browser/devtools/shared/telemetry.js               |   5 +
+ browser/devtools/shared/test/browser.ini           |   1 +
+ ...browser_telemetry_toolboxtabs_webaudioeditor.js | 118 +++++++++++++++++++++
+ .../webaudioeditor/webaudioeditor-controller.js    |   4 +
+ toolkit/components/telemetry/Histograms.json       |  17 +++
+ 5 files changed, 145 insertions(+)
+ create mode 100644 browser/devtools/shared/test/browser_telemetry_toolboxtabs_webaudioeditor.js
+
+diff --git a/browser/devtools/shared/telemetry.js b/browser/devtools/shared/telemetry.js
+index b5832b3..478a559 100644
+--- a/browser/devtools/shared/telemetry.js
++++ b/browser/devtools/shared/telemetry.js
+@@ -120,16 +120,21 @@ Telemetry.prototype = {
+       userHistogram: "DEVTOOLS_STYLEEDITOR_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_STYLEEDITOR_TIME_ACTIVE_SECONDS"
+     },
+     shadereditor: {
+       histogram: "DEVTOOLS_SHADEREDITOR_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_SHADEREDITOR_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_SHADEREDITOR_TIME_ACTIVE_SECONDS"
+     },
++    webaudioeditor: {
++      histogram: "DEVTOOLS_WEBAUDIOEDITOR_OPENED_BOOLEAN",
++      userHistogram: "DEVTOOLS_WEBAUDIOEDITOR_OPENED_PER_USER_FLAG",
++      timerHistogram: "DEVTOOLS_WEBAUDIOEDITOR_TIME_ACTIVE_SECONDS"
++    },
+     jsprofiler: {
+       histogram: "DEVTOOLS_JSPROFILER_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_JSPROFILER_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_JSPROFILER_TIME_ACTIVE_SECONDS"
+     },
+     netmonitor: {
+       histogram: "DEVTOOLS_NETMONITOR_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_NETMONITOR_OPENED_PER_USER_FLAG",
+diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
+index fb05fe8..34fefe2 100644
+--- a/browser/devtools/shared/test/browser.ini
++++ b/browser/devtools/shared/test/browser.ini
+@@ -29,16 +29,17 @@ support-files =
+ [browser_require_basic.js]
+ [browser_telemetry_button_paintflashing.js]
+ [browser_telemetry_button_responsive.js]
+ [browser_telemetry_button_scratchpad.js]
+ [browser_telemetry_button_tilt.js]
+ [browser_telemetry_sidebar.js]
+ [browser_telemetry_toolbox.js]
+ [browser_telemetry_toolboxtabs_inspector.js]
++[browser_telemetry_toolboxtabs_webaudioeditor.js]
+ [browser_telemetry_toolboxtabs_jsdebugger.js]
+ [browser_telemetry_toolboxtabs_jsprofiler.js]
+ [browser_telemetry_toolboxtabs_netmonitor.js]
+ [browser_telemetry_toolboxtabs_options.js]
+ [browser_telemetry_toolboxtabs_styleeditor.js]
+ [browser_telemetry_toolboxtabs_webconsole.js]
+ [browser_templater_basic.js]
+ [browser_toolbar_basic.js]
+diff --git a/browser/devtools/shared/test/browser_telemetry_toolboxtabs_webaudioeditor.js b/browser/devtools/shared/test/browser_telemetry_toolboxtabs_webaudioeditor.js
+new file mode 100644
+index 0000000..f29947c
+--- /dev/null
++++ b/browser/devtools/shared/test/browser_telemetry_toolboxtabs_webaudioeditor.js
+@@ -0,0 +1,118 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++const TEST_URI = "data:text/html;charset=utf-8,<p>browser_telemetry_toolboxtabs_webaudioeditor.js</p>";
++
++// Because we need to gather stats for the period of time that a tool has been
++// opened we make use of setTimeout() to create tool active times.
++const TOOL_DELAY = 200;
++
++let {Promise: promise} = Cu.import("resource://gre/modules/devtools/deprecated-sync-thenables.js", {});
++let {Services} = Cu.import("resource://gre/modules/Services.jsm", {});
++
++let require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
++let Telemetry = require("devtools/shared/telemetry");
++
++let originalPref = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
++Services.prefs.setBoolPref("devtools.webaudioeditor.enabled", true);
++
++function init() {
++  Telemetry.prototype.telemetryInfo = {};
++  Telemetry.prototype._oldlog = Telemetry.prototype.log;
++  Telemetry.prototype.log = function(histogramId, value) {
++    if (!this.telemetryInfo) {
++      // Can be removed when Bug 992911 lands (see Bug 1011652 Comment 10)
++      return;
++    }
++    if (histogramId) {
++      if (!this.telemetryInfo[histogramId]) {
++        this.telemetryInfo[histogramId] = [];
++      }
++
++      this.telemetryInfo[histogramId].push(value);
++    }
++  }
++
++  openToolboxTabTwice("webaudioeditor", false);
++}
++
++function openToolboxTabTwice(id, secondPass) {
++  let target = TargetFactory.forTab(gBrowser.selectedTab);
++
++  gDevTools.showToolbox(target, id).then(function(toolbox) {
++    info("Toolbox tab " + id + " opened");
++
++    toolbox.once("destroyed", function() {
++      if (secondPass) {
++        checkResults();
++      } else {
++        openToolboxTabTwice(id, true);
++      }
++    });
++    // We use a timeout to check the tools active time
++    setTimeout(function() {
++      gDevTools.closeToolbox(target);
++    }, TOOL_DELAY);
++  }).then(null, reportError);
++}
++
++function checkResults() {
++  let result = Telemetry.prototype.telemetryInfo;
++
++  for (let [histId, value] of Iterator(result)) {
++    if (histId.endsWith("OPENED_PER_USER_FLAG")) {
++      ok(value.length === 1 && value[0] === true,
++         "Per user value " + histId + " has a single value of true");
++    } else if (histId.endsWith("OPENED_BOOLEAN")) {
++      ok(value.length > 1, histId + " has more than one entry");
++
++      let okay = value.every(function(element) {
++        return element === true;
++      });
++
++      ok(okay, "All " + histId + " entries are === true");
++    } else if (histId.endsWith("TIME_ACTIVE_SECONDS")) {
++      ok(value.length > 1, histId + " has more than one entry");
++
++      let okay = value.every(function(element) {
++        return element > 0;
++      });
++
++      ok(okay, "All " + histId + " entries have time > 0");
++    }
++  }
++
++  finishUp();
++}
++
++function reportError(error) {
++  let stack = "    " + error.stack.replace(/\n?.*?@/g, "\n    JS frame :: ");
++
++  ok(false, "ERROR: " + error + " at " + error.fileName + ":" +
++            error.lineNumber + "\n\nStack trace:" + stack);
++  finishUp();
++}
++
++function finishUp() {
++  gBrowser.removeCurrentTab();
++
++  Telemetry.prototype.log = Telemetry.prototype._oldlog;
++  delete Telemetry.prototype._oldlog;
++  delete Telemetry.prototype.telemetryInfo;
++
++  Services.prefs.setBoolPref("devtools.webaudioeditor.enabled", originalPref);
++  TargetFactory = Services = promise = require = null;
++
++  finish();
++}
++
++function test() {
++  waitForExplicitFinish();
++  gBrowser.selectedTab = gBrowser.addTab();
++  gBrowser.selectedBrowser.addEventListener("load", function() {
++    gBrowser.selectedBrowser.removeEventListener("load", arguments.callee, true);
++    waitForFocus(init, content);
++  }, true);
++
++  content.location = TEST_URI;
++}
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-controller.js b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+index 0c5a99c..7e11a9c 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-controller.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+@@ -13,16 +13,18 @@ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ // Override DOM promises with Promise.jsm helpers
+ const { defer, all } = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ 
+ const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const STRINGS_URI = "chrome://browser/locale/devtools/webaudioeditor.properties"
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
++const Telemetry = require("devtools/shared/telemetry");
++const telemetry = new Telemetry();
+ 
+ let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ 
+ // The panel's window global is an EventEmitter firing the following events:
+ const EVENTS = {
+   // Fired when the first AudioNode has been created, signifying
+   // that the AudioContext is being used and should be tracked via the editor.
+   START_CONTEXT: "WebAudioEditor:StartContext",
+@@ -139,16 +141,17 @@ function shutdownWebAudioEditor() {
+ /**
+  * Functions handling target-related lifetime events.
+  */
+ let WebAudioEditorController = {
+   /**
+    * Listen for events emitted by the current tab target.
+    */
+   initialize: function() {
++    telemetry.toolOpened("webaudioeditor");
+     this._onTabNavigated = this._onTabNavigated.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
+     gTarget.on("will-navigate", this._onTabNavigated);
+     gTarget.on("navigate", this._onTabNavigated);
+     gFront.on("start-context", this._onStartContext);
+     gFront.on("create-node", this._onCreateNode);
+     gFront.on("connect-node", this._onConnectNode);
+     gFront.on("disconnect-node", this._onDisconnectNode);
+@@ -164,16 +167,17 @@ let WebAudioEditorController = {
+     window.on(EVENTS.CONNECT_NODE, this._onUpdatedContext);
+     window.on(EVENTS.DISCONNECT_NODE, this._onUpdatedContext);
+   },
+ 
+   /**
+    * Remove events emitted by the current tab target.
+    */
+   destroy: function() {
++    telemetry.toolClosed("webaudioeditor");
+     gTarget.off("will-navigate", this._onTabNavigated);
+     gTarget.off("navigate", this._onTabNavigated);
+     gFront.off("start-context", this._onStartContext);
+     gFront.off("create-node", this._onCreateNode);
+     gFront.off("connect-node", this._onConnectNode);
+     gFront.off("disconnect-node", this._onDisconnectNode);
+     gFront.off("change-param", this._onChangeParam);
+     window.off(EVENTS.CREATE_NODE, this._onUpdatedContext);
+diff --git a/toolkit/components/telemetry/Histograms.json b/toolkit/components/telemetry/Histograms.json
+index e00a112..11132a5 100644
+--- a/toolkit/components/telemetry/Histograms.json
++++ b/toolkit/components/telemetry/Histograms.json
+@@ -5704,16 +5704,21 @@
+     "kind": "boolean",
+     "description": "How many times has the devtool's Style Editor been opened?"
+   },
+   "DEVTOOLS_SHADEREDITOR_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+     "description": "How many times has the devtool's Shader Editor been opened?"
+   },
++  "DEVTOOLS_WEBAUDIOEDITOR_OPENED_BOOLEAN": {
++    "expires_in_version": "never",
++    "kind": "boolean",
++    "description": "How many times has the devtool's Web Audio Editor been opened?"
++  },
+   "DEVTOOLS_JSPROFILER_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+     "description": "How many times has the devtool's JS Profiler been opened?"
+   },
+   "DEVTOOLS_NETMONITOR_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+@@ -5809,16 +5814,21 @@
+     "kind": "flag",
+     "description": "How many users have opened the devtool's Style Editor?"
+   },
+   "DEVTOOLS_SHADEREDITOR_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+     "description": "How many users have opened the devtool's Shader Editor?"
+   },
++  "DEVTOOLS_WEBAUDIOEDITOR_OPENED_PER_USER_FLAG": {
++    "expires_in_version": "never",
++    "kind": "flag",
++    "description": "How many users have opened the devtool's Web Audio Editor?"
++  },
+   "DEVTOOLS_JSPROFILER_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+     "description": "How many users have opened the devtool's JS Profiler?"
+   },
+   "DEVTOOLS_NETMONITOR_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+@@ -5940,16 +5950,23 @@
+   },
+   "DEVTOOLS_SHADEREDITOR_TIME_ACTIVE_SECONDS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000000",
+     "n_buckets": 100,
+     "description": "How long has the Shader Editor been active (seconds)"
+   },
++  "DEVTOOLS_WEBAUDIOEDITOR_TIME_ACTIVE_SECONDS": {
++    "expires_in_version": "never",
++    "kind": "exponential",
++    "high": "10000000",
++    "n_buckets": 100,
++    "description": "How long has the Web Audio Editor been active (seconds)"
++  },
+   "DEVTOOLS_JSPROFILER_TIME_ACTIVE_SECONDS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000000",
+     "n_buckets": 100,
+     "description": "How long has the JS profiler been active (seconds)"
+   },
+   "DEVTOOLS_NETMONITOR_TIME_ACTIVE_SECONDS": {
+-- 
+1.8.4.2
+
