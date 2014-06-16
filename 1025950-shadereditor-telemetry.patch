@@ -1,0 +1,217 @@
+From ff8898bd85f8cf33f116393e849390188fd5f9d7 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 16 Jun 2014 09:08:18 -0700
+Subject: Bug 1025950 - Add hooks into telemetry for the shader editor. r=vp,miker
+
+---
+ browser/devtools/shadereditor/shadereditor.js      |   4 +
+ browser/devtools/shared/test/browser.ini           |   1 +
+ .../browser_telemetry_toolboxtabs_shadereditor.js  | 117 +++++++++++++++++++++
+ 3 files changed, 122 insertions(+)
+ create mode 100644 browser/devtools/shared/test/browser_telemetry_toolboxtabs_shadereditor.js
+
+diff --git a/browser/devtools/shadereditor/shadereditor.js b/browser/devtools/shadereditor/shadereditor.js
+index 1133009..359c804 100644
+--- a/browser/devtools/shadereditor/shadereditor.js
++++ b/browser/devtools/shadereditor/shadereditor.js
+@@ -11,16 +11,18 @@ Cu.import("resource://gre/modules/Task.jsm");
+ Cu.import("resource:///modules/devtools/SideMenuWidget.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ 
+ const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const {Tooltip} = require("devtools/shared/widgets/Tooltip");
+ const Editor = require("devtools/sourceeditor/editor");
++const Telemetry = require("devtools/shared/telemetry");
++const telemetry = new Telemetry();
+ 
+ // The panel's window global is an EventEmitter firing the following events:
+ const EVENTS = {
+   // When new programs are received from the server.
+   NEW_PROGRAM: "ShaderEditor:NewProgram",
+   PROGRAMS_ADDED: "ShaderEditor:ProgramsAdded",
+ 
+   // When the vertex and fragment sources were shown in the editor.
+@@ -78,31 +80,33 @@ function shutdownShaderEditor() {
+ /**
+  * Functions handling target-related lifetime events.
+  */
+ let EventsHandler = {
+   /**
+    * Listen for events emitted by the current tab target.
+    */
+   initialize: function() {
++    telemetry.toolOpened("shadereditor");
+     this._onHostChanged = this._onHostChanged.bind(this);
+     this._onTabNavigated = this._onTabNavigated.bind(this);
+     this._onProgramLinked = this._onProgramLinked.bind(this);
+     this._onProgramsAdded = this._onProgramsAdded.bind(this);
+     gToolbox.on("host-changed", this._onHostChanged);
+     gTarget.on("will-navigate", this._onTabNavigated);
+     gTarget.on("navigate", this._onTabNavigated);
+     gFront.on("program-linked", this._onProgramLinked);
+ 
+   },
+ 
+   /**
+    * Remove events emitted by the current tab target.
+    */
+   destroy: function() {
++    telemetry.toolClosed("shadereditor");
+     gToolbox.off("host-changed", this._onHostChanged);
+     gTarget.off("will-navigate", this._onTabNavigated);
+     gTarget.off("navigate", this._onTabNavigated);
+     gFront.off("program-linked", this._onProgramLinked);
+   },
+ 
+   /**
+    * Handles a host change event on the parent toolbox.
+diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
+index fb05fe8..435e0fc 100644
+--- a/browser/devtools/shared/test/browser.ini
++++ b/browser/devtools/shared/test/browser.ini
+@@ -29,16 +29,17 @@ support-files =
+ [browser_require_basic.js]
+ [browser_telemetry_button_paintflashing.js]
+ [browser_telemetry_button_responsive.js]
+ [browser_telemetry_button_scratchpad.js]
+ [browser_telemetry_button_tilt.js]
+ [browser_telemetry_sidebar.js]
+ [browser_telemetry_toolbox.js]
+ [browser_telemetry_toolboxtabs_inspector.js]
++[browser_telemetry_toolboxtabs_shadereditor.js]
+ [browser_telemetry_toolboxtabs_jsdebugger.js]
+ [browser_telemetry_toolboxtabs_jsprofiler.js]
+ [browser_telemetry_toolboxtabs_netmonitor.js]
+ [browser_telemetry_toolboxtabs_options.js]
+ [browser_telemetry_toolboxtabs_styleeditor.js]
+ [browser_telemetry_toolboxtabs_webconsole.js]
+ [browser_templater_basic.js]
+ [browser_toolbar_basic.js]
+diff --git a/browser/devtools/shared/test/browser_telemetry_toolboxtabs_shadereditor.js b/browser/devtools/shared/test/browser_telemetry_toolboxtabs_shadereditor.js
+new file mode 100644
+index 0000000..657c29b
+--- /dev/null
++++ b/browser/devtools/shared/test/browser_telemetry_toolboxtabs_shadereditor.js
+@@ -0,0 +1,117 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++const TEST_URI = "data:text/html;charset=utf-8,<p>browser_telemetry_toolboxtabs_shadereditor.js</p>";
++
++// Because we need to gather stats for the period of time that a tool has been
++// opened we make use of setTimeout() to create tool active times.
++const TOOL_DELAY = 200;
++
++let {Promise: promise} = Cu.import("resource://gre/modules/devtools/deprecated-sync-thenables.js", {});
++let {Services} = Cu.import("resource://gre/modules/Services.jsm", {});
++
++let require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
++let Telemetry = require("devtools/shared/telemetry");
++let originalPref = Services.prefs.getBoolPref("devtools.shadereditor.enabled");
++Services.prefs.setBoolPref("devtools.shadereditor.enabled", true);
++
++function init() {
++  Telemetry.prototype.telemetryInfo = {};
++  Telemetry.prototype._oldlog = Telemetry.prototype.log;
++  Telemetry.prototype.log = function(histogramId, value) {
++    if (!this.telemetryInfo) {
++      // Can be removed when Bug 992911 lands (see Bug 1011652 Comment 10)
++      return;
++    }
++    if (histogramId) {
++      if (!this.telemetryInfo[histogramId]) {
++        this.telemetryInfo[histogramId] = [];
++      }
++
++      this.telemetryInfo[histogramId].push(value);
++    }
++  }
++
++  openToolboxTabTwice("shadereditor", false);
++}
++
++function openToolboxTabTwice(id, secondPass) {
++  let target = TargetFactory.forTab(gBrowser.selectedTab);
++
++  gDevTools.showToolbox(target, id).then(function(toolbox) {
++    info("Toolbox tab " + id + " opened");
++
++    toolbox.once("destroyed", function() {
++      if (secondPass) {
++        checkResults();
++      } else {
++        openToolboxTabTwice(id, true);
++      }
++    });
++    // We use a timeout to check the tools active time
++    setTimeout(function() {
++      gDevTools.closeToolbox(target);
++    }, TOOL_DELAY);
++  }).then(null, reportError);
++}
++
++function checkResults() {
++  let result = Telemetry.prototype.telemetryInfo;
++
++  for (let [histId, value] of Iterator(result)) {
++    if (histId.endsWith("OPENED_PER_USER_FLAG")) {
++      ok(value.length === 1 && value[0] === true,
++         "Per user value " + histId + " has a single value of true");
++    } else if (histId.endsWith("OPENED_BOOLEAN")) {
++      ok(value.length > 1, histId + " has more than one entry");
++
++      let okay = value.every(function(element) {
++        return element === true;
++      });
++
++      ok(okay, "All " + histId + " entries are === true");
++    } else if (histId.endsWith("TIME_ACTIVE_SECONDS")) {
++      ok(value.length > 1, histId + " has more than one entry");
++
++      let okay = value.every(function(element) {
++        return element > 0;
++      });
++
++      ok(okay, "All " + histId + " entries have time > 0");
++    }
++  }
++
++  finishUp();
++}
++
++function reportError(error) {
++  let stack = "    " + error.stack.replace(/\n?.*?@/g, "\n    JS frame :: ");
++
++  ok(false, "ERROR: " + error + " at " + error.fileName + ":" +
++            error.lineNumber + "\n\nStack trace:" + stack);
++  finishUp();
++}
++
++function finishUp() {
++  gBrowser.removeCurrentTab();
++
++  Telemetry.prototype.log = Telemetry.prototype._oldlog;
++  delete Telemetry.prototype._oldlog;
++  delete Telemetry.prototype.telemetryInfo;
++  Services.prefs.setBoolPref("devtools.shadereditor.enabled", originalPref);
++
++  TargetFactory = Services = promise = require = null;
++
++  finish();
++}
++
++function test() {
++  waitForExplicitFinish();
++  gBrowser.selectedTab = gBrowser.addTab();
++  gBrowser.selectedBrowser.addEventListener("load", function() {
++    gBrowser.selectedBrowser.removeEventListener("load", arguments.callee, true);
++    waitForFocus(init, content);
++  }, true);
++
++  content.location = TEST_URI;
++}
+-- 
+1.8.4.2
+
