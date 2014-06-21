@@ -1,0 +1,405 @@
+From d7912ceb697febe0c4786cb583ea1b25438ff542 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 20 Jun 2014 11:59:22 -0700
+Subject: Bug 980506 - Emit destruction events on AudioNodes in the WebAudioActor. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 9b5f814..95b392a 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -2,26 +2,28 @@
+ skip-if = e10s # Bug ?????? - devtools tests disabled with e10s
+ subsuite = devtools
+ support-files =
+   doc_simple-context.html
+   doc_complex-context.html
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
++  doc_destroy-nodes.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_webaudio-actor-simple.js]
++[browser_webaudio-actor-destroy-node.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ 
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-render-01.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_webaudio-actor-destroy-node.js b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-destroy-node.js
+new file mode 100644
+index 0000000..88dc96b
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-destroy-node.js
+@@ -0,0 +1,41 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test `destroy-node` event on WebAudioActor.
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(DESTROY_NODES_URL);
++
++  let waitUntilDestroyed = getN(front, "destroy-node", 10);
++  let [_, _, created] = yield Promise.all([
++    front.setup({ reload: true }),
++    once(front, "start-context"),
++    // Should create 1 destination node and 10 disposable buffer nodes
++    getN(front, "create-node", 13)
++  ]);
++
++  // Force CC so we can ensure it's run to clear out dead AudioNodes
++  forceCC();
++
++  let destroyed = yield waitUntilDestroyed;
++
++  let destroyedTypes = yield Promise.all(destroyed.map(actor => actor.getType()));
++  destroyedTypes.forEach((type, i) => {
++    ok(type, "AudioBufferSourceNode", "Only buffer nodes are destroyed");
++    ok(actorIsInList(created, destroyed[i]),
++      "`destroy-node` called only on AudioNodes in current document.");
++  });
++
++  yield removeTab(target.tab);
++  finish();
++}
++
++function actorIsInList (list, actor) {
++  for (let i = 0; i < list.length; i++) {
++    if (list[i].actorID === actor.actorID)
++      return list[i];
++  }
++  return null;
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_destroy-nodes.html b/browser/devtools/webaudioeditor/test/doc_destroy-nodes.html
+new file mode 100644
+index 0000000..7738c39
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_destroy-nodes.html
+@@ -0,0 +1,32 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++      (function () {
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++      let gain = ctx.createGain();
++
++      for (let i = 0; i < 10; i++) {
++        ctx.createBufferSource();
++      }
++
++      osc.connect(gain);
++      gain.connect(ctx.destination);
++      gain.gain.value = 0;
++      osc.start();
++      })();
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index 0dbd8b0..a93bec9 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -21,16 +21,17 @@ let { WebAudioFront } = devtools.require("devtools/server/actors/webaudio");
+ let TargetFactory = devtools.TargetFactory;
+ 
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
+ const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
++const DESTROY_NODES_URL = EXAMPLE_URL + "doc_destroy-nodes.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
+@@ -368,16 +369,25 @@ function getGripValue (value) {
+ function countGraphObjects (win) {
+   return {
+     nodes: win.document.querySelectorAll(".nodes > .audionode").length,
+     edges: win.document.querySelectorAll(".edgePaths > .edgePath").length
+   }
+ }
+ 
+ /**
++* Forces cycle collection and GC, used in AudioNode destruction tests.
++*/
++function forceCC () {
++  SpecialPowers.DOMWindowUtils.cycleCollect();
++  SpecialPowers.DOMWindowUtils.garbageCollect();
++  SpecialPowers.DOMWindowUtils.garbageCollect();
++}
++
++/**
+  * List of audio node properties to test against expectations of the AudioNode actor
+  */
+ 
+ const NODE_DEFAULT_VALUES = {
+   "AudioDestinationNode": {},
+   "MediaElementAudioSourceNode": {},
+   "MediaStreamAudioSourceNode": {},
+   "MediaStreamAudioDestinationNode": {
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index cc2eddc..c8c1932 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -63,30 +63,33 @@ let FunctionCallActor = protocol.ActorClass({
+    * @param string name
+    *        The called function's name.
+    * @param array stack
+    *        The called function's stack, as a list of { name, file, line } objects.
+    * @param array args
+    *        The called function's arguments.
+    * @param any result
+    *        The value returned by the function call.
++   * @param boolean holdWeak
++   *        Determines whether or not FunctionCallActor stores a weak reference
++   *        to the underlying objects.
+    */
+-  initialize: function(conn, [window, global, caller, type, name, stack, args, result]) {
++  initialize: function(conn, [window, global, caller, type, name, stack, args, result], holdWeak) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+ 
+     this.details = {
+       type: type,
+       name: name,
+       stack: stack,
+     };
+ 
+     // Store a weak reference to all objects so we don't
+     // prevent natural GC if `holdWeak` was passed into
+     // setup as truthy. Used in the Web Audio Editor.
+-    if (this._holdWeak) {
++    if (holdWeak) {
+       let weakRefs = {
+         window: Cu.getWeakReference(window),
+         caller: Cu.getWeakReference(caller),
+         result: Cu.getWeakReference(result),
+         args: Cu.getWeakReference(args)
+       };
+ 
+       Object.defineProperties(this.details, {
+@@ -521,17 +524,17 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+       this.eraseRecording();
+     }
+   },
+ 
+   /**
+    * Invoked whenever an instrumented function is called.
+    */
+   _onContentFunctionCall: function(...details) {
+-    let functionCall = new FunctionCallActor(this.conn, details);
++    let functionCall = new FunctionCallActor(this.conn, details, this._holdWeak);
+     this._functionCalls.push(functionCall);
+     this.onCall(functionCall);
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the CallWatcherActor.
+  */
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 6e3e9cf..1ef55fe 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -4,16 +4,17 @@
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ 
+ const Services = require("Services");
+ 
+ const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const events = require("sdk/event/core");
++const { on: systemOn, off: systemOff } = require("sdk/system/events");
+ const protocol = require("devtools/server/protocol");
+ const { CallWatcherActor, CallWatcherFront } = require("devtools/server/actors/call-watcher");
+ const { ThreadActor } = require("devtools/server/actors/script");
+ 
+ const { on, once, off, emit } = events;
+ const { method, Arg, Option, RetVal } = protocol;
+ 
+ exports.register = function(handle) {
+@@ -284,16 +285,19 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     this.tabActor = tabActor;
+ 
+     this._onContentFunctionCall = this._onContentFunctionCall.bind(this);
+ 
+     // Store ChromeOnly ID (`nativeID` property on AudioNodeActor) mapped
+     // to the associated actorID, so we don't have to expose `nativeID`
+     // to the client in any way.
+     this._nativeToActorID = new Map();
++
++    this._onDestroyNode = this._onDestroyNode.bind(this);
++    this._onGlobalDestroyed = this._onGlobalDestroyed.bind(this);
+   },
+ 
+   destroy: function(conn) {
+     protocol.Actor.prototype.destroy.call(this, conn);
+     this.finalize();
+   },
+ 
+   /**
+@@ -321,16 +325,21 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: AUDIO_GLOBALS,
+       startRecording: true,
+       performReload: reload,
+       holdWeak: true
+     });
++    // Bind to the `global-destroyed` event on the content observer so we can
++    // unbind events between the global destruction and the `finalize` cleanup
++    // method on the actor.
++    // TODO expose these events on CallWatcherActor itself, bug 1021321
++    on(this._callWatcher._contentObserver, "global-destroyed", this._onGlobalDestroyed);
+   }, {
+     request: { reload: Option(0, "boolean") },
+     oneway: true
+   }),
+ 
+   /**
+    * Invoked whenever an instrumented function is called, like an AudioContext
+    * method or an AudioNode method.
+@@ -390,16 +399,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+    * actor is destroyed.
+    */
+   finalize: method(function() {
+     if (!this._initialized) {
+       return;
+     }
+     this.tabActor = null;
+     this._initialized = false;
++    off(this._callWatcher._contentObserver, "global-destroyed", this._onGlobalDestroyed);
+     this._nativeToActorID = null;
+     this._callWatcher.eraseRecording();
+     this._callWatcher.finalize();
+     this._callWatcher = null;
+   }, {
+    oneway: true
+   }),
+ 
+@@ -428,16 +438,20 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+       type: "changeParam",
+       source: Option(0, "audionode"),
+       param: Option(0, "string"),
+       value: Option(0, "string")
+     },
+     "create-node": {
+       type: "createNode",
+       source: Arg(0, "audionode")
++    },
++    "destroy-node": {
++      type: "destroyNode",
++      source: Arg(0, "audionode")
+     }
+   },
+ 
+   /**
+    * Helper for constructing an AudioNodeActor, assigning to
+    * internal weak map, and tracking via `manage` so it is assigned
+    * an `actorID`.
+    */
+@@ -466,16 +480,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     let actor = actorID != null ? this.conn.getActor(actorID) : null;
+     return actor;
+   },
+ 
+   /**
+    * Called on first audio node creation, signifying audio context usage
+    */
+   _onStartContext: function () {
++    systemOn("webaudio-node-demise", this._onDestroyNode);
+     emit(this, "start-context");
+   },
+ 
+   /**
+    * Called when one audio node is connected to another.
+    */
+   _onConnectNode: function (source, dest) {
+     let sourceActor = this._getActorByNativeID(source.id);
+@@ -515,16 +530,50 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   },
+ 
+   /**
+    * Called on node creation.
+    */
+   _onCreateNode: function (node) {
+     let actor = this._constructAudioNode(node);
+     emit(this, "create-node", actor);
++  },
++
++  /** Called when `webaudio-node-demise` is triggered,
++   * and emits the associated actor to the front if found.
++   */
++  _onDestroyNode: function ({data}) {
++    // Cast to integer.
++    let nativeID = ~~data;
++
++    let actor = this._getActorByNativeID(nativeID);
++
++    // If actorID exists, emit; in the case where we get demise
++    // notifications for a document that no longer exists,
++    // the mapping should not be found, so we do not emit an event.
++    if (actor) {
++      this._nativeToActorID.delete(nativeID);
++      emit(this, "destroy-node", actor);
++    }
++  },
++
++  /**
++   * Called when the underlying ContentObserver fires `global-destroyed`
++   * so we can cleanup some things between the global being destroyed and
++   * when the actor's `finalize` method gets called.
++   */
++  _onGlobalDestroyed: function (id) {
++    if (this._callWatcher._tracedWindowId !== id) {
++      return;
++    }
++
++    if (this._nativeToActorID) {
++      this._nativeToActorID.clear();
++    }
++    systemOff("webaudio-node-demise", this._onDestroyNode);
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the WebAudioActor.
+  */
+ let WebAudioFront = exports.WebAudioFront = protocol.FrontClass(WebAudioActor, {
+   initialize: function(client, { webaudioActor }) {
+-- 
+1.8.4.2
+

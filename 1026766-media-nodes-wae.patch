@@ -1,0 +1,239 @@
+From fe7f1f72bdb00e0ad2d687d40548138de506a4d6 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 17 Jun 2014 15:54:53 -0700
+Subject: Bug 1026766 - Support Media AudioNodes in the web audio editor. r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  2 +
+ .../test/browser_wa_properties-view-media-nodes.js | 45 ++++++++++++++++++++++
+ .../test/doc_media-node-creation.html              | 29 ++++++++++++++
+ browser/devtools/webaudioeditor/test/head.js       | 16 ++++++++
+ toolkit/devtools/server/actors/webaudio.js         |  7 +++-
+ 5 files changed, 98 insertions(+), 1 deletion(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js
+ create mode 100644 browser/devtools/webaudioeditor/test/doc_media-node-creation.html
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 3616124..9b5f814 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -1,16 +1,17 @@
+ [DEFAULT]
+ skip-if = e10s # Bug ?????? - devtools tests disabled with e10s
+ subsuite = devtools
+ support-files =
+   doc_simple-context.html
+   doc_complex-context.html
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
++  doc_media-node-creation.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-param-flags.js]
+@@ -27,12 +28,13 @@ support-files =
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-selected.js]
+ 
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+ 
+ [browser_wa_properties-view.js]
++[browser_wa_properties-view-media-nodes.js]
+ # [browser_wa_properties-view-edit.js]
+ # Disabled for too many intermittents bug 1010423
+ [browser_wa_properties-view-params.js]
+ [browser_wa_properties-view-params-objects.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js
+new file mode 100644
+index 0000000..a0ee37f
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js
+@@ -0,0 +1,45 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that params view correctly displays all properties for nodes
++ * correctly, with default values and correct types.
++ */
++
++let MEDIA_PERMISSION = "media.navigator.permission.disabled";
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(MEDIA_NODES_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, WebAudioInspectorView } = panelWin;
++  let gVars = WebAudioInspectorView._propsView;
++
++  // Auto enable getUserMedia
++  let mediaPermissionPref = Services.prefs.getBoolPref(MEDIA_PERMISSION);
++  Services.prefs.setBoolPref(MEDIA_PERMISSION, true);
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    getN(gFront, "create-node", 4),
++    waitForGraphRendered(panelWin, 4, 0)
++  ]);
++
++  let nodeIds = actors.map(actor => actor.actorID);
++  let types = [
++    "AudioDestinationNode", "MediaElementAudioSourceNode",
++    "MediaStreamAudioSourceNode", "MediaStreamAudioDestinationNode"
++  ];
++
++  for (let i = 0; i < types.length; i++) {
++    click(panelWin, findGraphNode(panelWin, nodeIds[i]));
++    yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++    checkVariableView(gVars, 0, NODE_DEFAULT_VALUES[types[i]], types[i]);
++  }
++
++  // Reset permissions on getUserMedia
++  Services.prefs.setBoolPref(MEDIA_PERMISSION, mediaPermissionPref);
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_media-node-creation.html b/browser/devtools/webaudioeditor/test/doc_media-node-creation.html
+new file mode 100644
+index 0000000..685062e
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_media-node-creation.html
+@@ -0,0 +1,29 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let audio = new Audio();
++      let meNode, msNode, mdNode;
++      navigator.getUserMedia = navigator.getUserMedia || navigator.mozGetUserMedia;
++
++      navigator.getUserMedia({ audio: true }, stream => {
++        meNode = ctx.createMediaElementSource(audio);
++        msNode = ctx.createMediaStreamSource(stream);
++        mdNode = ctx.createMediaStreamDestination();
++      }, () => {});
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index 386ab2b..0dbd8b0 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -19,16 +19,17 @@ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.j
+ 
+ let { WebAudioFront } = devtools.require("devtools/server/actors/webaudio");
+ let TargetFactory = devtools.TargetFactory;
+ 
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
++const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
+ registerCleanupFunction(() => {
+@@ -211,16 +212,26 @@ function waitForGraphRendered (front, nodeCount, edgeCount) {
+   });
+   return deferred.promise;
+ }
+ 
+ function checkVariableView (view, index, hash, description = "") {
+   info("Checking Variable View");
+   let scope = view.getScopeAtIndex(index);
+   let variables = Object.keys(hash);
++
++  // If node shouldn't display any properties, ensure that the 'empty' message is
++  // visible
++  if (!variables.length) {
++    ok(isVisible(scope.window.$("#properties-tabpanel-content-empty")),
++      description + " should show the empty properties tab.");
++    return;
++  }
++
++  // Otherwise, iterate over expected properties
+   variables.forEach(variable => {
+     let aVar = scope.get(variable);
+     is(aVar.target.querySelector(".name").getAttribute("value"), variable,
+       "Correct property name for " + variable);
+     let value = aVar.target.querySelector(".value").getAttribute("value");
+ 
+     // Cast value with JSON.parse if possible;
+     // will fail when displaying Object types like "ArrayBuffer"
+@@ -362,16 +373,21 @@ function countGraphObjects (win) {
+ }
+ 
+ /**
+  * List of audio node properties to test against expectations of the AudioNode actor
+  */
+ 
+ const NODE_DEFAULT_VALUES = {
+   "AudioDestinationNode": {},
++  "MediaElementAudioSourceNode": {},
++  "MediaStreamAudioSourceNode": {},
++  "MediaStreamAudioDestinationNode": {
++    "stream": "MediaStream"
++  },
+   "AudioBufferSourceNode": {
+     "playbackRate": 1,
+     "loop": false,
+     "loopStart": 0,
+     "loopEnd": 0,
+     "buffer": null
+   },
+   "ScriptProcessorNode": {
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index b3fc7e5..6e3e9cf 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -99,17 +99,22 @@ const NODE_PROPERTIES = {
+     "fftSize": {},
+     "minDecibels": {},
+     "maxDecibels": {},
+     "smoothingTimeConstant": {},
+     "frequencyBinCount": { "readonly": true },
+   },
+   "AudioDestinationNode": {},
+   "ChannelSplitterNode": {},
+-  "ChannelMergerNode": {}
++  "ChannelMergerNode": {},
++  "MediaElementAudioSourceNode": {},
++  "MediaStreamAudioSourceNode": {},
++  "MediaStreamAudioDestinationNode": {
++    "stream": { "MediaStream": true }
++  }
+ };
+ 
+ /**
+  * An Audio Node actor allowing communication to a specific audio node in the
+  * Audio Context graph.
+  */
+ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+   typeName: "audionode",
+-- 
+1.8.4.2
+
