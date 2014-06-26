@@ -1,0 +1,290 @@
+From 4d8710b334dca27ccefc74aebd965cdc0ec1983f Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 24 Jun 2014 09:58:56 -0700
+Subject: Bug 1029195 - Ensure selected node visually persists beyond graph re-rendering in web audio editor. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 95b392a..6586274 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -3,16 +3,17 @@ skip-if = e10s # Bug ?????? - devtools tests disabled with e10s
+ subsuite = devtools
+ support-files =
+   doc_simple-context.html
+   doc_complex-context.html
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
++  doc_connect-toggle.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-param-flags.js]
+@@ -23,16 +24,17 @@ support-files =
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ 
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
++[browser_wa_graph-render-03.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-selected.js]
+ 
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+ 
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-media-nodes.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
+index 9ce825d..8e000fa 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-click.js
+@@ -25,30 +25,30 @@ function spawnTest() {
+ 
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   ok(!WebAudioInspectorView.isVisible(), "InspectorView hidden on start.");
+ 
+   yield clickGraphNode(panelWin, nodeIds[1], true);
+ 
+   ok(WebAudioInspectorView.isVisible(), "InspectorView visible after selecting a node.");
+-  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[1], "InspectorView has correct node set.");
++  is(WebAudioInspectorView.getCurrentAudioNode().id, nodeIds[1], "InspectorView has correct node set.");
+ 
+   yield clickGraphNode(panelWin, nodeIds[2]);
+ 
+   ok(WebAudioInspectorView.isVisible(), "InspectorView still visible after selecting another node.");
+-  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[2], "InspectorView has correct node set on second node.");
++  is(WebAudioInspectorView.getCurrentAudioNode().id, nodeIds[2], "InspectorView has correct node set on second node.");
+ 
+   yield clickGraphNode(panelWin, nodeIds[2]);
+-  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[2], "Clicking the same node again works (idempotent).");
++  is(WebAudioInspectorView.getCurrentAudioNode().id, nodeIds[2], "Clicking the same node again works (idempotent).");
+ 
+   yield clickGraphNode(panelWin, $("rect", findGraphNode(panelWin, nodeIds[3])));
+-  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[3], "Clicking on a <rect> works as expected.");
++  is(WebAudioInspectorView.getCurrentAudioNode().id, nodeIds[3], "Clicking on a <rect> works as expected.");
+ 
+   yield clickGraphNode(panelWin, $("tspan", findGraphNode(panelWin, nodeIds[4])));
+-  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[4], "Clicking on a <tspan> works as expected.");
++  is(WebAudioInspectorView.getCurrentAudioNode().id, nodeIds[4], "Clicking on a <tspan> works as expected.");
+ 
+   ok(WebAudioInspectorView.isVisible(),
+     "InspectorView still visible after several nodes have been clicked.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-03.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-03.js
+new file mode 100644
+index 0000000..784d7fe
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-03.js
+@@ -0,0 +1,34 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests to ensure that selected nodes stay selected on graph redraw.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(CONNECT_TOGGLE_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    getN(gFront, "create-node", 3),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  let nodeIDs = actors.map(actor => actor.actorID);
++
++  yield clickGraphNode(panelWin, nodeIDs[1]);
++  ok(findGraphNode(panelWin, nodeIDs[1]).classList.contains("selected"),
++    "Node selected once.");
++
++  yield once(panelWin, EVENTS.UI_GRAPH_RENDERED);
++  
++  ok(findGraphNode(panelWin, nodeIDs[1]).classList.contains("selected"),
++    "Node still selected after rerender.");
++
++  yield teardown(panel);
++  finish();
++}
++
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js b/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
+index 2734b9f..04c1092 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
+@@ -16,34 +16,34 @@ function spawnTest() {
+   let [actors] = yield Promise.all([
+     get3(gFront, "create-node"),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   yield clickGraphNode(panelWin, nodeIds[1], true);
+   ok(WebAudioInspectorView.isVisible(), "InspectorView visible after selecting a node.");
+-  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[1], "InspectorView has correct node set.");
++  is(WebAudioInspectorView.getCurrentAudioNode().id, nodeIds[1], "InspectorView has correct node set.");
+ 
+   /**
+    * Reload
+    */
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     get3(gFront, "create-node"),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   ok(!WebAudioInspectorView.isVisible(), "InspectorView hidden on start.");
+-  ise(WebAudioInspectorView.getCurrentNode(), null,
++  ise(WebAudioInspectorView.getCurrentAudioNode(), null,
+     "InspectorView has no current node set on reset.");
+ 
+   yield clickGraphNode(panelWin, nodeIds[2], true);
+   ok(WebAudioInspectorView.isVisible(),
+     "InspectorView visible after selecting a node after a reset.");
+-  is(WebAudioInspectorView.getCurrentNode().id, nodeIds[2], "InspectorView has correct node set upon clicking graph node after a reset.");
++  is(WebAudioInspectorView.getCurrentAudioNode().id, nodeIds[2], "InspectorView has correct node set upon clicking graph node after a reset.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/webaudioeditor/test/doc_connect-toggle.html b/browser/devtools/webaudioeditor/test/doc_connect-toggle.html
+new file mode 100644
+index 0000000..7fa1241
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_connect-toggle.html
+@@ -0,0 +1,27 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let i = 0;
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++      let gain = ctx.createGain();
++      gain.gain.value = 0;
++      gain.connect(ctx.destination);
++      osc.start(0);
++      setInterval(() => ++i && (i % 2 ? osc.connect(gain) : osc.disconnect()), 1000);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index a93bec9..22aa1f0 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -22,16 +22,17 @@ let TargetFactory = devtools.TargetFactory;
+ 
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
+ const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
+ const DESTROY_NODES_URL = EXAMPLE_URL + "doc_destroy-nodes.html";
++const CONNECT_TOGGLE_URL = EXAMPLE_URL + "doc_connect-toggle.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index 123cb3f..cd0067c 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -170,17 +170,17 @@ let WebAudioGraphView = {
+         let edge = graph.edge(n);
+         return edge.target;
+       });
+       return svgNodes;
+     });
+ 
+     // Override Dagre-d3's post render function by passing in our own.
+     // This way we can leave styles out of it.
+-    renderer.postRender(function (graph, root) {
++    renderer.postRender((graph, root) => {
+       // We have to manually set the marker styling since we cannot
+       // do this currently with CSS, although it is in spec for SVG2
+       // https://svgwg.org/svg2-draft/painting.html#VertexMarkerProperties
+       // For now, manually set it on creation, and the `_onThemeChange`
+       // function will fire when the devtools theme changes to update the
+       // styling manually.
+       let theme = Services.prefs.getCharPref("devtools.theme");
+       let markerColor = MARKER_STYLING[theme];
+@@ -196,16 +196,22 @@ let WebAudioGraphView = {
+           .attr("markerWidth", ARROW_WIDTH)
+           .attr("markerHeight", ARROW_HEIGHT)
+           .attr("orient", "auto")
+           .attr("style", "fill: " + markerColor)
+           .append("svg:path")
+           .attr("d", "M 0 0 L 10 5 L 0 10 z");
+       }
+ 
++      // Reselect the previously selected audio node
++      let currentNode = WebAudioInspectorView.getCurrentAudioNode();
++      if (currentNode) {
++        this.focusNode(currentNode.id);
++      }
++
+       // Fire an event upon completed rendering
+       window.emit(EVENTS.UI_GRAPH_RENDERED, AudioNodes.length, edges.length);
+     });
+ 
+     let layout = dagreD3.layout().rankDir("LR");
+     renderer.layout(layout).run(graph, d3.select("#graph-target"));
+ 
+     // Handle the sliding and zooming of the graph,
+@@ -378,17 +384,17 @@ let WebAudioInspectorView = {
+       this._buildPropertiesView()
+         .then(() => window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id));
+     }
+   },
+ 
+   /**
+    * Returns the current AudioNodeView.
+    */
+-  getCurrentNode: function () {
++  getCurrentAudioNode: function () {
+     return this._currentNode;
+   },
+ 
+   /**
+    * Empties out the props view.
+    */
+   resetUI: function () {
+     this._propsView.empty();
+-- 
+1.8.4.2
+

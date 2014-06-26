@@ -1,0 +1,52 @@
+From 8f628b3902128b44590548adccb10ee28f4fd1a0 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 24 Jun 2014 14:00:15 -0700
+Subject: Bug 1029738 - Halt firing instrumented function calls after destruction in CallWatcherActor. r=vp
+
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index c8c1932..a03f6d1 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -308,16 +308,17 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+    * to hibernation. This method is called automatically just before the
+    * actor is destroyed.
+    */
+   finalize: method(function() {
+     if (!this._initialized) {
+       return;
+     }
+     this._initialized = false;
++    this._finalized = true;
+ 
+     this._contentObserver.stopListening();
+     off(this._contentObserver, "global-created", this._onGlobalCreated);
+     off(this._contentObserver, "global-destroyed", this._onGlobalDestroyed);
+ 
+     this._tracedGlobals = null;
+     this._tracedFunctions = null;
+     this._contentObserver = null;
+@@ -524,16 +525,21 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+       this.eraseRecording();
+     }
+   },
+ 
+   /**
+    * Invoked whenever an instrumented function is called.
+    */
+   _onContentFunctionCall: function(...details) {
++    // If the consuming tool has finalized call-watcher, ignore the
++    // still-instrumented calls.
++    if (this._finalized) {
++      return;
++    }
+     let functionCall = new FunctionCallActor(this.conn, details, this._holdWeak);
+     this._functionCalls.push(functionCall);
+     this.onCall(functionCall);
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the CallWatcherActor.
+-- 
+1.8.4.2
+

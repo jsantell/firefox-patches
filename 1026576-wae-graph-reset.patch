@@ -1,0 +1,206 @@
+From 56a85f26373ef242dd1c83199c4c259c6863782c Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 24 Jun 2014 15:13:52 -0700
+Subject: Bug 1026576 - Resets the web audio editor graph's position and scale on refresh. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 95b392a..12c3ec5 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -25,16 +25,17 @@ support-files =
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ 
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-selected.js]
++[browser_wa_graph-zoom.js]
+ 
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+ 
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-media-nodes.js]
+ # [browser_wa_properties-view-edit.js]
+ # Disabled for too many intermittents bug 1010423
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-zoom.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-zoom.js
+new file mode 100644
+index 0000000..f67d5eb
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-zoom.js
+@@ -0,0 +1,45 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the graph's scale and position is reset on a page reload.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, WebAudioGraphView } = panelWin;
++
++  let started = once(gFront, "start-context");
++
++  yield Promise.all([
++    reload(target),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  is(WebAudioGraphView.getCurrentScale(), 1, "Default graph scale is 1.");
++  is(WebAudioGraphView.getCurrentTranslation()[0], 20, "Default x-translation is 20.");
++  is(WebAudioGraphView.getCurrentTranslation()[1], 20, "Default y-translation is 20.");
++
++  // Change both attribute and D3's internal store
++  panelWin.d3.select("#graph-target").attr("transform", "translate([100, 400]) scale(10)");
++  WebAudioGraphView._zoomBinding.scale(10);
++  WebAudioGraphView._zoomBinding.translate([100, 400]);
++
++  is(WebAudioGraphView.getCurrentScale(), 10, "After zoom, scale is 10.");
++  is(WebAudioGraphView.getCurrentTranslation()[0], 100, "After zoom, x-translation is 100.");
++  is(WebAudioGraphView.getCurrentTranslation()[1], 400, "After zoom, y-translation is 400.");
++
++  yield Promise.all([
++    reload(target),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  is(WebAudioGraphView.getCurrentScale(), 1, "After refresh, graph scale is 1.");
++  is(WebAudioGraphView.getCurrentTranslation()[0], 20, "After refresh, x-translation is 20.");
++  is(WebAudioGraphView.getCurrentTranslation()[1], 20, "After refresh, y-translation is 20.");
++
++  yield teardown(panel);
++  finish();
++}
++
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index a398796..f993799 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -11,20 +11,21 @@ const { debounce } = require("sdk/lang/functional");
+ const EXPAND_INSPECTOR_STRING = L10N.getStr("expandInspector");
+ const COLLAPSE_INSPECTOR_STRING = L10N.getStr("collapseInspector");
+ 
+ // Store width as a preference rather than hardcode
+ // TODO bug 1009056
+ const INSPECTOR_WIDTH = 300;
+ 
+ // Globals for d3 stuff
+-// Width/height in pixels of SVG graph
+-// TODO investigate to see how this works in other host types bug 994257
+-const WIDTH = 1000;
+-const HEIGHT = 400;
++// Default properties of the graph on rerender
++const GRAPH_DEFAULTS = {
++  translate: [20, 20],
++  scale: 1
++};
+ 
+ // Sizes of SVG arrows in graph
+ const ARROW_HEIGHT = 5;
+ const ARROW_WIDTH = 8;
+ 
+ // Styles for markers as they cannot be done with CSS.
+ const MARKER_STYLING = {
+   light: "#AAA",
+@@ -76,28 +77,52 @@ let WebAudioGraphView = {
+     window.off(EVENTS.START_CONTEXT, this._onStartContext);
+   },
+ 
+   /**
+    * Called when a page is reloaded and waiting for a "start-context" event
+    * and clears out old content
+    */
+   resetUI: function () {
+-    this.resetGraph();
++    this.clearGraph();
++    this.resetGraphPosition();
+   },
+ 
+   /**
+    * Clears out the rendered graph, called when resetting the SVG elements to draw again,
+    * or when resetting the entire UI tool
+    */
+-  resetGraph: function () {
++  clearGraph: function () {
+     $("#graph-target").innerHTML = "";
+   },
+ 
+   /**
++   * Moves the graph back to its original scale and translation.
++   */
++  resetGraphPosition: function () {
++    if (this._zoomBinding) {
++      let { translate, scale } = GRAPH_DEFAULTS;
++      // Must set the `zoomBinding` so the next `zoom` event is in sync with
++      // where the graph is visually (set by the `transform` attribute).
++      this._zoomBinding.scale(scale);
++      this._zoomBinding.translate(translate);
++      d3.select("#graph-target")
++        .attr("transform", "translate(" + translate + ") scale(" + scale + ")");
++    }
++  },
++
++  getCurrentScale: function () {
++    return this._zoomBinding ? this._zoomBinding.scale() : null;
++  },
++
++  getCurrentTranslation: function () {
++    return this._zoomBinding ? this._zoomBinding.translate() : null;
++  },
++
++  /**
+    * Makes the corresponding graph node appear "focused", removing
+    * focused styles from all other nodes. If no `actorID` specified,
+    * make all nodes appear unselected.
+    * Called from UI_INSPECTOR_NODE_SELECT.
+    */
+   focusNode: function (actorID) {
+     // Remove class "selected" from all nodes
+     Array.forEach($$(".nodes > g"), $node => $node.classList.remove("selected"));
+@@ -116,17 +141,17 @@ let WebAudioGraphView = {
+ 
+   /**
+    * `draw` renders the ViewNodes currently available in `AudioNodes` with `AudioNodeConnections`,
+    * and is throttled to be called at most every `GRAPH_DEBOUNCE_TIMER` milliseconds. Is called
+    * whenever the audio context routing changes, after being debounced.
+    */
+   draw: function () {
+     // Clear out previous SVG information
+-    this.resetGraph();
++    this.clearGraph();
+ 
+     let graph = new dagreD3.Digraph();
+     let edges = [];
+ 
+     AudioNodes.forEach(node => {
+       // Add node to graph
+       graph.addNode(node.id, { label: node.type, id: node.id });
+ 
+@@ -212,16 +237,20 @@ let WebAudioGraphView = {
+     // store as `this._zoomBinding` so we can unbind during destruction
+     if (!this._zoomBinding) {
+       this._zoomBinding = d3.behavior.zoom().on("zoom", function () {
+         var ev = d3.event;
+         d3.select("#graph-target")
+           .attr("transform", "translate(" + ev.translate + ") scale(" + ev.scale + ")");
+       });
+       d3.select("svg").call(this._zoomBinding);
++
++      // Set initial translation and scale -- this puts D3's awareness of
++      // the graph in sync with what the user sees originally.
++      this.resetGraphPosition();
+     }
+   },
+ 
+   /**
+    * Event handlers
+    */
+ 
+   /**
+-- 
+1.8.4.2
+
