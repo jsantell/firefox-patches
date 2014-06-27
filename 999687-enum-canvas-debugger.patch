@@ -1,0 +1,278 @@
+From 27ef44acad4ca3bd3c1ebee9feea1678f4d361ed Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 26 Jun 2014 18:11:55 -0700
+Subject: Bug 999687 - Only show enum names in canvas debugger for appropriate method and arguments. r=vp
+
+diff --git a/browser/devtools/canvasdebugger/test/browser.ini b/browser/devtools/canvasdebugger/test/browser.ini
+index 3f1e21c..dad2a47 100644
+--- a/browser/devtools/canvasdebugger/test/browser.ini
++++ b/browser/devtools/canvasdebugger/test/browser.ini
+@@ -1,23 +1,25 @@
+ [DEFAULT]
+ subsuite = devtools
+ support-files =
+   doc_simple-canvas.html
++  doc_simple-canvas-bitmasks.html
+   doc_simple-canvas-deep-stack.html
+   doc_simple-canvas-transparent.html
+   head.js
+ 
+ [browser_canvas-actor-test-01.js]
+ [browser_canvas-actor-test-02.js]
+ [browser_canvas-actor-test-03.js]
+ [browser_canvas-actor-test-04.js]
+ [browser_canvas-actor-test-05.js]
+ [browser_canvas-actor-test-06.js]
+ [browser_canvas-actor-test-07.js]
++[browser_canvas-actor-test-08.js]
+ [browser_canvas-frontend-call-highlight.js]
+ [browser_canvas-frontend-call-list.js]
+ [browser_canvas-frontend-call-search.js]
+ [browser_canvas-frontend-call-stack-01.js]
+ [browser_canvas-frontend-call-stack-02.js]
+ [browser_canvas-frontend-call-stack-03.js]
+ [browser_canvas-frontend-clear.js]
+ [browser_canvas-frontend-img-screenshots.js]
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-08.js b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-08.js
+new file mode 100644
+index 0000000..ab31f11
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-08.js
+@@ -0,0 +1,38 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that integers used in arguments are not cast to their constant, enum value
++ * forms if the method's signature does not expect an enum. Bug 999687.
++ */
++
++function ifTestingSupported() {
++  let [target, debuggee, front] = yield initCanavsDebuggerBackend(SIMPLE_BITMASKS_URL);
++
++  let navigated = once(target, "navigate");
++
++  yield front.setup({ reload: true });
++  ok(true, "The front was setup up successfully.");
++
++  yield navigated;
++  ok(true, "Target automatically navigated when the front was set up.");
++
++  let snapshotActor = yield front.recordAnimationFrame();
++
++  let animationOverview = yield snapshotActor.getOverview();
++
++  let functionCalls = animationOverview.calls;
++
++  is(functionCalls[0].name, "clearRect",
++    "The first called function's name is correct.");
++  is(functionCalls[0].argsPreview, "0, 0, 4, 4",
++    "The first called function's args preview is not cast to enums.");
++
++  is(functionCalls[2].name, "fillRect",
++    "The fillRect called function's name is correct.");
++  is(functionCalls[2].argsPreview, "0, 0, 1, 1",
++    "The fillRect called function's args preview is not casted to enums.");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/canvasdebugger/test/doc_simple-canvas-bitmasks.html b/browser/devtools/canvasdebugger/test/doc_simple-canvas-bitmasks.html
+new file mode 100644
+index 0000000..bd5f67a
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/doc_simple-canvas-bitmasks.html
+@@ -0,0 +1,34 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Canvas inspector test page</title>
++  </head>
++
++  <body>
++    <canvas width="128" height="128"></canvas>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      var ctx = document.querySelector("canvas").getContext("2d");
++
++      function drawRect(fill, size) {
++        ctx.fillStyle = fill;
++        ctx.fillRect(size[0], size[1], size[2], size[3]);
++      }
++
++      function drawScene() {
++        ctx.clearRect(0, 0, 4, 4);
++        drawRect("rgb(192, 192, 192)", [0, 0, 1, 1]);
++        window.requestAnimationFrame(drawScene);
++      }
++
++      drawScene();
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/canvasdebugger/test/head.js b/browser/devtools/canvasdebugger/test/head.js
+index 889d091..74799d7 100644
+--- a/browser/devtools/canvasdebugger/test/head.js
++++ b/browser/devtools/canvasdebugger/test/head.js
+@@ -21,16 +21,17 @@ let { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.j
+ let { CallWatcherFront } = devtools.require("devtools/server/actors/call-watcher");
+ let { CanvasFront } = devtools.require("devtools/server/actors/canvas");
+ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
+ 
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/canvasdebugger/test/";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
++const SIMPLE_BITMASKS_URL = EXAMPLE_URL + "doc_simple-canvas-bitmasks.html";
+ const SIMPLE_CANVAS_TRANSPARENT_URL = EXAMPLE_URL + "doc_simple-canvas-transparent.html";
+ const SIMPLE_CANVAS_DEEP_STACK_URL = EXAMPLE_URL + "doc_simple-canvas-deep-stack.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.canvasdebugger.enabled");
+ 
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index c8c1932..62210cf 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -192,37 +192,42 @@ let FunctionCallActor = protocol.ActorClass({
+   /**
+    * Serializes the arguments so that they can be easily be transferred
+    * as a string, but still be useful when displayed in a potential UI.
+    *
+    * @return string
+    *         The arguments as a string.
+    */
+   _generateArgsPreview: function() {
+-    let { caller, args } = this.details;
++    let { caller, args, name } = this.details;
+     let { global } = this.meta;
+ 
++    // Get method signature to determine if there are any enums
++    // used in this method.
++    let enumArgs = (CallWatcherFront.ENUM_METHODS[global] || {})[name];
++    if (typeof enumArgs === "function") {
++      enumArgs = enumArgs(args);
++    }
++
+     // XXX: All of this sucks. Make this smarter, so that the frontend
+     // can inspect each argument, be it object or primitive. Bug 978960.
+-    let serializeArgs = () => args.map(arg => {
++    let serializeArgs = () => args.map((arg, i) => {
+       if (typeof arg == "undefined") {
+         return "undefined";
+       }
+       if (typeof arg == "function") {
+         return "Function";
+       }
+       if (typeof arg == "object") {
+         return "Object";
+       }
+-      if (global == CallWatcherFront.CANVAS_WEBGL_CONTEXT) {
+-        // XXX: This doesn't handle combined bitmasks. Bug 978964.
+-        return getEnumsLookupTable("webgl", caller)[arg] || arg;
+-      }
+-      if (global == CallWatcherFront.CANVAS_2D_CONTEXT) {
+-        return getEnumsLookupTable("2d", caller)[arg] || arg;
++      // If this argument matches the method's signature
++      // and is an enum, change it to its constant name.
++      if (enumArgs && enumArgs.indexOf(i) !== -1) {
++        return getEnumsLookupTable(global, caller)[arg] || arg;
+       }
+       return arg;
+     });
+ 
+     return serializeArgs().join(", ");
+   }
+ });
+ 
+@@ -553,16 +558,78 @@ CallWatcherFront.METHOD_FUNCTION = 0;
+ CallWatcherFront.GETTER_FUNCTION = 1;
+ CallWatcherFront.SETTER_FUNCTION = 2;
+ 
+ CallWatcherFront.GLOBAL_SCOPE = 0;
+ CallWatcherFront.UNKNOWN_SCOPE = 1;
+ CallWatcherFront.CANVAS_WEBGL_CONTEXT = 2;
+ CallWatcherFront.CANVAS_2D_CONTEXT = 3;
+ 
++CallWatcherFront.ENUM_METHODS = {};
++CallWatcherFront.ENUM_METHODS[CallWatcherFront.CANVAS_2D_CONTEXT] = {
++  asyncDrawXULElement: [6],
++  drawWindow: [6]
++};
++
++CallWatcherFront.ENUM_METHODS[CallWatcherFront.CANVAS_WEBGL_CONTEXT] = {
++  activeTexture: [0],
++  bindBuffer: [0],
++  bindFramebuffer: [0],
++  bindRenderbuffer: [0],
++  bindTexture: [0],
++  blendEquation: [0],
++  blendEquationSeparate: [0, 1],
++  blendFunc: [0, 1],
++  blendFuncSeparate: [0, 1, 2, 3],
++  bufferData: [0, 1, 2],
++  bufferSubData: [0, 1],
++  checkFramebufferStatus: [0],
++  clear: [0],
++  compressedTexImage2D: [0, 2],
++  compressedTexSubImage2D: [0, 6],
++  copyTexImage2D: [0, 2],
++  copyTexSubImage2D: [0],
++  createShader: [0],
++  cullFace: [0],
++  depthFunc: [0],
++  disable: [0],
++  drawArrays: [0],
++  drawElements: [0, 2],
++  enable: [0],
++  framebufferRenderbuffer: [0, 1, 2],
++  framebufferTexture2D: [0, 1, 2],
++  frontFace: [0],
++  generateMipmap: [0],
++  getBufferParameter: [0, 1],
++  getParameter: [0],
++  getFramebufferAttachmentParameter: [0, 1, 2],
++  getProgramParameter: [1],
++  getRenderbufferParameter: [0, 1],
++  getShaderParameter: [1],
++  getShaderPrecisionFormat: [0, 1],
++  getTexParameter: [0, 1],
++  getVertexAttrib: [1],
++  getVertexAttribOffset: [1],
++  hint: [0, 1],
++  isEnabled: [0],
++  pixelStorei: [0],
++  readPixels: [4, 5],
++  renderbufferStorage: [0, 1],
++  stencilFunc: [0],
++  stencilFuncSeparate: [0, 1],
++  stencilMaskSeparate: [0],
++  stencilOp: [0, 1, 2],
++  stencilOpSeparate: [0, 1, 2, 3],
++  texImage2D: (args) => args.length > 6 ? [0, 2, 6, 7] : [0, 2, 3, 4],
++  texParameterf: [0, 1],
++  texParameteri: [0, 1],
++  texSubImage2D: (args) => args.length === 9 ? [0, 6, 7] : [0, 4, 5],
++  vertexAttribPointer: [2]
++};
++
+ /**
+  * A lookup table for cross-referencing flags or properties with their name
+  * assuming they look LIKE_THIS most of the time.
+  *
+  * For example, when gl.clear(gl.COLOR_BUFFER_BIT) is called, the actual passed
+  * argument's value is 16384, which we want identified as "COLOR_BUFFER_BIT".
+  */
+ var gEnumRegex = /^[A-Z_]+$/;
+-- 
+1.8.4.2
+
