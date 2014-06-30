@@ -1,32 +1,153 @@
-From ed00accd6460b98e4c9fe7b5e8058a1769766a10 Mon Sep 17 00:00:00 2001
+From 428c2af5dacbabd88ff48ac6816754809265751a Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Thu, 12 Jun 2014 23:04:29 -0700
-Subject: Bug 978964 - Render combined bitmasks correctly in the canvas debugger.
+Date: Thu, 26 Jun 2014 15:38:11 -0700
+Subject: Bug 978964 - Display combined bitmask values in the canvas debugger. r=vp
 
----
- toolkit/devtools/server/actors/call-watcher.js | 47 +++++++++++++++++++-------
- 1 file changed, 34 insertions(+), 13 deletions(-)
-
+diff --git a/browser/devtools/canvasdebugger/test/browser.ini b/browser/devtools/canvasdebugger/test/browser.ini
+index dad2a47..d1fe819 100644
+--- a/browser/devtools/canvasdebugger/test/browser.ini
++++ b/browser/devtools/canvasdebugger/test/browser.ini
+@@ -1,25 +1,27 @@
+ [DEFAULT]
+ subsuite = devtools
+ support-files =
+   doc_simple-canvas.html
+   doc_simple-canvas-bitmasks.html
+   doc_simple-canvas-deep-stack.html
+   doc_simple-canvas-transparent.html
++  doc_webgl-enum.html
+   head.js
+ 
+ [browser_canvas-actor-test-01.js]
+ [browser_canvas-actor-test-02.js]
+ [browser_canvas-actor-test-03.js]
+ [browser_canvas-actor-test-04.js]
+ [browser_canvas-actor-test-05.js]
+ [browser_canvas-actor-test-06.js]
+ [browser_canvas-actor-test-07.js]
+ [browser_canvas-actor-test-08.js]
++[browser_canvas-actor-test-09.js]
+ [browser_canvas-frontend-call-highlight.js]
+ [browser_canvas-frontend-call-list.js]
+ [browser_canvas-frontend-call-search.js]
+ [browser_canvas-frontend-call-stack-01.js]
+ [browser_canvas-frontend-call-stack-02.js]
+ [browser_canvas-frontend-call-stack-03.js]
+ [browser_canvas-frontend-clear.js]
+ [browser_canvas-frontend-img-screenshots.js]
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-09.js b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-09.js
+new file mode 100644
+index 0000000..229f361
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-09.js
+@@ -0,0 +1,31 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that integers used in arguments are not cast to their constant, enum value
++ * forms if the method's signature does not expect an enum. Bug 999687.
++ */
++
++function ifTestingSupported() {
++  let [target, debuggee, front] = yield initCanavsDebuggerBackend(WEBGL_ENUM_URL);
++
++  let navigated = once(target, "navigate");
++
++  yield front.setup({ reload: true });
++  ok(true, "The front was setup up successfully.");
++
++  yield navigated;
++  ok(true, "Target automatically navigated when the front was set up.");
++
++  let snapshotActor = yield front.recordAnimationFrame();
++  let animationOverview = yield snapshotActor.getOverview();
++  let functionCalls = animationOverview.calls;
++
++  is(functionCalls[0].name, "clear",
++    "The function's name is correct.");
++  is(functionCalls[0].argsPreview, "DEPTH_BUFFER_BIT | STENCIL_BUFFER_BIT | COLOR_BUFFER_BIT",
++    "The bits passed into `gl.clear` have been cast to their enum values.");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/canvasdebugger/test/doc_webgl-enum.html b/browser/devtools/canvasdebugger/test/doc_webgl-enum.html
+new file mode 100644
+index 0000000..3c63936
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/doc_webgl-enum.html
+@@ -0,0 +1,33 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>WebGL editor test page</title>
++  </head>
++
++  <body>
++    <canvas id="canvas" width="128" height="128"></canvas>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let canvas, gl;
++
++      window.onload = function() {
++        canvas = document.querySelector("canvas");
++        gl = canvas.getContext("webgl", { preserveDrawingBuffer: true });
++        gl.clearColor(0.0, 0.0, 0.0, 1.0);
++        drawScene();
++      }
++
++      function drawScene() {
++        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
++        window.requestAnimationFrame(drawScene);
++      }
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/canvasdebugger/test/head.js b/browser/devtools/canvasdebugger/test/head.js
+index 74799d7..e922c31 100644
+--- a/browser/devtools/canvasdebugger/test/head.js
++++ b/browser/devtools/canvasdebugger/test/head.js
+@@ -24,16 +24,17 @@ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
+ 
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/canvasdebugger/test/";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
+ const SIMPLE_BITMASKS_URL = EXAMPLE_URL + "doc_simple-canvas-bitmasks.html";
+ const SIMPLE_CANVAS_TRANSPARENT_URL = EXAMPLE_URL + "doc_simple-canvas-transparent.html";
+ const SIMPLE_CANVAS_DEEP_STACK_URL = EXAMPLE_URL + "doc_simple-canvas-deep-stack.html";
++const WEBGL_ENUM_URL = EXAMPLE_URL + "doc_webgl-enum.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.canvasdebugger.enabled");
+ 
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
 diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
-index 3c986d9..eb688ac 100644
+index ffbac19..9cc1c93 100644
 --- a/toolkit/devtools/server/actors/call-watcher.js
 +++ b/toolkit/devtools/server/actors/call-watcher.js
-@@ -183,21 +183,20 @@ let FunctionCallActor = protocol.ActorClass({
-       }
-       if (typeof arg == "function") {
+@@ -217,17 +217,17 @@ let FunctionCallActor = protocol.ActorClass({
          return "Function";
        }
        if (typeof arg == "object") {
          return "Object";
        }
-       if (global == CallWatcherFront.CANVAS_WEBGL_CONTEXT) {
--        // XXX: This doesn't handle combined bitmasks. Bug 978964.
--        return getEnumsLookupTable("webgl", caller)[arg] || arg;
-+        return getBitToEnumValue("webgl", caller, arg);
-       }
-       if (global == CallWatcherFront.CANVAS_2D_CONTEXT) {
--        return getEnumsLookupTable("2d", caller)[arg] || arg;
-+        return getBitToEnumValue("2d", caller, arg);
+       // If this argument matches the method's signature
+       // and is an enum, change it to its constant name.
+       if (enumArgs && enumArgs.indexOf(i) !== -1) {
+-        return getEnumsLookupTable(global, caller)[arg] || arg;
++        return getBitToEnumValue(global, caller, arg);
        }
        return arg;
      });
@@ -35,7 +156,7 @@ index 3c986d9..eb688ac 100644
    }
  });
  
-@@ -536,24 +535,46 @@ CallWatcherFront.CANVAS_2D_CONTEXT = 3;
+@@ -630,24 +630,53 @@ CallWatcherFront.ENUM_METHODS[CallWatcherFront.CANVAS_WEBGL_CONTEXT] = {
   * assuming they look LIKE_THIS most of the time.
   *
   * For example, when gl.clear(gl.COLOR_BUFFER_BIT) is called, the actual passed
@@ -48,49 +169,55 @@ index 3c986d9..eb688ac 100644
 -  let cachedEnum = gEnumsLookupTable[type];
 -  if (cachedEnum) {
 -    return cachedEnum;
--  }
++// These values are returned from errors, or empty values,
++// and need to be ignored when checking arguments due to the bitwise math.
++var INVALID_ENUMS = [
++  "INVALID_ENUM", "NO_ERROR", "INVALID_VALUE", "OUT_OF_MEMORY", "NONE"
++];
++
 +function getBitToEnumValue(type, object, arg) {
 +  let table = gEnumsLookupTable[type];
- 
--  let table = gEnumsLookupTable[type] = {};
-+  // If mapping not yet created, do it on first run.
++
++  // If mapping not yet created, do it on the first run.
 +  if (!table) {
 +    table = gEnumsLookupTable[type] = {};
++
++    for (let key in object) {
++      if (key.match(gEnumRegex)) {
++        // Maps `16384` to `"COLOR_BUFFER_BIT"`, etc.
++        table[object[key]] = key;
++      }
++    }
++  }
++
++  // If a single bit value, just return it.
++  if (table[arg]) {
++    return table[arg];
+   }
+ 
+-  let table = gEnumsLookupTable[type] = {};
++  // Otherwise, attempt to reduce it to the original bit flags:
++  // `16640` -> "COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT"
++  let flags = [];
++  for (let flag in table) {
++    if (INVALID_ENUMS.indexOf(table[flag]) !== -1) {
++      continue;
++    }
  
 -  for (let key in object) {
 -    if (key.match(gEnumRegex)) {
 -      table[object[key]] = key;
-+    for (let key in object) {
-+      if (key.match(gEnumRegex)) {
-+        // Maps `16384` to `"COLOR_BUFFER_BIT"`
-+        table[object[key]] = key;
-+      }
++    // Cast to integer as all values are stored as strings
++    // in `table`
++    flag = flag | 0;
++    if (flag && (arg & flag) === flag) {
++      flags.push(table[flag]);
      }
    }
  
 -  return table;
-+  // If a single bit-value, just return it.
-+  if (table[arg]) {
-+    return table[arg];
-+  }
-+  // Otherwise, attempt to reduce it to the original bit flags:
-+  // `16640` -> "COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT"
-+  else {
-+    let flags = [];
-+    for (let key in table) {
-+      if (table[key] === "NONE") {
-+        continue;
-+      }
-+
-+      key = ~~key;
-+      if ((arg & key) === key) {
-+        flags.push(table[key]);
-+      }
-+    }
-+
-+    // Cache the combined bitmask value
-+    return table[arg] = flags.join(" | ") || arg;
-+  }
++  // Cache the combined bitmask value
++  return table[arg] = flags.join(" | ") || arg;
  }
 -- 
 1.8.4.2
