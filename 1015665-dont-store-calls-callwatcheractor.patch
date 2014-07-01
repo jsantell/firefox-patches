@@ -1,0 +1,156 @@
+From c3ac543f074b39a30f4d1c06b61ff4d60e9866b4 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 1 Jul 2014 14:23:36 -0700
+Subject: Bug 1015665 - Do not store function calls in CallWatcherActor unless needed. r=vp
+
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-02.js b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-02.js
+index b7f105e..31c83b4 100644
+--- a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-02.js
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-02.js
+@@ -9,17 +9,18 @@
+ function ifTestingSupported() {
+   let [target, debuggee, front] = yield initCallWatcherBackend(SIMPLE_CANVAS_URL);
+ 
+   let navigated = once(target, "navigate");
+ 
+   yield front.setup({
+     tracedGlobals: ["CanvasRenderingContext2D", "WebGLRenderingContext"],
+     startRecording: true,
+-    performReload: true
++    performReload: true,
++    storeCalls: true
+   });
+   ok(true, "The front was setup up successfully.");
+ 
+   yield navigated;
+   ok(true, "Target automatically navigated when the front was set up.");
+ 
+   // Allow the content to execute some functions.
+   yield waitForTick();
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index 98999c7..04cdbfa 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -271,26 +271,27 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+     this.finalize();
+   },
+ 
+   /**
+    * Starts waiting for the current tab actor's document global to be
+    * created, in order to instrument the specified objects and become
+    * aware of everything the content does with them.
+    */
+-  setup: method(function({ tracedGlobals, tracedFunctions, startRecording, performReload, holdWeak }) {
++  setup: method(function({ tracedGlobals, tracedFunctions, startRecording, performReload, holdWeak, storeCalls }) {
+     if (this._initialized) {
+       return;
+     }
+     this._initialized = true;
+ 
+     this._functionCalls = [];
+     this._tracedGlobals = tracedGlobals || [];
+     this._tracedFunctions = tracedFunctions || [];
+     this._holdWeak = !!holdWeak;
++    this._storeCalls = !!storeCalls;
+     this._contentObserver = new ContentObserver(this.tabActor);
+ 
+     on(this._contentObserver, "global-created", this._onGlobalCreated);
+     on(this._contentObserver, "global-destroyed", this._onGlobalDestroyed);
+ 
+     if (startRecording) {
+       this.resumeRecording();
+     }
+@@ -298,17 +299,18 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+       this.tabActor.window.location.reload();
+     }
+   }, {
+     request: {
+       tracedGlobals: Option(0, "nullable:array:string"),
+       tracedFunctions: Option(0, "nullable:array:string"),
+       startRecording: Option(0, "boolean"),
+       performReload: Option(0, "boolean"),
+-      holdWeak: Option(0, "boolean")
++      holdWeak: Option(0, "boolean"),
++      storeCalls: Option(0, "boolean")
+     },
+     oneway: true
+   }),
+ 
+   /**
+    * Stops listening for document global changes and puts this actor
+    * to hibernation. This method is called automatically just before the
+    * actor is destroyed.
+@@ -536,17 +538,21 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+    */
+   _onContentFunctionCall: function(...details) {
+     // If the consuming tool has finalized call-watcher, ignore the
+     // still-instrumented calls.
+     if (this._finalized) {
+       return;
+     }
+     let functionCall = new FunctionCallActor(this.conn, details, this._holdWeak);
+-    this._functionCalls.push(functionCall);
++
++    if (this._storeCalls) {
++      this._functionCalls.push(functionCall);
++    }
++
+     this.onCall(functionCall);
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the CallWatcherActor.
+  */
+ let CallWatcherFront = exports.CallWatcherFront = protocol.FrontClass(CallWatcherActor, {
+diff --git a/toolkit/devtools/server/actors/canvas.js b/toolkit/devtools/server/actors/canvas.js
+index 991e22e..79d8523 100644
+--- a/toolkit/devtools/server/actors/canvas.js
++++ b/toolkit/devtools/server/actors/canvas.js
+@@ -251,17 +251,18 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+     }
+     this._initialized = true;
+ 
+     this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: CANVAS_CONTEXTS,
+       tracedFunctions: ANIMATION_GENERATORS,
+-      performReload: reload
++      performReload: reload,
++      storeCalls: true
+     });
+   }, {
+     request: { reload: Option(0, "boolean") },
+     oneway: true
+   }),
+ 
+   /**
+    * Stops listening for function calls.
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index c7432ee..e882cc6 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -325,17 +325,18 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     this._initialized = true;
+ 
+     this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: AUDIO_GLOBALS,
+       startRecording: true,
+       performReload: reload,
+-      holdWeak: true
++      holdWeak: true,
++      storeCalls: false
+     });
+     // Bind to the `global-destroyed` event on the content observer so we can
+     // unbind events between the global destruction and the `finalize` cleanup
+     // method on the actor.
+     // TODO expose these events on CallWatcherActor itself, bug 1021321
+     on(this._callWatcher._contentObserver, "global-destroyed", this._onGlobalDestroyed);
+   }, {
+     request: { reload: Option(0, "boolean") },
+-- 
+1.8.4.2
+

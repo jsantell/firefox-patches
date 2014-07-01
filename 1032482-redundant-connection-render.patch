@@ -1,0 +1,178 @@
+From 207e427ecb13ccdf5fc24e4be338ca2e0f0f5081 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 1 Jul 2014 14:02:05 -0700
+Subject: Bug 1032482 - Only render redundant connections between nodes once in the web audio editor. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js
+index ae2ecd6..137d5ee 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js
+@@ -1,33 +1,46 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that SVG nodes and edges were created for the Graph View.
+  */
+ 
++let connectCount = 0;
++
+ function spawnTest() {
+   let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
+   let { panelWin } = panel;
+   let { gFront, $, $$, EVENTS } = panelWin;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
++  panelWin.on(EVENTS.CONNECT_NODE, onConnectNode);
++
+   let [actors] = yield Promise.all([
+     get3(gFront, "create-node"),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+ 
+   let [destId, oscId, gainId] = actors.map(actor => actor.actorID);
+ 
+   ok(findGraphNode(panelWin, oscId).classList.contains("type-OscillatorNode"), "found OscillatorNode with class");
+   ok(findGraphNode(panelWin, gainId).classList.contains("type-GainNode"), "found GainNode with class");
+   ok(findGraphNode(panelWin, destId).classList.contains("type-AudioDestinationNode"), "found AudioDestinationNode with class");
+   is(findGraphEdge(panelWin, oscId, gainId).toString(), "[object SVGGElement]", "found edge for osc -> gain");
+   is(findGraphEdge(panelWin, gainId, destId).toString(), "[object SVGGElement]", "found edge for gain -> dest");
+ 
++  yield wait(1000);
++
++  is(connectCount, 2, "Only two node connect events should be fired.");
++
++  panelWin.off(EVENTS.CONNECT_NODE, onConnectNode);
++
+   yield teardown(panel);
+   finish();
+ }
+ 
++function onConnectNode () {
++  ++connectCount;
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_simple-context.html b/browser/devtools/webaudioeditor/test/doc_simple-context.html
+index d6d8e70..89a84b8 100644
+--- a/browser/devtools/webaudioeditor/test/doc_simple-context.html
++++ b/browser/devtools/webaudioeditor/test/doc_simple-context.html
+@@ -12,15 +12,22 @@
+ 
+     <script type="text/javascript;version=1.8">
+       "use strict";
+ 
+       let ctx = new AudioContext();
+       let osc = ctx.createOscillator();
+       let gain = ctx.createGain();
+       gain.gain.value = 0;
++
++      // Connect multiple times to test that it's disregarded.
+       osc.connect(gain);
+       gain.connect(ctx.destination);
++      gain.connect(ctx.destination);
++      gain.connect(ctx.destination);
++      gain.connect(ctx.destination);
++      gain.connect(ctx.destination);
++      gain.connect(ctx.destination);
+       osc.start(0);
+     </script>
+   </body>
+ 
+ </html>
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-controller.js b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+index 0c2f834..b8a801f9 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-controller.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+@@ -89,29 +89,34 @@ function AudioNodeView (actor) {
+ // A proxy for the underlying AudioNodeActor to fetch its type
+ // and subsequently assign the type to the instance.
+ AudioNodeView.prototype.getType = Task.async(function* () {
+   this.type = yield this.actor.getType();
+   return this.type;
+ });
+ 
+ // Helper method to create connections in the AudioNodeConnections
+-// WeakMap for rendering
++// WeakMap for rendering. Returns a boolean indicating
++// if the connection was successfully created. Will return `false`
++// when the connection was previously made.
+ AudioNodeView.prototype.connect = function (destination) {
+-  let connections = AudioNodeConnections.get(this);
+-  if (!connections) {
+-    connections = [];
+-    AudioNodeConnections.set(this, connections);
++  let connections = AudioNodeConnections.get(this) || new Set();
++  AudioNodeConnections.set(this, connections);
++
++  // Don't duplicate add.
++  if (!connections.has(destination)) {
++    connections.add(destination);
++    return true;
+   }
+-  connections.push(destination);
++  return false;
+ };
+ 
+ // Helper method to remove audio connections from the current AudioNodeView
+ AudioNodeView.prototype.disconnect = function () {
+-  AudioNodeConnections.set(this, []);
++  AudioNodeConnections.set(this, new Set());
+ };
+ 
+ // Returns a promise that resolves to an array of objects containing
+ // both a `param` name property and a `value` property.
+ AudioNodeView.prototype.getParams = function () {
+   return this.actor.getParams();
+ };
+ 
+@@ -288,18 +293,20 @@ let WebAudioEditorController = {
+   _onConnectNode: Task.async(function* ({ source: sourceActor, dest: destActor }) {
+     // Since node create and connect are probably executed back to back,
+     // and the controller's `_onCreateNode` needs to look up type,
+     // the edge creation could be called before the graph node is actually
+     // created. This way, we can check and listen for the event before
+     // adding an edge.
+     let [source, dest] = yield waitForNodeCreation(sourceActor, destActor);
+ 
+-    source.connect(dest);
+-    window.emit(EVENTS.CONNECT_NODE, source.id, dest.id);
++    // Connect nodes, and only emit if it's a new connection.
++    if (source.connect(dest)) {
++      window.emit(EVENTS.CONNECT_NODE, source.id, dest.id);
++    }
+ 
+     function waitForNodeCreation (sourceActor, destActor) {
+       let deferred = defer();
+       let source = getViewNodeByActor(sourceActor);
+       let dest = getViewNodeByActor(destActor);
+ 
+       if (!source || !dest)
+         window.on(EVENTS.CREATE_NODE, function createNodeListener (_, id) {
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index 88ccf26..124defe 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -156,17 +156,17 @@ let WebAudioGraphView = {
+ 
+     AudioNodes.forEach(node => {
+       // Add node to graph
+       graph.addNode(node.id, { label: node.type, id: node.id });
+ 
+       // Add all of the connections from this node to the edge array to be added
+       // after all the nodes are added, otherwise edges will attempted to be created
+       // for nodes that have not yet been added
+-      AudioNodeConnections.get(node, []).forEach(dest => edges.push([node, dest]));
++      AudioNodeConnections.get(node, new Set()).forEach(dest => edges.push([node, dest]));
+     });
+ 
+     edges.forEach(([node, dest]) => graph.addEdge(null, node.id, dest.id, {
+       source: node.id,
+       target: dest.id
+     }));
+ 
+     let renderer = new dagreD3.Renderer();
+-- 
+1.8.4.2
+
