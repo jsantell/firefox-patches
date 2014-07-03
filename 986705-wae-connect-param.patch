@@ -1,0 +1,246 @@
+From d5b712655dd7b683f88c14148db0791d7cb0f56e Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 2 Jul 2014 11:16:18 -0700
+Subject: Bug 986705 - Implement web audio server events for connecting to an AudioParam in the web audio editor. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 9a5d8e1..ee07505 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -4,27 +4,29 @@ subsuite = devtools
+ support-files =
+   doc_simple-context.html
+   doc_complex-context.html
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-toggle.html
++  doc_connect-param.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
++[browser_webaudio-actor-connect-param.js]
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ 
+diff --git a/browser/devtools/webaudioeditor/test/browser_webaudio-actor-connect-param.js b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-connect-param.js
+new file mode 100644
+index 0000000..af40782
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-connect-param.js
+@@ -0,0 +1,26 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test the `connect-param` event on the web audio actor.
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(CONNECT_PARAM_URL);
++  let [_, _, [destNode, carrierNode, modNode, gainNode], _, connectParam] = yield Promise.all([
++    front.setup({ reload: true }),
++    once(front, "start-context"),
++    getN(front, "create-node", 4),
++    get2(front, "connect-node"),
++    once(front, "connect-param")
++  ]);
++
++  info(connectParam);
++
++  is(connectParam.source.actorID, modNode.actorID, "`connect-param` has correct actor for `source`");
++  is(connectParam.dest.actorID, gainNode.actorID, "`connect-param` has correct actor for `dest`");
++  is(connectParam.param, "gain", "`connect-param` has correct parameter name for `param`");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_connect-param.html b/browser/devtools/webaudioeditor/test/doc_connect-param.html
+new file mode 100644
+index 0000000..9185c0b
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_connect-param.html
+@@ -0,0 +1,28 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let carrier = ctx.createOscillator();
++      let modulator = ctx.createOscillator();
++      let gain = ctx.createGain();
++      carrier.connect(gain);
++      gain.connect(ctx.destination);
++      modulator.connect(gain.gain);
++      modulator.start(0);
++      carrier.start(0);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index 22aa1f0..ec4aa4a 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -23,16 +23,17 @@ let TargetFactory = devtools.TargetFactory;
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
+ const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
+ const DESTROY_NODES_URL = EXAMPLE_URL + "doc_destroy-nodes.html";
+ const CONNECT_TOGGLE_URL = EXAMPLE_URL + "doc_connect-toggle.html";
++const CONNECT_PARAM_URL = EXAMPLE_URL + "doc_connect-param.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index c7432ee..1b6726e 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -358,17 +358,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+       this._handleCreationCall(functionCall);
+     }
+   },
+ 
+   _handleRoutingCall: function(functionCall) {
+     let { caller, args, window, name } = functionCall.details;
+     let source = caller;
+     let dest = args[0];
+-    let isAudioParam = dest instanceof window.AudioParam;
++    let isAudioParam = dest ? getConstructorName(dest) === "AudioParam" : false;
+ 
+     // audionode.connect(param)
+     if (name === "connect" && isAudioParam) {
+       this._onConnectParam(source, dest);
+     }
+     // audionode.connect(node)
+     else if (name === "connect") {
+       this._onConnectNode(source, dest);
+@@ -428,18 +428,19 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+       dest: Option(0, "audionode")
+     },
+     "disconnect-node": {
+       type: "disconnectNode",
+       source: Arg(0, "audionode")
+     },
+     "connect-param": {
+       type: "connectParam",
+-      source: Arg(0, "audionode"),
+-      param: Arg(1, "string")
++      source: Option(0, "audionode"),
++      dest: Option(0, "audionode"),
++      param: Option(0, "string")
+     },
+     "change-param": {
+       type: "changeParam",
+       source: Option(0, "audionode"),
+       param: Option(0, "string"),
+       value: Option(0, "string")
+     },
+     "create-node": {
+@@ -456,23 +457,41 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+    * Helper for constructing an AudioNodeActor, assigning to
+    * internal weak map, and tracking via `manage` so it is assigned
+    * an `actorID`.
+    */
+   _constructAudioNode: function (node) {
+     // Ensure AudioNode is wrapped.
+     node = new XPCNativeWrapper(node);
+ 
++    this._instrumentParams(node);
++
+     let actor = new AudioNodeActor(this.conn, node);
+     this.manage(actor);
+     this._nativeToActorID.set(node.id, actor.actorID);
+     return actor;
+   },
+ 
+   /**
++   * Takes an XrayWrapper node, and attaches the node's `nativeID`
++   * to the AudioParams as `_parentID`, as well as the the type of param
++   * as a string on `_paramName`.
++   */
++  _instrumentParams: function (node) {
++    let type = getConstructorName(node);
++    Object.keys(NODE_PROPERTIES[type])
++      .filter(isAudioParam.bind(null, node))
++      .forEach(paramName => {
++        let param = node[paramName];
++        param._parentID = node.id;
++        param._paramName = paramName;
++      });
++  },
++
++  /**
+    * Takes an AudioNode and returns the stored actor for it.
+    * In some cases, we won't have an actor stored (for example,
+    * connecting to an AudioDestinationNode, since it's implicitly
+    * created), so make a new actor and store that.
+    */
+   _getActorByNativeID: function (nativeID) {
+     // Ensure we have a Number, rather than a string
+     // return via notification.
+@@ -500,20 +519,25 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     emit(this, "connect-node", {
+       source: sourceActor,
+       dest: destActor
+     });
+   },
+ 
+   /**
+    * Called when an audio node is connected to an audio param.
+-   * Implement in bug 986705
+    */
+-  _onConnectParam: function (source, dest) {
+-    // TODO bug 986705
++  _onConnectParam: function (source, param) {
++    let sourceActor = this._getActorByNativeID(source.id);
++    let destActor = this._getActorByNativeID(param._parentID);
++    emit(this, "connect-param", {
++      source: sourceActor,
++      dest: destActor,
++      param: param._paramName
++    });
+   },
+ 
+   /**
+    * Called when an audio node is disconnected.
+    */
+   _onDisconnectNode: function (node) {
+     let actor = this._getActorByNativeID(node.id);
+     emit(this, "disconnect-node", actor);
+-- 
+1.8.4.2
+
