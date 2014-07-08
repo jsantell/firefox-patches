@@ -1,0 +1,1405 @@
+From 79ee1f925bfdca4cd4f87f080f93694727b0244a Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 7 Jul 2014 12:57:55 -0700
+Subject: [PATCH] Bug 1034295 - Make shader editor tests e10s compliant. r=vp
+
+---
+ browser/devtools/shadereditor/test/browser.ini     |  2 +-
+ .../test/browser_se_programs-blackbox-01.js        | 80 +++++++++++-----------
+ .../test/browser_se_programs-blackbox-02.js        | 24 +++----
+ .../test/browser_se_programs-highlight-01.js       | 48 ++++++-------
+ .../test/browser_se_programs-highlight-02.js       | 16 ++---
+ .../test/browser_se_shaders-edit-01.js             | 18 ++---
+ .../test/browser_se_shaders-edit-02.js             |  8 +--
+ .../test/browser_se_shaders-edit-03.js             | 16 ++---
+ .../test/browser_webgl-actor-test-06.js            | 20 +++---
+ .../test/browser_webgl-actor-test-07.js            | 18 ++---
+ .../test/browser_webgl-actor-test-08.js            |  8 +--
+ .../test/browser_webgl-actor-test-09.js            | 16 ++---
+ .../test/browser_webgl-actor-test-10.js            | 12 ++--
+ .../test/browser_webgl-actor-test-13.js            | 32 ++++-----
+ .../test/browser_webgl-actor-test-14.js            | 20 +++---
+ .../test/browser_webgl-actor-test-15.js            | 44 ++++++------
+ .../test/browser_webgl-actor-test-16.js            | 44 ++++++------
+ .../test/browser_webgl-actor-test-17.js            | 30 ++++----
+ .../test/browser_webgl-actor-test-18.js            | 22 ++++++
+ browser/devtools/shadereditor/test/head.js         | 59 ++++------------
+ toolkit/devtools/server/actors/webgl.js            | 59 +++++++++++++++-
+ 21 files changed, 321 insertions(+), 275 deletions(-)
+ create mode 100644 browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js
+
+diff --git a/browser/devtools/shadereditor/test/browser.ini b/browser/devtools/shadereditor/test/browser.ini
+index b6db425..5993210 100644
+--- a/browser/devtools/shadereditor/test/browser.ini
++++ b/browser/devtools/shadereditor/test/browser.ini
+@@ -1,10 +1,9 @@
+ [DEFAULT]
+-skip-if = e10s # Bug ?????? - devtools tests disabled with e10s
+ subsuite = devtools
+ support-files =
+   doc_blended-geometry.html
+   doc_multiple-contexts.html
+   doc_overlapping-geometry.html
+   doc_shader-order.html
+   doc_simple-canvas.html
+   head.js
+@@ -39,8 +38,9 @@ skip-if = true # Bug 942473, caused by Bug 940541
+ [browser_webgl-actor-test-10.js]
+ [browser_webgl-actor-test-11.js]
+ [browser_webgl-actor-test-12.js]
+ [browser_webgl-actor-test-13.js]
+ [browser_webgl-actor-test-14.js]
+ [browser_webgl-actor-test-15.js]
+ [browser_webgl-actor-test-16.js]
+ [browser_webgl-actor-test-17.js]
++[browser_webgl-actor-test-18.js]
+diff --git a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
+index b199cd1..e82af27 100644
+--- a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
++++ b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
+@@ -27,20 +27,20 @@ function ifWebGLSupported() {
+   });
+   fsEditor.once("change", () => {
+     ok(false, "The fragment shader source was unexpectedly changed.");
+   });
+   once(panel.panelWin, EVENTS.SOURCES_SHOWN).then(() => {
+     ok(false, "No sources should be changed form this point onward.");
+   });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+ 
+   ok(!ShadersListView.selectedAttachment.isBlackBoxed,
+     "The first program should not be blackboxed yet.");
+   is(getBlackBoxCheckbox(panel, 0).checked, true,
+     "The first blackbox checkbox should be initially checked.");
+   ok(!ShadersListView.attachments[1].isBlackBoxed,
+     "The second program should not be blackboxed yet.");
+   is(getBlackBoxCheckbox(panel, 1).checked, true,
+@@ -52,105 +52,105 @@ function ifWebGLSupported() {
+     "The first program should now be blackboxed.");
+   is(getBlackBoxCheckbox(panel, 0).checked, false,
+     "The first blackbox checkbox should now be unchecked.");
+   ok(!ShadersListView.attachments[1].isBlackBoxed,
+     "The second program should still not be blackboxed.");
+   is(getBlackBoxCheckbox(panel, 1).checked, true,
+     "The second blackbox checkbox should still be checked.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The first program was correctly blackboxed.");
+ 
+   getBlackBoxCheckbox(panel, 1).click();
+ 
+   ok(ShadersListView.selectedAttachment.isBlackBoxed,
+     "The first program should still be blackboxed.");
+   is(getBlackBoxCheckbox(panel, 0).checked, false,
+     "The first blackbox checkbox should still be unchecked.");
+   ok(ShadersListView.attachments[1].isBlackBoxed,
+     "The second program should now be blackboxed.");
+   is(getBlackBoxCheckbox(panel, 1).checked, false,
+     "The second blackbox checkbox should now be unchecked.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+   ok(true, "The second program was correctly blackboxed.");
+ 
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+   ok(true, "Highlighting shouldn't work while blackboxed (1).");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+   ok(true, "Highlighting shouldn't work while blackboxed (2).");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
+   ok(true, "Highlighting shouldn't work while blackboxed (3).");
+ 
+   getBlackBoxCheckbox(panel, 0).click();
+   getBlackBoxCheckbox(panel, 1).click();
+ 
+   ok(!ShadersListView.selectedAttachment.isBlackBoxed,
+     "The first program should now be unblackboxed.");
+   is(getBlackBoxCheckbox(panel, 0).checked, true,
+     "The first blackbox checkbox should now be rechecked.");
+   ok(!ShadersListView.attachments[1].isBlackBoxed,
+     "The second program should now be unblackboxed.");
+   is(getBlackBoxCheckbox(panel, 1).checked, true,
+     "The second blackbox checkbox should now be rechecked.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The two programs were correctly unblackboxed.");
+ 
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The first program was correctly highlighted.");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
+   ok(true, "The second program was correctly highlighted.");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The two programs were correctly unhighlighted.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+ function getItemLabel(aPanel, aIndex) {
+   return aPanel.panelWin.document.querySelectorAll(
+diff --git a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js
+index 171c638..e1bb8b0 100644
+--- a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js
++++ b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js
+@@ -11,51 +11,51 @@ function ifWebGLSupported() {
+   let { gFront, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
+ 
+   reload(target);
+   let [[firstProgramActor, secondProgramActor]] = yield promise.all([
+     getPrograms(gFront, 2),
+     once(panel.panelWin, EVENTS.SOURCES_SHOWN)
+   ]);
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
+   ok(true, "The canvas was correctly drawn.");
+ 
+   getBlackBoxCheckbox(panel, 0).click();
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 0, b: 0, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 0, b: 0, a: 127 }, true);
+   ok(true, "The first program was correctly blackboxed.");
+ 
+   getBlackBoxCheckbox(panel, 0).click();
+   getBlackBoxCheckbox(panel, 1).click();
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+   ok(true, "The second program was correctly blackboxed.");
+ 
+   getBlackBoxCheckbox(panel, 1).click();
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
+   ok(true, "The two programs were correctly unblackboxed.");
+ 
+   getBlackBoxCheckbox(panel, 0).click();
+   getBlackBoxCheckbox(panel, 1).click();
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+   ok(true, "The two programs were correctly blackboxed again.");
+ 
+   getBlackBoxCheckbox(panel, 0).click();
+   getBlackBoxCheckbox(panel, 1).click();
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
+   ok(true, "The two programs were correctly unblackboxed again.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+ function getBlackBoxCheckbox(aPanel, aIndex) {
+   return aPanel.panelWin.document.querySelectorAll(
+diff --git a/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js b/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js
+index 62085e9..e668462 100644
+--- a/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js
++++ b/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js
+@@ -27,60 +27,60 @@ function ifWebGLSupported() {
+   });
+   fsEditor.once("change", () => {
+     ok(false, "The fragment shader source was unexpectedly changed.");
+   });
+   once(panel.panelWin, EVENTS.SOURCES_SHOWN).then(() => {
+     ok(false, "No sources should be changed form this point onward.");
+   });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+ 
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The first program was correctly highlighted.");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
+   ok(true, "The second program was correctly highlighted.");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The two programs were correctly unhighlighted.");
+ 
+   ShadersListView._onProgramMouseEnter({ target: getBlackBoxCheckbox(panel, 0) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The two programs were left unchanged after hovering a blackbox checkbox.");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getBlackBoxCheckbox(panel, 0) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The two programs were left unchanged after unhovering a blackbox checkbox.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+ function getItemLabel(aPanel, aIndex) {
+   return aPanel.panelWin.document.querySelectorAll(
+diff --git a/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js b/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js
+index 84c5c40..e7b65ef 100644
+--- a/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js
++++ b/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js
+@@ -11,37 +11,37 @@ function ifWebGLSupported() {
+   let { gFront, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
+ 
+   reload(target);
+   let [[firstProgramActor, secondProgramActor]] = yield promise.all([
+     getPrograms(gFront, 2),
+     once(panel.panelWin, EVENTS.SOURCES_SHOWN)
+   ]);
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
+   ok(true, "The canvas was correctly drawn.");
+ 
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 0, b: 32, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 0, b: 32, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 0, b: 32, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 0, b: 32, a: 127 }, true);
+   ok(true, "The first program was correctly highlighted.");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 255, g: 0, b: 64, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 255, g: 0, b: 64, a: 255 }, true);
+   ok(true, "The second program was correctly highlighted.");
+ 
+   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
+   ok(true, "The two programs were correctly unhighlighted.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+ function getItemLabel(aPanel, aIndex) {
+   return aPanel.panelWin.document.querySelectorAll(
+diff --git a/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js b/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js
+index 088286f..c276fba 100644
+--- a/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js
++++ b/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js
+@@ -23,51 +23,51 @@ function ifWebGLSupported() {
+   is(fsEditor.getText().indexOf("gl_FragColor"), 97,
+     "The fragment shader editor contains the correct text.");
+ 
+   is($("#vs-editor-label").hasAttribute("selected"), false,
+     "The vertex shader editor shouldn't be initially selected.");
+   is($("#fs-editor-label").hasAttribute("selected"), false,
+     "The vertex shader editor shouldn't be initially selected.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 128, y: 128 }, { r: 191, g: 64, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 128, y: 128 }, { r: 191, g: 64, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+ 
+   vsEditor.focus();
+ 
+   is($("#vs-editor-label").hasAttribute("selected"), true,
+     "The vertex shader editor should now be selected.");
+   is($("#fs-editor-label").hasAttribute("selected"), false,
+     "The vertex shader editor shouldn't still not be selected.");
+ 
+   vsEditor.replaceText("2.0", { line: 7, ch: 44 }, { line: 7, ch: 47 });
+   yield once(panel.panelWin, EVENTS.SHADER_COMPILED);
+ 
+   ok(true, "Vertex shader was changed.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+ 
+   ok(true, "The vertex shader was recompiled successfully.");
+ 
+   fsEditor.focus();
+ 
+   is($("#vs-editor-label").hasAttribute("selected"), false,
+     "The vertex shader editor should now be deselected.");
+   is($("#fs-editor-label").hasAttribute("selected"), true,
+     "The vertex shader editor should now be selected.");
+ 
+   fsEditor.replaceText("0.5", { line: 5, ch: 44 }, { line: 5, ch: 47 });
+   yield once(panel.panelWin, EVENTS.SHADER_COMPILED);
+ 
+   ok(true, "Fragment shader was changed.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 127 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 127 }, true);
++  yield ensurePixelIs(gFront, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+ 
+   ok(true, "The fragment shader was recompiled successfully.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js b/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js
+index 7586efa..ca6bb3a 100644
+--- a/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js
++++ b/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js
+@@ -44,25 +44,25 @@ function ifWebGLSupported() {
+     "The compilation status should be empty.");
+   isnot(error.link, "",
+     "The linkage status should not be empty.");
+   is(error.link.split("ERROR").length - 1, 1,
+     "The linkage status contains one error.");
+   ok(error.link.contains("ERROR: 0:6: 'constructor'"),
+     "A constructor error is contained in the linkage status.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+ 
+   vsEditor.replaceText("vec4", { line: 7, ch: 22 }, { line: 7, ch: 26 });
+   let [, error] = yield onceSpread(panel.panelWin, EVENTS.SHADER_COMPILED);
+   ok(!error, "The new vertex shader source was compiled successfully.");
+ 
+   fsEditor.replaceText("vec3", { line: 2, ch: 14 }, { line: 2, ch: 18 });
+   let [, error] = yield onceSpread(panel.panelWin, EVENTS.SHADER_COMPILED);
+   ok(!error, "The new fragment shader source was compiled successfully.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(gFront, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js b/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js
+index 0c4a323..fbfa046 100644
+--- a/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js
++++ b/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js
+@@ -36,24 +36,24 @@ function ifWebGLSupported() {
+   vsEditor.replaceText("2.", { line: 5, ch: 44 }, { line: 5, ch: 45 });
+   yield once(panel.panelWin, EVENTS.SHADER_COMPILED);
+ 
+   fsEditor.replaceText(".0", { line: 5, ch: 35 }, { line: 5, ch: 37 });
+   yield once(panel.panelWin, EVENTS.SHADER_COMPILED);
+ 
+   ok(true, "Vertex and fragment shaders were changed.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 32, y: 32 }, { r: 255, g: 255, b: 0, a: 0 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 255, g: 255, b: 0, a: 0 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 32, y: 32 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 32, y: 32 }, { r: 255, g: 255, b: 0, a: 0 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 255, g: 255, b: 0, a: 0 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(gFront, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 32, y: 32 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+ 
+   ok(true, "The vertex and fragment shaders were recompiled successfully.");
+ 
+   EventUtils.sendMouseEvent({ type: "mousedown" }, ShadersListView.items[1].target);
+   yield once(panel.panelWin, EVENTS.SOURCES_SHOWN);
+ 
+   is(ShadersListView.selectedIndex, 1,
+     "The second program is currently selected.");
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-06.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-06.js
+index 024a6ca..cb1a6e4 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-06.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-06.js
+@@ -9,42 +9,42 @@
+ function ifWebGLSupported() {
+   let [target, debuggee, front] = yield initBackend(SIMPLE_CANVAS_URL);
+   front.setup({ reload: true });
+ 
+   let programActor = yield once(front, "program-linked");
+   let vertexShader = yield programActor.getVertexShader();
+   let fragmentShader = yield programActor.getFragmentShader();
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   yield checkShaderSource("The shader sources are correct before highlighting.");
+   ok(true, "The corner pixel colors are correct before highlighting.");
+ 
+   yield programActor.highlight([0, 1, 0, 1]);
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   yield checkShaderSource("The shader sources are preserved after highlighting.");
+   ok(true, "The corner pixel colors are correct after highlighting.");
+ 
+   yield programActor.unhighlight();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   yield checkShaderSource("The shader sources are correct after unhighlighting.");
+   ok(true, "The corner pixel colors are correct after unhighlighting.");
+ 
+   yield programActor.blackbox();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+   yield checkShaderSource("The shader sources are preserved after blackboxing.");
+   ok(true, "The corner pixel colors are correct after blackboxing.");
+ 
+   yield programActor.unblackbox();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   yield checkShaderSource("The shader sources are correct after unblackboxing.");
+   ok(true, "The corner pixel colors are correct after unblackboxing.");
+ 
+   function checkShaderSource(aMessage) {
+     return Task.spawn(function() {
+       let newVertexShader = yield programActor.getVertexShader();
+       let newFragmentShader = yield programActor.getFragmentShader();
+       is(vertexShader, newVertexShader,
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-07.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-07.js
+index 8e9adec..ebc68f1 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-07.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-07.js
+@@ -8,51 +8,51 @@
+ function ifWebGLSupported() {
+   let [target, debuggee, front] = yield initBackend(SIMPLE_CANVAS_URL);
+   front.setup({ reload: true });
+ 
+   let programActor = yield once(front, "program-linked");
+   let vertexShader = yield programActor.getVertexShader();
+   let fragmentShader = yield programActor.getFragmentShader();
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 128, y: 128 }, { r: 191, g: 64, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 128, y: 128 }, { r: 191, g: 64, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+ 
+   let vertSource = yield vertexShader.getText();
+   let fragSource = yield fragmentShader.getText();
+   ok(!vertSource.contains("2.0"),
+     "The vertex shader source is correct before changing it.");
+   ok(!fragSource.contains("0.5"),
+     "The fragment shader source is correct before changing it.");
+ 
+   let newVertSource = vertSource.replace("1.0", "2.0");
+   let status = yield vertexShader.compile(newVertSource);
+   ok(!status,
+     "The new vertex shader source was compiled without errors.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+ 
+   let vertSource = yield vertexShader.getText();
+   let fragSource = yield fragmentShader.getText();
+   ok(vertSource.contains("2.0"),
+     "The vertex shader source is correct after changing it.");
+   ok(!fragSource.contains("0.5"),
+     "The fragment shader source is correct after changing the vertex shader.");
+ 
+   let newFragSource = fragSource.replace("1.0", "0.5");
+   let status = yield fragmentShader.compile(newFragSource);
+   ok(!status,
+     "The new fragment shader source was compiled without errors.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 127 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 128, y: 128 }, { r: 255, g: 0, b: 0, a: 127 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+ 
+   let vertSource = yield vertexShader.getText();
+   let fragSource = yield fragmentShader.getText();
+   ok(vertSource.contains("2.0"),
+     "The vertex shader source is correct after changing the fragment shader.");
+   ok(fragSource.contains("0.5"),
+     "The fragment shader source is correct after changing it.");
+ 
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-08.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-08.js
+index 6582aaf..35de1c5 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-08.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-08.js
+@@ -15,20 +15,20 @@ function ifWebGLSupported() {
+   let fragmentShader = yield programActor.getFragmentShader();
+ 
+   let oldVertSource = yield vertexShader.getText();
+   let newVertSource = oldVertSource.replace("= aVertexColor", "= vec3(0, 0, 1)");
+   let status = yield vertexShader.compile(newVertSource);
+   ok(!status,
+     "The new vertex shader source was compiled without errors.");
+ 
+-  yield waitForFrame(debuggee);
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 255, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 128, y: 128 }, { r: 0, g: 0, b: 255, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 0, b: 255, a: 255 }, true);
++  yield front.waitForFrame();
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 255, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 128, y: 128 }, { r: 0, g: 0, b: 255, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 0, b: 255, a: 255 }, true);
+ 
+   let vertSource = yield vertexShader.getText();
+   let fragSource = yield fragmentShader.getText();
+   ok(vertSource.contains("vFragmentColor = vec3(0, 0, 1);"),
+     "The vertex shader source is correct after changing it.");
+   ok(fragSource.contains("gl_FragColor = vec4(vFragmentColor, 1.0);"),
+     "The fragment shader source is correct after changing the vertex shader.");
+ 
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-09.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-09.js
+index 61bd306..dee37a2 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-09.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-09.js
+@@ -30,18 +30,18 @@ function ifWebGLSupported() {
+     is(error.link.split("ERROR").length - 1, 2,
+       "The linkage status contains two errors.");
+     ok(error.link.contains("ERROR: 0:8: 'constructor'"),
+       "A constructor error is contained in the linkage status.");
+     ok(error.link.contains("ERROR: 0:8: 'assign'"),
+       "An assignment error is contained in the linkage status.");
+   }
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   ok(true, "The shader was reverted to the old source.");
+ 
+   let vertSource = yield vertexShader.getText();
+   ok(vertSource.contains("vec4(aVertexPosition, 1.0);"),
+     "The previous correct vertex shader source was preserved.");
+ 
+   let oldFragSource = yield fragmentShader.getText();
+   let newFragSource = oldFragSource.replace("vec3", "vec4");
+@@ -57,29 +57,29 @@ function ifWebGLSupported() {
+     isnot(error.link, "",
+       "The linkage status should not be empty.");
+     is(error.link.split("ERROR").length - 1, 1,
+       "The linkage status contains one error.");
+     ok(error.link.contains("ERROR: 0:6: 'constructor'"),
+       "A constructor error is contained in the linkage status.");
+   }
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   ok(true, "The shader was reverted to the old source.");
+ 
+   let fragSource = yield fragmentShader.getText();
+   ok(fragSource.contains("vec3 vFragmentColor;"),
+     "The previous correct fragment shader source was preserved.");
+ 
+   yield programActor.highlight([0, 1, 0, 1]);
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   ok(true, "Highlighting worked after setting a defective fragment source.");
+ 
+   yield programActor.unhighlight();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+   ok(true, "Unhighlighting worked after setting a defective vertex source.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-10.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-10.js
+index f9f4c7f..c2dbd86 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-10.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-10.js
+@@ -21,24 +21,24 @@ function ifWebGLSupported() {
+   yield testHighlighting((yield once(front, "program-linked")));
+   ok(true, "Canvas was correctly instrumented on the third navigation.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ 
+   function testHighlighting(programActor) {
+     return Task.spawn(function() {
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct before highlighting.");
+ 
+       yield programActor.highlight([0, 1, 0, 1]);
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct after highlighting.");
+ 
+       yield programActor.unhighlight();
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct after unhighlighting.");
+     });
+   }
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-13.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-13.js
+index 17376ac..a6ecd1a 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-13.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-13.js
+@@ -29,39 +29,39 @@ function ifWebGLSupported() {
+   let secondVertSource = yield secondVertexShader.getText();
+   let secondFragSource = yield secondFragmentShader.getText();
+ 
+   is(firstVertSource, secondVertSource,
+     "The vertex shaders should have identical sources.");
+   is(firstFragSource, secondFragSource,
+     "The vertex shaders should have identical sources.");
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The two canvases are correctly drawn.");
+ 
+   yield firstProgramActor.highlight([1, 0, 0, 1]);
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The first canvas was correctly filled after highlighting.");
+ 
+   yield secondProgramActor.highlight([0, 1, 0, 1]);
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
+   ok(true, "The second canvas was correctly filled after highlighting.");
+ 
+   yield firstProgramActor.unhighlight();
+   yield secondProgramActor.unhighlight();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The two canvases were correctly filled after unhighlighting.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-14.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-14.js
+index 9585c1a..95ae1e0 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-14.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-14.js
+@@ -16,31 +16,31 @@ function ifWebGLSupported() {
+   let secondFragmentShader = yield secondProgramActor.getFragmentShader();
+ 
+   let oldFragSource = yield firstFragmentShader.getText();
+   let newFragSource = oldFragSource.replace("vec4(uColor", "vec4(0.25, 0.25, 0.25");
+   let status = yield firstFragmentShader.compile(newFragSource);
+   ok(!status,
+     "The first new fragment shader source was compiled without errors.");
+ 
+-  yield waitForFrame(debuggee);
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield front.waitForFrame();
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+   ok(true, "The first fragment shader was changed.");
+ 
+   let oldFragSource = yield secondFragmentShader.getText();
+   let newFragSource = oldFragSource.replace("vec4(uColor", "vec4(0.75, 0.75, 0.75");
+   let status = yield secondFragmentShader.compile(newFragSource);
+   ok(!status,
+     "The second new fragment shader source was compiled without errors.");
+ 
+-  yield waitForFrame(debuggee);
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 191, g: 191, b: 191, a: 255 }, true, "#canvas2");
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 191, g: 191, b: 191, a: 255 }, true, "#canvas2");
++  yield front.waitForFrame();
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 64, g: 64, b: 64, a: 255 }, true, "#canvas1");
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 191, g: 191, b: 191, a: 255 }, true, "#canvas2");
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 191, g: 191, b: 191, a: 255 }, true, "#canvas2");
+   ok(true, "The second fragment shader was changed.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
+index 3a39e83..ffc09b8 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
+@@ -74,56 +74,56 @@ function ifWebGLSupported() {
+         "The old program actor is not equal to the new first program actor.");
+       isnot(newProgramActors[1], oldProgramActor,
+         "The old program actor is not equal to the new second program actor.");
+     });
+   }
+ 
+   function checkHighlightingInTheFirstPage(programActor) {
+     return Task.spawn(function() {
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct before highlighting.");
+ 
+       yield programActor.highlight([0, 1, 0, 1]);
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct after highlighting.");
+ 
+       yield programActor.unhighlight();
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct after unhighlighting.");
+     });
+   }
+ 
+   function checkHighlightingInTheSecondPage(firstProgramActor, secondProgramActor) {
+     return Task.spawn(function() {
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+       ok(true, "The two canvases are correctly drawn before highlighting.");
+ 
+       yield firstProgramActor.highlight([1, 0, 0, 1]);
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+       ok(true, "The first canvas was correctly filled after highlighting.");
+ 
+       yield secondProgramActor.highlight([0, 1, 0, 1]);
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
+       ok(true, "The second canvas was correctly filled after highlighting.");
+ 
+       yield firstProgramActor.unhighlight();
+       yield secondProgramActor.unhighlight();
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+       ok(true, "The two canvases were correctly filled after unhighlighting.");
+     });
+   }
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
+index 50bfc0b..2172914 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
+@@ -73,56 +73,56 @@ function ifWebGLSupported() {
+   yield checkHighlightingInTheSecondPage(programs[0], programs[1]);
+   ok(true, "The cached programs behave correctly after navigating forward and reloading.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ 
+   function checkHighlightingInTheFirstPage(programActor) {
+     return Task.spawn(function() {
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct before highlighting.");
+ 
+       yield programActor.highlight([0, 1, 0, 1]);
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct after highlighting.");
+ 
+       yield programActor.unhighlight();
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
+-      yield ensurePixelIs(debuggee, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true);
++      yield ensurePixelIs(front, { x: 511, y: 511 }, { r: 0, g: 255, b: 0, a: 255 }, true);
+       ok(true, "The corner pixel colors are correct after unhighlighting.");
+     });
+   }
+ 
+   function checkHighlightingInTheSecondPage(firstProgramActor, secondProgramActor) {
+     return Task.spawn(function() {
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+       ok(true, "The two canvases are correctly drawn before highlighting.");
+ 
+       yield firstProgramActor.highlight([1, 0, 0, 1]);
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+       ok(true, "The first canvas was correctly filled after highlighting.");
+ 
+       yield secondProgramActor.highlight([0, 1, 0, 1]);
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 0, a: 255 }, true, "#canvas2");
+       ok(true, "The second canvas was correctly filled after highlighting.");
+ 
+       yield firstProgramActor.unhighlight();
+       yield secondProgramActor.unhighlight();
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
+-      yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
++      yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
+       ok(true, "The two canvases were correctly filled after unhighlighting.");
+     });
+   }
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-17.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-17.js
+index 07d979f..eeb003d 100644
+--- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-17.js
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-17.js
+@@ -7,40 +7,40 @@
+  */
+ 
+ function ifWebGLSupported() {
+   let [target, debuggee, front] = yield initBackend(OVERLAPPING_GEOMETRY_CANVAS_URL);
+   front.setup({ reload: true });
+ 
+   let [firstProgramActor, secondProgramActor] = yield getPrograms(front, 2);
+ 
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+   ok(true, "The corner vs. center pixel colors are correct before blackboxing.");
+ 
+   yield firstProgramActor.blackbox();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true);
+   ok(true, "The corner vs. center pixel colors are correct after blackboxing (1).");
+ 
+   yield firstProgramActor.unblackbox();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+   ok(true, "The corner vs. center pixel colors are correct after unblackboxing (1).");
+ 
+   yield secondProgramActor.blackbox();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 64, y: 64 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+   ok(true, "The corner vs. center pixel colors are correct after blackboxing (2).");
+ 
+   yield secondProgramActor.unblackbox();
+-  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
+-  yield ensurePixelIs(debuggee, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 64, y: 64 }, { r: 0, g: 255, b: 255, a: 255 }, true);
++  yield ensurePixelIs(front, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true);
+   ok(true, "The corner vs. center pixel colors are correct after unblackboxing (2).");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js
+new file mode 100644
+index 0000000..77752aa
+--- /dev/null
++++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js
+@@ -0,0 +1,22 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the `getPixel` actor method works across threads.
++ */
++
++function ifWebGLSupported() {
++  let [target, debuggee, front] = yield initBackend(MULTIPLE_CONTEXTS_URL);
++  front.setup({ reload: true });
++
++  yield getPrograms(front, 2);
++
++  let pixel = yield front.getPixel({ selector: "#canvas1", position: { x: 0, y: 0 }});
++  is(pixel.r, 255, "correct `r` value.")
++  is(pixel.g, 255, "correct `g` value.")
++  is(pixel.b, 0, "correct `b` value.")
++  is(pixel.a, 255, "correct `a` value.")
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/shadereditor/test/head.js b/browser/devtools/shadereditor/test/head.js
+index cbd613a..98b0a4e 100644
+--- a/browser/devtools/shadereditor/test/head.js
++++ b/browser/devtools/shadereditor/test/head.js
+@@ -157,74 +157,43 @@ function observe(aNotificationName, aOwnsWeak = false) {
+   Services.obs.addObserver(function onNotification(...aArgs) {
+     Services.obs.removeObserver(onNotification, aNotificationName);
+     deferred.resolve.apply(deferred, aArgs);
+   }, aNotificationName, aOwnsWeak);
+ 
+   return deferred.promise;
+ }
+ 
+-function waitForFrame(aDebuggee) {
+-  let deferred = promise.defer();
+-  aDebuggee.requestAnimationFrame(deferred.resolve);
+-  return deferred.promise;
+-}
+-
+ function isApprox(aFirst, aSecond, aMargin = 1) {
+   return Math.abs(aFirst - aSecond) <= aMargin;
+ }
+ 
+ function isApproxColor(aFirst, aSecond, aMargin) {
+   return isApprox(aFirst.r, aSecond.r, aMargin) &&
+     isApprox(aFirst.g, aSecond.g, aMargin) &&
+     isApprox(aFirst.b, aSecond.b, aMargin) &&
+     isApprox(aFirst.a, aSecond.a, aMargin);
+ }
+ 
+-function getPixels(aDebuggee, aSelector = "canvas") {
+-  let canvas = aDebuggee.document.querySelector(aSelector);
+-  let gl = canvas.getContext("webgl");
+-
+-  let { width, height } = canvas;
+-  let buffer = new aDebuggee.Uint8Array(width * height * 4);
+-  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, buffer);
+-
+-  info("Retrieved pixels: " + width + "x" + height);
+-  return [buffer, width, height];
+-}
+-
+-function getPixel(aDebuggee, aPosition, aSelector = "canvas") {
+-  let canvas = aDebuggee.document.querySelector(aSelector);
+-  let gl = canvas.getContext("webgl");
+-
+-  let { width, height } = canvas;
+-  let { x, y } = aPosition;
+-  let buffer = new aDebuggee.Uint8Array(4);
+-  gl.readPixels(x, height - y - 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buffer);
+-
+-  let pixel = { r: buffer[0], g: buffer[1], b: buffer[2], a: buffer[3] };
++function ensurePixelIs (front, aPosition, aColor, aWaitFlag = false, aSelector = "canvas") {
++  return Task.spawn(function*() {
++    let pixel = yield front.getPixel({ selector: aSelector, position: aPosition });
++    if (isApproxColor(pixel, aColor)) {
++      ok(true, "Expected pixel is shown at: " + aPosition.toSource());
++      return;
++    }
+ 
+-  info("Retrieved pixel: " + pixel.toSource() + " at " + aPosition.toSource());
+-  return pixel;
+-}
++    if (aWaitFlag) {
++      yield front.waitForFrame();
++      return ensurePixelIs(front, aPosition, aColor, aWaitFlag, aSelector);
++    }
+ 
+-function ensurePixelIs(aDebuggee, aPosition, aColor, aWaitFlag = false, aSelector = "canvas") {
+-  let pixel = getPixel(aDebuggee, aPosition, aSelector);
+-  if (isApproxColor(pixel, aColor)) {
+-    ok(true, "Expected pixel is shown at: " + aPosition.toSource());
+-    return promise.resolve(null);
+-  }
+-  if (aWaitFlag) {
+-    return Task.spawn(function() {
+-      yield waitForFrame(aDebuggee);
+-      yield ensurePixelIs(aDebuggee, aPosition, aColor, aWaitFlag, aSelector);
+-    });
+-  }
+-  ok(false, "Expected pixel was not already shown at: " + aPosition.toSource());
+-  return promise.reject(null);
++    ok(false, "Expected pixel was not already shown at: " + aPosition.toSource());
++    return promise.reject(null);
++  });
+ }
+ 
+ function navigateInHistory(aTarget, aDirection, aWaitForTargetEvent = "navigate") {
+   executeSoon(() => content.history[aDirection]());
+   return once(aTarget, aWaitForTargetEvent);
+ }
+ 
+ function navigate(aTarget, aUrl, aWaitForTargetEvent = "navigate") {
+diff --git a/toolkit/devtools/server/actors/webgl.js b/toolkit/devtools/server/actors/webgl.js
+index 5393e29..85a5898 100644
+--- a/toolkit/devtools/server/actors/webgl.js
++++ b/toolkit/devtools/server/actors/webgl.js
+@@ -2,19 +2,19 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ const events = require("sdk/event/core");
+ const protocol = require("devtools/server/protocol");
+ const { ContentObserver } = require("devtools/content-observer");
+-
+ const { on, once, off, emit } = events;
+ const { method, Arg, Option, RetVal } = protocol;
++const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ 
+ const WEBGL_CONTEXT_NAMES = ["webgl", "experimental-webgl", "moz-webgl"];
+ 
+ // These traits are bit masks. Make sure they're powers of 2.
+ const PROGRAM_DEFAULT_TRAITS = 0;
+ const PROGRAM_BLACKBOX_TRAIT = 1;
+ const PROGRAM_HIGHLIGHT_TRAIT = 2;
+ 
+@@ -297,16 +297,61 @@ let WebGLActor = exports.WebGLActor = protocol.ActorClass({
+   getPrograms: method(function() {
+     let id = ContentObserver.GetInnerWindowID(this.tabActor.window);
+     return this._programActorsCache.filter(e => e.ownerWindow == id);
+   }, {
+     response: { programs: RetVal("array:gl-program") }
+   }),
+ 
+   /**
++   * Waits for one frame via `requestAnimationFrame` on the tab actor's window.
++   * Used in tests.
++   */
++  waitForFrame: method(function () {
++    let deferred = promise.defer();
++    this.tabActor.window.requestAnimationFrame(deferred.resolve);
++    return deferred.promise;
++  }, {
++    response: { success: RetVal("nullable:json") }
++  }),
++
++  /**
++   * Gets a pixel's RGBA value from a context specified by window
++   * and canvas ID, and the coordinates of the pixel in question.
++   * Currently only used in tests.
++   *
++   * @param String selector
++   *        A string selector to select the canvas in question from the DOM.
++   * @param Object position
++   *        An object with an `x` and `y` property indicating coordinates of the pixel being inspected.
++   * @return Object
++   *        An object containing `r`, `g`, `b`, and `a` properties of the pixel.
++   */
++  getPixel: method(function ({ selector, position }) {
++    let { x, y } = position;
++    let canvas = this.tabActor.window.document.querySelector(selector);
++    let context = XPCNativeWrapper.unwrap(canvas.getContext("webgl"));
++    let { proxy } = this._webglObserver.for(context);
++    let height = canvas.height;
++
++    let buffer = new this.tabActor.window.Uint8Array(4);
++    buffer = XPCNativeWrapper.unwrap(buffer);
++
++    proxy.readPixels(x, height - y - 1, 1, 1, context.RGBA, context.UNSIGNED_BYTE, buffer);
++
++    return { r: buffer[0], g: buffer[1], b: buffer[2], a: buffer[3] };
++  }, {
++    request: {
++      selector: Option(0, "string"),
++      position: Option(0, "json")
++    },
++    response: { pixels: RetVal("json") }
++  }),
++
++  /**
+    * Events emitted by this actor. The "program-linked" event is fired
+    * every time a WebGL program was linked with its respective two shaders.
+    */
+   events: {
+     "program-linked": {
+       type: "programLinked",
+       program: Arg(0, "gl-program")
+     }
+@@ -1064,17 +1109,18 @@ function WebGLProxy(id, context, cache, observer) {
+   let exports = [
+     "isEnabled",
+     "getParameter",
+     "getAttachedShaders",
+     "getShaderSource",
+     "getShaderOfType",
+     "compileShader",
+     "enableHighlighting",
+-    "disableHighlighting"
++    "disableHighlighting",
++    "readPixels"
+   ];
+   exports.forEach(e => this[e] = (...args) => this._call(e, args));
+ }
+ 
+ WebGLProxy.prototype = {
+   _id: 0,
+   _gl: null,
+   _cache: null,
+@@ -1268,16 +1314,25 @@ WebGLProxy.prototype = {
+ 
+     gl[s[gl.BLEND] ? "enable" : "disable"](gl.BLEND);
+     gl.blendColor.apply(gl, s.blendColor);
+     gl.blendEquationSeparate(s.blendEquationRgb, s.blendEquationAlpha);
+     gl.blendFuncSeparate(s.blendSrcRgb, s.blendDstRgb, s.blendSrcAlpha, s.blendDstAlpha);
+   },
+ 
+   /**
++   * Returns the pixel values at the position specified on the canvas.
++   * Proxy for the contexts `readPixels` method:
++   * readPixels(int x, int y, int width, int height, long format, long type, ArrayBufferView pixels);
++   */
++  _readPixels: function(x, y, w, h, format, type, buffer) {
++    this._gl.readPixels(x, y, w, h, format, type, buffer);
++  },
++
++  /**
+    * The color tint used for highlighting geometry.
+    * @see _enableHighlighting and _disableHighlighting.
+    */
+   highlightTint: [0, 0, 0, 0],
+ 
+   /**
+    * Executes a function in this object.
+    *
+-- 
+1.8.4.2
+
