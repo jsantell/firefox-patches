@@ -1,33 +1,60 @@
-From 79ee1f925bfdca4cd4f87f080f93694727b0244a Mon Sep 17 00:00:00 2001
+From f2d2b6a80f39b2f8eb1891be792bda892010934c Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 7 Jul 2014 12:57:55 -0700
-Subject: [PATCH] Bug 1034295 - Make shader editor tests e10s compliant. r=vp
+Date: Fri, 18 Jul 2014 15:47:57 -0700
+Subject: Bug 1034295 - Get shader editor working with e10s. r=vp
 
 ---
+ browser/devtools/jar.mn                            |  1 +
  browser/devtools/shadereditor/test/browser.ini     |  2 +-
- .../test/browser_se_programs-blackbox-01.js        | 80 +++++++++++-----------
- .../test/browser_se_programs-blackbox-02.js        | 24 +++----
- .../test/browser_se_programs-highlight-01.js       | 48 ++++++-------
- .../test/browser_se_programs-highlight-02.js       | 16 ++---
+ .../shadereditor/test/browser_se_bfcache.js        |  4 +-
+ .../test/browser_se_programs-blackbox-01.js        | 80 ++++++++++----------
+ .../test/browser_se_programs-blackbox-02.js        | 24 +++---
+ .../test/browser_se_programs-highlight-01.js       | 48 ++++++------
+ .../test/browser_se_programs-highlight-02.js       | 16 ++--
  .../test/browser_se_shaders-edit-01.js             | 18 ++---
- .../test/browser_se_shaders-edit-02.js             |  8 +--
- .../test/browser_se_shaders-edit-03.js             | 16 ++---
- .../test/browser_webgl-actor-test-06.js            | 20 +++---
+ .../test/browser_se_shaders-edit-02.js             |  8 +-
+ .../test/browser_se_shaders-edit-03.js             | 16 ++--
+ .../test/browser_webgl-actor-test-06.js            | 20 ++---
  .../test/browser_webgl-actor-test-07.js            | 18 ++---
- .../test/browser_webgl-actor-test-08.js            |  8 +--
- .../test/browser_webgl-actor-test-09.js            | 16 ++---
- .../test/browser_webgl-actor-test-10.js            | 12 ++--
- .../test/browser_webgl-actor-test-13.js            | 32 ++++-----
- .../test/browser_webgl-actor-test-14.js            | 20 +++---
- .../test/browser_webgl-actor-test-15.js            | 44 ++++++------
- .../test/browser_webgl-actor-test-16.js            | 44 ++++++------
+ .../test/browser_webgl-actor-test-08.js            |  8 +-
+ .../test/browser_webgl-actor-test-09.js            | 16 ++--
+ .../test/browser_webgl-actor-test-10.js            | 12 +--
+ .../test/browser_webgl-actor-test-13.js            | 32 ++++----
+ .../test/browser_webgl-actor-test-14.js            | 20 ++---
+ .../test/browser_webgl-actor-test-15.js            | 47 ++++++------
+ .../test/browser_webgl-actor-test-16.js            | 83 +++++++++++---------
  .../test/browser_webgl-actor-test-17.js            | 30 ++++----
  .../test/browser_webgl-actor-test-18.js            | 22 ++++++
- browser/devtools/shadereditor/test/head.js         | 59 ++++------------
- toolkit/devtools/server/actors/webgl.js            | 59 +++++++++++++++-
- 21 files changed, 321 insertions(+), 275 deletions(-)
+ browser/devtools/shadereditor/test/head.js         | 83 ++++++++++----------
+ browser/devtools/shared/frame-script-utils.js      |  9 +++
+ toolkit/devtools/server/actors/webgl.js            | 88 ++++++++++++++++++++--
+ toolkit/devtools/server/main.js                    |  4 +-
+ 25 files changed, 414 insertions(+), 295 deletions(-)
  create mode 100644 browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js
+ create mode 100644 browser/devtools/shared/frame-script-utils.js
 
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 1712ccb..7235dfc 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -18,16 +18,17 @@ browser.jar:
+     content/browser/devtools/netmonitor-view.js                        (netmonitor/netmonitor-view.js)
+     content/browser/devtools/NetworkPanel.xhtml                        (webconsole/NetworkPanel.xhtml)
+     content/browser/devtools/webconsole.xul                            (webconsole/webconsole.xul)
+ *   content/browser/devtools/scratchpad.xul                            (scratchpad/scratchpad.xul)
+     content/browser/devtools/scratchpad.js                             (scratchpad/scratchpad.js)
+     content/browser/devtools/scratchpad-commands.js                    (scratchpad/scratchpad-commands.js)
+     content/browser/devtools/splitview.css                             (shared/splitview.css)
+     content/browser/devtools/theme-switching.js                        (shared/theme-switching.js)
++    content/browser/devtools/frame-script-utils.js                     (shared/frame-script-utils.js)
+     content/browser/devtools/styleeditor.xul                           (styleeditor/styleeditor.xul)
+     content/browser/devtools/styleeditor.css                           (styleeditor/styleeditor.css)
+     content/browser/devtools/computedview.xhtml                        (styleinspector/computedview.xhtml)
+     content/browser/devtools/cssruleview.xhtml                         (styleinspector/cssruleview.xhtml)
+     content/browser/devtools/ruleview.css                              (styleinspector/ruleview.css)
+     content/browser/devtools/layoutview/view.js                        (layoutview/view.js)
+     content/browser/devtools/layoutview/view.xhtml                     (layoutview/view.xhtml)
+     content/browser/devtools/layoutview/view.css                       (layoutview/view.css)
 diff --git a/browser/devtools/shadereditor/test/browser.ini b/browser/devtools/shadereditor/test/browser.ini
 index b6db425..5993210 100644
 --- a/browser/devtools/shadereditor/test/browser.ini
@@ -53,8 +80,35 @@ index b6db425..5993210 100644
  [browser_webgl-actor-test-16.js]
  [browser_webgl-actor-test-17.js]
 +[browser_webgl-actor-test-18.js]
+diff --git a/browser/devtools/shadereditor/test/browser_se_bfcache.js b/browser/devtools/shadereditor/test/browser_se_bfcache.js
+index 706f417..979d1e5 100644
+--- a/browser/devtools/shadereditor/test/browser_se_bfcache.js
++++ b/browser/devtools/shadereditor/test/browser_se_bfcache.js
+@@ -1,19 +1,21 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the shader editor works with bfcache.
+  */
+-
+ function ifWebGLSupported() {
+   let [target, debuggee, panel] = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, $, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
+ 
++  // Attach frame scripts if in e10s
++  loadFrameScripts();
++
+   let reloaded = reload(target);
+   let firstProgram = yield once(gFront, "program-linked");
+   yield reloaded;
+ 
+   let navigated = navigate(target, MULTIPLE_CONTEXTS_URL);
+   let [secondProgram, thirdProgram] = yield getPrograms(gFront, 2);
+   yield navigated;
+ 
 diff --git a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
-index b199cd1..e82af27 100644
+index cfce6e1..7fdba8d 100644
 --- a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
 +++ b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
 @@ -27,20 +27,20 @@ function ifWebGLSupported() {
@@ -122,7 +176,7 @@ index b199cd1..e82af27 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
    ok(true, "The second program was correctly blackboxed.");
  
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 0) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
@@ -134,8 +188,8 @@ index b199cd1..e82af27 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
    ok(true, "Highlighting shouldn't work while blackboxed (1).");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
@@ -147,7 +201,7 @@ index b199cd1..e82af27 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
    ok(true, "Highlighting shouldn't work while blackboxed (2).");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 0, a: 255 }, true, "#canvas2");
@@ -181,7 +235,7 @@ index b199cd1..e82af27 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
    ok(true, "The two programs were correctly unblackboxed.");
  
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 0) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
@@ -193,8 +247,8 @@ index b199cd1..e82af27 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
    ok(true, "The first program was correctly highlighted.");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
@@ -206,7 +260,7 @@ index b199cd1..e82af27 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
    ok(true, "The second program was correctly highlighted.");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
@@ -293,7 +347,7 @@ index 171c638..e1bb8b0 100644
  function getBlackBoxCheckbox(aPanel, aIndex) {
    return aPanel.panelWin.document.querySelectorAll(
 diff --git a/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js b/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js
-index 62085e9..e668462 100644
+index da9e11c..31f9985 100644
 --- a/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js
 +++ b/browser/devtools/shadereditor/test/browser_se_programs-highlight-01.js
 @@ -27,60 +27,60 @@ function ifWebGLSupported() {
@@ -314,7 +368,7 @@ index 62085e9..e668462 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
  
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 0) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 0, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
@@ -326,8 +380,8 @@ index 62085e9..e668462 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
    ok(true, "The first program was correctly highlighted.");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
@@ -339,7 +393,7 @@ index 62085e9..e668462 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 0, b: 64, a: 255 }, true, "#canvas2");
    ok(true, "The second program was correctly highlighted.");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
@@ -351,7 +405,7 @@ index 62085e9..e668462 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
    ok(true, "The two programs were correctly unhighlighted.");
  
-   ShadersListView._onProgramMouseEnter({ target: getBlackBoxCheckbox(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getBlackBoxCheckbox(panel, 0) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
@@ -363,7 +417,7 @@ index 62085e9..e668462 100644
 +  yield ensurePixelIs(gFront, { x: 127, y: 127 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
    ok(true, "The two programs were left unchanged after hovering a blackbox checkbox.");
  
-   ShadersListView._onProgramMouseLeave({ target: getBlackBoxCheckbox(panel, 0) });
+   ShadersListView._onProgramMouseOut({ target: getBlackBoxCheckbox(panel, 0) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 255, g: 255, b: 0, a: 255 }, true, "#canvas1");
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 0, g: 255, b: 255, a: 255 }, true, "#canvas2");
@@ -382,7 +436,7 @@ index 62085e9..e668462 100644
  function getItemLabel(aPanel, aIndex) {
    return aPanel.panelWin.document.querySelectorAll(
 diff --git a/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js b/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js
-index 84c5c40..e7b65ef 100644
+index 805151f..2d5c76e 100644
 --- a/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js
 +++ b/browser/devtools/shadereditor/test/browser_se_programs-highlight-02.js
 @@ -11,37 +11,37 @@ function ifWebGLSupported() {
@@ -400,7 +454,7 @@ index 84c5c40..e7b65ef 100644
 +  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
    ok(true, "The canvas was correctly drawn.");
  
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 0) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 0, b: 32, a: 255 }, true);
 -  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 0, b: 32, a: 127 }, true);
@@ -408,8 +462,8 @@ index 84c5c40..e7b65ef 100644
 +  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 0, g: 0, b: 32, a: 127 }, true);
    ok(true, "The first program was correctly highlighted.");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 0) });
-   ShadersListView._onProgramMouseEnter({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 0) });
+   ShadersListView._onProgramMouseOver({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
 -  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 255, g: 0, b: 64, a: 255 }, true);
@@ -417,7 +471,7 @@ index 84c5c40..e7b65ef 100644
 +  yield ensurePixelIs(gFront, { x: 64, y: 64 }, { r: 255, g: 0, b: 64, a: 255 }, true);
    ok(true, "The second program was correctly highlighted.");
  
-   ShadersListView._onProgramMouseLeave({ target: getItemLabel(panel, 1) });
+   ShadersListView._onProgramMouseOut({ target: getItemLabel(panel, 1) });
  
 -  yield ensurePixelIs(debuggee, { x: 0, y: 0 }, { r: 127, g: 127, b: 127, a: 255 }, true);
 -  yield ensurePixelIs(debuggee, { x: 64, y: 64 }, { r: 0, g: 127, b: 127, a: 127 }, true);
@@ -921,10 +975,30 @@ index 9585c1a..95ae1e0 100644
    finish();
  }
 diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
-index 3a39e83..ffc09b8 100644
+index 3a39e83..71132d5 100644
 --- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
 +++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
-@@ -74,56 +74,56 @@ function ifWebGLSupported() {
+@@ -4,16 +4,19 @@
+ /**
+  * Tests if program actors are cached when navigating in the bfcache.
+  */
+ 
+ function ifWebGLSupported() {
+   let [target, debuggee, front] = yield initBackend(SIMPLE_CANVAS_URL);
+   front.setup({ reload: false });
+ 
++  // Attach frame scripts if in e10s
++  loadFrameScripts();
++
+   reload(target);
+   let firstProgram = yield once(front, "program-linked");
+   yield checkFirstCachedPrograms(firstProgram);
+   yield checkHighlightingInTheFirstPage(firstProgram);
+   ok(true, "The cached programs behave correctly before the navigation.");
+ 
+   navigate(target, MULTIPLE_CONTEXTS_URL);
+   let [secondProgram, thirdProgram] = yield getPrograms(front, 2);
+@@ -74,56 +77,56 @@ function ifWebGLSupported() {
          "The old program actor is not equal to the new first program actor.");
        isnot(newProgramActors[1], oldProgramActor,
          "The old program actor is not equal to the new second program actor.");
@@ -1004,10 +1078,102 @@ index 3a39e83..ffc09b8 100644
    }
  }
 diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
-index 50bfc0b..2172914 100644
+index 50bfc0b..227f3ac 100644
 --- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
 +++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
-@@ -73,56 +73,56 @@ function ifWebGLSupported() {
+@@ -5,124 +5,133 @@
+  * Tests if program actors are invalidated from the cache when a window is
+  * removed from the bfcache.
+  */
+ 
+ function ifWebGLSupported() {
+   let [target, debuggee, front] = yield initBackend(SIMPLE_CANVAS_URL);
+   front.setup({ reload: false });
+ 
++  // Attach frame scripts if in e10s
++  loadFrameScripts();
++
+   // 0. Perform the initial reload.
+ 
+   reload(target);
+   let firstProgram = yield once(front, "program-linked");
+   let programs = yield front.getPrograms();
+   is(programs.length, 1,
+     "The first program should be returned by a call to getPrograms().");
+   is(programs[0], firstProgram,
+     "The first programs was correctly retrieved from the cache.");
+ 
++  let allPrograms = yield front._getAllPrograms();
++  is(allPrograms.length, 1,
++    "Should be only one program in cache.");
++
+   // 1. Perform a simple navigation.
+ 
+   navigate(target, MULTIPLE_CONTEXTS_URL);
+   let [secondProgram, thirdProgram] = yield getPrograms(front, 2);
+   let programs = yield front.getPrograms();
+   is(programs.length, 2,
+     "The second and third programs should be returned by a call to getPrograms().");
+   is(programs[0], secondProgram,
+     "The second programs was correctly retrieved from the cache.");
+   is(programs[1], thirdProgram,
+     "The third programs was correctly retrieved from the cache.");
+ 
++  allPrograms = yield front._getAllPrograms();
++  is(allPrograms.length, 3,
++    "Should be three programs in cache.");
++
+   // 2. Perform a bfcache navigation.
+ 
+   yield navigateInHistory(target, "back");
+-  let globalDestroyed = observe("inner-window-destroyed");
+-  let globalCreated = observe("content-document-global-created");
++  let globalDestroyed = once(front, "global-created");
++  let globalCreated = once(front, "global-destroyed");
++  let programsLinked = once(front, "program-linked");
+   reload(target);
+ 
+-  yield globalDestroyed;
+-  let programs = yield front.getPrograms();
+-  is(programs.length, 0,
+-    "There should be no cached program actors yet.");
++  yield promise.all([programsLinked, globalDestroyed, globalCreated]);
++  allPrograms = yield front._getAllPrograms();
++  is(allPrograms.length, 3,
++    "Should be 3 programs total in cache.");
+ 
+-  yield globalCreated;
+   let programs = yield front.getPrograms();
+   is(programs.length, 1,
+     "There should be 1 cached program actor now.");
+ 
+   yield checkHighlightingInTheFirstPage(programs[0]);
+   ok(true, "The cached programs behave correctly after navigating back and reloading.");
+ 
+   // 3. Perform a bfcache navigation and a page reload.
+ 
+   yield navigateInHistory(target, "forward");
+-  let globalDestroyed = observe("inner-window-destroyed");
+-  let globalCreated = observe("content-document-global-created");
++
++  let globalDestroyed = once(front, "global-created");
++  let globalCreated = once(front, "global-destroyed");
++  let programsLinked = getPrograms(front, 2);
++
+   reload(target);
+ 
+-  yield globalDestroyed;
+-  let programs = yield front.getPrograms();
+-  is(programs.length, 0,
+-    "There should be no cached program actors yet.");
++  yield promise.all([programsLinked, globalDestroyed, globalCreated]);
+ 
+-  yield getPrograms(front, 2);
+-  yield globalCreated;
+   let programs = yield front.getPrograms();
+   is(programs.length, 2,
+     "There should be 2 cached program actors now.");
+ 
    yield checkHighlightingInTheSecondPage(programs[0], programs[1]);
    ok(true, "The cached programs behave correctly after navigating forward and reloading.");
  
@@ -1175,10 +1341,61 @@ index 0000000..77752aa
 +  finish();
 +}
 diff --git a/browser/devtools/shadereditor/test/head.js b/browser/devtools/shadereditor/test/head.js
-index cbd613a..98b0a4e 100644
+index cbd613a..858b7e1 100644
 --- a/browser/devtools/shadereditor/test/head.js
 +++ b/browser/devtools/shadereditor/test/head.js
-@@ -157,74 +157,43 @@ function observe(aNotificationName, aOwnsWeak = false) {
+@@ -16,17 +16,19 @@ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
+ let { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.jsm", {});
+ 
+ let { WebGLFront } = devtools.require("devtools/server/actors/webgl");
+ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
++let mm = null;
+ 
++const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/shadereditor/test/";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
+ const SHADER_ORDER_URL = EXAMPLE_URL + "doc_shader-order.html";
+ const MULTIPLE_CONTEXTS_URL = EXAMPLE_URL + "doc_multiple-contexts.html";
+ const OVERLAPPING_GEOMETRY_CANVAS_URL = EXAMPLE_URL + "doc_overlapping-geometry.html";
+ const BLENDED_GEOMETRY_CANVAS_URL = EXAMPLE_URL + "doc_blended-geometry.html";
+ 
+ // All tests are asynchronous.
+@@ -40,16 +42,30 @@ registerCleanupFunction(() => {
+   Services.prefs.setBoolPref("devtools.shadereditor.enabled", gToolEnabled);
+ 
+   // These tests use a lot of memory due to GL contexts, so force a GC to help
+   // fragmentation.
+   info("Forcing GC after shadereditor test.");
+   Cu.forceGC();
+ });
+ 
++/**
++ * Call manually in tests that use frame script utils after initializing
++ * the shader editor. Must be called after initializing so we can detect
++ * whether or not `content` is a CPOW or not. Call after init but before navigating
++ * to different pages, as bfcache and thus shader caching gets really strange if
++ * frame script attached in the middle of the test.
++ */
++function loadFrameScripts () {
++  if (Cu.isCrossProcessWrapper(content)) {
++    mm = gBrowser.selectedBrowser.messageManager;
++    mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
++  }
++}
++
+ function addTab(aUrl, aWindow) {
+   info("Adding tab: " + aUrl);
+ 
+   let deferred = promise.defer();
+   let targetWindow = aWindow || window;
+   let targetBrowser = targetWindow.gBrowser;
+ 
+   targetWindow.focus();
+@@ -157,78 +173,55 @@ function observe(aNotificationName, aOwnsWeak = false) {
    Services.obs.addObserver(function onNotification(...aArgs) {
      Services.obs.removeObserver(onNotification, aNotificationName);
      deferred.resolve.apply(deferred, aArgs);
@@ -1224,51 +1441,78 @@ index cbd613a..98b0a4e 100644
 -  let { x, y } = aPosition;
 -  let buffer = new aDebuggee.Uint8Array(4);
 -  gl.readPixels(x, height - y - 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buffer);
--
--  let pixel = { r: buffer[0], g: buffer[1], b: buffer[2], a: buffer[3] };
-+function ensurePixelIs (front, aPosition, aColor, aWaitFlag = false, aSelector = "canvas") {
++function ensurePixelIs (aFront, aPosition, aColor, aWaitFlag = false, aSelector = "canvas") {
 +  return Task.spawn(function*() {
-+    let pixel = yield front.getPixel({ selector: aSelector, position: aPosition });
++    let pixel = yield aFront.getPixel({ selector: aSelector, position: aPosition });
 +    if (isApproxColor(pixel, aColor)) {
 +      ok(true, "Expected pixel is shown at: " + aPosition.toSource());
 +      return;
 +    }
  
+-  let pixel = { r: buffer[0], g: buffer[1], b: buffer[2], a: buffer[3] };
++    if (aWaitFlag) {
++      yield aFront.waitForFrame();
++      return ensurePixelIs(aFront, aPosition, aColor, aWaitFlag, aSelector);
++    }
+ 
 -  info("Retrieved pixel: " + pixel.toSource() + " at " + aPosition.toSource());
 -  return pixel;
--}
-+    if (aWaitFlag) {
-+      yield front.waitForFrame();
-+      return ensurePixelIs(front, aPosition, aColor, aWaitFlag, aSelector);
-+    }
++    ok(false, "Expected pixel was not already shown at: " + aPosition.toSource());
++    throw new Error("Expected pixel was not already shown at: " + aPosition.toSource());
++  });
+ }
  
 -function ensurePixelIs(aDebuggee, aPosition, aColor, aWaitFlag = false, aSelector = "canvas") {
 -  let pixel = getPixel(aDebuggee, aPosition, aSelector);
 -  if (isApproxColor(pixel, aColor)) {
 -    ok(true, "Expected pixel is shown at: " + aPosition.toSource());
 -    return promise.resolve(null);
--  }
++function navigateInHistory(aTarget, aDirection, aWaitForTargetEvent = "navigate") {
++  if (Cu.isCrossProcessWrapper(content)) {
++    if (!mm) {
++      throw new Error("`loadFrameScripts()` must be called before attempting to navigate in e10s.");
++    }
++    mm.sendAsyncMessage("devtools:test:history", { direction: aDirection });
+   }
 -  if (aWaitFlag) {
 -    return Task.spawn(function() {
 -      yield waitForFrame(aDebuggee);
 -      yield ensurePixelIs(aDebuggee, aPosition, aColor, aWaitFlag, aSelector);
 -    });
--  }
++  else {
++    executeSoon(() => content.history[aDirection]());
+   }
 -  ok(false, "Expected pixel was not already shown at: " + aPosition.toSource());
 -  return promise.reject(null);
-+    ok(false, "Expected pixel was not already shown at: " + aPosition.toSource());
-+    return promise.reject(null);
-+  });
- }
- 
- function navigateInHistory(aTarget, aDirection, aWaitForTargetEvent = "navigate") {
-   executeSoon(() => content.history[aDirection]());
+-}
+-
+-function navigateInHistory(aTarget, aDirection, aWaitForTargetEvent = "navigate") {
+-  executeSoon(() => content.history[aDirection]());
    return once(aTarget, aWaitForTargetEvent);
  }
  
  function navigate(aTarget, aUrl, aWaitForTargetEvent = "navigate") {
+   executeSoon(() => aTarget.activeTab.navigateTo(aUrl));
+   return once(aTarget, aWaitForTargetEvent);
+ }
+ 
+diff --git a/browser/devtools/shared/frame-script-utils.js b/browser/devtools/shared/frame-script-utils.js
+new file mode 100644
+index 0000000..b5858532
+--- /dev/null
++++ b/browser/devtools/shared/frame-script-utils.js
+@@ -0,0 +1,9 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++addMessageListener("devtools:test:history", function ({ data }) {
++  content.history[data.direction]();
++});
 diff --git a/toolkit/devtools/server/actors/webgl.js b/toolkit/devtools/server/actors/webgl.js
-index 5393e29..85a5898 100644
+index d2edaa8..7db50f6 100644
 --- a/toolkit/devtools/server/actors/webgl.js
 +++ b/toolkit/devtools/server/actors/webgl.js
 @@ -2,19 +2,19 @@
@@ -1292,7 +1536,7 @@ index 5393e29..85a5898 100644
  const PROGRAM_BLACKBOX_TRAIT = 1;
  const PROGRAM_HIGHLIGHT_TRAIT = 2;
  
-@@ -297,16 +297,61 @@ let WebGLActor = exports.WebGLActor = protocol.ActorClass({
+@@ -297,39 +297,106 @@ let WebGLActor = exports.WebGLActor = protocol.ActorClass({
    getPrograms: method(function() {
      let id = ContentObserver.GetInnerWindowID(this.tabActor.window);
      return this._programActorsCache.filter(e => e.ownerWindow == id);
@@ -1313,11 +1557,11 @@ index 5393e29..85a5898 100644
 +  }),
 +
 +  /**
-+   * Gets a pixel's RGBA value from a context specified by window
-+   * and canvas ID, and the coordinates of the pixel in question.
++   * Gets a pixel's RGBA value from a context specified by selector
++   * and the coordinates of the pixel in question.
 +   * Currently only used in tests.
 +   *
-+   * @param String selector
++   * @param string selector
 +   *        A string selector to select the canvas in question from the DOM.
 +   * @param Object position
 +   *        An object with an `x` and `y` property indicating coordinates of the pixel being inspected.
@@ -1353,8 +1597,53 @@ index 5393e29..85a5898 100644
      "program-linked": {
        type: "programLinked",
        program: Arg(0, "gl-program")
++    },
++    "global-destroyed": {
++      type: "globalDestroyed",
++      program: Arg(0, "number")
++    },
++    "global-created": {
++      type: "globalCreated",
++      program: Arg(0, "number")
      }
-@@ -1064,17 +1109,18 @@ function WebGLProxy(id, context, cache, observer) {
+   },
+ 
+   /**
++   * Gets an array of all cached program actors belonging to all windows.
++   * This should only be used for tests.
++   */
++  _getAllPrograms: method(function() {
++    return this._programActorsCache;
++  }, {
++    response: { programs: RetVal("array:gl-program") }
++  }),
++
++
++  /**
+    * Invoked whenever the current tab actor's document global is created.
+    */
+   _onGlobalCreated: function(window) {
++    let id = ContentObserver.GetInnerWindowID(window);
+     WebGLInstrumenter.handle(window, this._webglObserver);
++    events.emit(this, "global-created", id);
+   },
+ 
+   /**
+    * Invoked whenever the current tab actor's inner window is destroyed.
+    */
+   _onGlobalDestroyed: function(id) {
+     removeFromArray(this._programActorsCache, e => e.ownerWindow == id);
+     this._webglObserver.unregisterContextsForWindow(id);
++    events.emit(this, "global-destroyed", id);
+   },
+ 
+   /**
+    * Invoked whenever an observed WebGL context links a program.
+    */
+   _onProgramLinked: function(...args) {
+     let programActor = new ProgramActor(this.conn, args);
+     this._programActorsCache.push(programActor);
+@@ -1063,17 +1130,18 @@ function WebGLProxy(id, context, cache, observer) {
    let exports = [
      "isEnabled",
      "getParameter",
@@ -1374,7 +1663,7 @@ index 5393e29..85a5898 100644
    _id: 0,
    _gl: null,
    _cache: null,
-@@ -1268,16 +1314,25 @@ WebGLProxy.prototype = {
+@@ -1267,16 +1335,23 @@ WebGLProxy.prototype = {
  
      gl[s[gl.BLEND] ? "enable" : "disable"](gl.BLEND);
      gl.blendColor.apply(gl, s.blendColor);
@@ -1384,8 +1673,6 @@ index 5393e29..85a5898 100644
  
    /**
 +   * Returns the pixel values at the position specified on the canvas.
-+   * Proxy for the contexts `readPixels` method:
-+   * readPixels(int x, int y, int width, int height, long format, long type, ArrayBufferView pixels);
 +   */
 +  _readPixels: function(x, y, w, h, format, type, buffer) {
 +    this._gl.readPixels(x, y, w, h, format, type, buffer);
@@ -1400,6 +1687,69 @@ index 5393e29..85a5898 100644
    /**
     * Executes a function in this object.
     *
+@@ -1307,14 +1382,17 @@ function removeFromMap(map, predicate) {
+   for (let [key, value] of map) {
+     if (predicate(value)) {
+       map.delete(key);
+     }
+   }
+ };
+ 
+ function removeFromArray(array, predicate) {
+-  for (let value of array) {
+-    if (predicate(value)) {
+-      array.splice(array.indexOf(value), 1);
++  for (let i = 0; i < array.length;) {
++    if (predicate(array[i])) {
++      array.splice(i, 1);
++    }
++    else {
++      i++;
+     }
+   }
+ }
+diff --git a/toolkit/devtools/server/main.js b/toolkit/devtools/server/main.js
+index a36b583..2199eac 100644
+--- a/toolkit/devtools/server/main.js
++++ b/toolkit/devtools/server/main.js
+@@ -597,16 +597,19 @@ var DebuggerServer = {
+       if (subject == mm) {
+         Services.obs.removeObserver(onMessageManagerDisconnect, topic);
+         if (childTransport) {
+           // If we have a child transport, the actor has already
+           // been created. We need to stop using this message manager.
+           childTransport.close();
+           childTransport = null;
+           aConnection.cancelForwarding(prefix);
++
++          // ... and notify the child process to clean the tab actors.
++          mm.sendAsyncMessage("debug:disconnect");
+         } else {
+           // Otherwise, the app has been closed before the actor
+           // had a chance to be created, so we are not able to create
+           // the actor.
+           deferred.resolve(null);
+         }
+         if (actor) {
+           // The ContentActor within the child process doesn't necessary
+@@ -635,17 +638,16 @@ var DebuggerServer = {
+         // ChildDebuggerTransport...
+         childTransport.close();
+         childTransport = null;
+         aConnection.cancelForwarding(prefix);
+ 
+         // ... and notify the child process to clean the tab actors.
+         mm.sendAsyncMessage("debug:disconnect");
+       }
+-      Services.obs.removeObserver(onMessageManagerDisconnect, "message-manager-disconnect");
+     });
+ 
+     mm.sendAsyncMessage("debug:connect", { prefix: prefix });
+ 
+     return deferred.promise;
+   },
+ 
+   /**
 -- 
 1.8.4.2
 
