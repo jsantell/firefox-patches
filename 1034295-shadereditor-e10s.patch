@@ -1,12 +1,12 @@
-From f2d2b6a80f39b2f8eb1891be792bda892010934c Mon Sep 17 00:00:00 2001
+From f05d20879e6460f386916490d96ba9db83c73ee0 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Fri, 18 Jul 2014 15:47:57 -0700
-Subject: Bug 1034295 - Get shader editor working with e10s. r=vp
+Date: Fri, 25 Jul 2014 10:45:36 -0700
+Subject: Bug 1034295 - Add e10s support to shader editor, r=vp, r=jryans
 
 ---
  browser/devtools/jar.mn                            |  1 +
  browser/devtools/shadereditor/test/browser.ini     |  2 +-
- .../shadereditor/test/browser_se_bfcache.js        |  4 +-
+ .../shadereditor/test/browser_se_bfcache.js        |  5 +-
  .../test/browser_se_programs-blackbox-01.js        | 80 ++++++++++----------
  .../test/browser_se_programs-blackbox-02.js        | 24 +++---
  .../test/browser_se_programs-highlight-01.js       | 48 ++++++------
@@ -21,20 +21,20 @@ Subject: Bug 1034295 - Get shader editor working with e10s. r=vp
  .../test/browser_webgl-actor-test-10.js            | 12 +--
  .../test/browser_webgl-actor-test-13.js            | 32 ++++----
  .../test/browser_webgl-actor-test-14.js            | 20 ++---
- .../test/browser_webgl-actor-test-15.js            | 47 ++++++------
- .../test/browser_webgl-actor-test-16.js            | 83 +++++++++++---------
+ .../test/browser_webgl-actor-test-15.js            | 48 ++++++------
+ .../test/browser_webgl-actor-test-16.js            | 87 +++++++++++++---------
  .../test/browser_webgl-actor-test-17.js            | 30 ++++----
- .../test/browser_webgl-actor-test-18.js            | 22 ++++++
- browser/devtools/shadereditor/test/head.js         | 83 ++++++++++----------
+ .../test/browser_webgl-actor-test-18.js            | 28 +++++++
+ browser/devtools/shadereditor/test/head.js         | 83 ++++++++++-----------
  browser/devtools/shared/frame-script-utils.js      |  9 +++
- toolkit/devtools/server/actors/webgl.js            | 88 ++++++++++++++++++++--
+ toolkit/devtools/server/actors/webgl.js            | 87 ++++++++++++++++++++--
  toolkit/devtools/server/main.js                    |  4 +-
- 25 files changed, 414 insertions(+), 295 deletions(-)
+ 25 files changed, 425 insertions(+), 295 deletions(-)
  create mode 100644 browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js
  create mode 100644 browser/devtools/shared/frame-script-utils.js
 
 diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
-index 1712ccb..7235dfc 100644
+index a25e815..2f0b134 100644
 --- a/browser/devtools/jar.mn
 +++ b/browser/devtools/jar.mn
 @@ -18,16 +18,17 @@ browser.jar:
@@ -81,10 +81,10 @@ index b6db425..5993210 100644
  [browser_webgl-actor-test-17.js]
 +[browser_webgl-actor-test-18.js]
 diff --git a/browser/devtools/shadereditor/test/browser_se_bfcache.js b/browser/devtools/shadereditor/test/browser_se_bfcache.js
-index 706f417..979d1e5 100644
+index 706f417..012a9d2 100644
 --- a/browser/devtools/shadereditor/test/browser_se_bfcache.js
 +++ b/browser/devtools/shadereditor/test/browser_se_bfcache.js
-@@ -1,19 +1,21 @@
+@@ -1,19 +1,22 @@
  /* Any copyright is dedicated to the Public Domain.
     http://creativecommons.org/publicdomain/zero/1.0/ */
  
@@ -96,7 +96,8 @@ index 706f417..979d1e5 100644
    let [target, debuggee, panel] = yield initShaderEditor(SIMPLE_CANVAS_URL);
    let { gFront, $, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
  
-+  // Attach frame scripts if in e10s
++  // Attach frame scripts if in e10s to perform
++  // history navigation via the content
 +  loadFrameScripts();
 +
    let reloaded = reload(target);
@@ -975,10 +976,10 @@ index 9585c1a..95ae1e0 100644
    finish();
  }
 diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
-index 3a39e83..71132d5 100644
+index 3a39e83..4a1fd62 100644
 --- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
 +++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-15.js
-@@ -4,16 +4,19 @@
+@@ -4,16 +4,20 @@
  /**
   * Tests if program actors are cached when navigating in the bfcache.
   */
@@ -987,7 +988,8 @@ index 3a39e83..71132d5 100644
    let [target, debuggee, front] = yield initBackend(SIMPLE_CANVAS_URL);
    front.setup({ reload: false });
  
-+  // Attach frame scripts if in e10s
++  // Attach frame scripts if in e10s to perform
++  // history navigation via the content
 +  loadFrameScripts();
 +
    reload(target);
@@ -998,7 +1000,7 @@ index 3a39e83..71132d5 100644
  
    navigate(target, MULTIPLE_CONTEXTS_URL);
    let [secondProgram, thirdProgram] = yield getPrograms(front, 2);
-@@ -74,56 +77,56 @@ function ifWebGLSupported() {
+@@ -74,56 +78,56 @@ function ifWebGLSupported() {
          "The old program actor is not equal to the new first program actor.");
        isnot(newProgramActors[1], oldProgramActor,
          "The old program actor is not equal to the new second program actor.");
@@ -1078,10 +1080,10 @@ index 3a39e83..71132d5 100644
    }
  }
 diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
-index 50bfc0b..227f3ac 100644
+index 50bfc0b..85ebc77 100644
 --- a/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
 +++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-16.js
-@@ -5,124 +5,133 @@
+@@ -5,124 +5,137 @@
   * Tests if program actors are invalidated from the cache when a window is
   * removed from the bfcache.
   */
@@ -1090,7 +1092,8 @@ index 50bfc0b..227f3ac 100644
    let [target, debuggee, front] = yield initBackend(SIMPLE_CANVAS_URL);
    front.setup({ reload: false });
  
-+  // Attach frame scripts if in e10s
++  // Attach frame scripts if in e10s to perform
++  // history navigation via the content
 +  loadFrameScripts();
 +
    // 0. Perform the initial reload.
@@ -1119,7 +1122,7 @@ index 50bfc0b..227f3ac 100644
    is(programs[1], thirdProgram,
      "The third programs was correctly retrieved from the cache.");
  
-+  allPrograms = yield front._getAllPrograms();
++  let allPrograms = yield front._getAllPrograms();
 +  is(allPrograms.length, 3,
 +    "Should be three programs in cache.");
 +
@@ -1138,7 +1141,7 @@ index 50bfc0b..227f3ac 100644
 -  is(programs.length, 0,
 -    "There should be no cached program actors yet.");
 +  yield promise.all([programsLinked, globalDestroyed, globalCreated]);
-+  allPrograms = yield front._getAllPrograms();
++  let allPrograms = yield front._getAllPrograms();
 +  is(allPrograms.length, 3,
 +    "Should be 3 programs total in cache.");
  
@@ -1167,6 +1170,9 @@ index 50bfc0b..227f3ac 100644
 -  is(programs.length, 0,
 -    "There should be no cached program actors yet.");
 +  yield promise.all([programsLinked, globalDestroyed, globalCreated]);
++  let allPrograms = yield front._getAllPrograms();
++  is(allPrograms.length, 3,
++    "Should be 3 programs total in cache.");
  
 -  yield getPrograms(front, 2);
 -  yield globalCreated;
@@ -1314,10 +1320,10 @@ index 07d979f..eeb003d 100644
  }
 diff --git a/browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js b/browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js
 new file mode 100644
-index 0000000..77752aa
+index 0000000..6da7e3d
 --- /dev/null
 +++ b/browser/devtools/shadereditor/test/browser_webgl-actor-test-18.js
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,28 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -1332,10 +1338,16 @@ index 0000000..77752aa
 +  yield getPrograms(front, 2);
 +
 +  let pixel = yield front.getPixel({ selector: "#canvas1", position: { x: 0, y: 0 }});
-+  is(pixel.r, 255, "correct `r` value.")
-+  is(pixel.g, 255, "correct `g` value.")
-+  is(pixel.b, 0, "correct `b` value.")
-+  is(pixel.a, 255, "correct `a` value.")
++  is(pixel.r, 255, "correct `r` value for first canvas.")
++  is(pixel.g, 255, "correct `g` value for first canvas.")
++  is(pixel.b, 0, "correct `b` value for first canvas.")
++  is(pixel.a, 255, "correct `a` value for first canvas.")
++
++  let pixel = yield front.getPixel({ selector: "#canvas2", position: { x: 0, y: 0 }});
++  is(pixel.r, 0, "correct `r` value for second canvas.")
++  is(pixel.g, 255, "correct `g` value for second canvas.")
++  is(pixel.b, 255, "correct `b` value for second canvas.")
++  is(pixel.a, 255, "correct `a` value for second canvas.")
 +
 +  yield removeTab(target.tab);
 +  finish();
@@ -1512,30 +1524,29 @@ index 0000000..b5858532
 +  content.history[data.direction]();
 +});
 diff --git a/toolkit/devtools/server/actors/webgl.js b/toolkit/devtools/server/actors/webgl.js
-index d2edaa8..7db50f6 100644
+index d2edaa8..c4b7c5c 100644
 --- a/toolkit/devtools/server/actors/webgl.js
 +++ b/toolkit/devtools/server/actors/webgl.js
-@@ -2,19 +2,19 @@
+@@ -1,18 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
  
  const {Cc, Ci, Cu, Cr} = require("chrome");
  const events = require("sdk/event/core");
++const promise = require("promise");
  const protocol = require("devtools/server/protocol");
  const { ContentObserver } = require("devtools/content-observer");
 -
  const { on, once, off, emit } = events;
  const { method, Arg, Option, RetVal } = protocol;
-+const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
  
  const WEBGL_CONTEXT_NAMES = ["webgl", "experimental-webgl", "moz-webgl"];
  
  // These traits are bit masks. Make sure they're powers of 2.
  const PROGRAM_DEFAULT_TRAITS = 0;
  const PROGRAM_BLACKBOX_TRAIT = 1;
- const PROGRAM_HIGHLIGHT_TRAIT = 2;
- 
 @@ -297,39 +297,106 @@ let WebGLActor = exports.WebGLActor = protocol.ActorClass({
    getPrograms: method(function() {
      let id = ContentObserver.GetInnerWindowID(this.tabActor.window);
@@ -1687,7 +1698,7 @@ index d2edaa8..7db50f6 100644
    /**
     * Executes a function in this object.
     *
-@@ -1307,14 +1382,17 @@ function removeFromMap(map, predicate) {
+@@ -1307,14 +1382,16 @@ function removeFromMap(map, predicate) {
    for (let [key, value] of map) {
      if (predicate(value)) {
        map.delete(key);
@@ -1702,14 +1713,13 @@ index d2edaa8..7db50f6 100644
 +  for (let i = 0; i < array.length;) {
 +    if (predicate(array[i])) {
 +      array.splice(i, 1);
-+    }
-+    else {
++    } else {
 +      i++;
      }
    }
  }
 diff --git a/toolkit/devtools/server/main.js b/toolkit/devtools/server/main.js
-index a36b583..2199eac 100644
+index 4db2389..e4aba73 100644
 --- a/toolkit/devtools/server/main.js
 +++ b/toolkit/devtools/server/main.js
 @@ -597,16 +597,19 @@ var DebuggerServer = {
