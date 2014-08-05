@@ -1,0 +1,843 @@
+From ee80c03a32f29651b37607b5507e6a6232c3d6f6 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 4 Aug 2014 17:51:16 -0700
+Subject: Bug 1025864 - Add observer updates when AudioParams change in the Web Audio Editor, r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |   3 +
+ .../test/browser_audionode-actor-change-param.js   |  54 +++++
+ .../browser_wa_properties-view-change-params.js    |  47 +++++
+ .../webaudioeditor/test/doc_change-param.html      |  28 +++
+ browser/devtools/webaudioeditor/test/head.js       |   1 +
+ .../webaudioeditor/webaudioeditor-controller.js    |  49 ++++-
+ .../devtools/webaudioeditor/webaudioeditor-view.js |  19 +-
+ toolkit/devtools/server/actors/webaudio.js         | 225 ++++++++++++++++++---
+ 8 files changed, 396 insertions(+), 30 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-change-param.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_properties-view-change-params.js
+ create mode 100644 browser/devtools/webaudioeditor/test/doc_change-param.html
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 84dca5d..8dc943a 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -4,25 +4,27 @@ support-files =
+   doc_simple-context.html
+   doc_complex-context.html
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-toggle.html
+   doc_connect-param.html
++  doc_change-param.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-is-source.js]
++[browser_audionode-actor-change-param.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
+ [browser_webaudio-actor-connect-param.js]
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+@@ -41,9 +43,10 @@ support-files =
+ [browser_wa_inspector-toggle.js]
+ 
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-media-nodes.js]
+ # [browser_wa_properties-view-edit-01.js]
+ # [browser_wa_properties-view-edit-02.js]
+ # Disabled for too many intermittents bug 1010423
+ [browser_wa_properties-view-params.js]
++[browser_wa_properties-view-change-params.js]
+ [browser_wa_properties-view-params-objects.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-change-param.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-change-param.js
+new file mode 100644
+index 0000000..3c2b34b
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-change-param.js
+@@ -0,0 +1,54 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode `change-param` event and AudioNode#listenToParamChange()
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(CHANGE_PARAM_URL);
++  let [_, nodes] = yield Promise.all([
++    front.setup({ reload: true }),
++    getN(front, "create-node", 3)
++  ]);
++
++  let osc = nodes[1];
++  let gain = nodes[2];
++
++  let oscChange = 0;
++  let gainChange = 0;
++
++  yield osc.listenToParamChange(true, 20);
++
++  gain.on("change-param", onGainChange);
++  osc.on("change-param", onOscChange);
++
++  yield getN(osc, "change-param", 3);
++  yield osc.listenToParamChange(false);
++
++  let currentOscChange = oscChange;
++
++  // Be flexible here incase we get an extra counter before the listener is turned off
++  ok(oscChange >= 3, "Calling `listenToParamChange` should allow node to emit `change-param`.");
++  is(gainChange, 0, "node should not emit `change-param` when `listenToParamChange` has not been called.");
++
++  yield wait(100);
++
++  is(oscChange, currentOscChange, "Calling `listenToParamChange(false)` should turn off the listener.");
++
++  gain.off("change-param", onGainChange);
++  osc.off("change-param", onOscChange);
++
++  yield removeTab(target.tab);
++  finish();
++
++  function onOscChange ({ newValue, oldValue, param }) {
++    is(param, "detune", "correct `param` property in `change-param`.");
++    ok(newValue > oldValue, "correct `newValue` and `oldValue` in `change-param`");
++    oscChange++;
++  }
++
++  function onGainChange () {
++    gainChange++;
++  }
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-change-params.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-change-params.js
+new file mode 100644
+index 0000000..e4553ee
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-change-params.js
+@@ -0,0 +1,47 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that params view correctly updates changed parameters
++ * when source code updates them, as well as CHANGE_PARAM events.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(CHANGE_PARAM_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, WebAudioInspectorView } = panelWin;
++  let gVars = WebAudioInspectorView._propsView;
++
++  // Set parameter polling to 50ms for tests
++  panelWin.PARAM_POLLING_FREQUENCY = 50;
++
++  let started = once(gFront, "start-context");
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    getN(gFront, "create-node", 3),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  let oscId = actors[1].actorID;
++  let gainId = actors[2].actorID;
++
++  click(panelWin, findGraphNode(panelWin, gainId));
++  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++
++  // Yield twice so we get a diff
++  yield once(panelWin, EVENTS.CHANGE_PARAM);
++  let [[_, args]] = yield getSpread(panelWin, EVENTS.CHANGE_PARAM);
++  is(args.actorID, gainId, "EVENTS.CHANGE_PARAM has correct `actorID`");
++  ok(args.oldValue < args.newValue, "EVENTS.CHANGE_PARAM has correct `newValue` and `oldValue`");
++  is(args.param, "gain", "EVENTS.CHANGE_PARAM has correct `param`");
++
++  let [[_, args]] = yield getSpread(panelWin, EVENTS.CHANGE_PARAM);
++  checkVariableView(gVars, 0, { "gain": args.newValue }, "`gain` parameter updated.");
++  let [[_, args]] = yield getSpread(panelWin, EVENTS.CHANGE_PARAM);
++  checkVariableView(gVars, 0, { "gain": args.newValue }, "`gain` parameter updated.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_change-param.html b/browser/devtools/webaudioeditor/test/doc_change-param.html
+new file mode 100644
+index 0000000..3a45ea2
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_change-param.html
+@@ -0,0 +1,28 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++	  let gain = ctx.createGain();
++	  let detuneVal = 0;
++	  let gainVal = 0;
++      osc.connect(gain);
++      gain.connect(ctx.destination);
++	  setInterval(() => osc.detune.value = ++detuneVal, 10);
++	  setInterval(() => gain.gain.value = ++gainVal, 10);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index ec4aa4a..dce2507 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -24,16 +24,17 @@ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
+ const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
+ const DESTROY_NODES_URL = EXAMPLE_URL + "doc_destroy-nodes.html";
+ const CONNECT_TOGGLE_URL = EXAMPLE_URL + "doc_connect-toggle.html";
+ const CONNECT_PARAM_URL = EXAMPLE_URL + "doc_connect-param.html";
++const CHANGE_PARAM_URL = EXAMPLE_URL + "doc_change-param.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-controller.js b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+index b8a801f9..d94b5bc 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-controller.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-controller.js
+@@ -15,19 +15,20 @@ const { defer, all } = Cu.import("resource://gre/modules/Promise.jsm", {}).Promi
+ 
+ const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const STRINGS_URI = "chrome://browser/locale/devtools/webaudioeditor.properties"
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const Telemetry = require("devtools/shared/telemetry");
+ const telemetry = new Telemetry();
+-
+ let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ 
++let PARAM_POLLING_FREQUENCY = 1000;
++
+ // The panel's window global is an EventEmitter firing the following events:
+ const EVENTS = {
+   // Fired when the first AudioNode has been created, signifying
+   // that the AudioContext is being used and should be tracked via the editor.
+   START_CONTEXT: "WebAudioEditor:StartContext",
+ 
+   // On node creation, connect and disconnect.
+   CREATE_NODE: "WebAudioEditor:CreateNode",
+@@ -142,23 +143,28 @@ function shutdownWebAudioEditor() {
+     WebAudioInspectorView.destroy(),
+   ]);
+ }
+ 
+ /**
+  * Functions handling target-related lifetime events.
+  */
+ let WebAudioEditorController = {
++
++  _currentNode: null,
++
+   /**
+    * Listen for events emitted by the current tab target.
+    */
+   initialize: function() {
+     telemetry.toolOpened("webaudioeditor");
+     this._onTabNavigated = this._onTabNavigated.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
++    this._onSelectNode = this._onSelectNode.bind(this);
++    this._onChangeParam = this._onChangeParam.bind(this);
+     gTarget.on("will-navigate", this._onTabNavigated);
+     gTarget.on("navigate", this._onTabNavigated);
+     gFront.on("start-context", this._onStartContext);
+     gFront.on("create-node", this._onCreateNode);
+     gFront.on("connect-node", this._onConnectNode);
+     gFront.on("disconnect-node", this._onDisconnectNode);
+     gFront.on("change-param", this._onChangeParam);
+     gFront.on("destroy-node", this._onDestroyNode);
+@@ -168,16 +174,19 @@ let WebAudioEditorController = {
+     // with CSS
+     gDevTools.on("pref-changed", this._onThemeChange);
+ 
+     // Set up events to refresh the Graph view
+     window.on(EVENTS.CREATE_NODE, this._onUpdatedContext);
+     window.on(EVENTS.CONNECT_NODE, this._onUpdatedContext);
+     window.on(EVENTS.DISCONNECT_NODE, this._onUpdatedContext);
+     window.on(EVENTS.DESTROY_NODE, this._onUpdatedContext);
++
++    // Set up a controller for managing parameter changes per audio node
++    window.on(EVENTS.UI_SELECT_NODE, this._onSelectNode);
+   },
+ 
+   /**
+    * Remove events emitted by the current tab target.
+    */
+   destroy: function() {
+     telemetry.toolClosed("webaudioeditor");
+     gTarget.off("will-navigate", this._onTabNavigated);
+@@ -187,17 +196,24 @@ let WebAudioEditorController = {
+     gFront.off("connect-node", this._onConnectNode);
+     gFront.off("disconnect-node", this._onDisconnectNode);
+     gFront.off("change-param", this._onChangeParam);
+     gFront.off("destroy-node", this._onDestroyNode);
+     window.off(EVENTS.CREATE_NODE, this._onUpdatedContext);
+     window.off(EVENTS.CONNECT_NODE, this._onUpdatedContext);
+     window.off(EVENTS.DISCONNECT_NODE, this._onUpdatedContext);
+     window.off(EVENTS.DESTROY_NODE, this._onUpdatedContext);
++    window.off(EVENTS.UI_SELECT_NODE, this._onSelectNode);
+     gDevTools.off("pref-changed", this._onThemeChange);
++
++    // Stop listening on node for param changes if it exists.
++    if (this._currentNode) {
++      this._currentNode.actor.listenToParamChange(false);
++      this._currentNode.actor.off("change-param", this._onChangeParam);
++    }
+   },
+ 
+   /**
+    * Called when page is reloaded to show the reload notice and waiting
+    * for an audio context notice.
+    */
+   reset: function () {
+     $("#reload-notice").hidden = true;
+@@ -333,19 +349,44 @@ let WebAudioEditorController = {
+     let node = getViewNodeByActor(nodeActor);
+     node.disconnect();
+     window.emit(EVENTS.DISCONNECT_NODE, node.id);
+   },
+ 
+   /**
+    * Called when a node param is changed.
+    */
+-  _onChangeParam: function({ actor, param, value }) {
+-    window.emit(EVENTS.CHANGE_PARAM, getViewNodeByActor(actor), param, value);
+-  }
++  _onChangeParam: function (args) {
++    // Only emit if the node is still the current node
++    if (this._currentNode && this._currentNode.actor.actorID === args.actorID) {
++      window.emit(EVENTS.CHANGE_PARAM, args);
++    }
++  },
++
++  /**
++   * Called on UI_SELECT_NODE, used to manage
++   * `change-param` events on that node.
++   */
++  _onSelectNode: function (_, id) {
++    let node = getViewNodeById(id);
++
++    // Stop listening on previous node if it exists.
++    if (this._currentNode) {
++      this._currentNode.actor.listenToParamChange(false);
++      this._currentNode.actor.off("change-param", this._onChangeParam);
++    }
++
++    if (node && node.actor) {
++      node.actor.listenToParamChange(true, PARAM_POLLING_FREQUENCY);
++      node.actor.on("change-param", this._onChangeParam);
++      this._currentNode = node;
++    } else {
++      this._currentNode = null;
++    }
++  },
+ };
+ 
+ /**
+  * Convenient way of emitting events from the panel window.
+  */
+ EventEmitter.decorate(this);
+ 
+ /**
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor-view.js b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+index 124defe..95b5824 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor-view.js
++++ b/browser/devtools/webaudioeditor/webaudioeditor-view.js
+@@ -330,32 +330,35 @@ let WebAudioInspectorView = {
+     // Hide inspector view on startup
+     this._inspectorPane.setAttribute("width", INSPECTOR_WIDTH);
+     this.toggleInspector({ visible: false, delayed: false, animated: false });
+ 
+     this._onEval = this._onEval.bind(this);
+     this._onNodeSelect = this._onNodeSelect.bind(this);
+     this._onTogglePaneClick = this._onTogglePaneClick.bind(this);
+     this._onDestroyNode = this._onDestroyNode.bind(this);
++    this._onChangeParam = this._onChangeParam.bind(this);
+ 
+     this._inspectorPaneToggleButton.addEventListener("mousedown", this._onTogglePaneClick, false);
+     this._propsView = new VariablesView($("#properties-tabpanel-content"), GENERIC_VARIABLES_VIEW_SETTINGS);
+     this._propsView.eval = this._onEval;
+ 
+     window.on(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
+     window.on(EVENTS.DESTROY_NODE, this._onDestroyNode);
++    window.on(EVENTS.CHANGE_PARAM, this._onChangeParam);
+   },
+ 
+   /**
+    * Destruction function called when the tool cleans up.
+    */
+   destroy: function () {
+     this._inspectorPaneToggleButton.removeEventListener("mousedown", this._onTogglePaneClick);
+     window.off(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
+     window.off(EVENTS.DESTROY_NODE, this._onDestroyNode);
++    window.off(EVENTS.CHANGE_PARAM, this._onChangeParam);
+ 
+     this._inspectorPane = null;
+     this._inspectorPaneToggleButton = null;
+     this._tabsPane = null;
+   },
+ 
+   /**
+    * Toggles the visibility of the AudioNode Inspector.
+@@ -565,17 +568,31 @@ let WebAudioInspectorView = {
+   /**
+    * Called when `DESTROY_NODE` is fired to remove the node from props view if
+    * it's currently selected.
+    */
+   _onDestroyNode: function (_, id) {
+     if (this._currentNode && this._currentNode.id === id) {
+       this.setCurrentAudioNode(null);
+     }
+-  }
++  },
++
++  /**
++   * Called when `CHANGE_PARAM` is fired. We should ensure that this event is
++   * for the same node that is currently selected. We check the existence
++   * of each part of the scope to make sure that if this event was fired
++   * during a VariablesView rebuild, then we just ignore it.
++   */
++  _onChangeParam: function (_, { param, newValue, oldValue, actorID }) {
++    let scope = this._getAudioPropertiesScope();
++    if (!scope) return;
++    let property = scope.get(param);
++    if (!property) return;
++    property.setGrip(newValue);
++  },
+ };
+ 
+ /**
+  * Takes an element in an SVG graph and iterates over
+  * ancestors until it finds the graph node container. If not found,
+  * returns null.
+  */
+ 
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 4cea0f9..611a486 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -1,37 +1,42 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+-
+ const Services = require("Services");
+-
+ const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const events = require("sdk/event/core");
+ const { on: systemOn, off: systemOff } = require("sdk/system/events");
++const { setTimeout, clearTimeout } = require("sdk/timers");
+ const protocol = require("devtools/server/protocol");
+ const { CallWatcherActor, CallWatcherFront } = require("devtools/server/actors/call-watcher");
+ const { ThreadActor } = require("devtools/server/actors/script");
+-
+ const { on, once, off, emit } = events;
+ const { method, Arg, Option, RetVal } = protocol;
+ 
+ exports.register = function(handle) {
+   handle.addTabActor(WebAudioActor, "webaudioActor");
+   handle.addGlobalActor(WebAudioActor, "webaudioActor");
+ };
+ 
+ exports.unregister = function(handle) {
+   handle.removeTabActor(WebAudioActor);
+   handle.removeGlobalActor(WebAudioActor);
+ };
+ 
++// In milliseconds, how often should AudioNodes poll to see
++// if an AudioParam's value has changed to emit to the client.
++const PARAM_POLLING_FREQUENCY = 1000;
++
++const ListenerIntervals = new WeakMap();
++const PreviousParams = new WeakMap();
++
+ const AUDIO_GLOBALS = [
+   "AudioContext", "AudioNode"
+ ];
+ 
+ const NODE_CREATION_METHODS = [
+   "createBufferSource", "createMediaElementSource", "createMediaStreamSource",
+   "createMediaStreamDestination", "createScriptProcessor", "createAnalyser",
+   "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
+@@ -134,23 +139,32 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+     protocol.Actor.prototype.initialize.call(this, conn);
+ 
+     // Store ChromeOnly property `id` to identify AudioNode,
+     // rather than storing a strong reference, and store a weak
+     // ref to underlying node for controlling.
+     this.nativeID = node.id;
+     this.node = Cu.getWeakReference(node);
+ 
++    this._pollParams = this._pollParams.bind(this);
++    on(this, "check-params", this._pollParams);
++
+     try {
+       this.type = getConstructorName(node);
+     } catch (e) {
+       this.type = "";
+     }
+   },
+ 
++  destroy: function(conn) {
++    protocol.Actor.prototype.destroy.call(this, conn);
++    off(this, "check-params", this._pollParams);
++    this._cleanUpListeners();
++  },
++
+   /**
+    * Returns the name of the audio type.
+    * Examples: "OscillatorNode", "MediaElementAudioSourceNode"
+    */
+   getType: method(function () {
+     return this.type;
+   }, {
+     response: { type: RetVal("string") }
+@@ -182,16 +196,23 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+       return CollectedAudioNodeError();
+     }
+ 
+     try {
+       if (isAudioParam(node, param))
+         node[param].value = value;
+       else
+         node[param] = value;
++
++      // Update stored param values so we don't get a change event
++      // for this explicit assignment.
++      if (this.previousValues && this.previousValues[param]) {
++        this.previousValues[param] = value;
++      }
++
+       return undefined;
+     } catch (e) {
+       return constructError(e);
+     }
+   }, {
+     request: {
+       param: Arg(0, "string"),
+       value: Arg(1, "nullable:primitive")
+@@ -247,26 +268,133 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+   getParamFlags: method(function (param) {
+     return (NODE_PROPERTIES[this.type] || {})[param];
+   }, {
+     request: { param: Arg(0, "string") },
+     response: { flags: RetVal("nullable:primitive") }
+   }),
+ 
+   /**
+-   * Get an array of objects each containing a `param` and `value` property,
+-   * corresponding to a property name and current value of the audio node.
++   * Get an array of objects each containing a `param`, `value` and `flags` property,
++   * corresponding to a property name and current value of the audio node, and any
++   * associated flags as defined by NODE_PROPERTIES.
+    */
+-  getParams: method(function (param) {
++  getParams: method(function () {
+     let props = Object.keys(NODE_PROPERTIES[this.type]);
+     return props.map(prop =>
+       ({ param: prop, value: this.getParam(prop), flags: this.getParamFlags(prop) }));
+   }, {
+     response: { params: RetVal("json") }
+-  })
++  }),
++
++  /**
++   * Takes a boolean indicating whether or not this AudioNode should emit
++   * events when an AudioParam is changed. Front-end toggles this when node
++   * is in focused for performance reasons so that we're not polling on changes
++   * and sending data over protocol.js unnecessarily.
++   *
++   * `wait` is used in tests to specify the poll timer.
++   */
++  listenToParamChange: method(function (listen, wait) {
++    // Ignore if state isn't changed
++    if ((listen && this._listening) || (!listen && !this._listening)) {
++      return void 0;
++    } else if (!listen) {
++      this._disableParamListen();
++    } else {
++      this._enableParamListen(wait);
++    }
++  }, {
++    request: {
++      listen: Arg(0, "boolean"),
++      wait: Arg(1, "nullable:number"),
++    },
++    oneway: true
++  }),
++
++  /**
++   * Enables parameter polling. Should not be accessed publically, instead use
++   * `listenToParamChange(true, 1000)`.
++   */
++  _enableParamListen: function (wait) {
++    if (!this.isAlive()) {
++      this._disableParamListen();
++    }
++    this._listening = true;
++    
++    let interval = setTimeout(() => {
++      emit(this, "check-params", wait || PARAM_POLLING_FREQUENCY);
++    }, wait || PARAM_POLLING_FREQUENCY);
++
++    PreviousParams.set(this, mapAudioParams(this));
++    ListenerIntervals.set(this, interval);
++  },
++
++  _pollParams: function (wait) {
++    let prev = PreviousParams.get(this);
++    let current = mapAudioParams(this);
++      /*
++      // Check to ensure node is still alive
++      if (!this.isAlive()) {
++        this._disableParamListen();
++      }
++      */
++      /*
++
++      // Diff the two sets of audio parameters, and emit
++      // if there's been a change.
++      diffAudioParams(previous, current).forEach(args => {
++        // Merge in the actor ID into arguments so
++        // abstractions can track the origin of the event.
++        args.actorID = this.actorID;
++        emit(this, "change-param", args)
++      });
++
++      */
++    
++    let interval = setTimeout(() => emit(this, "check-params", wait), wait);
++    PreviousParams.set(this, current);
++    ListenerIntervals.set(this, interval);
++  },
++
++  /**
++   * Disables parameter polling. Should not be accessed publically, instead use
++   * `listenToParamChange(false)`.
++   */
++  _disableParamListen: function () {
++    this._cleanUpListeners();
++    this._listening = false;
++  },
++
++  /**
++   * Cleans up intervals created to poll the AudioParams and previously stored parameters.
++   * Used when disabling param polling and during destruction.
++   */
++  _cleanUpListeners: function () {
++    let interval = ListenerIntervals.get(this);
++    if (interval) {
++      clearTimeout(interval);
++      ListenerIntervals.delete(this);
++    }
++    PreviousParams.delete(this);
++  },
++
++  isAlive: function () {
++    return !!this.node.get();
++  },
++
++  events: {
++    "change-param": {
++      type: "changeParam",
++      param: Option(0, "string"),
++      newValue: Option(0, "nullable:json"),
++      oldValue: Option(0, "nullable:json"),
++      actorID: Option(0, "string")
++    }
++  }
+ });
+ 
+ /**
+  * The corresponding Front object for the AudioNodeActor.
+  */
+ let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
+   initialize: function (client, form) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+@@ -432,22 +560,16 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+       source: Arg(0, "audionode")
+     },
+     "connect-param": {
+       type: "connectParam",
+       source: Option(0, "audionode"),
+       dest: Option(0, "audionode"),
+       param: Option(0, "string")
+     },
+-    "change-param": {
+-      type: "changeParam",
+-      source: Option(0, "audionode"),
+-      param: Option(0, "string"),
+-      value: Option(0, "string")
+-    },
+     "create-node": {
+       type: "createNode",
+       source: Arg(0, "audionode")
+     },
+     "destroy-node": {
+       type: "destroyNode",
+       source: Arg(0, "audionode")
+     }
+@@ -488,16 +610,24 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+ 
+   /**
+    * Takes an AudioNode and returns the stored actor for it.
+    * In some cases, we won't have an actor stored (for example,
+    * connecting to an AudioDestinationNode, since it's implicitly
+    * created), so make a new actor and store that.
+    */
+   _getActorByNativeID: function (nativeID) {
++    // If the WebAudioActor has already been finalized, the `_nativeToActorID`
++    // map will already be destroyed -- the lingering destruction events
++    // seem to only occur in e10s, so add an extra check here to disregard
++    // these late events
++    if (!this._nativeToActorID) {
++      return null;
++    }
++
+     // Ensure we have a Number, rather than a string
+     // return via notification.
+     nativeID = ~~nativeID;
+ 
+     let actorID = this._nativeToActorID.get(nativeID);
+     let actor = actorID != null ? this.conn.getActor(actorID) : null;
+     return actor;
+   },
+@@ -539,28 +669,16 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+    * Called when an audio node is disconnected.
+    */
+   _onDisconnectNode: function (node) {
+     let actor = this._getActorByNativeID(node.id);
+     emit(this, "disconnect-node", actor);
+   },
+ 
+   /**
+-   * Called when a parameter changes on an audio node
+-   */
+-  _onParamChange: function (node, param, value) {
+-    let actor = this._getActorByNativeID(node.id);
+-    emit(this, "param-change", {
+-      source: actor,
+-      param: param,
+-      value: value
+-    });
+-  },
+-
+-  /**
+    * Called on node creation.
+    */
+   _onCreateNode: function (node) {
+     let actor = this._constructAudioNode(node);
+     emit(this, "create-node", actor);
+   },
+ 
+   /** Called when `webaudio-node-demise` is triggered,
+@@ -672,8 +790,65 @@ function createObjectGrip (value) {
+     type: "object",
+     preview: {
+       kind: "ObjectWithText",
+       text: ""
+     },
+     class: getConstructorName(value)
+   };
+ }
++
++/**
++ * Takes an AudioNodeActor and maps its current parameter values
++ * to a hash, where the property is the AudioParam name, and value
++ * is the current value.
++ */
++function mapAudioParams (node) {
++  return node.getParams().reduce(function (obj, p) {
++    obj[p.param] = p.value;
++    return obj;
++  }, {});
++}
++
++/**
++ * Takes an object of previous and current values of audio parameters,
++ * and compares them. If they differ, emit a `change-param` event.
++ *
++ * TODO better compare non-primitives.
++ *
++ * @param prev
++ *        Hash of previous set of AudioParam values.
++ * @param current
++ *        Hash of current set of AudioParam values.
++ */
++function diffAudioParams (prev, current) {
++  return Object.keys(current).reduce((changed, param) => {
++    if (!equalGrips(current[param], prev[param])) {
++      changed.push({
++        param: param,
++        oldValue: prev[param],
++        newValue: current[param]
++      });
++    }
++    return changed;
++  }, []);
++}
++
++function equalGrips (a, b) {
++  let aType = typeof a;
++  let bType = typeof b;
++  if (aType !== bType) {
++    return false;
++  } else if (aType === "object") {
++    // In this case, we are comparing two objects, like an ArrayBuffer or Float32Array,
++    // or even just plain "null"s (which grip's will have `type` property "null",
++    // and we have no way of showing more information than its class, so assume
++    // these are equal since nothing can be updated with information of value.
++    if (a.type === b.type) {
++      return true;
++    }
++    // Otherwise return false -- this could be a case of a property going from `null`
++    // to having an ArrayBuffer or an object, in which case we should update it.
++    return false;
++  } else {
++    return a === b;
++  }
++}
+-- 
+1.8.4.2
+
