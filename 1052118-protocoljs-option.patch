@@ -1,0 +1,126 @@
+From 72c4e8ef328966740e1f1584f19484c9c14f0112 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 11 Aug 2014 15:58:22 -0700
+Subject: Bug 1052118 - Allow protocol.js Option to allow falsy values through. r=dcamp
+
+---
+ toolkit/devtools/server/protocol.js                |  8 +++----
+ .../server/tests/unit/test_protocol_simple.js      | 26 ++++++++++++++++++++--
+ 2 files changed, 27 insertions(+), 7 deletions(-)
+
+diff --git a/toolkit/devtools/server/protocol.js b/toolkit/devtools/server/protocol.js
+index e329072..9176ee2 100644
+--- a/toolkit/devtools/server/protocol.js
++++ b/toolkit/devtools/server/protocol.js
+@@ -443,23 +443,21 @@ exports.Arg = Arg;
+  */
+ let Option = Class({
+   extends: Arg,
+   initialize: function(index, type) {
+     Arg.prototype.initialize.call(this, index, type)
+   },
+ 
+   write: function(arg, ctx, name) {
+-    if (!arg) {
+-      return undefined;
+-    }
+-    let v = arg[name] || undefined;
+-    if (v === undefined) {
++    // Ignore if arg is undefined or null; allow other falsy values
++    if (arg == undefined || arg[name] == undefined) {
+       return undefined;
+     }
++    let v = arg[name];
+     return this.type.write(v, ctx);
+   },
+   read: function(v, ctx, outArgs, name) {
+     if (outArgs[this.index] === undefined) {
+       outArgs[this.index] = {};
+     }
+     if (v === undefined) {
+       return;
+diff --git a/toolkit/devtools/server/tests/unit/test_protocol_simple.js b/toolkit/devtools/server/tests/unit/test_protocol_simple.js
+index 8bb6d28..264baf8 100644
+--- a/toolkit/devtools/server/tests/unit/test_protocol_simple.js
++++ b/toolkit/devtools/server/tests/unit/test_protocol_simple.js
+@@ -127,18 +127,28 @@ let RootActor = protocol.ActorClass({
+   testOneWay: method(function(a) {
+     // Emit to show that we got this message, because there won't be a response.
+     events.emit(this, "oneway", a);
+   }, {
+     request: { a: Arg(0) },
+     oneway: true
+   }),
+ 
++  emitFalsyOptions: method(function() {
++    events.emit(this, "falsyOptions", { zero: 0, farce: false });
++  }, {
++    oneway: true
++  }),
++
+   events: {
+-    "oneway": { a: Arg(0) }
++    "oneway": { a: Arg(0) },
++    "falsyOptions": {
++      zero: Option(0),
++      farce: Option(0)
++    }
+   }
+ });
+ 
+ let RootFront = protocol.FrontClass(RootActor, {
+   initialize: function(client) {
+     this.actorID = "root";
+     protocol.Front.prototype.initialize.call(this, client);
+     // Root owns itself.
+@@ -218,17 +228,17 @@ function run_test()
+       do_check_eq(ret.option2, 10);
+     }).then(() => {
+       return rootClient.optionArgs({});
+     }).then(ret => {
+       trace.expectSend({"type":"optionArgs","to":"<actorid>"});
+       trace.expectReceive({"from":"<actorid>"});
+       do_check_true(typeof(ret.option1) === "undefined");
+       do_check_true(typeof(ret.option2) === "undefined");
+-    }).then(ret => {
++    }).then(() => {
+       // Explicitly call an optional argument...
+       return rootClient.optionalArgs(5, 10);
+     }).then(ret => {
+       trace.expectSend({"type":"optionalArgs","a":5,"b":10,"to":"<actorid>"});
+       trace.expectReceive({"value":10,"from":"<actorid>"});
+       do_check_eq(ret, 10);
+     }).then(() => {
+       // Now don't pass the optional argument, expect the default.
+@@ -264,16 +274,28 @@ function run_test()
+         trace.expectReceive({"type":"oneway","a":"hello","from":"<actorid>"});
+ 
+         do_check_eq(response, "hello");
+         deferred.resolve();
+       });
+       do_check_true(typeof(rootClient.testOneWay("hello")) === "undefined");
+       return deferred.promise;
+     }).then(() => {
++      let deferred = promise.defer();
++      rootClient.on("falsyOptions", res => {
++        trace.expectSend({"type":"emitFalsyOptions", "to":"<actorid>"});
++        trace.expectReceive({"type":"falsyOptions", "farce":false, "zero": 0, "from":"<actorid>"});
++
++        do_check_true(res.zero === 0);
++        do_check_true(res.farce === false);
++        deferred.resolve();
++      });
++      rootClient.emitFalsyOptions();
++      return deferred.promise;
++    }).then(() => {
+       client.close(() => {
+         do_test_finished();
+       });
+     }).then(null, err => {
+       do_report_unexpected_exception(err, "Failure executing test");
+     });
+   });
+   do_test_pending();
+-- 
+1.8.4.2
+
