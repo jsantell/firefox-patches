@@ -1,0 +1,404 @@
+From 591599cac9a237c3311cea1987182040606986ea Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 12 Aug 2014 18:41:21 -0700
+Subject: [PATCH] Bug 980555 - Allowsetting of custom webconsole object
+ inspectors
+
+---
+ browser/devtools/framework/gDevTools.jsm           | 56 +++++++++++++
+ .../shared/widgets/VariablesViewController.jsm     |  2 +-
+ browser/devtools/webconsole/webconsole.js          | 94 +++++++++++++---------
+ 3 files changed, 114 insertions(+), 38 deletions(-)
+
+diff --git a/browser/devtools/framework/gDevTools.jsm b/browser/devtools/framework/gDevTools.jsm
+index ab7d31e..e6ace87 100644
+--- a/browser/devtools/framework/gDevTools.jsm
++++ b/browser/devtools/framework/gDevTools.jsm
+@@ -26,16 +26,18 @@ const MAX_ORDINAL = 99;
+ /**
+  * DevTools is a class that represents a set of developer tools, it holds a
+  * set of tools and keeps track of open toolboxes in the browser.
+  */
+ this.DevTools = function DevTools() {
+   this._tools = new Map();     // Map<toolId, tool>
+   this._toolboxes = new Map(); // Map<target, toolbox>
+ 
++  this._variablesViewFlagsCallbacks = new Map() // Map<source, callback>
++
+   // destroy() is an observer's handler so we need to preserve context.
+   this.destroy = this.destroy.bind(this);
+   this._teardown = this._teardown.bind(this);
+ 
+   this._testing = false;
+ 
+   EventEmitter.decorate(this);
+ 
+@@ -301,16 +303,70 @@ DevTools.prototype = {
+    * @return {Toolbox} toolbox
+    *         The toobox that is debugging the given target
+    */
+   getToolbox: function DT_getToolbox(target) {
+     return this._toolboxes.get(target);
+   },
+ 
+   /**
++   * Registers a flags callback for the given source.
++   * Whenever this source attempts to instantiate a VariablesView and
++   * VariablesViewController, it will feed the default flags for these
++   * components to this callback to get overriding flags.
++   * @param {String} source
++   *        Name of the VariablesView component that is to be modified, i.e. "webconsole".
++   * @param {Function} callback
++   *        Callback to be executed with the default view flags and controller flags
++   *        when modifying values.
++   */
++  setVariablesViewFlagsCallback: function DT_setVariablesViewFlagsCallback(source, callback) {
++    if (this._variablesViewFlagsCallbacks.has(source)) {
++      // If there is already a callback for this source, return failure.
++      return false;
++    } else {
++      this._variablesViewFlagsCallbacks.set(source, callback);
++      return true;
++    }
++  },
++
++  /**
++   * Gets flags for the VariablesView and VariablesViewController from addons
++   * for a given source. Feeds default flags for these components to a callback
++   * registered by addons.
++   * @param {String} source
++   *        Name of the VariablesView component that is to be accessed, i.e. "webconsole".
++   * @param {Object} defaultViewFlags
++   *        Default flags for the VariablesView constructor.
++   * @param {Object} defaultControllerFlags
++   *        Default flags for the VariablesViewController constructor.
++   * @return {Object}
++   */
++  getVariablesViewFlags: function DT_getVariablesViewFlags(source, defaultViewFlags, defaultControllerFlags) {
++    let callback = this._variablesViewFlagsCallbacks.get(source);
++    return callback ? callback(defaultViewFlags, defaultControllerFlags) : {};
++  },
++
++  /**
++   * Clears a source's callback for VariablesView flags.
++   * @param {String} source
++   *        Name of the VariablesView component that is to be deleted.
++   */
++  clearVariablesViewFlags: function DT_clearVariablesViewFlags (source) {
++    this._variablesViewFlagsCallbacks.delete(source);
++  },
++
++  /**
++   * Clears all flags for the VariablesView.
++   */
++  clearAllVariablesViewFlags: function DT_clearAllVariablesViewFlag() {
++    this._variablesViewFlagsCallbacks.clear();
++  },
++
++  /**
+    * Close the toolbox for a given target
+    *
+    * @return promise
+    *         This promise will resolve to false if no toolbox was found
+    *         associated to the target. true, if the toolbox was successfuly
+    *         closed.
+    */
+   closeToolbox: function DT_closeToolbox(target) {
+diff --git a/browser/devtools/shared/widgets/VariablesViewController.jsm b/browser/devtools/shared/widgets/VariablesViewController.jsm
+index 9423612..0afd706 100644
+--- a/browser/devtools/shared/widgets/VariablesViewController.jsm
++++ b/browser/devtools/shared/widgets/VariablesViewController.jsm
+@@ -165,17 +165,17 @@ VariablesViewController.prototype = {
+    * @param Scope aTarget
+    *        The Scope where the properties will be placed into.
+    * @param object aGrip
+    *        The grip to use to populate the target.
+    */
+   _populateFromObject: function(aTarget, aGrip) {
+     let deferred = promise.defer();
+ 
+-    let objectClient = this._getObjectClient(aGrip);
++    let objectClient = this._getObjectClient(aGrip, aTarget);
+     objectClient.getPrototypeAndProperties(aResponse => {
+       let { ownProperties, prototype } = aResponse;
+       // 'safeGetterValues' is new and isn't necessary defined on old actors.
+       let safeGetterValues = aResponse.safeGetterValues || {};
+       let sortable = VariablesView.isSortable(aGrip.class);
+ 
+       // Merge the safe getter values into one object such that we can use it
+       // in VariablesView.
+diff --git a/browser/devtools/webconsole/webconsole.js b/browser/devtools/webconsole/webconsole.js
+index 8910770..965b0c7 100644
+--- a/browser/devtools/webconsole/webconsole.js
++++ b/browser/devtools/webconsole/webconsole.js
+@@ -27,16 +27,18 @@ loader.lazyGetter(this, "ConsoleOutput",
+ loader.lazyGetter(this, "Messages",
+                   () => require("devtools/webconsole/console-output").Messages);
+ loader.lazyImporter(this, "EnvironmentClient", "resource://gre/modules/devtools/dbg-client.jsm");
+ loader.lazyImporter(this, "ObjectClient", "resource://gre/modules/devtools/dbg-client.jsm");
+ loader.lazyImporter(this, "VariablesView", "resource:///modules/devtools/VariablesView.jsm");
+ loader.lazyImporter(this, "VariablesViewController", "resource:///modules/devtools/VariablesViewController.jsm");
+ loader.lazyImporter(this, "PluralForm", "resource://gre/modules/PluralForm.jsm");
+ loader.lazyImporter(this, "gDevTools", "resource:///modules/devtools/gDevTools.jsm");
++loader.lazyImporter(this, "Heritage", "resource:///modules/devtools/ViewHelpers.jsm");
++
+ 
+ const STRINGS_URI = "chrome://browser/locale/devtools/webconsole.properties";
+ let l10n = new WebConsoleUtils.l10n(STRINGS_URI);
+ 
+ const XHTML_NS = "http://www.w3.org/1999/xhtml";
+ 
+ const MIXED_CONTENT_LEARN_MORE = "https://developer.mozilla.org/docs/Security/MixedContent";
+ 
+@@ -2979,17 +2981,16 @@ function JSTerm(aWebConsoleFrame)
+ 
+   // Holds the number of entries in history. This value is incremented in
+   // this.execute().
+   this.historyIndex = 0; // incremented on this.execute()
+ 
+   // Holds the index of the history entry that the user is currently viewing.
+   // This is reset to this.history.length when this.execute() is invoked.
+   this.historyPlaceHolder = 0;
+-  this._objectActorsInVariablesViews = new Map();
+ 
+   this._keyPress = this._keyPress.bind(this);
+   this._inputEventHandler = this._inputEventHandler.bind(this);
+   this._focusEventHandler = this._focusEventHandler.bind(this);
+   this._onKeypressInVariablesView = this._onKeypressInVariablesView.bind(this);
+   this._blurEventHandler = this._blurEventHandler.bind(this);
+ 
+   EventEmitter.decorate(this);
+@@ -3046,26 +3047,16 @@ JSTerm.prototype = {
+    * disable lazy updates.
+    *
+    * @private
+    * @type boolean
+    */
+   _lazyVariablesView: true,
+ 
+   /**
+-   * Holds a map between VariablesView instances and sets of ObjectActor IDs
+-   * that have been retrieved from the server. This allows us to release the
+-   * objects when needed.
+-   *
+-   * @private
+-   * @type Map
+-   */
+-  _objectActorsInVariablesViews: null,
+-
+-  /**
+    * Last input value.
+    * @type string
+    */
+   lastInputValue: "",
+ 
+   /**
+    * Tells if the input node changed since the last focus.
+    *
+@@ -3078,16 +3069,24 @@ JSTerm.prototype = {
+    * Tells if the autocomplete popup was navigated since the last open.
+    *
+    * @private
+    * @type boolean
+    */
+   _autocompletePopupNavigated: false,
+ 
+   /**
++   * Options associated with the current VariablesView.
++   * Set by |this._updateVariablesView()|.
++   * @private
++   * @type object
++   */
++   _variablesViewOptions: null,
++
++  /**
+    * History of code that was executed.
+    * @type array
+    */
+   history: null,
+   autocompletePopup: null,
+   inputNode: null,
+   completeNode: null,
+ 
+@@ -3526,40 +3525,65 @@ JSTerm.prototype = {
+    *        - container: the DOM element where the variables view is inserted.
+    *        - hideFilterInput: boolean, if true the variables filter input is
+    *        hidden.
+    * @return object
+    *         The new Variables View instance.
+    */
+   _createVariablesView: function JST__createVariablesView(aOptions)
+   {
+-    let view = new VariablesView(aOptions.container);
+-    view.toolbox = gDevTools.getToolbox(this.hud.owner.target);
+-    view.searchPlaceholder = l10n.getStr("propertiesFilterPlaceholder");
+-    view.emptyText = l10n.getStr("emptyPropertiesList");
+-    view.searchEnabled = !aOptions.hideFilterInput;
+-    view.lazyEmpty = this._lazyVariablesView;
+-
+-    VariablesViewController.attach(view, {
++    // Determine whether we should disable updates to objects being inspected
++    // in the VariablesView.
++    let disableUpdates = this.hud.owner._browserConsole &&
++        !Services.prefs.getBoolPref("devtools.chrome.enabled");
++
++    // The default flags for the VariablesView and VariablesViewController.
++    let viewFlags = {
++      toolbox: gDevTools.getToolbox(this.hud.owner.target),
++      searchPlaceholder: l10n.getStr("propertiesFilterPlaceholder"),
++      emptyText: l10n.getStr("emptyPropertiesList"),
++      searchEnabled: !aOptions.hideFilterInput,
++      lazyEmpty: this._lazyVariablesView,
++      eval: disableUpdates ? null : ((aVar, aValue) => {
++        this._variablesViewEvaluate(this._variablesViewOptions, aVar, aValue);
++      }),
++      switch: disableUpdates ? null : ((aVar, aNewName) => {
++        this._variablesViewSwitch(this._variablesViewOptions, aVar, aNewName);
++      }),
++      delete: disableUpdates ? null : ((aVar) => {
++        this._variablesViewDelete(this._variablesViewOptions, aVar);
++      }),
++    };
++    let controllerFlags = {
+       getEnvironmentClient: aGrip => {
+         return new EnvironmentClient(this.hud.proxy.client, aGrip);
+       },
+       getObjectClient: aGrip => {
+         return new ObjectClient(this.hud.proxy.client, aGrip);
+       },
+       getLongStringClient: aGrip => {
+         return this.webConsoleClient.longString(aGrip);
+       },
+       releaseActor: aActor => {
+         this.hud._releaseObject(aActor);
+       },
+       simpleValueEvalMacro: simpleValueEvalMacro,
+       overrideValueEvalMacro: overrideValueEvalMacro,
+       getterOrSetterEvalMacro: getterOrSetterEvalMacro,
+-    });
++    };
++
++    // Fetch any flags for the VariablesView or VariablesViewController set by
++    // addons.
++    let { viewFlags: addonViewFlags, controllerFlags: addonControllerFlags } =
++      gDevTools.getVariablesViewFlags("webconsole", viewFlags, controllerFlags);
++
++    // Create VariablesView and VariablesViewController for this webconsole
++    // from combination of default and addon flags for each component.
++    let view = new VariablesView(aOptions.container, Heritage.extend(viewFlags, addonViewFlags));
++    VariablesViewController.attach(view, Heritage.extend(controllerFlags, addonControllerFlags));
+ 
+     // Relay events from the VariablesView.
+     view.on("fetched", (aEvent, aType, aVar) => {
+       this.emit("variablesview-fetched", aVar);
+     });
+ 
+     return view;
+   },
+@@ -3576,36 +3600,26 @@ JSTerm.prototype = {
+    *        - rawObject: the new raw object you want to show.
+    *        - label: the new label for the inspected object.
+    */
+   _updateVariablesView: function JST__updateVariablesView(aOptions)
+   {
+     let view = aOptions.view;
+     view.empty();
+ 
++    // Save these options so that we don't need to recreate
++    // view.eval/switch/delete every time.
++    this._variablesViewOptions = aOptions;
++
+     // We need to avoid pruning the object inspection starting point.
+     // That one is pruned when the console message is removed.
+     view.controller.releaseActors(aActor => {
+       return view._consoleLastObjectActor != aActor;
+     });
+ 
+-    if (aOptions.objectActor &&
+-        (!this.hud.owner._browserConsole ||
+-         Services.prefs.getBoolPref("devtools.chrome.enabled"))) {
+-      // Make sure eval works in the correct context.
+-      view.eval = this._variablesViewEvaluate.bind(this, aOptions);
+-      view.switch = this._variablesViewSwitch.bind(this, aOptions);
+-      view.delete = this._variablesViewDelete.bind(this, aOptions);
+-    }
+-    else {
+-      view.eval = null;
+-      view.switch = null;
+-      view.delete = null;
+-    }
+-
+     let { variable, expanded } = view.controller.setSingleVariable(aOptions);
+     variable.evaluationMacro = simpleValueEvalMacro;
+ 
+     if (aOptions.objectActor) {
+       view._consoleLastObjectActor = aOptions.objectActor.actor;
+     }
+     else if (aOptions.rawObject) {
+       view._consoleLastObjectActor = null;
+@@ -3636,17 +3650,19 @@ JSTerm.prototype = {
+   function JST__variablesViewEvaluate(aOptions, aVar, aValue)
+   {
+     let updater = this._updateVariablesView.bind(this, aOptions);
+     let onEval = this._silentEvalCallback.bind(this, updater);
+     let string = aVar.evaluationMacro(aVar, aValue);
+ 
+     let evalOptions = {
+       frame: this.SELECTED_FRAME,
+-      bindObjectActor: aOptions.objectActor.actor,
++      bindObjectActor: aOptions.objectActor
++        ? aOptions.objectActor.actor
++        : null
+     };
+ 
+     this.requestEvaluation(string, evalOptions).then(onEval, onEval);
+   },
+ 
+   /**
+    * The property deletion function used by the variables view when a property
+    * is deleted.
+@@ -3658,17 +3674,19 @@ JSTerm.prototype = {
+    *        The Variable object instance for the deleted property.
+    */
+   _variablesViewDelete: function JST__variablesViewDelete(aOptions, aVar)
+   {
+     let onEval = this._silentEvalCallback.bind(this, null);
+ 
+     let evalOptions = {
+       frame: this.SELECTED_FRAME,
+-      bindObjectActor: aOptions.objectActor.actor,
++      bindObjectActor: aOptions.objectActor
++        ? aOptions.objectActor.actor
++        : null
+     };
+ 
+     this.requestEvaluation("delete _self" + aVar.symbolicName, evalOptions)
+         .then(onEval, onEval);
+   },
+ 
+   /**
+    * The property rename function used by the variables view when a property
+@@ -3685,17 +3703,19 @@ JSTerm.prototype = {
+   _variablesViewSwitch:
+   function JST__variablesViewSwitch(aOptions, aVar, aNewName)
+   {
+     let updater = this._updateVariablesView.bind(this, aOptions);
+     let onEval = this._silentEvalCallback.bind(this, updater);
+ 
+     let evalOptions = {
+       frame: this.SELECTED_FRAME,
+-      bindObjectActor: aOptions.objectActor.actor,
++      bindObjectActor: aOptions.objectActor
++        ? aOptions.objectActor.actor
++        : null
+     };
+ 
+     let newSymbolicName = aVar.ownerView.symbolicName + '["' + aNewName + '"]';
+     if (newSymbolicName == aVar.symbolicName) {
+       return;
+     }
+ 
+     let code = "_self" + newSymbolicName + " = _self" + aVar.symbolicName + ";" +
+-- 
+1.8.4.2
+
