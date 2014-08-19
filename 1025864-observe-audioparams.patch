@@ -1,21 +1,21 @@
-From 4b9f0023287022a968dc3f5a81d59df910b5650c Mon Sep 17 00:00:00 2001
+From e4dbb7bc50ddedfa9ecda6b7aebbe216e9271072 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
 Date: Mon, 4 Aug 2014 17:51:16 -0700
-Subject: Bug 1025864 - Add observer updates when AudioParams change in the Web Audio Editor, r=vp
+Subject: Bug 1025864 - Add observer updates when AudioParams change in the Web Audio Editor r=vp
 
 ---
  browser/devtools/shared/frame-script-utils.js      |  10 +
  browser/devtools/webaudioeditor/test/browser.ini   |   7 +-
  .../browser_wa_properties-view-change-params.js    |  46 ++++
  .../browser_webaudio-actor-change-params-01.js     |  46 ++++
- .../browser_webaudio-actor-change-params-02.js     |  36 ++++
+ .../browser_webaudio-actor-change-params-02.js     |  36 +++
  .../browser_webaudio-actor-change-params-03.js     |  32 +++
- .../webaudioeditor/test/doc_change-param.html      |  25 +++
+ .../webaudioeditor/test/doc_change-param.html      |  25 ++
  browser/devtools/webaudioeditor/test/head.js       |  16 +-
  .../webaudioeditor/webaudioeditor-controller.js    |  33 ++-
  .../devtools/webaudioeditor/webaudioeditor-view.js |  20 +-
- toolkit/devtools/server/actors/webaudio.js         | 235 +++++++++++++++++----
- 11 files changed, 453 insertions(+), 53 deletions(-)
+ toolkit/devtools/server/actors/webaudio.js         | 254 +++++++++++++++++----
+ 11 files changed, 471 insertions(+), 54 deletions(-)
  create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_properties-view-change-params.js
  create mode 100644 browser/devtools/webaudioeditor/test/browser_webaudio-actor-change-params-01.js
  create mode 100644 browser/devtools/webaudioeditor/test/browser_webaudio-actor-change-params-02.js
@@ -618,7 +618,7 @@ index 8b69fc4..2eeb06c 100644
   */
  
 diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
-index 4cea0f9..1771375a 100644
+index 4cea0f9..ef9b0fe 100644
 --- a/toolkit/devtools/server/actors/webaudio.js
 +++ b/toolkit/devtools/server/actors/webaudio.js
 @@ -1,37 +1,39 @@
@@ -729,7 +729,7 @@ index 4cea0f9..1771375a 100644
    }),
  
    /**
-@@ -247,20 +247,21 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+@@ -247,26 +247,37 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
    getParamFlags: method(function (param) {
      return (NODE_PROPERTIES[this.type] || {})[param];
    }, {
@@ -751,10 +751,27 @@ index 4cea0f9..1771375a 100644
        ({ param: prop, value: this.getParam(prop), flags: this.getParamFlags(prop) }));
    }, {
      response: { params: RetVal("json") }
-   })
+-  })
++  }),
++
++  /**
++   * Returns a boolean indicating whether or not
++   * the underlying AudioNode has been collected yet or not.
++   *
++   * @return Boolean
++   */
++  isAlive: function () {
++    return !!this.node.get();
++  }
  });
  
-@@ -402,25 +403,74 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+ /**
+  * The corresponding Front object for the AudioNodeActor.
+  */
+ let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
+   initialize: function (client, form) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+@@ -402,25 +413,79 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
     */
    finalize: method(function() {
      if (!this._initialized) {
@@ -786,14 +803,18 @@ index 4cea0f9..1771375a 100644
 +    this.disableChangeParamEvents();
 +
 +    // Ignore if node is dead
-+    if (!this.node.get()) {
++    if (!nodeActor.isAlive()) {
 +      return;
 +    }
 +
 +    let previous = mapAudioParams(nodeActor);
++
++    // Store the ID of the node being polled
++    this._pollingID = nodeActor.actorID;
++
 +    this.poller = new Poller(() => {
 +      // If node has been collected, disable param polling
-+      if (!this.node.get()) {
++      if (!nodeActor.isAlive()) {
 +        this.disableChangeParamEvents();
 +        return;
 +      }
@@ -816,6 +837,7 @@ index 4cea0f9..1771375a 100644
 +    if (this.poller) {
 +      this.poller.off();
 +    }
++    this._pollingID = null;
 +  }, {
 +    oneway: true
 +  }),
@@ -829,7 +851,7 @@ index 4cea0f9..1771375a 100644
      },
      "connect-node": {
        type: "connectNode",
-@@ -432,29 +482,30 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -432,29 +497,30 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
        source: Arg(0, "audionode")
      },
      "connect-param": {
@@ -866,7 +888,7 @@ index 4cea0f9..1771375a 100644
     * internal weak map, and tracking via `manage` so it is assigned
     * an `actorID`.
     */
-@@ -468,17 +519,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -468,17 +534,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
      this.manage(actor);
      this._nativeToActorID.set(node.id, actor.actorID);
      return actor;
@@ -885,7 +907,7 @@ index 4cea0f9..1771375a 100644
        .forEach(paramName => {
          let param = node[paramName];
          param._parentID = node.id;
-@@ -488,16 +539,24 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -488,16 +554,24 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
  
    /**
     * Takes an AudioNode and returns the stored actor for it.
@@ -910,7 +932,7 @@ index 4cea0f9..1771375a 100644
      let actor = actorID != null ? this.conn.getActor(actorID) : null;
      return actor;
    },
-@@ -539,48 +598,48 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -539,48 +613,50 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
     * Called when an audio node is disconnected.
     */
    _onDisconnectNode: function (node) {
@@ -958,8 +980,10 @@ index 4cea0f9..1771375a 100644
      // notifications for a document that no longer exists,
      // the mapping should not be found, so we do not emit an event.
      if (actor) {
-+      // Turn off polling for changes if on
-+      actor.disableChangeParamEvents();
++      // Turn off polling for changes if on for this node
++      if (this._pollingID === actor.actorID) {
++        this.disableChangeParamEvents();
++      }
        this._nativeToActorID.delete(nativeID);
        emit(this, "destroy-node", actor);
      }
@@ -968,7 +992,7 @@ index 4cea0f9..1771375a 100644
    /**
     * Called when the underlying ContentObserver fires `global-destroyed`
     * so we can cleanup some things between the global being destroyed and
-@@ -658,22 +717,114 @@ function CollectedAudioNodeError () {
+@@ -658,22 +734,114 @@ function CollectedAudioNodeError () {
   * to a string of just the constructor name, like "OscillatorNode",
   * or "Float32Array".
   */
@@ -1069,7 +1093,7 @@ index 4cea0f9..1771375a 100644
 +  } else {
 +    return a === b;
 +  }
- }
++}
 +
 +/**
 + * Poller class -- takes a function, and call be turned on and off
@@ -1077,7 +1101,7 @@ index 4cea0f9..1771375a 100644
 + */
 +function Poller (fn) {
 +  this.fn = fn;
-+}
+ }
 +
 +Poller.prototype.on = function (wait) {
 +  let poller = this;
