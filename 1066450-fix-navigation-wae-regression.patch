@@ -1,0 +1,200 @@
+From 466a4e2b151e67a264d3394f1cdee153fc932c30 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 12 Sep 2014 14:27:52 +0200
+Subject: Bug 1066450 - Fix regression of web audio tools not reinitializing after navigation. r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  1 +
+ .../webaudioeditor/test/browser_wa_navigate.js     | 45 ++++++++++++++++++++++
+ browser/devtools/webaudioeditor/test/head.js       |  5 +++
+ toolkit/devtools/server/actors/webaudio.js         | 13 +++++++
+ 4 files changed, 64 insertions(+)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_navigate.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 943d647..9545b68 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -26,16 +26,17 @@ support-files =
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ [browser_wa_reset-04.js]
++[browser_wa_navigate.js]
+ 
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-selected.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_navigate.js b/browser/devtools/webaudioeditor/test/browser_wa_navigate.js
+new file mode 100644
+index 0000000..417e8ce
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_navigate.js
+@@ -0,0 +1,45 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests naviating from a page to another will repopulate
++ * the audio graph if both pages have an AudioContext.
++ */
++
++function spawnTest() {
++  let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $ } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  let { nodes, edges } = countGraphObjects(panelWin);
++  ise(nodes, 3, "should only be 3 nodes.");
++  ise(edges, 2, "should only be 2 edges.");
++
++  navigate(target, SIMPLE_NODES_URL);
++
++  let [actors] = yield Promise.all([
++    getN(gFront, "create-node", 14),
++    waitForGraphRendered(panelWin, 14, 0)
++  ]);
++
++  is($("#reload-notice").hidden, true,
++    "The 'reload this page' notice should be hidden after context found after navigation.");
++  is($("#waiting-notice").hidden, true,
++    "The 'waiting for an audio context' notice should be hidden after context found after navigation.");
++  is($("#content").hidden, false,
++    "The tool's content should reappear without closing and reopening the toolbox.");
++
++  let { nodes, edges } = countGraphObjects(panelWin);
++  ise(nodes, 14, "after navigation, should have 14 nodes");
++  ise(edges, 0, "after navigation, should have 0 edges.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index 0f5d0cb..d088c36 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -109,16 +109,21 @@ function once(aTarget, aEventName, aUseCapture = false) {
+   return deferred.promise;
+ }
+ 
+ function reload(aTarget, aWaitForTargetEvent = "navigate") {
+   aTarget.activeTab.reload();
+   return once(aTarget, aWaitForTargetEvent);
+ }
+ 
++function navigate(aTarget, aUrl, aWaitForTargetEvent = "navigate") {
++  executeSoon(() => aTarget.activeTab.navigateTo(aUrl));
++  return once(aTarget, aWaitForTargetEvent);
++}
++
+ function test () {
+   Task.spawn(spawnTest).then(finish, handleError);
+ }
+ 
+ function initBackend(aUrl) {
+   info("Initializing a web audio editor front.");
+ 
+   if (!DebuggerServer.initialized) {
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index e7772c0..a7c5b07 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -289,16 +289,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+ 
+     // Store ChromeOnly ID (`nativeID` property on AudioNodeActor) mapped
+     // to the associated actorID, so we don't have to expose `nativeID`
+     // to the client in any way.
+     this._nativeToActorID = new Map();
+ 
+     this._onDestroyNode = this._onDestroyNode.bind(this);
+     this._onGlobalDestroyed = this._onGlobalDestroyed.bind(this);
++    this._onGlobalCreated = this._onGlobalCreated.bind(this);
+   },
+ 
+   destroy: function(conn) {
+     protocol.Actor.prototype.destroy.call(this, conn);
+     this.finalize();
+   },
+ 
+   /**
+@@ -327,16 +328,19 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: AUDIO_GLOBALS,
+       startRecording: true,
+       performReload: reload,
+       holdWeak: true,
+       storeCalls: false
+     });
++    // Bind to `window-ready` so we can reenable recording on the
++    // call watcher
++    on(this.tabActor, "window-ready", this._onGlobalCreated);
+     // Bind to the `window-destroyed` event so we can unbind events between
+     // the global destruction and the `finalize` cleanup method on the actor.
+     on(this.tabActor, "window-destroyed", this._onGlobalDestroyed);
+   }, {
+     request: { reload: Option(0, "boolean") },
+     oneway: true
+   }),
+ 
+@@ -400,16 +404,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+    */
+   finalize: method(function() {
+     if (!this._initialized) {
+       return;
+     }
+     this.tabActor = null;
+     this._initialized = false;
+     off(this.tabActor, "window-destroyed", this._onGlobalDestroyed);
++    off(this.tabActor, "window-ready", this._onGlobalCreated);
+     this._nativeToActorID = null;
+     this._callWatcher.eraseRecording();
+     this._callWatcher.finalize();
+     this._callWatcher = null;
+   }, {
+    oneway: true
+   }),
+ 
+@@ -575,16 +580,24 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     // the mapping should not be found, so we do not emit an event.
+     if (actor) {
+       this._nativeToActorID.delete(nativeID);
+       emit(this, "destroy-node", actor);
+     }
+   },
+ 
+   /**
++   * Ensures that the new global has recording on
++   * so we can proxy the function calls.
++   */
++  _onGlobalCreated: function () {
++    this._callWatcher.resumeRecording();
++  },
++
++  /**
+    * Called when the underlying ContentObserver fires `global-destroyed`
+    * so we can cleanup some things between the global being destroyed and
+    * when the actor's `finalize` method gets called.
+    */
+   _onGlobalDestroyed: function ({id}) {
+     if (this._callWatcher._tracedWindowId !== id) {
+       return;
+     }
+-- 
+1.8.4.2
+

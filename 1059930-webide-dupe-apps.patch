@@ -1,0 +1,440 @@
+From f6f4aa360221a66449cc53853b343b7a4b7faf86 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 5 Sep 2014 14:40:58 -0700
+Subject: Bug 1059930 - When adding an existing app, select the existing app, and show alert errors with more descriptive information. r=jryans
+
+---
+ browser/devtools/webide/content/webide.js          | 89 +++++++++-------------
+ browser/devtools/webide/modules/utils.js           | 56 ++++++++++++++
+ browser/devtools/webide/moz.build                  |  1 +
+ browser/devtools/webide/test/chrome.ini            |  1 +
+ browser/devtools/webide/test/head.js               |  6 +-
+ .../webide/test/test_duplicate_import.html         | 74 ++++++++++++++++++
+ 6 files changed, 172 insertions(+), 55 deletions(-)
+ create mode 100644 browser/devtools/webide/modules/utils.js
+ create mode 100644 browser/devtools/webide/test/test_duplicate_import.html
+
+diff --git a/browser/devtools/webide/content/webide.js b/browser/devtools/webide/content/webide.js
+index 576b016..cc78b95 100644
+--- a/browser/devtools/webide/content/webide.js
++++ b/browser/devtools/webide/content/webide.js
+@@ -2,30 +2,30 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const Cc = Components.classes;
+ const Cu = Components.utils;
+ const Ci = Components.interfaces;
+ 
+ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+-Cu.import("resource://gre/modules/FileUtils.jsm");
+ Cu.import("resource://gre/modules/Task.jsm");
+ 
+ const {devtools} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ const {require} = devtools;
+ const {Services} = Cu.import("resource://gre/modules/Services.jsm");
+ const {AppProjects} = require("devtools/app-manager/app-projects");
+ const {Connection} = require("devtools/client/connection-manager");
+ const {AppManager} = require("devtools/webide/app-manager");
+ const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const ProjectEditor = require("projecteditor/projecteditor");
+ const {Devices} = Cu.import("resource://gre/modules/devtools/Devices.jsm");
+ const {GetAvailableAddons} = require("devtools/webide/addons");
+ const {GetTemplatesJSON, GetAddonsJSON} = require("devtools/webide/remote-resources");
++const utils = require("devtools/webide/utils");
+ 
+ const Strings = Services.strings.createBundle("chrome://browser/locale/devtools/webide.properties");
+ 
+ const HTML = "http://www.w3.org/1999/xhtml";
+ const HELP_URL = "https://developer.mozilla.org/docs/Tools/WebIDE/Troubleshooting";
+ 
+ // download template index early
+ GetTemplatesJSON(true);
+@@ -242,20 +242,21 @@ let UI = {
+     this._busyPromise = promise;
+     this._busyOperationDescription = operationDescription;
+     this.setupBusyTimeout();
+     this.busy();
+     promise.then(() => {
+       this.cancelBusyTimeout();
+       this.unbusy();
+     }, (e) => {
++      let message = operationDescription + (e ? (": " + e) : "");
+       this.cancelBusyTimeout();
+       let operationCanceled = e && e.canceled;
+       if (!operationCanceled) {
+-        UI.reportError("error_operationFail", operationDescription);
++        UI.reportError("error_operationFail", message);
+         console.error(e);
+       }
+       this.unbusy();
+     });
+     return promise;
+   },
+ 
+   reportError: function(l10nProperty, ...l10nArgs) {
+@@ -454,18 +455,17 @@ let UI = {
+     if (project.location) {
+       Services.prefs.setCharPref("devtools.webide.lastprojectlocation", project.location);
+     }
+ 
+     // Make sure the directory exist before we show Project Editor
+ 
+     let forceDetailsOnly = false;
+     if (project.type == "packaged") {
+-      let directory = new FileUtils.File(project.location);
+-      forceDetailsOnly = !directory.exists();
++      forceDetailsOnly = !utils.doesFileExist(project.location);
+     }
+ 
+     // Show only the details screen
+ 
+     if (project.type != "packaged" ||
+         !this.isProjectEditorEnabled() ||
+         forceDetailsOnly) {
+       this.selectDeckPanel("details");
+@@ -476,16 +476,38 @@ let UI = {
+ 
+     this.selectDeckPanel("projecteditor");
+ 
+     this.getProjectEditor().then(() => {
+       this.updateProjectEditorHeader();
+     }, console.error);
+   },
+ 
++  importAndSelectApp: Task.async(function* (source) {
++    let isPackaged = !!source.path;
++    let project;
++    try {
++      project = yield AppProjects[isPackaged ? "addPackaged" : "addHosted"](source);
++    } catch (e) {
++      if (e === "Already added") {
++        // Select project that's already been added,
++        // and allow it to be revalidated and selected
++        project = AppProjects.get(isPackaged ? source.path : source);
++      } else {
++        throw e;
++      }
++    }
++
++    // Validate project
++    yield AppManager.validateProject(project);
++
++    // Select project
++    AppManager.selectedProject = project;
++  }),
++
+   /********** DECK **********/
+ 
+   setupDeck: function() {
+     let iframes = document.querySelectorAll("#deck > iframe");
+     for (let iframe of iframes) {
+       iframe.tooltip = "aHTMLTooltip";
+     }
+   },
+@@ -709,79 +731,40 @@ let Cmds = {
+       AppManager.selectedProject = project;
+ 
+     }), "creating new app");
+   },
+ 
+   importPackagedApp: function(location) {
+     return UI.busyUntil(Task.spawn(function* () {
+ 
+-      let directory;
++      let directory = utils.getPackagedDirectory(window, location);
+ 
+-      if (!location) {
+-        let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+-        fp.init(window, Strings.GetStringFromName("importPackagedApp_title"), Ci.nsIFilePicker.modeGetFolder);
+-        let res = fp.show();
+-        if (res == Ci.nsIFilePicker.returnCancel) {
+-          return promise.resolve();
+-        }
+-        directory = fp.file;
+-      } else {
+-        directory = new FileUtils.File(location);
++      if (!directory) {
++        // User cancelled directory selection
++        return;
+       }
+ 
+-      // Add project
+-      let project = yield AppProjects.addPackaged(directory);
+-
+-      // Validate project
+-      yield AppManager.validateProject(project);
+-
+-      // Select project
+-      AppManager.selectedProject = project;
++      yield UI.importAndSelectApp(directory);
+     }), "importing packaged app");
+   },
+ 
+-
+   importHostedApp: function(location) {
+     return UI.busyUntil(Task.spawn(function* () {
+-      let ret = {value: null};
+-
+-      let url;
+-      if (!location) {
+-        Services.prompt.prompt(window,
+-                               Strings.GetStringFromName("importHostedApp_title"),
+-                               Strings.GetStringFromName("importHostedApp_header"),
+-                               ret, null, {});
+-        location = ret.value;
+-      }
+ 
+-      if (!location) {
+-        return;
+-      }
++      let url = utils.getHostedURL(window, location);
+ 
+-      // Clean location string and add "http://" if missing
+-      location = location.trim();
+-      try { // Will fail if no scheme
+-        Services.io.extractScheme(location);
+-      } catch(e) {
+-        location = "http://" + location;
++      if (!url) {
++        return;
+       }
+ 
+-      // Add project
+-      let project = yield AppProjects.addHosted(location)
+-
+-      // Validate project
+-      yield AppManager.validateProject(project);
+-
+-      // Select project
+-      AppManager.selectedProject = project;
++      yield UI.importAndSelectApp(url);
+     }), "importing hosted app");
+   },
+ 
+-
+   showProjectPanel: function() {
+     let deferred = promise.defer();
+ 
+     let panelNode = document.querySelector("#project-panel");
+     let panelVboxNode = document.querySelector("#project-panel > vbox");
+     let anchorNode = document.querySelector("#project-panel-button > .panel-button-anchor");
+     let projectsNode = document.querySelector("#project-panel-projects");
+ 
+@@ -1029,9 +1012,9 @@ let Cmds = {
+ 
+   showAddons: function() {
+     UI.selectDeckPanel("addons");
+   },
+ 
+   showPrefs: function() {
+     UI.selectDeckPanel("prefs");
+   },
+-}
++};
+diff --git a/browser/devtools/webide/modules/utils.js b/browser/devtools/webide/modules/utils.js
+new file mode 100644
+index 0000000..c41b0c3
+--- /dev/null
++++ b/browser/devtools/webide/modules/utils.js
+@@ -0,0 +1,56 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { Cc, Cu, Ci } = require("chrome");
++const { FileUtils } = Cu.import("resource://gre/modules/FileUtils.jsm", {});
++const { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
++const Strings = Services.strings.createBundle("chrome://browser/locale/devtools/webide.properties");
++
++function doesFileExist (location) {
++  let file = new FileUtils.File(location);
++  return file.exists();
++}
++exports.doesFileExist = doesFileExist;
++
++function getPackagedDirectory (window, location) {
++  let directory;
++  if (!location) {
++    let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
++    fp.init(window, Strings.GetStringFromName("importPackagedApp_title"), Ci.nsIFilePicker.modeGetFolder);
++    let res = fp.show();
++    if (res == Ci.nsIFilePicker.returnCancel) {
++      return null;
++    }
++    return fp.file;
++  } else {
++    return new FileUtils.File(location);
++  }
++}
++exports.getPackagedDirectory = getPackagedDirectory;
++
++function getHostedURL (window, location) {
++  let ret = { value: null };
++
++  if (!location) {
++    Services.prompt.prompt(window,
++        Strings.GetStringFromName("importHostedApp_title"),
++        Strings.GetStringFromName("importHostedApp_header"),
++        ret, null, {});
++    location = ret.value;
++  }
++
++  if (!location) {
++    return null;
++  }
++
++  // Clean location string and add "http://" if missing
++  location = location.trim();
++  try { // Will fail if no scheme
++    Services.io.extractScheme(location);
++  } catch(e) {
++    location = "http://" + location;
++  }
++  return location;
++}
++exports.getHostedURL = getHostedURL;
+diff --git a/browser/devtools/webide/moz.build b/browser/devtools/webide/moz.build
+index fd6bdd9..bb8b5ae 100644
+--- a/browser/devtools/webide/moz.build
++++ b/browser/devtools/webide/moz.build
+@@ -14,9 +14,10 @@ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+ MOCHITEST_CHROME_MANIFESTS += ['test/chrome.ini']
+ 
+ EXTRA_JS_MODULES.devtools.webide += [
+     'modules/addons.js',
+     'modules/app-manager.js',
+     'modules/remote-resources.js',
+     'modules/runtimes.js',
+     'modules/tab-store.js',
++    'modules/utils.js',
+ ]
+diff --git a/browser/devtools/webide/test/chrome.ini b/browser/devtools/webide/test/chrome.ini
+index 9af2900..4184786 100644
+--- a/browser/devtools/webide/test/chrome.ini
++++ b/browser/devtools/webide/test/chrome.ini
+@@ -22,12 +22,13 @@ support-files =
+   addons/adbhelper-mac64.xpi
+   head.js
+   hosted_app.manifest
+   templates.json
+ 
+ [test_basic.html]
+ [test_newapp.html]
+ [test_import.html]
++[test_duplicate_import.html]
+ [test_runtime.html]
+ [test_manifestUpdate.html]
+ [test_addons.html]
+ [test_deviceinfo.html]
+diff --git a/browser/devtools/webide/test/head.js b/browser/devtools/webide/test/head.js
+index a583b76..640c3b4 100644
+--- a/browser/devtools/webide/test/head.js
++++ b/browser/devtools/webide/test/head.js
+@@ -80,19 +80,21 @@ function closeWebIDE(win) {
+   win.close();
+ 
+   return deferred.promise;
+ }
+ 
+ function removeAllProjects() {
+   return Task.spawn(function* () {
+     yield AppProjects.load();
+-    let projects = AppProjects.store.object.projects;
++    // use a new array so we're not iterating over the same
++    // underlying array that's being modified by AppProjects
++    let projects = AppProjects.store.object.projects.map(p => p.location);
+     for (let i = 0; i < projects.length; i++) {
+-      yield AppProjects.remove(projects[i].location);
++      yield AppProjects.remove(projects[i]);
+     }
+   });
+ }
+ 
+ function nextTick() {
+   let deferred = promise.defer();
+   SimpleTest.executeSoon(() => {
+     deferred.resolve();
+diff --git a/browser/devtools/webide/test/test_duplicate_import.html b/browser/devtools/webide/test/test_duplicate_import.html
+new file mode 100644
+index 0000000..df8166f
+--- /dev/null
++++ b/browser/devtools/webide/test/test_duplicate_import.html
+@@ -0,0 +1,74 @@
++<!DOCTYPE html>
++
++<html>
++
++  <head>
++    <meta charset="utf8">
++    <title></title>
++
++    <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++    <script type="application/javascript" src="chrome://mochikit/content/chrome-harness.js"></script>
++    <script type="application/javascript;version=1.8" src="head.js"></script>
++    <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++  </head>
++
++  <body>
++
++    <script type="application/javascript;version=1.8">
++      window.onload = function() {
++        SimpleTest.waitForExplicitFinish();
++
++        Task.spawn(function* () {
++          let win = yield openWebIDE();
++          let packagedAppLocation = getTestFilePath("app");
++          let hostedAppManifest = TEST_BASE + "hosted_app.manifest";
++
++          yield win.AppProjects.load();
++          is(win.AppProjects.store.object.projects.length, 0, "IDB is empty");
++
++          info("to call importPackagedApp(" + packagedAppLocation + ")");
++          yield win.Cmds.importPackagedApp(packagedAppLocation);
++          yield nextTick();
++
++          info("to call importHostedApp(" + hostedAppManifest + ")");
++          yield win.Cmds.importHostedApp(hostedAppManifest);
++          yield nextTick();
++
++          info("to call importPackagedApp(" + packagedAppLocation + ") again");
++          yield win.Cmds.importPackagedApp(packagedAppLocation);
++
++          let project = win.AppManager.selectedProject;
++          is(project.location, packagedAppLocation, "Correctly reselected existing packaged app.");
++          yield nextTick();
++
++          info("to call importHostedApp(" + hostedAppManifest + ") again");
++          yield win.Cmds.importHostedApp(hostedAppManifest);
++          project = win.AppManager.selectedProject;
++          is(project.location, hostedAppManifest, "Correctly reselected existing hosted app.");
++          yield nextTick();
++
++          info("opening panel");
++          yield win.Cmds.showProjectPanel();
++          info("panel open");
++
++          let panelNode = win.document.querySelector("#project-panel");
++          let items = panelNode.querySelectorAll(".panel-item");
++          // 3 controls, + 2 projects
++          is(items.length, 5, "5 projects in panel");
++          is(items[3].getAttribute("label"), "A name (in app directory)", "Panel label is correct");
++          is(items[4].getAttribute("label"), "hosted manifest name property", "Panel label is correct");
++
++          yield closeWebIDE(win);
++
++          yield removeAllProjects();
++
++          SimpleTest.finish();
++        }).then(null, e => {
++          ok(false, "Exception: " + e);
++          SimpleTest.finish();
++        });
++      }
++    </script>
++  </body>
++</html>
++
+-- 
+1.8.4.2
+
