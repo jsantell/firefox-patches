@@ -1,0 +1,137 @@
+From 149e17b123698ee19b0e9727ec53e0dab97336f5 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 18 Sep 2014 14:23:02 -0700
+Subject: Bug 1055211 - Add bypass method on AudioNodeActors. r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  5 +--
+ .../test/browser_audionode-actor-bypass.js         | 30 +++++++++++++++++
+ toolkit/devtools/server/actors/webaudio.js         | 38 ++++++++++++++++++++++
+ 3 files changed, 71 insertions(+), 2 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 943d647..a9e0129 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -15,19 +15,20 @@ support-files =
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-is-source.js]
+-[browser_webaudio-actor-connect-param.js]
+-[browser_webaudio-actor-destroy-node.js]
++[browser_audionode-actor-bypass.js]
+ [browser_webaudio-actor-simple.js]
++[browser_webaudio-actor-destroy-node.js]
++[browser_webaudio-actor-connect-param.js]
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ [browser_wa_reset-04.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js
+new file mode 100644
+index 0000000..c8e58f4
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js
+@@ -0,0 +1,30 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode#bypass(), AudioNode#isBypassed()
++ */
++
++function spawnTest () {
++  let [target, debuggee, front] = yield initBackend(SIMPLE_CONTEXT_URL);
++  let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
++    front.setup({ reload: true }),
++    get3(front, "create-node")
++  ]);
++
++  is((yield gainNode.isBypassed()), false, "Nodes start off unbypassed.");
++
++  info("Calling node#bypass(true)");
++  yield gainNode.bypass(true);
++
++  is((yield gainNode.isBypassed()), true, "Node is now bypassed.");
++  
++  
++  info("Calling node#bypass(false)");
++  yield gainNode.bypass(false);
++
++  is((yield gainNode.isBypassed()), false, "Node back to being unbypassed.");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 41529ae..12155a7 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -152,16 +152,54 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+    */
+   isSource: method(function () {
+     return !!~this.type.indexOf("Source") || this.type === "OscillatorNode";
+   }, {
+     response: { source: RetVal("boolean") }
+   }),
+ 
+   /**
++   * Returns a boolean indicating if the AudioNode has been "bypassed",
++   * via `AudioNodeActor#bypass` method.
++   *
++   * @return Boolean
++   */
++  isBypassed: method(function () {
++    let node = this.node.get();
++    if (node === null) {
++      return false;
++    }
++
++    return node.passThrough;
++  }, {
++    response: { bypassed: RetVal("boolean") }
++  }),
++
++  /**
++   * Takes a boolean, either enabling or disabling the "passThrough" option
++   * on an AudioNode. If a node is bypassed, an effects processing node (like gain, biquad),
++   * will allow the audio stream to pass through the node, unaffected.
++   *
++   * @param Boolean enable
++   *        Whether the bypass value should be set on or off.
++   */
++  bypass: method(function (enable) {
++    let node = this.node.get();
++
++    if (node === null) {
++      return;
++    }
++
++    node.passThrough = enable;
++  }, {
++    request: { enable: Arg(0, "boolean") },
++    oneway: true
++  }),
++
++  /**
+    * Changes a param on the audio node. Responds with either `undefined`
+    * on success, or a description of the error upon param set failure.
+    *
+    * @param String param
+    *        Name of the AudioParam to change.
+    * @param String value
+    *        Value to change AudioParam to.
+    */
+-- 
+1.8.4.2
+
