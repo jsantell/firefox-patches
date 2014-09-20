@@ -1,13 +1,13 @@
-From 6948cdd55d52fc5e59878fc28263ace46685362c Mon Sep 17 00:00:00 2001
+From 2902f882ce840920a31e2a421d4344a8388a038d Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Thu, 4 Sep 2014 14:59:47 -0700
-Subject: Bug 1057042 - Refactor front end of web audio editor. r=vp
+Date: Wed, 17 Sep 2014 14:40:53 -0700
+Subject: Bug 1057042 - refactor front end of the web audio editor. r=vp
 
 ---
  browser/devtools/jar.mn                            |  10 +-
  browser/devtools/webaudioeditor/controller.js      | 223 ++++++++
- browser/devtools/webaudioeditor/head.js            |  98 ++++
- browser/devtools/webaudioeditor/models.js          | 181 ++++++
+ browser/devtools/webaudioeditor/includes.js        |  98 ++++
+ browser/devtools/webaudioeditor/models.js          | 274 +++++++++
  browser/devtools/webaudioeditor/panel.js           |   1 +
  browser/devtools/webaudioeditor/test/browser.ini   |   2 +
  .../test/browser_wa_destroy-node-01.js             |  14 +-
@@ -28,15 +28,15 @@ Subject: Bug 1057042 - Refactor front end of web audio editor. r=vp
  .../webaudioeditor/test/browser_wa_reset-03.js     |  14 +-
  .../test/doc_connect-toggle-param.html             |  27 +
  browser/devtools/webaudioeditor/test/head.js       |   9 +-
- browser/devtools/webaudioeditor/views/context.js   | 347 +++++++++++
+ browser/devtools/webaudioeditor/views/context.js   | 305 ++++++++++
  browser/devtools/webaudioeditor/views/inspector.js | 240 ++++++++
  browser/devtools/webaudioeditor/views/utils.js     | 103 ++++
  .../webaudioeditor/webaudioeditor-controller.js    | 428 --------------
  .../devtools/webaudioeditor/webaudioeditor-view.js | 636 ---------------------
  browser/devtools/webaudioeditor/webaudioeditor.xul |   8 +-
- 30 files changed, 1330 insertions(+), 1139 deletions(-)
+ 30 files changed, 1381 insertions(+), 1139 deletions(-)
  create mode 100644 browser/devtools/webaudioeditor/controller.js
- create mode 100644 browser/devtools/webaudioeditor/head.js
+ create mode 100644 browser/devtools/webaudioeditor/includes.js
  create mode 100644 browser/devtools/webaudioeditor/models.js
  create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_graph-render-05.js
  create mode 100644 browser/devtools/webaudioeditor/test/doc_connect-toggle-param.html
@@ -47,7 +47,7 @@ Subject: Bug 1057042 - Refactor front end of web audio editor. r=vp
  delete mode 100644 browser/devtools/webaudioeditor/webaudioeditor-view.js
 
 diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
-index e64dcb2..76f2cba 100644
+index 192ac9ac..1b58101 100644
 --- a/browser/devtools/jar.mn
 +++ b/browser/devtools/jar.mn
 @@ -68,21 +68,25 @@ browser.jar:
@@ -65,7 +65,7 @@ index e64dcb2..76f2cba 100644
      content/browser/devtools/dagre-d3.js                               (webaudioeditor/lib/dagre-d3.js)
 -    content/browser/devtools/webaudioeditor-controller.js              (webaudioeditor/webaudioeditor-controller.js)
 -    content/browser/devtools/webaudioeditor-view.js                    (webaudioeditor/webaudioeditor-view.js)
-+    content/browser/devtools/webaudioeditor/head.js                    (webaudioeditor/head.js)
++    content/browser/devtools/webaudioeditor/includes.js                (webaudioeditor/includes.js)
 +    content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
 +    content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
 +    content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
@@ -81,7 +81,7 @@ index e64dcb2..76f2cba 100644
      content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
 diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
 new file mode 100644
-index 0000000..b28b321
+index 0000000..ee8dc45
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/controller.js
 @@ -0,0 +1,223 @@
@@ -90,9 +90,10 @@ index 0000000..b28b321
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +/**
-+ * Track an array of audio nodes
++ * A collection of `AudioNodeModel`s used throughout the editor
++ * to keep track of audio nodes within the audio context.
 + */
-+let audioNodes = new AudioNodesCollection();
++let gAudioNodes = new AudioNodesCollection();
 +
 +/**
 + * Initializes the web audio editor views
@@ -142,7 +143,6 @@ index 0000000..b28b321
 +    // the graph's marker styling, since we can't do this
 +    // with CSS
 +    gDevTools.on("pref-changed", this._onThemeChange);
-+
 +  },
 +
 +  /**
@@ -179,17 +179,17 @@ index 0000000..b28b321
 +  // adding an edge.
 +  _waitForNodeCreation: function (sourceActor, destActor) {
 +    let deferred = defer();
-+    let source = audioNodes.get(sourceActor.actorID);
-+    let dest = audioNodes.get(destActor.actorID);
++    let source = gAudioNodes.get(sourceActor.actorID);
++    let dest = gAudioNodes.get(destActor.actorID);
 +
 +    if (!source || !dest) {
-+      audioNodes.on("add", function createNodeListener (createdNode) {
++      gAudioNodes.on("add", function createNodeListener (createdNode) {
 +        if (sourceActor.actorID === createdNode.id)
 +          source = createdNode;
 +        if (destActor.actorID === createdNode.id)
 +          dest = createdNode;
 +        if (source && dest) {
-+          audioNodes.off("add", createNodeListener);
++          gAudioNodes.off("add", createNodeListener);
 +          deferred.resolve([source, dest]);
 +        }
 +      });
@@ -237,7 +237,7 @@ index 0000000..b28b321
 +        }
 +
 +        // Clear out stored audio nodes
-+        audioNodes.reset();
++        gAudioNodes.reset();
 +
 +        window.emit(EVENTS.UI_RESET);
 +        break;
@@ -266,7 +266,7 @@ index 0000000..b28b321
 +   * for tracking throughout the editor.
 +   */
 +  _onCreateNode: Task.async(function* (nodeActor) {
-+    yield audioNodes.add(nodeActor);
++    yield gAudioNodes.add(nodeActor);
 +  }),
 +
 +  /**
@@ -274,7 +274,7 @@ index 0000000..b28b321
 +   * from the AudioNode array and fires an event indicating the removal.
 +   */
 +  _onDestroyNode: function (nodeActor) {
-+    audioNodes.remove(audioNodes.get(nodeActor.actorID));
++    gAudioNodes.remove(gAudioNodes.get(nodeActor.actorID));
 +  },
 +
 +  /**
@@ -297,7 +297,7 @@ index 0000000..b28b321
 +   * Called when a node is disconnected.
 +   */
 +  _onDisconnectNode: function(nodeActor) {
-+    let node = audioNodes.get(nodeActor.actorID);
++    let node = gAudioNodes.get(nodeActor.actorID);
 +    node.disconnect();
 +  },
 +
@@ -305,14 +305,14 @@ index 0000000..b28b321
 +   * Called when a node param is changed.
 +   */
 +  _onChangeParam: function({ actor, param, value }) {
-+    window.emit(EVENTS.CHANGE_PARAM, audioNodes.get(actor.actorID), param, value);
++    window.emit(EVENTS.CHANGE_PARAM, gAudioNodes.get(actor.actorID), param, value);
 +  }
 +};
-diff --git a/browser/devtools/webaudioeditor/head.js b/browser/devtools/webaudioeditor/head.js
+diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
 new file mode 100644
 index 0000000..ddac056
 --- /dev/null
-+++ b/browser/devtools/webaudioeditor/head.js
++++ b/browser/devtools/webaudioeditor/includes.js
 @@ -0,0 +1,98 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -414,10 +414,10 @@ index 0000000..ddac056
 +}
 diff --git a/browser/devtools/webaudioeditor/models.js b/browser/devtools/webaudioeditor/models.js
 new file mode 100644
-index 0000000..97599f9
+index 0000000..e9ce10c
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/models.js
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,274 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -447,17 +447,37 @@ index 0000000..97599f9
 +    this.connections = [];
 +  },
 +
++  /**
++   * After instantiating the AudioNodeModel, calling `setup` caches values
++   * from the actor onto the model. In this case, only the type of audio node.
++   *
++   * @return promise
++   */
 +  setup: Task.async(function* () {
 +    yield this.getType();
 +  }),
 +
-+  // A proxy for the underlying AudioNodeActor to fetch its type
-+  // and subsequently assign the type to the instance.
++  /**
++   * A proxy for the underlying AudioNodeActor to fetch its type
++   * and subsequently assign the type to the instance.
++   *
++   * @return Promise->String
++   */
 +  getType: Task.async(function* () {
 +    this.type = yield this.actor.getType();
 +    return this.type;
 +  }),
 +
++  /**
++   * Stores connection data inside this instance of this audio node connecting
++   * to another node (destination). If connecting to another node's AudioParam,
++   * the second argument (param) must be populated with a string.
++   *
++   * Connecting nodes is idempotent. Upon new connection, emits "connect" event.
++   *
++   * @param AudioNodeModel destination
++   * @param String param
++   */
 +  connect: function (destination, param) {
 +    let edge = findWhere(this.connections, { destination: destination.id, param: param });
 +
@@ -467,19 +487,30 @@ index 0000000..97599f9
 +    }
 +  },
 +
++  /**
++   * Clears out all internal connection data. Emits "disconnect" event.
++   */
 +  disconnect: function () {
 +    this.connections.length = 0;
 +    coreEmit(this, "disconnect", this);
 +  },
 +
-+  // Returns a promise that resolves to an array of objects containing
-+  // both a `param` name property and a `value` property.
++  /**
++   * Returns a promise that resolves to an array of objects containing
++   * both a `param` name property and a `value` property.
++   *
++   * @return Promise->Object
++   */
 +  getParams: function () {
 +    return this.actor.getParams();
 +  },
 +
-+  // Takes a `dagreD3.Digraph` object and adds this node to
-+  // the graph to be rendered.
++  /**
++   * Takes a `dagreD3.Digraph` object and adds this node to
++   * the graph to be rendered.
++   *
++   * @param dagreD3.Digraph
++   */
 +  addToGraph: function (graph) {
 +    graph.addNode(this.id, {
 +      type: this.type,
@@ -488,12 +519,16 @@ index 0000000..97599f9
 +    });
 +  },
 +
-+  // Takes a `dagreD3.Digraph` object and adds edges to
-+  // the graph to be rendered. Separate from `addToGraph`,
-+  // as while we depend on D3/Dagre's constraints, we cannot
-+  // add edges for nodes that have not yet been added to the graph.
++  /**
++   * Takes a `dagreD3.Digraph` object and adds edges to
++   * the graph to be rendered. Separate from `addToGraph`,
++   * as while we depend on D3/Dagre's constraints, we cannot
++   * add edges for nodes that have not yet been added to the graph.
++   *
++   * @param dagreD3.Digraph
++   */
 +  addEdgesToGraph: function (graph) {
-+    this.connections.forEach(edge => {
++    for (let edge of this.connections) {
 +      let options = {
 +        source: this.id,
 +        target: edge.destination
@@ -508,7 +543,7 @@ index 0000000..97599f9
 +      }
 +
 +      graph.addEdge(null, this.id, edge.destination, options);
-+    });
++    }
 +  }
 +});
 +
@@ -532,10 +567,29 @@ index 0000000..97599f9
 +    this._onModelEvent = this._onModelEvent.bind(this);
 +  },
 +
++  /**
++   * Iterates over all models within the collection, calling `fn` with the
++   * model as the first argument.
++   *
++   * @param Function fn
++   */
 +  forEach: function (fn) {
-+    return this.models.forEach(fn);
++    this.models.forEach(fn);
 +  },
 +
++  /**
++   * Creates a new AudioNodeModel, passing through arguments into the AudioNodeModel
++   * constructor, and adds the model to the internal collection store of this
++   * instance.
++   *
++   * Also calls `setup` on the model itself, and sets up event piping, so that
++   * events emitted on each model propagate to the collection itself.
++   *
++   * Emits "add" event on instance when completed.
++   *
++   * @param Object obj
++   * @return Promise->AudioNodeModel
++   */
 +  add: Task.async(function* (obj) {
 +    let node = new this.model(obj);
 +    node.collection = this;
@@ -548,24 +602,53 @@ index 0000000..97599f9
 +    return node;
 +  }),
 +
++  /**
++   * Removes an AudioNodeModel from the internal collection. Calls `delete` method
++   * on the model, and emits "remove" on this instance.
++   *
++   * @param AudioNodeModel node
++   */
 +  remove: function (node) {
 +    this.models.delete(node);
 +    coreEmit(this, "remove", node);
 +  },
 +
++  /**
++   * Empties out the internal collection of all AudioNodeModels.
++   */
 +  reset: function () {
 +    this.models.clear();
 +  },
 +
++  /**
++   * Takes an `id` from an AudioNodeModel and returns the corresponding
++   * AudioNodeModel within the collection that matches that id. Returns `null`
++   * if not found.
++   *
++   * @param Number id
++   * @return AudioNodeModel|null
++   */
 +  get: function (id) {
 +    return findWhere(this.models, { id: id });
 +  },
 +
++  /**
++   * Returns the count for how many models are a part of this collection.
++   *
++   * @return Number
++   */
 +  get length() {
 +    return this.models.size;
 +  },
 +
-+  // Used during tests to query state
++  /**
++   * Returns detailed information about the collection. used during tests
++   * to query state. Returns an object with information on node count,
++   * how many edges are within the data graph, as well as how many of those edges
++   * are for AudioParams.
++   *
++   * @return Object
++   */
 +  getInfo: function () {
 +    let info = {
 +      nodes: this.length,
@@ -581,11 +664,22 @@ index 0000000..97599f9
 +    return info;
 +  },
 +
++  /**
++   * Adds all nodes within the collection to the passed in graph,
++   * as well as their corresponding edges.
++   *
++   * @param dagreD3.Digraph
++   */
 +  populateGraph: function (graph) {
 +    this.models.forEach(node => node.addToGraph(graph));
 +    this.models.forEach(node => node.addEdgesToGraph(graph));
 +  },
 +
++  /**
++   * Called when a stored model emits any event. Used to manage
++   * event propagation, or listening to model events to react, like
++   * removing a model from the collection when it's destroyed.
++   */
 +  _onModelEvent: function (eventName, node, ...args) {
 +    if (eventName === "remove") {
 +      // If a `remove` event from the model, remove it
@@ -598,7 +692,6 @@ index 0000000..97599f9
 +    }
 +  }
 +});
-+
 diff --git a/browser/devtools/webaudioeditor/panel.js b/browser/devtools/webaudioeditor/panel.js
 index f138b7c..fd4c7b9 100644
 --- a/browser/devtools/webaudioeditor/panel.js
@@ -662,7 +755,7 @@ index 943d647..b17a97d 100644
  [browser_wa_properties-view.js]
  [browser_wa_properties-view-edit-01.js]
 diff --git a/browser/devtools/webaudioeditor/test/browser_wa_destroy-node-01.js b/browser/devtools/webaudioeditor/test/browser_wa_destroy-node-01.js
-index 6343cfd..ecc4943 100644
+index 6343cfd..d3f14a2 100644
 --- a/browser/devtools/webaudioeditor/test/browser_wa_destroy-node-01.js
 +++ b/browser/devtools/webaudioeditor/test/browser_wa_destroy-node-01.js
 @@ -7,45 +7,45 @@
@@ -675,20 +768,20 @@ index 6343cfd..ecc4943 100644
    let [target, debuggee, panel] = yield initWebAudioEditor(DESTROY_NODES_URL);
    let { panelWin } = panel;
 -  let { gFront, $, $$, EVENTS } = panelWin;
-+  let { gFront, $, $$, audioNodes } = panelWin;
++  let { gFront, $, $$, gAudioNodes } = panelWin;
  
    let started = once(gFront, "start-context");
  
    reload(target);
  
 -  let destroyed = getN(panelWin, EVENTS.DESTROY_NODE, 10);
-+  let destroyed = getN(audioNodes, "remove", 10);
++  let destroyed = getN(gAudioNodes, "remove", 10);
  
    forceCC();
  
    let [created] = yield Promise.all([
 -    getNSpread(panelWin, EVENTS.CREATE_NODE, 13),
-+    getNSpread(audioNodes, "add", 13),
++    getNSpread(gAudioNodes, "add", 13),
      waitForGraphRendered(panelWin, 13, 2)
    ]);
  
@@ -709,7 +802,7 @@ index 6343cfd..ecc4943 100644
  
    // Test internal storage
 -  is(panelWin.AudioNodes.length, 3, "All nodes should be GC'd except one gain, osc and dest node.");
-+  is(panelWin.audioNodes.length, 3, "All nodes should be GC'd except one gain, osc and dest node.");
++  is(panelWin.gAudioNodes.length, 3, "All nodes should be GC'd except one gain, osc and dest node.");
  
    // Test graph rendering
    ok(findGraphNode(panelWin, actorIDs[0]), "dest should be in graph");
@@ -811,7 +904,7 @@ index c04a15e..5961837 100644
    let started = once(gFront, "start-context");
  
 diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js
-index 137d5ee..68318f9 100644
+index 137d5ee..b036cc17 100644
 --- a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js
 +++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-01.js
 @@ -5,23 +5,23 @@
@@ -824,14 +917,14 @@ index 137d5ee..68318f9 100644
    let [target, debuggee, panel] = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
    let { panelWin } = panel;
 -  let { gFront, $, $$, EVENTS } = panelWin;
-+  let { gFront, $, $$, EVENTS, audioNodes } = panelWin;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
  
    let started = once(gFront, "start-context");
  
    reload(target);
  
 -  panelWin.on(EVENTS.CONNECT_NODE, onConnectNode);
-+  audioNodes.on("connect", onConnectNode);
++  gAudioNodes.on("connect", onConnectNode);
  
    let [actors] = yield Promise.all([
      get3(gFront, "create-node"),
@@ -850,7 +943,7 @@ index 137d5ee..68318f9 100644
    is(connectCount, 2, "Only two node connect events should be fired.");
  
 -  panelWin.off(EVENTS.CONNECT_NODE, onConnectNode);
-+  audioNodes.off("connect", onConnectNode);
++  gAudioNodes.off("connect", onConnectNode);
  
    yield teardown(panel);
    finish();
@@ -1246,7 +1339,7 @@ index 0421de6..c84287e 100644
      get3(gFront, "create-node"),
      waitForGraphRendered(panelWin, 3, 2)
 diff --git a/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js b/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
-index 04c1092..a39073e 100644
+index 96dd9c9..8ccbf9f 100644
 --- a/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
 +++ b/browser/devtools/webaudioeditor/test/browser_wa_reset-03.js
 @@ -4,46 +4,46 @@
@@ -1281,11 +1374,11 @@ index 04c1092..a39073e 100644
  
    reload(target);
  
-   let [actors] = yield Promise.all([
+   [actors] = yield Promise.all([
      get3(gFront, "create-node"),
      waitForGraphRendered(panelWin, 3, 2)
    ]);
-   let nodeIds = actors.map(actor => actor.actorID);
+   nodeIds = actors.map(actor => actor.actorID);
  
 -  ok(!WebAudioInspectorView.isVisible(), "InspectorView hidden on start.");
 -  ise(WebAudioInspectorView.getCurrentAudioNode(), null,
@@ -1395,10 +1488,10 @@ index 0f5d0cb..de19e84 100644
  
 diff --git a/browser/devtools/webaudioeditor/views/context.js b/browser/devtools/webaudioeditor/views/context.js
 new file mode 100644
-index 0000000..783b122
+index 0000000..139047c
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/views/context.js
-@@ -0,0 +1,347 @@
+@@ -0,0 +1,305 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1425,7 +1518,7 @@ index 0000000..783b122
 +
 +const GRAPH_DEBOUNCE_TIMER = 100;
 +
-+// `audioNodes` events that should require the graph
++// `gAudioNodes` events that should require the graph
 +// to redraw
 +const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove"];
 +
@@ -1449,13 +1542,15 @@ index 0000000..783b122
 +    window.on(EVENTS.THEME_CHANGE, this._onThemeChange);
 +    window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
 +    window.on(EVENTS.START_CONTEXT, this._onStartContext);
-+    audioNodes.on("*", this._onEvent);
++    gAudioNodes.on("*", this._onEvent);
 +  },
 +
 +  /**
 +   * Destruction function, called when the tool is closed.
 +   */
 +  destroy: function() {
++    // If the graph was rendered at all, then the handler
++    // for zooming in will be set. We must remove it to prevent leaks.
 +    if (this._zoomBinding) {
 +      this._zoomBinding.on("zoom", null);
 +    }
@@ -1463,7 +1558,7 @@ index 0000000..783b122
 +    window.off(EVENTS.THEME_CHANGE, this._onThemeChange);
 +    window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
 +    window.off(EVENTS.START_CONTEXT, this._onStartContext);
-+    audioNodes.off("*", this._onEvent);
++    gAudioNodes.off("*", this._onEvent);
 +  },
 +
 +  /**
@@ -1472,7 +1567,7 @@ index 0000000..783b122
 +   */
 +  resetUI: function () {
 +    this.clearGraph();
-+    this.resetGraphPosition();
++    this.resetGraphTransform();
 +  },
 +
 +  /**
@@ -1486,7 +1581,8 @@ index 0000000..783b122
 +  /**
 +   * Moves the graph back to its original scale and translation.
 +   */
-+  resetGraphPosition: function () {
++  resetGraphTransform: function () {
++    // Only reset if the graph was ever drawn.
 +    if (this._zoomBinding) {
 +      let { translate, scale } = GRAPH_DEFAULTS;
 +      // Must set the `zoomBinding` so the next `zoom` event is in sync with
@@ -1529,62 +1625,17 @@ index 0000000..783b122
 +  },
 +
 +  /**
-+   * `draw` renders the ViewNodes currently available in `audioNodes` with `AudioNodeConnections`,
-+   * and `AudioParamConnections` and is throttled to be called at most every
-+   * `GRAPH_DEBOUNCE_TIMER` milliseconds. Is called whenever the audio context routing changes,
-+   * after being debounced.
++   * This method renders the nodes currently available in `gAudioNodes` and is
++   * throttled to be called at most every `GRAPH_DEBOUNCE_TIMER` milliseconds.
++   * It's called whenever the audio context routing changes, after being debounced.
 +   */
 +  draw: function () {
 +    // Clear out previous SVG information
 +    this.clearGraph();
 +
 +    let graph = new dagreD3.Digraph();
-+    audioNodes.populateGraph(graph);
-+    /*
-+    // An array of duples/tuples of pairs [sourceNode, destNode, param].
-+    // `param` is optional, indicating a connection to an AudioParam, rather than
-+    // an other AudioNode.
-+    let edges = [];
-+
-+    audioNodes.forEach(node => {
-+      // Add node to graph
-+      graph.addNode(node.id, {
-+        type: node.type,                        // Just for storing type data
-+        label: node.type.replace(/Node$/, ""),  // Displayed in SVG node
-+        id: node.id                             // Identification
-+      });
-+
-+      // Add all of the connections from this node to the edge array to be added
-+      // after all the nodes are added, otherwise edges will attempted to be created
-+      // for nodes that have not yet been added
-+      AudioNodeConnections.get(node, new Set()).forEach(dest => edges.push([node, dest]));
-+      let paramConnections = AudioParamConnections.get(node, {});
-+      Object.keys(paramConnections).forEach(destId => {
-+        let dest = getViewNodeById(destId);
-+        let connections = paramConnections[destId] || [];
-+        connections.forEach(param => edges.push([node, dest, param]));
-+      });
-+    });
-+
-+    edges.forEach(([node, dest, param]) => {
-+      let options = {
-+        source: node.id,
-+        target: dest.id
-+      };
-+
-+      // Only add `label` if `param` specified, as this is an AudioParam connection then.
-+      // `label` adds the magic to render with dagre-d3, and `param` is just more explicitly
-+      // the param, ignoring implementation details.
-+      if (param) {
-+        options.label = param;
-+        options.param = param;
-+      }
-+
-+      graph.addEdge(null, node.id, dest.id, options);
-+    });
-+    */
-+
 +    let renderer = new dagreD3.Renderer();
++    gAudioNodes.populateGraph(graph);
 +
 +    // Post-render manipulation of the nodes
 +    let oldDrawNodes = renderer.drawNodes();
@@ -1669,7 +1720,7 @@ index 0000000..783b122
 +      // if in testing mode only.
 +      let info = {};
 +      if (gDevTools.testing) {
-+        info = audioNodes.getInfo();
++        info = gAudioNodes.getInfo();
 +      }
 +      window.emit(EVENTS.UI_GRAPH_RENDERED, info.nodes, info.edges, info.paramEdges);
 +    });
@@ -1689,7 +1740,7 @@ index 0000000..783b122
 +
 +      // Set initial translation and scale -- this puts D3's awareness of
 +      // the graph in sync with what the user sees originally.
-+      this.resetGraphPosition();
++      this.resetGraphTransform();
 +    }
 +  },
 +
@@ -1706,7 +1757,7 @@ index 0000000..783b122
 +  },
 +
 +  /**
-+   * Called when `audioNodes` fires an event -- most events (listed
++   * Called when `gAudioNodes` fires an event -- most events (listed
 +   * in GRAPH_REDRAW_EVENTS) qualify as a redraw event.
 +   */
 +  _onEvent: function (eventName, ...args) {
@@ -1748,7 +1799,7 @@ index 0000000..783b122
 +};
 diff --git a/browser/devtools/webaudioeditor/views/inspector.js b/browser/devtools/webaudioeditor/views/inspector.js
 new file mode 100644
-index 0000000..008289f
+index 0000000..0a80755
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/views/inspector.js
 @@ -0,0 +1,240 @@
@@ -1815,7 +1866,7 @@ index 0000000..008289f
 +    this._propsView.eval = this._onEval;
 +
 +    window.on(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
-+    audioNodes.on("remove", this._onDestroyNode);
++    gAudioNodes.on("remove", this._onDestroyNode);
 +  },
 +
 +  /**
@@ -1824,7 +1875,7 @@ index 0000000..008289f
 +  destroy: function () {
 +    this.unbindToggle();
 +    window.off(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
-+    audioNodes.off("remove", this._onDestroyNode);
++    gAudioNodes.off("remove", this._onDestroyNode);
 +
 +    this.el = null;
 +    this.button = null;
@@ -1976,7 +2027,7 @@ index 0000000..008289f
 +   * and calls `setCurrentAudioNode` to scaffold the inspector view.
 +   */
 +  _onNodeSelect: function (_, id) {
-+    this.setCurrentAudioNode(audioNodes.get(id));
++    this.setCurrentAudioNode(gAudioNodes.get(id));
 +
 +    // Ensure inspector is visible when selecting a new node
 +    this.show();
@@ -3178,7 +3229,7 @@ index 8bcf4b3..0000000
 -  return null;
 -}
 diff --git a/browser/devtools/webaudioeditor/webaudioeditor.xul b/browser/devtools/webaudioeditor/webaudioeditor.xul
-index 0b01556..56f277c 100644
+index 0b01556..9be6b2b 100644
 --- a/browser/devtools/webaudioeditor/webaudioeditor.xul
 +++ b/browser/devtools/webaudioeditor/webaudioeditor.xul
 @@ -14,18 +14,22 @@
@@ -3192,7 +3243,7 @@ index 0b01556..56f277c 100644
    <script type="application/javascript" src="dagre-d3.js"/>
 -  <script type="application/javascript" src="webaudioeditor-controller.js"/>
 -  <script type="application/javascript" src="webaudioeditor-view.js"/>
-+  <script type="application/javascript" src="webaudioeditor/head.js"/>
++  <script type="application/javascript" src="webaudioeditor/includes.js"/>
 +  <script type="application/javascript" src="webaudioeditor/models.js"/>
 +  <script type="application/javascript" src="webaudioeditor/controller.js"/>
 +  <script type="application/javascript" src="webaudioeditor/views/utils.js"/>
