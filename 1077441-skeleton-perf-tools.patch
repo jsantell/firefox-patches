@@ -1,0 +1,627 @@
+From d5dca418b03f98a03e790a06a95eab723a274a97 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 13 Oct 2014 15:41:24 -0700
+Subject: Bug 1077441 - create empty performance tool under build flag, r=vp
+
+---
+ browser/app/profile/firefox.js                     |  7 ++
+ browser/devtools/jar.mn                            |  4 +
+ browser/devtools/main.js                           | 36 ++++++++
+ browser/devtools/moz.build                         |  3 +
+ browser/devtools/performance/moz.build             | 10 +++
+ browser/devtools/performance/panel.js              | 62 ++++++++++++++
+ browser/devtools/performance/performance.js        | 98 ++++++++++++++++++++++
+ browser/devtools/performance/performance.xul       | 50 +++++++++++
+ browser/themes/linux/devtools/performance.css      |  5 ++
+ browser/themes/linux/jar.mn                        |  1 +
+ browser/themes/osx/devtools/performance.css        |  6 ++
+ browser/themes/osx/jar.mn                          |  1 +
+ browser/themes/shared/devtools/performance.inc.css | 40 +++++++++
+ browser/themes/windows/devtools/performance.css    |  5 ++
+ browser/themes/windows/jar.mn                      |  1 +
+ configure.in                                       | 13 +++
+ 16 files changed, 342 insertions(+)
+ create mode 100644 browser/devtools/performance/moz.build
+ create mode 100644 browser/devtools/performance/panel.js
+ create mode 100644 browser/devtools/performance/performance.js
+ create mode 100644 browser/devtools/performance/performance.xul
+ create mode 100644 browser/themes/linux/devtools/performance.css
+ create mode 100644 browser/themes/osx/devtools/performance.css
+ create mode 100644 browser/themes/shared/devtools/performance.inc.css
+ create mode 100644 browser/themes/windows/devtools/performance.css
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index 37c810e..23ed1a6 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1374,16 +1374,23 @@ pref("devtools.debugger.ui.panes-visible-on-startup", false);
+ pref("devtools.debugger.ui.variables-sorting-enabled", true);
+ pref("devtools.debugger.ui.variables-only-enum-visible", false);
+ pref("devtools.debugger.ui.variables-searchbox-visible", false);
+ 
+ // Enable the Profiler and the Timeline
+ pref("devtools.profiler.enabled", true);
+ pref("devtools.timeline.enabled", false);
+ 
++// Enable perftools via build command
++#ifdef MOZ_DEVTOOLS_PERFTOOLS
++  pref("devtools.performance_dev.enabled", true);
++#else
++  pref("devtools.performance_dev.enabled", false);
++#endif
++
+ // The default Profiler UI settings
+ pref("devtools.profiler.ui.show-platform-data", false);
+ 
+ // The default cache UI setting
+ pref("devtools.cache.disabled", false);
+ 
+ // Enable the Network Monitor
+ pref("devtools.netmonitor.enabled", true);
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 1b58101..c3db0d6 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -81,16 +81,20 @@ browser.jar:
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/profiler.xul                              (profiler/profiler.xul)
+     content/browser/devtools/profiler.js                               (profiler/profiler.js)
+     content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
++#ifdef MOZ_DEVTOOLS_PERFTOOLS
++    content/browser/devtools/performance.xul                           (performance/performance.xul)
++    content/browser/devtools/performance.js                            (performance/performance.js)
++#endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+     content/browser/devtools/framework/toolbox-options.js              (framework/toolbox-options.js)
+diff --git a/browser/devtools/main.js b/browser/devtools/main.js
+index b6d5d06..be33c12 100644
+--- a/browser/devtools/main.js
++++ b/browser/devtools/main.js
+@@ -26,16 +26,17 @@ loader.lazyGetter(this, "OptionsPanel", () => require("devtools/framework/toolbo
+ loader.lazyGetter(this, "InspectorPanel", () => require("devtools/inspector/inspector-panel").InspectorPanel);
+ loader.lazyGetter(this, "WebConsolePanel", () => require("devtools/webconsole/panel").WebConsolePanel);
+ loader.lazyGetter(this, "DebuggerPanel", () => require("devtools/debugger/panel").DebuggerPanel);
+ loader.lazyGetter(this, "StyleEditorPanel", () => require("devtools/styleeditor/styleeditor-panel").StyleEditorPanel);
+ loader.lazyGetter(this, "ShaderEditorPanel", () => require("devtools/shadereditor/panel").ShaderEditorPanel);
+ loader.lazyGetter(this, "CanvasDebuggerPanel", () => require("devtools/canvasdebugger/panel").CanvasDebuggerPanel);
+ loader.lazyGetter(this, "WebAudioEditorPanel", () => require("devtools/webaudioeditor/panel").WebAudioEditorPanel);
+ loader.lazyGetter(this, "ProfilerPanel", () => require("devtools/profiler/panel").ProfilerPanel);
++loader.lazyGetter(this, "PerformancePanel", () => require("devtools/performance/panel").PerformancePanel);
+ loader.lazyGetter(this, "TimelinePanel", () => require("devtools/timeline/panel").TimelinePanel);
+ loader.lazyGetter(this, "NetMonitorPanel", () => require("devtools/netmonitor/panel").NetMonitorPanel);
+ loader.lazyGetter(this, "StoragePanel", () => require("devtools/storage/panel").StoragePanel);
+ loader.lazyGetter(this, "ScratchpadPanel", () => require("devtools/scratchpad/scratchpad-panel").ScratchpadPanel);
+ 
+ // Strings
+ const toolboxProps = "chrome://browser/locale/devtools/toolbox.properties";
+ const inspectorProps = "chrome://browser/locale/devtools/inspector.properties";
+@@ -269,16 +270,41 @@ Tools.jsprofiler = {
+     return !target.isAddon && (!target.isApp || target.form.profilerActor);
+   },
+ 
+   build: function (frame, target) {
+     return new ProfilerPanel(frame, target);
+   }
+ };
+ 
++Tools.performance = {
++  id: "performance",
++  ordinal: 19,
++  icon: "chrome://browser/skin/devtools/tool-profiler.svg",
++  invertIconForLightTheme: true,
++  url: "chrome://browser/content/devtools/performance.xul",
++  label: "Performance++", //l10n("profiler.label2", profilerStrings),
++  panelLabel: "Performance++", //l10n("profiler.panelLabel2", profilerStrings),
++  tooltip: l10n("profiler.tooltip2", profilerStrings),
++  accesskey: l10n("profiler.accesskey", profilerStrings),
++  key: l10n("profiler.commandkey2", profilerStrings),
++  modifiers: "shift",
++  inMenu: true,
++
++  isTargetSupported: function (target) {
++    // Hide the profiler when debugging devices pre bug 1046394,
++    // that don't expose profiler actor in content processes.
++    return !target.isAddon && (!target.isApp || target.form.profilerActor);
++  },
++
++  build: function (frame, target) {
++    return new PerformancePanel(frame, target);
++  }
++};
++
+ Tools.timeline = {
+   id: "timeline",
+   ordinal: 8,
+   visibilityswitch: "devtools.timeline.enabled",
+   icon: "chrome://browser/skin/devtools/tool-network.svg",
+   invertIconForLightTheme: true,
+   url: "chrome://browser/content/devtools/timeline/timeline.xul",
+   label: l10n("timeline.label", timelineStrings),
+@@ -399,16 +425,26 @@ let defaultTools = [
+   Tools.webAudioEditor,
+   Tools.jsprofiler,
+   Tools.timeline,
+   Tools.netMonitor,
+   Tools.storage,
+   Tools.scratchpad
+ ];
+ 
++// Only enable in-development performance tools if `--enable-devtools-perf`
++// used in build, turning on `devtools.performance_dev.enabled`.
++// Add to normal `defaultTools` when ready for normal release,
++// pull out MOZ_DEVTOOLS_PERFTOOLS setting in `./configure.in`, and
++// leave config on in `./browser/app/profile/firefox.js`, and always
++// build in `./browser/devtools/moz.build`.
++if (Services.prefs.getBoolPref("devtools.performance_dev.enabled")) {
++  defaultTools.push(Tools.performance);
++}
++
+ exports.defaultTools = defaultTools;
+ 
+ for (let definition of defaultTools) {
+   gDevTools.registerTool(definition);
+ }
+ 
+ Tools.darkTheme = {
+   id: "dark",
+diff --git a/browser/devtools/moz.build b/browser/devtools/moz.build
+index f1327bd..0d783ae 100644
+--- a/browser/devtools/moz.build
++++ b/browser/devtools/moz.build
+@@ -28,16 +28,19 @@ DIRS += [
+     'styleinspector',
+     'tilt',
+     'timeline',
+     'webaudioeditor',
+     'webconsole',
+     'webide',
+ ]
+ 
++if CONFIG['MOZ_DEVTOOLS_PERFTOOLS']:
++  DIRS += ['performance']
++
+ EXTRA_COMPONENTS += [
+     'devtools-clhandler.js',
+     'devtools-clhandler.manifest',
+ ]
+ 
+ JAR_MANIFESTS += ['jar.mn']
+ 
+ EXTRA_JS_MODULES.devtools += [
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+new file mode 100644
+index 0000000..3c23ab6
+--- /dev/null
++++ b/browser/devtools/performance/moz.build
+@@ -0,0 +1,10 @@
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++EXTRA_JS_MODULES.devtools.performance += [
++    'panel.js'
++]
++
++BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/browser/devtools/performance/panel.js b/browser/devtools/performance/panel.js
+new file mode 100644
+index 0000000..d8d32dc
+--- /dev/null
++++ b/browser/devtools/performance/panel.js
+@@ -0,0 +1,62 @@
++/* -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set ft=javascript ts=2 et sw=2 tw=80: */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const {Cc, Ci, Cu, Cr} = require("chrome");
++
++Cu.import("resource://gre/modules/Task.jsm");
++
++loader.lazyRequireGetter(this, "promise");
++loader.lazyRequireGetter(this, "EventEmitter",
++  "devtools/toolkit/event-emitter");
++
++function PerformancePanel(iframeWindow, toolbox) {
++  this.panelWin = iframeWindow;
++  this._toolbox = toolbox;
++
++  EventEmitter.decorate(this);
++}
++
++exports.PerformancePanel = PerformancePanel;
++
++PerformancePanel.prototype = {
++  /**
++   * Open is effectively an asynchronous constructor.
++   *
++   * @return object
++   *         A promise that is resolved when the Profiler completes opening.
++   */
++  open: Task.async(function*() {
++    this.panelWin.gToolbox = this._toolbox;
++    this.panelWin.gTarget = this.target;
++
++    // Mock Front for now
++    let gFront = {};
++    EventEmitter.decorate(gFront);
++    this.panelWin.gFront = gFront;
++
++    yield this.panelWin.startupPerformance();
++
++    this.isReady = true;
++    this.emit("ready");
++    return this;
++  }),
++
++  // DevToolPanel API
++
++  get target() this._toolbox.target,
++
++  destroy: Task.async(function*() {
++    // Make sure this panel is not already destroyed.
++    if (this._destroyed) {
++      return;
++    }
++
++    yield this.panelWin.shutdownPerformance();
++    this.emit("destroyed");
++    this._destroyed = true;
++  })
++};
+diff --git a/browser/devtools/performance/performance.js b/browser/devtools/performance/performance.js
+new file mode 100644
+index 0000000..cc357bd
+--- /dev/null
++++ b/browser/devtools/performance/performance.js
+@@ -0,0 +1,98 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++
++Cu.import("resource://gre/modules/Task.jsm");
++Cu.import("resource://gre/modules/devtools/Loader.jsm");
++Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
++
++devtools.lazyRequireGetter(this, "Services");
++devtools.lazyRequireGetter(this, "promise");
++devtools.lazyRequireGetter(this, "EventEmitter",
++  "devtools/toolkit/event-emitter");
++devtools.lazyRequireGetter(this, "DevToolsUtils",
++  "devtools/toolkit/DevToolsUtils");
++
++/**
++ * The current target and the profiler connection, set by this tool's host.
++ */
++let gToolbox, gTarget, gFront;
++
++/**
++ * Initializes the profiler controller and views.
++ */
++let startupPerformance = Task.async(function*() {
++  yield promise.all([
++    PrefObserver.register(),
++    EventsHandler.initialize()
++  ]);
++});
++
++/**
++ * Destroys the profiler controller and views.
++ */
++let shutdownPerformance = Task.async(function*() {
++  yield promise.all([
++    PrefObserver.unregister(),
++    EventsHandler.destroy()
++  ]);
++});
++
++/**
++ * Observes pref changes on the devtools.profiler branch and triggers the
++ * required frontend modifications.
++ */
++let PrefObserver = {
++  register: function() {
++    this.branch = Services.prefs.getBranch("devtools.profiler.");
++    this.branch.addObserver("", this, false);
++  },
++  unregister: function() {
++    this.branch.removeObserver("", this);
++  },
++  observe: function(subject, topic, pref) {
++    Prefs.refresh();
++  }
++};
++
++/**
++ * Functions handling target-related lifetime events.
++ */
++let EventsHandler = {
++  /**
++   * Listen for events emitted by the current tab target.
++   */
++  initialize: function() {
++  },
++
++  /**
++   * Remove events emitted by the current tab target.
++   */
++  destroy: function() {
++  }
++};
++
++/**
++ * Shortcuts for accessing various profiler preferences.
++ */
++const Prefs = new ViewHelpers.Prefs("devtools.profiler", {
++  showPlatformData: ["Bool", "ui.show-platform-data"]
++});
++
++/**
++ * Convenient way of emitting events from the panel window.
++ */
++EventEmitter.decorate(this);
++
++/**
++ * DOM query helpers.
++ */
++function $(selector, target = document) {
++  return target.querySelector(selector);
++}
++function $$(selector, target = document) {
++  return target.querySelectorAll(selector);
++}
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+new file mode 100644
+index 0000000..1180278
+--- /dev/null
++++ b/browser/devtools/performance/performance.xul
+@@ -0,0 +1,50 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<?xml-stylesheet href="chrome://browser/skin/" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/content/devtools/widgets.css" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/skin/devtools/common.css" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/skin/devtools/widgets.css" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/skin/devtools/performance.css" type="text/css"?>
++<!DOCTYPE window [
++  <!ENTITY % profilerDTD SYSTEM "chrome://browser/locale/devtools/profiler.dtd">
++  %profilerDTD;
++]>
++
++<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
++  <script src="chrome://browser/content/devtools/theme-switching.js"/>
++  <script type="application/javascript" src="performance.js"/>
++
++  <vbox class="theme-body" flex="1">
++    <toolbar id="performance-toolbar" class="devtools-toolbar">
++      <hbox id="performance-toolbar-controls-profiles" class="devtools-toolbarbutton-group">
++        <toolbarbutton id="record-button"
++                       class="devtools-toolbarbutton"
++                       oncommand="RecordingsListView._onRecordButtonClick()"
++                       tooltiptext="&profilerUI.recordButton.tooltip;"/>
++        <toolbarbutton id="clear-button"
++                       class="devtools-toolbarbutton"
++                       oncommand="RecordingsListView._onClearButtonClick()"
++                       label="&profilerUI.clearButton;"/>
++      </hbox>
++      <spacer flex="1"></spacer>
++      <hbox id="performance-toolbar-controls-storage" class="devtools-toolbarbutton-group">
++        <toolbarbutton id="import-button"
++                       class="devtools-toolbarbutton"
++                       oncommand="RecordingsListView._onImportButtonClick()"
++                       label="&profilerUI.importButton;"/>
++      </hbox>
++    </toolbar>
++    <splitter class="devtools-horizontal-splitter" />
++    <box id="overview-pane"
++      class="devtools-responsive-container"
++      flex="1">
++    </box>
++    <splitter class="devtools-horizontal-splitter" />
++    <box id="profile-pane"
++         class="devtools-responsive-container"
++         flex="1">
++    </box>
++  </vbox>
++</window>
+diff --git a/browser/themes/linux/devtools/performance.css b/browser/themes/linux/devtools/performance.css
+new file mode 100644
+index 0000000..9fbdab0
+--- /dev/null
++++ b/browser/themes/linux/devtools/performance.css
+@@ -0,0 +1,5 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++%include ../../shared/devtools/performance.inc.css
+diff --git a/browser/themes/linux/jar.mn b/browser/themes/linux/jar.mn
+index 4414eb8..4d6470e 100644
+--- a/browser/themes/linux/jar.mn
++++ b/browser/themes/linux/jar.mn
+@@ -247,16 +247,17 @@ browser.jar:
+   skin/classic/browser/devtools/breadcrumbs-divider@2x.png      (../shared/devtools/images/breadcrumbs-divider@2x.png)
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton.png    (../shared/devtools/images/breadcrumbs-scrollbutton.png)
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton@2x.png (../shared/devtools/images/breadcrumbs-scrollbutton@2x.png)
+ * skin/classic/browser/devtools/canvasdebugger.css    (devtools/canvasdebugger.css)
+ * skin/classic/browser/devtools/debugger.css          (devtools/debugger.css)
+   skin/classic/browser/devtools/eyedropper.css        (../shared/devtools/eyedropper.css)
+ * skin/classic/browser/devtools/netmonitor.css        (devtools/netmonitor.css)
+ * skin/classic/browser/devtools/profiler.css          (devtools/profiler.css)
++* skin/classic/browser/devtools/performance.css       (devtools/performance.css)
+ * skin/classic/browser/devtools/timeline.css          (devtools/timeline.css)
+ * skin/classic/browser/devtools/scratchpad.css        (devtools/scratchpad.css)
+ * skin/classic/browser/devtools/shadereditor.css      (devtools/shadereditor.css)
+ * skin/classic/browser/devtools/splitview.css         (../shared/devtools/splitview.css)
+   skin/classic/browser/devtools/styleeditor.css       (../shared/devtools/styleeditor.css)
+   skin/classic/browser/devtools/storage.css           (../shared/devtools/storage.css)
+ * skin/classic/browser/devtools/webaudioeditor.css    (devtools/webaudioeditor.css)
+   skin/classic/browser/devtools/magnifying-glass.png        (../shared/devtools/images/magnifying-glass.png)
+diff --git a/browser/themes/osx/devtools/performance.css b/browser/themes/osx/devtools/performance.css
+new file mode 100644
+index 0000000..8aefc9e
+--- /dev/null
++++ b/browser/themes/osx/devtools/performance.css
+@@ -0,0 +1,6 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++%include ../shared.inc
++%include ../../shared/devtools/performance.inc.css
+diff --git a/browser/themes/osx/jar.mn b/browser/themes/osx/jar.mn
+index 5e376ee..05b0583 100644
+--- a/browser/themes/osx/jar.mn
++++ b/browser/themes/osx/jar.mn
+@@ -377,16 +377,17 @@ browser.jar:
+   skin/classic/browser/devtools/breadcrumbs-divider@2x.png      (../shared/devtools/images/breadcrumbs-divider@2x.png)
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton.png    (../shared/devtools/images/breadcrumbs-scrollbutton.png)
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton@2x.png (../shared/devtools/images/breadcrumbs-scrollbutton@2x.png)
+ * skin/classic/browser/devtools/canvasdebugger.css          (devtools/canvasdebugger.css)
+ * skin/classic/browser/devtools/debugger.css                (devtools/debugger.css)
+   skin/classic/browser/devtools/eyedropper.css              (../shared/devtools/eyedropper.css)
+ * skin/classic/browser/devtools/netmonitor.css              (devtools/netmonitor.css)
+ * skin/classic/browser/devtools/profiler.css                (devtools/profiler.css)
++* skin/classic/browser/devtools/performance.css             (devtools/performance.css)
+ * skin/classic/browser/devtools/timeline.css                (devtools/timeline.css)
+ * skin/classic/browser/devtools/scratchpad.css              (devtools/scratchpad.css)
+ * skin/classic/browser/devtools/shadereditor.css            (devtools/shadereditor.css)
+ * skin/classic/browser/devtools/splitview.css               (../shared/devtools/splitview.css)
+   skin/classic/browser/devtools/styleeditor.css             (../shared/devtools/styleeditor.css)
+   skin/classic/browser/devtools/storage.css                 (../shared/devtools/storage.css)
+ * skin/classic/browser/devtools/webaudioeditor.css          (devtools/webaudioeditor.css)
+   skin/classic/browser/devtools/magnifying-glass.png        (../shared/devtools/images/magnifying-glass.png)
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+new file mode 100644
+index 0000000..ab8b9a4
+--- /dev/null
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -0,0 +1,40 @@
++/* vim:set ts=2 sw=2 sts=2 et: */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* Toolbar */
++
++#performance-toolbar {
++  -moz-border-end: 1px solid;
++}
++
++.theme-dark #performance-toolbar > tabs,
++.theme-dark #performance-toolbar {
++  -moz-border-end-color: #000; /* Splitters */
++}
++
++.theme-light #performance-toolbar > tabs,
++.theme-light #performance-toolbar {
++  -moz-border-end-color: #aaa; /* Splitters */
++}
++
++/* Overview Panel */
++
++#overview-controls {
++  position: absolute;
++  padding: 3px;
++  top: 0;
++}
++
++#record-button {
++  list-style-image: url(profiler-stopwatch.svg);
++}
++
++#record-button[checked] {
++  list-style-image: url(profiler-stopwatch-checked.svg);
++}
++
++#record-button[locked] {
++  pointer-events: none;
++}
+diff --git a/browser/themes/windows/devtools/performance.css b/browser/themes/windows/devtools/performance.css
+new file mode 100644
+index 0000000..9fbdab0
+--- /dev/null
++++ b/browser/themes/windows/devtools/performance.css
+@@ -0,0 +1,5 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++%include ../../shared/devtools/performance.inc.css
+diff --git a/browser/themes/windows/jar.mn b/browser/themes/windows/jar.mn
+index b910689..30d2c14 100644
+--- a/browser/themes/windows/jar.mn
++++ b/browser/themes/windows/jar.mn
+@@ -284,16 +284,17 @@ browser.jar:
+         skin/classic/browser/devtools/breadcrumbs-divider@2x.png    (../shared/devtools/images/breadcrumbs-divider@2x.png)
+         skin/classic/browser/devtools/breadcrumbs-scrollbutton.png  (../shared/devtools/images/breadcrumbs-scrollbutton.png)
+         skin/classic/browser/devtools/breadcrumbs-scrollbutton@2x.png (../shared/devtools/images/breadcrumbs-scrollbutton@2x.png)
+         skin/classic/browser/devtools/eyedropper.css                (../shared/devtools/eyedropper.css)
+ *       skin/classic/browser/devtools/canvasdebugger.css            (devtools/canvasdebugger.css)
+ *       skin/classic/browser/devtools/debugger.css                  (devtools/debugger.css)
+ *       skin/classic/browser/devtools/netmonitor.css                (devtools/netmonitor.css)
+ *       skin/classic/browser/devtools/profiler.css                  (devtools/profiler.css)
++*       skin/classic/browser/devtools/performance.css               (devtools/performance.css)
+ *       skin/classic/browser/devtools/timeline.css                  (devtools/timeline.css)
+ *       skin/classic/browser/devtools/scratchpad.css                (devtools/scratchpad.css)
+ *       skin/classic/browser/devtools/shadereditor.css              (devtools/shadereditor.css)
+         skin/classic/browser/devtools/storage.css                   (../shared/devtools/storage.css)
+ *       skin/classic/browser/devtools/splitview.css                 (../shared/devtools/splitview.css)
+         skin/classic/browser/devtools/styleeditor.css               (../shared/devtools/styleeditor.css)
+ *       skin/classic/browser/devtools/webaudioeditor.css            (devtools/webaudioeditor.css)
+         skin/classic/browser/devtools/magnifying-glass.png          (../shared/devtools/images/magnifying-glass.png)
+diff --git a/configure.in b/configure.in
+index 59757cf..28c4668 100644
+--- a/configure.in
++++ b/configure.in
+@@ -7746,16 +7746,29 @@ fi
+ 
+ if test "$MOZ_CHROME_FILE_FORMAT" != "jar" &&
+     test "$MOZ_CHROME_FILE_FORMAT" != "flat" &&
+     test "$MOZ_CHROME_FILE_FORMAT" != "omni"; then
+     AC_MSG_ERROR([--enable-chrome-format must be set to either jar, flat, or omni])
+ fi
+ 
+ dnl =========================================================
++dnl Enable support for revamped devtools Performance Tools
++dnl =========================================================
++
++MOZ_ARG_ENABLE_BOOL(devtools-perf,
++[  --enable-devtools-perf Set compile flags necessary for compiling devtools perftools],
++MOZ_DEVTOOLS_PERFTOOLS=1,
++MOZ_DEVTOOLS_PERFTOOLS= )
++if test -n "$MOZ_DEVTOOLS_PERFTOOLS"; then
++  AC_DEFINE(MOZ_DEVTOOLS_PERFTOOLS)
++fi
++AC_SUBST(MOZ_DEVTOOLS_PERFTOOLS)
++
++dnl =========================================================
+ dnl Omnijar packaging (bug 552121)
+ dnl =========================================================
+ dnl Omnijar packaging is compatible with flat packaging.
+ dnl In unpackaged builds, omnijar looks for files as if
+ dnl things were flat packaged. After packaging, all files
+ dnl are loaded from a single jar. MOZ_CHROME_FILE_FORMAT
+ dnl is set to flat since putting files into jars is only
+ dnl done during packaging with omnijar.
+-- 
+1.8.4.2
+
