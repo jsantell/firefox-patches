@@ -1,0 +1,272 @@
+From 865bf0d4bc0cc4b8e8ba06794b2b6baa72d6061c Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 14 Oct 2014 16:30:56 -0700
+Subject: Bug 1058879 - enable browser_canvas-actor-test-10.js for e10s. r=vp
+
+---
+ browser/devtools/canvasdebugger/test/browser.ini   |  1 -
+ .../test/browser_canvas-actor-test-10.js           | 47 +++++++++++++---------
+ browser/devtools/canvasdebugger/test/head.js       | 40 +++++++++++++++++-
+ browser/devtools/shared/frame-script-utils.js      |  9 +++++
+ 4 files changed, 77 insertions(+), 20 deletions(-)
+
+diff --git a/browser/devtools/canvasdebugger/test/browser.ini b/browser/devtools/canvasdebugger/test/browser.ini
+index 60c8c6c..2430397 100644
+--- a/browser/devtools/canvasdebugger/test/browser.ini
++++ b/browser/devtools/canvasdebugger/test/browser.ini
+@@ -14,17 +14,16 @@ support-files =
+ [browser_canvas-actor-test-03.js]
+ [browser_canvas-actor-test-04.js]
+ [browser_canvas-actor-test-05.js]
+ [browser_canvas-actor-test-06.js]
+ [browser_canvas-actor-test-07.js]
+ [browser_canvas-actor-test-08.js]
+ [browser_canvas-actor-test-09.js]
+ [browser_canvas-actor-test-10.js]
+-skip-if = e10s # Bug 1058879 - canvas debugger tests disabled with e10s
+ [browser_canvas-frontend-call-highlight.js]
+ [browser_canvas-frontend-call-list.js]
+ [browser_canvas-frontend-call-search.js]
+ [browser_canvas-frontend-call-stack-01.js]
+ [browser_canvas-frontend-call-stack-02.js]
+ [browser_canvas-frontend-call-stack-03.js]
+ [browser_canvas-frontend-clear.js]
+ [browser_canvas-frontend-img-screenshots.js]
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-10.js b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-10.js
+index 99f0214..d46318e 100644
+--- a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-10.js
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-10.js
+@@ -3,18 +3,17 @@
+ 
+ /**
+  * Tests that the correct framebuffer, renderbuffer and textures are re-bound
+  * after generating screenshots using the actor.
+  */
+ 
+ function ifTestingSupported() {
+   let { target, front } = yield initCanvasDebuggerBackend(WEBGL_BINDINGS_URL);
+-  // XXX - use of |debuggee| here is incompatible with e10s - bug 1058879.
+-  let debuggee = target.window.wrappedJSObject
++  loadFrameScripts();
+ 
+   let navigated = once(target, "navigate");
+ 
+   yield front.setup({ reload: true });
+   ok(true, "The front was setup up successfully.");
+ 
+   yield navigated;
+   ok(true, "Target automatically navigated when the front was set up.");
+@@ -32,30 +31,36 @@ function ifTestingSupported() {
+     "The first screenshot has the correct width.");
+   is(firstScreenshot.height, CanvasFront.WEBGL_SCREENSHOT_MAX_HEIGHT,
+     "The first screenshot has the correct height.");
+   is(firstScreenshot.flipped, true,
+     "The first screenshot has the correct 'flipped' flag.");
+   is(firstScreenshot.pixels.length, 0,
+     "The first screenshot should be empty.");
+ 
+-  let gl = debuggee.gl;
+-  is(gl.getParameter(gl.FRAMEBUFFER_BINDING), debuggee.customFramebuffer,
++  is((yield evalInDebuggee("gl.getParameter(gl.FRAMEBUFFER_BINDING) === customFramebuffer")),
++    true,
+     "The debuggee's gl context framebuffer wasn't changed.");
+-  is(gl.getParameter(gl.RENDERBUFFER_BINDING), debuggee.customRenderbuffer,
++  is((yield evalInDebuggee("gl.getParameter(gl.RENDERBUFFER_BINDING) === customRenderbuffer")),
++    true,
+     "The debuggee's gl context renderbuffer wasn't changed.");
+-  is(gl.getParameter(gl.TEXTURE_BINDING_2D), debuggee.customTexture,
++  is((yield evalInDebuggee("gl.getParameter(gl.TEXTURE_BINDING_2D) === customTexture")),
++    true,
+     "The debuggee's gl context texture binding wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[0], 128,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[0]")),
++    128,
+     "The debuggee's gl context viewport's left coord. wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[1], 256,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[1]")),
++    256,
+     "The debuggee's gl context viewport's left coord. wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[2], 384,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[2]")),
++    384,
+     "The debuggee's gl context viewport's left coord. wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[3], 512,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[3]")),
++    512,
+     "The debuggee's gl context viewport's left coord. wasn't changed.");
+ 
+   let secondScreenshot = yield snapshotActor.generateScreenshotFor(functionCalls[1]);
+   is(secondScreenshot.index, 1,
+     "The second screenshot has the correct index.");
+   is(secondScreenshot.width, CanvasFront.WEBGL_SCREENSHOT_MAX_HEIGHT,
+     "The second screenshot has the correct width.");
+   is(secondScreenshot.height, CanvasFront.WEBGL_SCREENSHOT_MAX_HEIGHT,
+@@ -70,27 +75,33 @@ function ifTestingSupported() {
+     "The second screenshot has the correct red component.");
+   is(new Uint8Array(secondScreenshot.pixels.buffer)[1], 0,
+     "The second screenshot has the correct green component.");
+   is(new Uint8Array(secondScreenshot.pixels.buffer)[2], 255,
+     "The second screenshot has the correct blue component.");
+   is(new Uint8Array(secondScreenshot.pixels.buffer)[3], 255,
+     "The second screenshot has the correct alpha component.");
+ 
+-  gl = debuggee.gl;
+-  is(gl.getParameter(gl.FRAMEBUFFER_BINDING), debuggee.customFramebuffer,
++  is((yield evalInDebuggee("gl.getParameter(gl.FRAMEBUFFER_BINDING) === customFramebuffer")),
++    true,
+     "The debuggee's gl context framebuffer still wasn't changed.");
+-  is(gl.getParameter(gl.RENDERBUFFER_BINDING), debuggee.customRenderbuffer,
++  is((yield evalInDebuggee("gl.getParameter(gl.RENDERBUFFER_BINDING) === customRenderbuffer")),
++    true,
+     "The debuggee's gl context renderbuffer still wasn't changed.");
+-  is(gl.getParameter(gl.TEXTURE_BINDING_2D), debuggee.customTexture,
++  is((yield evalInDebuggee("gl.getParameter(gl.TEXTURE_BINDING_2D) === customTexture")),
++    true,
+     "The debuggee's gl context texture binding still wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[0], 128,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[0]")),
++    128,
+     "The debuggee's gl context viewport's left coord. still wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[1], 256,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[1]")),
++    256,
+     "The debuggee's gl context viewport's left coord. still wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[2], 384,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[2]")),
++    384,
+     "The debuggee's gl context viewport's left coord. still wasn't changed.");
+-  is(gl.getParameter(gl.VIEWPORT)[3], 512,
++  is((yield evalInDebuggee("gl.getParameter(gl.VIEWPORT)[3]")),
++    512,
+     "The debuggee's gl context viewport's left coord. still wasn't changed.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/canvasdebugger/test/head.js b/browser/devtools/canvasdebugger/test/head.js
+index 1812e40..9d94cf6 100644
+--- a/browser/devtools/canvasdebugger/test/head.js
++++ b/browser/devtools/canvasdebugger/test/head.js
+@@ -6,29 +6,31 @@ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ 
+ // Disable logging for all the tests. Both the debugger server and frontend will
+ // be affected by this pref.
+ let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
+ Services.prefs.setBoolPref("devtools.debugger.log", false);
+ 
++let { generateUUID } = Cc['@mozilla.org/uuid-generator;1'].getService(Ci.nsIUUIDGenerator);
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
+ let { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.jsm", {});
+-
+ let { CallWatcherFront } = devtools.require("devtools/server/actors/call-watcher");
+ let { CanvasFront } = devtools.require("devtools/server/actors/canvas");
+ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
++let mm = null
+ 
++const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/canvasdebugger/test/";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
+ const SIMPLE_BITMASKS_URL = EXAMPLE_URL + "doc_simple-canvas-bitmasks.html";
+ const SIMPLE_CANVAS_TRANSPARENT_URL = EXAMPLE_URL + "doc_simple-canvas-transparent.html";
+ const SIMPLE_CANVAS_DEEP_STACK_URL = EXAMPLE_URL + "doc_simple-canvas-deep-stack.html";
+ const WEBGL_ENUM_URL = EXAMPLE_URL + "doc_webgl-enum.html";
+ const WEBGL_BINDINGS_URL = EXAMPLE_URL + "doc_webgl-bindings.html";
+ 
+@@ -43,16 +45,25 @@ registerCleanupFunction(() => {
+   Services.prefs.setBoolPref("devtools.canvasdebugger.enabled", gToolEnabled);
+ 
+   // Some of yhese tests use a lot of memory due to GL contexts, so force a GC
+   // to help fragmentation.
+   info("Forcing GC after canvas debugger test.");
+   Cu.forceGC();
+ });
+ 
++/**
++ * Call manually in tests that use frame script utils after initializing
++ * the shader editor. Call after init but before navigating to different pages.
++ */
++function loadFrameScripts () {
++  mm = gBrowser.selectedBrowser.messageManager;
++  mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
++}
++
+ function addTab(aUrl, aWindow) {
+   info("Adding tab: " + aUrl);
+ 
+   let deferred = promise.defer();
+   let targetWindow = aWindow || window;
+   let targetBrowser = targetWindow.gBrowser;
+ 
+   targetWindow.focus();
+@@ -227,8 +238,35 @@ function initCanvasDebuggerFrontend(aUrl) {
+ function teardown(aPanel) {
+   info("Destroying the specified canvas debugger.");
+ 
+   return promise.all([
+     once(aPanel, "destroyed"),
+     removeTab(aPanel.target.tab)
+   ]);
+ }
++
++/**
++ * Takes a string `script` and evaluates it directly in the content
++ * in potentially a different process.
++ */
++function evalInDebuggee (script) {
++  let deferred = promise.defer();
++
++  if (!mm) {
++    throw new Error("`loadFrameScripts()` must be called when using MessageManager.");
++  }
++
++  let id = generateUUID().toString();
++  mm.sendAsyncMessage("devtools:test:eval", { script: script, id: id });
++  mm.addMessageListener("devtools:test:eval:response", handler);
++
++  function handler ({ data }) {
++    if (id !== data.id) {
++      return;
++    }
++
++    mm.removeMessageListener("devtools:test:eval:response", handler);
++    deferred.resolve(data.value);
++  }
++
++  return deferred.promise;
++}
+diff --git a/browser/devtools/shared/frame-script-utils.js b/browser/devtools/shared/frame-script-utils.js
+index 4c71c7a..a5657b8 100644
+--- a/browser/devtools/shared/frame-script-utils.js
++++ b/browser/devtools/shared/frame-script-utils.js
+@@ -12,11 +12,20 @@ addMessageListener("devtools:test:navigate", function ({ data }) {
+   content.location = data.location;
+ });
+ 
+ addMessageListener("devtools:test:reload", function ({ data }) {
+   data = data || {};
+   content.location.reload(data.forceget);
+ });
+ 
++// To eval in content, look at `evalInDebuggee` in the head.js of canvasdebugger
++// for an example.
++addMessageListener("devtools:test:eval", function ({ data }) {
++  sendAsyncMessage("devtools:test:eval:response", {
++    value: content.eval(data.script),
++    id: data.id
++  });
++});
++
+ addEventListener("load", function() {
+   sendAsyncMessage("devtools:test:load");
+ }, true);
+-- 
+1.8.4.2
+

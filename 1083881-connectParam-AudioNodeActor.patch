@@ -1,0 +1,129 @@
+From 9677a120a84ff73e07a2dd734c8d3f3e2c9b5b9e Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 16 Oct 2014 09:25:24 -0700
+Subject: Bug 1083881 - add method connectParam to AudioNodeActors, r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  1 +
+ .../test/browser_audionode-actor-connectparam.js   | 35 ++++++++++++++++++++++
+ toolkit/devtools/server/actors/webaudio.js         | 30 +++++++++++++++++++
+ 3 files changed, 66 insertions(+)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-connectparam.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 438accd..503e6f0 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -18,16 +18,17 @@ support-files =
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_audionode-actor-bypass.js]
+ [browser_audionode-actor-connectnode-disconnect.js]
++[browser_audionode-actor-connectparam.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
+ [browser_webaudio-actor-connect-param.js]
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-connectparam.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-connectparam.js
+new file mode 100644
+index 0000000..2603299
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-connectparam.js
+@@ -0,0 +1,35 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that AudioNodeActor#connectParam() work.
++ * Uses the editor front as the actors do not retain connect state.
++ */
++
++function spawnTest() {
++  let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  let [dest, osc, gain] = actors;
++
++  yield osc.disconnect();
++
++  osc.connectParam(gain, "gain");
++  yield Promise.all([
++    waitForGraphRendered(panelWin, 3, 1, 1),
++    once(gAudioNodes, "connect")
++  ]);
++  ok(true, "Oscillator connect to Gain's Gain AudioParam, event emitted.");
++
++  yield teardown(panel);
++  finish();
++}
++
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index b276d91..09aebd6 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -288,16 +288,46 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+     let props = Object.keys(NODE_PROPERTIES[this.type]);
+     return props.map(prop =>
+       ({ param: prop, value: this.getParam(prop), flags: this.getParamFlags(prop) }));
+   }, {
+     response: { params: RetVal("json") }
+   }),
+ 
+   /**
++   * Connects this audionode to an AudioParam via `node.connect(param)`.
++   */
++  connectParam: method(function (destActor, paramName, output) {
++    let srcNode = this.node.get();
++    let destNode = destActor.node.get();
++
++    if (srcNode === null || destNode === null) {
++      return CollectedAudioNodeError();
++    }
++
++    try {
++      // Connect via the unwrapped node, so we can call the
++      // patched method that fires the webaudio actor's `connect-param` event.
++      // Connect directly to the wrapped `destNode`, otherwise
++      // the patched method thinks this is a new node and won't be
++      // able to find it in `_nativeToActorID`.
++      XPCNativeWrapper.unwrap(srcNode).connect(destNode[paramName], output);
++    } catch (e) {
++      return constructError(e);
++    }
++  }, {
++    request: {
++      destActor: Arg(0, "audionode"),
++      paramName: Arg(1, "string"),
++      output: Arg(2, "nullable:number")
++    },
++    response: { error: RetVal("nullable:json") }
++  }),
++
++  /**
+    * Connects this audionode to another via `node.connect(dest)`.
+    */
+   connectNode: method(function (destActor, output, input) {
+     let srcNode = this.node.get();
+     let destNode = destActor.node.get();
+ 
+     if (srcNode === null || destNode === null) {
+       return CollectedAudioNodeError();
+-- 
+1.8.4.2
+
