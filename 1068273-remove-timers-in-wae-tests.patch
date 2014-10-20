@@ -1,0 +1,217 @@
+From d9c301eadf29ab4c795364e011ac86bf96757148 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 17 Oct 2014 20:36:40 -0700
+Subject: Bug 1068273 - remove time-based toggling in web audio editor tests. r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  2 --
+ .../test/browser_wa_graph-render-03.js             | 13 +++++++----
+ .../test/browser_wa_graph-render-05.js             | 10 +++++---
+ .../test/doc_connect-toggle-param.html             | 27 ----------------------
+ .../webaudioeditor/test/doc_connect-toggle.html    | 27 ----------------------
+ browser/devtools/webaudioeditor/test/head.js       |  2 --
+ 6 files changed, 15 insertions(+), 66 deletions(-)
+ delete mode 100644 browser/devtools/webaudioeditor/test/doc_connect-toggle-param.html
+ delete mode 100644 browser/devtools/webaudioeditor/test/doc_connect-toggle.html
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 503e6f0..fd5e02e 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -2,18 +2,16 @@
+ subsuite = devtools
+ support-files =
+   doc_simple-context.html
+   doc_complex-context.html
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+-  doc_connect-toggle.html
+-  doc_connect-toggle-param.html
+   doc_connect-param.html
+   doc_connect-multi-param.html
+   doc_iframe-context.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-03.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-03.js
+index 6ec4cea..2573ddf 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-03.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-03.js
+@@ -1,34 +1,37 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests to ensure that selected nodes stay selected on graph redraw.
+  */
+ 
+ function spawnTest() {
+-  let { target, panel } = yield initWebAudioEditor(CONNECT_TOGGLE_URL);
++  let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
+   let { panelWin } = panel;
+   let { gFront, $, $$, EVENTS } = panelWin;
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     getN(gFront, "create-node", 3),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+ 
+-  let nodeIDs = actors.map(actor => actor.actorID);
++  let [dest, osc, gain] = actors;
+ 
+-  yield clickGraphNode(panelWin, nodeIDs[1]);
+-  ok(findGraphNode(panelWin, nodeIDs[1]).classList.contains("selected"),
++  yield clickGraphNode(panelWin, gain.actorID);
++  ok(findGraphNode(panelWin, gain.actorID).classList.contains("selected"),
+     "Node selected once.");
+ 
++  // Disconnect a node to trigger a rerender
++  osc.disconnect();
++
+   yield once(panelWin, EVENTS.UI_GRAPH_RENDERED);
+   
+-  ok(findGraphNode(panelWin, nodeIDs[1]).classList.contains("selected"),
++  ok(findGraphNode(panelWin, gain.actorID).classList.contains("selected"),
+     "Node still selected after rerender.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-05.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-05.js
+index ced1328..253a938 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-05.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-05.js
+@@ -1,27 +1,31 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests to ensure that param connections trigger graph redraws
+  */
+ 
+ function spawnTest() {
+-  let { target, panel } = yield initWebAudioEditor(CONNECT_TOGGLE_PARAM_URL);
++  let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
+   let { panelWin } = panel;
+   let { gFront, $, $$, EVENTS } = panelWin;
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     getN(gFront, "create-node", 3),
+-    waitForGraphRendered(panelWin, 3, 1, 0)
++    waitForGraphRendered(panelWin, 3, 2, 0)
+   ]);
+-  ok(true, "Graph rendered without param connection");
+ 
++  let [dest, osc, gain] = actors;
++
++  yield osc.disconnect();
++
++  osc.connectParam(gain, "gain");
+   yield waitForGraphRendered(panelWin, 3, 1, 1);
+   ok(true, "Graph re-rendered upon param connection");
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+diff --git a/browser/devtools/webaudioeditor/test/doc_connect-toggle-param.html b/browser/devtools/webaudioeditor/test/doc_connect-toggle-param.html
+deleted file mode 100644
+index ae3ece5..0000000
+--- a/browser/devtools/webaudioeditor/test/doc_connect-toggle-param.html
++++ /dev/null
+@@ -1,27 +0,0 @@
+-<!-- Any copyright is dedicated to the Public Domain.
+-     http://creativecommons.org/publicdomain/zero/1.0/ -->
+-<!doctype html>
+-
+-<html>
+-  <head>
+-    <meta charset="utf-8"/>
+-    <title>Web Audio Editor test page</title>
+-  </head>
+-
+-  <body>
+-
+-    <script type="text/javascript;version=1.8">
+-      "use strict";
+-
+-      let i = 0;
+-      let ctx = new AudioContext();
+-      let osc = ctx.createOscillator();
+-      let gain = ctx.createGain();
+-      gain.gain.value = 0;
+-      gain.connect(ctx.destination);
+-      osc.start(0);
+-      setTimeout(() => osc.connect(gain.gain), 500);
+-    </script>
+-  </body>
+-
+-</html>
+diff --git a/browser/devtools/webaudioeditor/test/doc_connect-toggle.html b/browser/devtools/webaudioeditor/test/doc_connect-toggle.html
+deleted file mode 100644
+index 7fa1241..0000000
+--- a/browser/devtools/webaudioeditor/test/doc_connect-toggle.html
++++ /dev/null
+@@ -1,27 +0,0 @@
+-<!-- Any copyright is dedicated to the Public Domain.
+-     http://creativecommons.org/publicdomain/zero/1.0/ -->
+-<!doctype html>
+-
+-<html>
+-  <head>
+-    <meta charset="utf-8"/>
+-    <title>Web Audio Editor test page</title>
+-  </head>
+-
+-  <body>
+-
+-    <script type="text/javascript;version=1.8">
+-      "use strict";
+-
+-      let i = 0;
+-      let ctx = new AudioContext();
+-      let osc = ctx.createOscillator();
+-      let gain = ctx.createGain();
+-      gain.gain.value = 0;
+-      gain.connect(ctx.destination);
+-      osc.start(0);
+-      setInterval(() => ++i && (i % 2 ? osc.connect(gain) : osc.disconnect()), 1000);
+-    </script>
+-  </body>
+-
+-</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index 9e3bb78..a4d276b 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -22,18 +22,16 @@ let TargetFactory = devtools.TargetFactory;
+ 
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
+ const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
+ const DESTROY_NODES_URL = EXAMPLE_URL + "doc_destroy-nodes.html";
+-const CONNECT_TOGGLE_URL = EXAMPLE_URL + "doc_connect-toggle.html";
+-const CONNECT_TOGGLE_PARAM_URL = EXAMPLE_URL + "doc_connect-toggle-param.html";
+ const CONNECT_PARAM_URL = EXAMPLE_URL + "doc_connect-param.html";
+ const CONNECT_MULTI_PARAM_URL = EXAMPLE_URL + "doc_connect-multi-param.html";
+ const IFRAME_CONTEXT_URL = EXAMPLE_URL + "doc_iframe-context.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+-- 
+1.8.4.2
+
