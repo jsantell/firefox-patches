@@ -1,0 +1,1623 @@
+From f6a20195344bdc491ebfd1bc5874674cb3936d5e Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 16 Oct 2014 16:41:23 -0700
+Subject: Bug 1077442 - Create a pseudo-PerformanceFront, r=vp
+
+---
+ browser/devtools/performance/modules/front.js      | 496 +++++++++++++++++++++
+ browser/devtools/performance/moz.build             |   3 +
+ browser/devtools/performance/panel.js              |  14 +-
+ browser/devtools/performance/test/browser.ini      |  24 +
+ .../test/browser_perf-aaa-run-first-leaktest.js    |  22 +
+ .../test/browser_perf-data-massaging-01.js         |  63 +++
+ .../performance/test/browser_perf-data-samples.js  |  34 ++
+ .../test/browser_perf-front-basic-profiler-01.js   |  25 ++
+ .../test/browser_perf-front-basic-timeline-01.js   |  82 ++++
+ .../test/browser_perf-front-profiler-01.js         |  42 ++
+ .../test/browser_perf-front-profiler-02.js         |  37 ++
+ .../test/browser_perf-front-profiler-03.js         |  33 ++
+ .../test/browser_perf-front-profiler-04.js         |  43 ++
+ .../test/browser_perf-front-profiler-05.js         |  53 +++
+ .../test/browser_perf-front-profiler-06.js         |  54 +++
+ .../test/browser_perf-shared-connection-01.js      |  45 ++
+ .../test/browser_perf-shared-connection-02.js      |  48 ++
+ .../test/browser_perf-shared-connection-03.js      |  29 ++
+ .../devtools/performance/test/doc_simple-test.html |  22 +
+ browser/devtools/performance/test/head.js          | 205 +++++++++
+ browser/devtools/shared/frame-script-utils.js      |   5 +
+ 21 files changed, 1374 insertions(+), 5 deletions(-)
+ create mode 100644 browser/devtools/performance/modules/front.js
+ create mode 100644 browser/devtools/performance/test/browser.ini
+ create mode 100644 browser/devtools/performance/test/browser_perf-aaa-run-first-leaktest.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-data-massaging-01.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-data-samples.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-profiler-01.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-profiler-02.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-profiler-03.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-profiler-04.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-profiler-05.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-front-profiler-06.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-shared-connection-01.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-shared-connection-02.js
+ create mode 100644 browser/devtools/performance/test/browser_perf-shared-connection-03.js
+ create mode 100644 browser/devtools/performance/test/doc_simple-test.html
+ create mode 100644 browser/devtools/performance/test/head.js
+
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+new file mode 100644
+index 0000000..f8836e3
+--- /dev/null
++++ b/browser/devtools/performance/modules/front.js
+@@ -0,0 +1,496 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Cc, Ci, Cu, Cr } = require("chrome");
++const { extend } = require("sdk/util/object");
++
++Cu.import("resource://gre/modules/Task.jsm");
++
++loader.lazyRequireGetter(this, "Services");
++loader.lazyRequireGetter(this, "promise");
++loader.lazyRequireGetter(this, "EventEmitter",
++  "devtools/toolkit/event-emitter");
++loader.lazyRequireGetter(this, "TimelineFront",
++  "devtools/server/actors/timeline", true);
++loader.lazyRequireGetter(this, "DevToolsUtils",
++  "devtools/toolkit/DevToolsUtils");
++
++loader.lazyImporter(this, "gDevTools",
++  "resource:///modules/devtools/gDevTools.jsm");
++
++/**
++ * A cache of all PerformanceConnection instances. The keys are Toolbox objects.
++ */
++let SharedPerformanceConnection = new WeakMap();
++
++/**
++ * Instantiates a shared PerformanceConnection for the specified toolbox.
++ * Consumers must yield on `open` to make sure the connection is established.
++ *
++ * @param Toolbox toolbox
++ *        The toolbox owning this connection.
++ */
++SharedPerformanceConnection.forToolbox = function(toolbox) {
++  if (this.has(toolbox)) {
++    return this.get(toolbox);
++  }
++
++  let instance = new PerformanceConnection(toolbox);
++  this.set(toolbox, instance);
++  return instance;
++};
++
++/**
++ * A connection to underlying actors (profiler, memory, framerate, etc)
++ * shared by all tools in a toolbox.
++ *
++ * Use `SharedPerformanceConnection.forToolbox` to make sure you get the same
++ * instance every time, and the `PerformanceFront` to start/stop recordings.
++ *
++ * @param Toolbox toolbox
++ *        The toolbox owning this connection.
++ */
++function PerformanceConnection(toolbox) {
++  EventEmitter.decorate(this);
++
++  this._toolbox = toolbox;
++  this._target = this._toolbox.target;
++  this._client = this._target.client;
++  this._request = this._request.bind(this);
++
++  this._pendingTimelineConsumers = 0;
++  this._pendingConsoleRecordings = [];
++  this._finishedConsoleRecordings = [];
++  this._onEventNotification = this._onEventNotification.bind(this);
++
++  Services.obs.notifyObservers(null, "profiler-connection-created", null);
++}
++
++PerformanceConnection.prototype = {
++
++  // Underlying TimelineActor
++  get timeline () {
++     return this._timeline;
++  },
++
++  // Underlying ProfilerActor
++  get profiler () {
++     return this._profiler;
++  },
++
++  /**
++   * Initializes a connection to the profiler and other miscellaneous actors.
++   * If already open, nothing happens.
++   *
++   * @return object
++   *         A promise that is resolved once the connection is established.
++   */
++  open: Task.async(function*() {
++    if (this._connected) {
++      return;
++    }
++
++    // Local debugging needs to make the target remote.
++    yield this._target.makeRemote();
++
++    // Sets `this._profiler`
++    yield this._connectProfilerActor();
++
++    // Sets or shims `this._timeline`
++    yield this._connectTimelineActor();
++
++    this._connected = true;
++
++    Services.obs.notifyObservers(null, "profiler-connection-opened", null);
++  }),
++
++  /**
++   * Destroys this connection.
++   */
++  destroy: function () {
++    this._disconnectActors();
++    this._connected = false;
++  },
++
++  /**
++   * Initializes a connection to the profiler actor.
++   */
++  _connectProfilerActor: Task.async(function*() {
++    // Chrome debugging targets have already obtained a reference
++    // to the profiler actor.
++    if (this._target.chrome) {
++      this._profiler = this._target.form.profilerActor;
++    }
++    // Or when we are debugging content processes, we already have the tab
++    // specific one. Use it immediately.
++    else if (this._target.form && this._target.form.profilerActor) {
++      this._profiler = this._target.form.profilerActor;
++      yield this._registerEventNotifications();
++    }
++    // Check if we already have a grip to the `listTabs` response object
++    // and, if we do, use it to get to the profiler actor.
++    else if (this._target.root && this._target.root.profilerActor) {
++      this._profiler = this._target.root.profilerActor;
++      yield this._registerEventNotifications();
++    }
++    // Otherwise, call `listTabs`.
++    else {
++      this._profiler = (yield listTabs(this._client)).profilerActor;
++      yield this._registerEventNotifications();
++    }
++  }),
++
++  /**
++   * Initializes a connection to a timeline actor.
++   */
++  _connectTimelineActor: function() {
++    // Only initialize the framerate front if the respective actor is available.
++    // Older Gecko versions don't have an existing implementation, in which case
++    // all the methods we need can be easily mocked.
++    //
++    // If the timeline actor exists, all underlying actors (memory, framerate) exist.
++    // If using the Performance tool, and timeline actor does not exist (FxOS devices < Gecko 35),
++    // then just use the mocked actor and do not display timeline data.
++    //
++    // TODO use framework level feature detection from bug 1069673
++    if (this._target.form && this._target.form.timelineActor) {
++      this._timeline = new TimelineFront(this._target.client, this._target.form);
++    } else {
++      this._timeline = {
++        start: () => {},
++        stop: () => {},
++        isRecording: () => false,
++        on: () => {},
++        off: () => {},
++        destroy: () => {}
++      };
++    }
++  },
++
++  /**
++   * Closes the connections to non-profiler actors.
++   */
++  _disconnectActors: function () {
++    this._timeline.destroy();
++  },
++
++  /**
++   * Sends the request over the remote debugging protocol to the
++   * specified actor.
++   *
++   * @param string actor
++   *        The designated actor. Currently supported: "profiler", "timeline".
++   * @param string method
++   *        Method to call on the backend.
++   * @param any args [optional]
++   *        Additional data or arguments to send with the request.
++   * @return object
++   *         A promise resolved with the response once the request finishes.
++   */
++  _request: function(actor, method, ...args) {
++    // Handle requests to the profiler actor.
++    if (actor == "profiler") {
++      let deferred = promise.defer();
++      let data = args[0] || {};
++      data.to = this._profiler;
++      data.type = method;
++      this._client.request(data, deferred.resolve);
++      return deferred.promise;
++    }
++
++    // Handle requests to the timeline actor.
++    if (actor == "timeline") {
++      switch (method) {
++      // Only stop recording timeline if there are no other pending consumers.
++      // Otherwise, for example, the next time `console.profileEnd` is called
++      // there won't be any timeline data available, since we're reusing the
++      // same actor for multiple overlapping recordings.
++        case "start":
++          this._pendingTimelineConsumers++;
++          break;
++        case "stop":
++          if (--this._pendingTimelineConsumers > 0) return;
++          break;
++      }
++      checkPendingTimelineConsumers(this);
++      return this._timeline[method].apply(this._timeline, args);
++    }
++  },
++
++  /**
++   * Starts listening to certain events emitted by the profiler actor.
++   *
++   * @return object
++   *         A promise that is resolved once the notifications are registered.
++   */
++  _registerEventNotifications: Task.async(function*() {
++    let events = ["console-api-profiler", "profiler-stopped"];
++    yield this._request("profiler", "registerEventNotifications", { events });
++    this._client.addListener("eventNotification", this._onEventNotification);
++  }),
++
++  /**
++   * Invoked whenever a registered event was emitted by the profiler actor.
++   *
++   * @param object response
++   *        The data received from the backend.
++   */
++  _onEventNotification: function(event, response) {
++    let toolbox = gDevTools.getToolbox(this._target);
++    if (toolbox == null) {
++      return;
++    }
++    if (response.topic == "console-api-profiler") {
++      let action = response.subject.action;
++      let details = response.details;
++      if (action == "profile") {
++        this.emit("invoked-console-profile", details.profileLabel); // used in tests
++        this._onConsoleProfileStart(details);
++      } else if (action == "profileEnd") {
++        this.emit("invoked-console-profileEnd", details.profileLabel); // used in tests
++        this._onConsoleProfileEnd(details);
++      }
++    } else if (response.topic == "profiler-stopped") {
++      this._onPerformanceUnexpectedlyStopped();
++    }
++  },
++
++  /**
++   * Invoked whenever `console.profile` is called.
++   * TODO add functionality for console hooks in bug 1077464
++   *
++   * @param string profileLabel
++   *        The provided string argument if available, undefined otherwise.
++   * @param number currentTime
++   *        The time in milliseconds when the call was made, relative to
++   *        when the nsIProfiler module was started.
++   */
++  _onConsoleProfileStart: Task.async(function *({ profileLabel, currentTime }) {
++    // Profiling was automatically started when `console.profile` was invoked,
++    // so we all we have to do is make sure the framerate actor is recording.
++    yield this._request("timeline", "start", { withTicks: true, withMemory: true });
++
++    this.emit("profile", profileLabel);
++  }),
++
++  /**
++   * Invoked whenever `console.profileEnd` is called.
++   * TODO add functionality for console hooks in bug 1077464
++   *
++   * @param object profilerData
++   *        The profiler data received from the backend.
++   */
++  _onConsoleProfileEnd: Task.async(function *(profilerData) {
++    yield this._request("timeline", "stop");
++    this.emit("profileEnd");
++  }),
++
++  /**
++   * Invoked whenever the built-in profiler module is deactivated. Since this
++   * should *never* happen while there's a consumer (i.e. "toolbox") available,
++   * treat this notification as being unexpected.
++   *
++   * This may happen, for example, if the Gecko Performance add-on is installed
++   * (and isn't using the profiler actor over the remote protocol). There's no
++   * way to prevent it from stopping the profiler and affecting our tool.
++   */
++  _onPerformanceUnexpectedlyStopped: function() {
++    // Pop all pending `console.profile` calls from the stack.
++    this._pendingConsoleRecordings.length = 0;
++    this.emit("profiler-unexpectedly-stopped");
++  }
++};
++
++/**
++ * A thin wrapper around a shared PerformanceConnection for the parent toolbox.
++ * Handles manually starting and stopping a recording.
++ *
++ * @param PerformanceConnection connection
++ *        The shared instance for the parent toolbox.
++ */
++function PerformanceFront(connection) {
++  EventEmitter.decorate(this);
++
++  this._request = connection._request;
++  this.pendingConsoleRecordings = connection._pendingConsoleRecordings;
++  this.finishedConsoleRecordings = connection._finishedConsoleRecordings;
++
++  // Pipe events from `connection` to the front
++  connection.on("profile", (e, args) => this.emit(e, args));
++  connection.on("profileEnd", (e, args) => this.emit(e, args));
++  connection.on("profiler-unexpectedly-stopped", (e, args) => this.emit(e, args));
++
++  // Pipe events from TimelineActor to the PerformanceFront
++  // TODO should these be cleaned up/unbound?
++  connection.timeline.on("markers", markers => this.emit("markers", markers));
++  connection.timeline.on("memory", (delta, measurement) => this.emit("memory", delta, measurement));
++  connection.timeline.on("ticks", (delta, timestamps) => this.emit("ticks", delta, timestamps));
++}
++
++PerformanceFront.prototype = {
++  /**
++   * Manually begins a recording session.
++   *
++   * @return object
++   *         A promise that is resolved once recording has started.
++   */
++  startRecording: Task.async(function*() {
++    let { isActive, currentTime } = yield this._request("profiler", "isActive");
++
++    // Start the profiler only if it wasn't already active. The built-in
++    // nsIPerformance module will be kept recording, because it's the same instance
++    // for all toolboxes and interacts with the whole platform, so we don't want
++    // to affect other clients by stopping (or restarting) it.
++    if (!isActive) {
++      // Extend the options so that protocol.js doesn't modify
++      // the source object.
++      let options = extend({}, this._customPerformanceOptions);
++      yield this._request("profiler", "startProfiler", options);
++      this._profilingStartTime = 0;
++      this.emit("profiler-activated");
++    } else {
++      this._profilingStartTime = currentTime;
++      this.emit("profiler-already-active");
++    }
++
++    // The timeline actor is target-dependent, so just make sure
++    // it's recording.
++    yield this._request("timeline", "start", { withTicks: true, withMemory: true });
++  }),
++
++  /**
++   * Manually ends the current recording session.
++   *
++   * @return object
++   *         A promise that is resolved once recording has stopped,
++   *         with the profiler and timeline data.
++   */
++  stopRecording: Task.async(function*() {
++    // We'll need to filter out all samples that fall out of current profile's
++    // range. This is necessary because the profiler is continuously running.
++    let profilerData = yield this._request("profiler", "getProfile");
++    filterSamples(profilerData, this._profilingStartTime);
++    offsetSampleTimes(profilerData, this._profilingStartTime);
++
++    // Fetch the recorded refresh driver ticks, during the same time window
++    // as the filtered profiler data.
++    let beginAt = findEarliestSampleTime(profilerData);
++    let endAt = findOldestSampleTime(profilerData);
++
++    // TODO do we keep this? As the new Timeline actor is event based, with
++    // no methods of getting retroactive data
++    //let ticksData = yield this._request("timeline", "getPendingTicks", beginAt, endAt);
++    yield this._request("timeline", "stop");
++
++    // Join all the acquired data and return it for outside consumers.
++    return {
++      recordingDuration: profilerData.currentTime - this._profilingStartTime,
++      profilerData: profilerData
++    };
++  }),
++
++  /**
++   * Overrides the options sent to the built-in profiler module when activating,
++   * such as the maximum entries count, the sampling interval etc.
++   *
++   * Used in tests and for older backend implementations.
++   */
++  _customPerformanceOptions: {
++    entries: 1000000,
++    interval: 1,
++    features: ["js"]
++  }
++};
++
++/**
++ * Filters all the samples in the provided profiler data to be more recent
++ * than the specified start time.
++ *
++ * @param object profilerData
++ *        The profiler data received from the backend.
++ * @param number profilingStartTime
++ *        The earliest acceptable sample time (in milliseconds).
++ */
++function filterSamples(profilerData, profilingStartTime) {
++  let firstThread = profilerData.profile.threads[0];
++
++  firstThread.samples = firstThread.samples.filter(e => {
++    return e.time >= profilingStartTime;
++  });
++}
++
++/**
++ * Offsets all the samples in the provided profiler data by the specified time.
++ *
++ * @param object profilerData
++ *        The profiler data received from the backend.
++ * @param number timeOffset
++ *        The amount of time to offset by (in milliseconds).
++ */
++function offsetSampleTimes(profilerData, timeOffset) {
++  let firstThreadSamples = profilerData.profile.threads[0].samples;
++
++  for (let sample of firstThreadSamples) {
++    sample.time -= timeOffset;
++  }
++}
++
++/**
++ * Finds the earliest sample time in the provided profiler data.
++ *
++ * @param object profilerData
++ *        The profiler data received from the backend.
++ * @return number
++ *         The earliest sample time (in milliseconds).
++ */
++function findEarliestSampleTime(profilerData) {
++  let firstThreadSamples = profilerData.profile.threads[0].samples;
++
++  for (let sample of firstThreadSamples) {
++    if ("time" in sample) {
++      return sample.time;
++    }
++  }
++}
++
++/**
++ * Finds the oldest sample time in the provided profiler data.
++ *
++ * @param object profilerData
++ *        The profiler data received from the backend.
++ * @return number
++ *         The oldest sample time (in milliseconds).
++ */
++function findOldestSampleTime(profilerData) {
++  let firstThreadSamples = profilerData.profile.threads[0].samples;
++
++  for (let i = firstThreadSamples.length - 1; i >= 0; i--) {
++    if ("time" in firstThreadSamples[i]) {
++      return firstThreadSamples[i].time;
++    }
++  }
++}
++
++/**
++ * Asserts the value sanity of `pendingTimelineConsumers`.
++ */
++function checkPendingTimelineConsumers(connection) {
++  if (connection._pendingTimelineConsumers < 0) {
++    let msg = "Somehow the number of timeline consumers is now negative.";
++    DevToolsUtils.reportException("PerformanceConnection", msg);
++  }
++}
++
++/**
++ * A collection of small wrappers promisifying functions invoking callbacks.
++ */
++function listTabs(client) {
++  let deferred = promise.defer();
++  client.listTabs(deferred.resolve);
++  return deferred.promise;
++}
++
++exports.getPerformanceConnection = toolbox => SharedPerformanceConnection.forToolbox(toolbox);
++exports.PerformanceFront = PerformanceFront;
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index 1ae47a2..816eb2b 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -1,8 +1,11 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
++    'modules/front.js',
+     'panel.js'
+ ]
++
++BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/browser/devtools/performance/panel.js b/browser/devtools/performance/panel.js
+index d8d32dc..1ce2451 100644
+--- a/browser/devtools/performance/panel.js
++++ b/browser/devtools/performance/panel.js
+@@ -1,16 +1,17 @@
+ /* -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
++const { PerformanceFront, getPerformanceConnection } = require("devtools/performance/front");
+ 
+ Cu.import("resource://gre/modules/Task.jsm");
+ 
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ 
+ function PerformancePanel(iframeWindow, toolbox) {
+@@ -22,26 +23,26 @@ function PerformancePanel(iframeWindow, toolbox) {
+ 
+ exports.PerformancePanel = PerformancePanel;
+ 
+ PerformancePanel.prototype = {
+   /**
+    * Open is effectively an asynchronous constructor.
+    *
+    * @return object
+-   *         A promise that is resolved when the Profiler completes opening.
++   *         A promise that is resolved when the Performance tool
++   *         completes opening.
+    */
+   open: Task.async(function*() {
+     this.panelWin.gToolbox = this._toolbox;
+     this.panelWin.gTarget = this.target;
+ 
+-    // Mock Front for now
+-    let gFront = {};
+-    EventEmitter.decorate(gFront);
+-    this.panelWin.gFront = gFront;
++    this._connection = getPerformanceConnection(this.panelWin.gToolbox);
++    yield this._connection.open();
++    this.panelWin.gFront = new PerformanceFront(this._connection);
+ 
+     yield this.panelWin.startupPerformance();
+ 
+     this.isReady = true;
+     this.emit("ready");
+     return this;
+   }),
+ 
+@@ -50,13 +51,16 @@ PerformancePanel.prototype = {
+   get target() this._toolbox.target,
+ 
+   destroy: Task.async(function*() {
+     // Make sure this panel is not already destroyed.
+     if (this._destroyed) {
+       return;
+     }
+ 
++    // Destroy the connection to ensure packet handlers are removed from client.
++    this._connection.destroy();
++
+     yield this.panelWin.shutdownPerformance();
+     this.emit("destroyed");
+     this._destroyed = true;
+   })
+ };
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+new file mode 100644
+index 0000000..ca65b35
+--- /dev/null
++++ b/browser/devtools/performance/test/browser.ini
+@@ -0,0 +1,24 @@
++[DEFAULT]
++skip-if = e10s # Handle in Bug 1077464 for profiler
++subsuite = devtools
++support-files =
++  doc_simple-test.html
++  head.js
++
++[browser_perf-aaa-run-first-leaktest.js]
++[browser_perf-front-basic-timeline-01.js]
++[browser_perf-front-basic-profiler-01.js]
++[browser_perf-front-profiler-01.js]
++skip-if = true # Handle in Bug 1077464
++[browser_perf-front-profiler-02.js]
++[browser_perf-front-profiler-03.js]
++[browser_perf-front-profiler-04.js]
++[browser_perf-front-profiler-05.js]
++[browser_perf-front-profiler-06.js]
++[browser_perf-shared-connection-01.js]
++[browser_perf-shared-connection-02.js]
++[browser_perf-shared-connection-03.js]
++[browser_perf-data-samples.js]
++[browser_perf-data-massaging-01.js]
++# To copy over from profiler
++# [browser_perf-shared-connection-04.js] 
+diff --git a/browser/devtools/performance/test/browser_perf-aaa-run-first-leaktest.js b/browser/devtools/performance/test/browser_perf-aaa-run-first-leaktest.js
+new file mode 100644
+index 0000000..dae34d6
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-aaa-run-first-leaktest.js
+@@ -0,0 +1,22 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the performance tool leaks on initialization and sudden destruction.
++ * You can also use this initialization format as a template for other tests.
++ */
++
++function spawnTest () {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++
++  ok(target, "Should have a target available.");
++  ok(toolbox, "Should have a toolbox available.");
++  ok(panel, "Should have a panel available.");
++
++  ok(panel.panelWin.gToolbox, "Should have a toolbox reference on the panel window.");
++  ok(panel.panelWin.gTarget, "Should have a target reference on the panel window.");
++  ok(panel.panelWin.gFront, "Should have a front reference on the panel window.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-data-massaging-01.js b/browser/devtools/performance/test/browser_perf-data-massaging-01.js
+new file mode 100644
+index 0000000..f5627f4
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-data-massaging-01.js
+@@ -0,0 +1,63 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the retrieved profiler data samples are correctly filtered and
++ * normalized before passed to consumers.
++ */
++
++const WAIT_TIME = 1000; // ms
++
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let front = panel.panelWin.gFront;
++
++  // Perform the first recording...
++
++  yield front.startRecording();
++  let profilingStartTime = front._profilingStartTime;
++  info("Started profiling at: " + profilingStartTime);
++
++  busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
++
++  let firstRecordingData = yield front.stopRecording();
++  let firstRecordingFinishTime = firstRecordingData.profilerData.currentTime;
++
++  is(profilingStartTime, 0,
++    "The profiling start time should be 0 for the first recording.");
++  ok(firstRecordingData.recordingDuration >= WAIT_TIME,
++    "The first recording duration is correct.");
++  ok(firstRecordingFinishTime >= WAIT_TIME,
++    "The first recording finish time is correct.");
++
++  // Perform the second recording...
++
++  yield front.startRecording();
++  profilingStartTime = front._profilingStartTime;
++  info("Started profiling at: " + profilingStartTime);
++
++  busyWait(WAIT_TIME); // allow the profiler module to sample more cpu activity
++
++  let secondRecordingData = yield front.stopRecording();
++  let secondRecordingFinishTime = secondRecordingData.profilerData.currentTime;
++  let secondRecordingProfile = secondRecordingData.profilerData.profile;
++  let secondRecordingSamples = secondRecordingProfile.threads[0].samples;
++
++  isnot(profilingStartTime, 0,
++    "The profiling start time should not be 0 on the second recording.");
++  ok(secondRecordingData.recordingDuration >= WAIT_TIME,
++    "The second recording duration is correct.");
++  ok(secondRecordingFinishTime - firstRecordingFinishTime >= WAIT_TIME,
++    "The second recording finish time is correct.");
++
++  ok(secondRecordingSamples[0].time < profilingStartTime,
++    "The second recorded sample times were normalized.");
++  ok(secondRecordingSamples[0].time > 0,
++    "The second recorded sample times were normalized correctly.");
++  ok(!secondRecordingSamples.find(e => e.time + profilingStartTime <= firstRecordingFinishTime),
++    "There should be no samples from the first recording in the second one, " +
++    "even though the total number of frames did not overflow.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-data-samples.js b/browser/devtools/performance/test/browser_perf-data-samples.js
+new file mode 100644
+index 0000000..d3ec2b6
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-data-samples.js
+@@ -0,0 +1,34 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the retrieved profiler data samples always have a (root) node.
++ * If this ever changes, the |ThreadNode.prototype.insert| function in
++ * browser/devtools/profiler/utils/tree-model.js will have to be changed.
++ */
++
++const WAIT_TIME = 1000; // ms
++
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let front = panel.panelWin.gFront;
++
++  yield front.startRecording();
++  busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
++
++  let recordingData = yield front.stopRecording();
++  let profile = recordingData.profilerData.profile;
++
++  for (let thread of profile.threads) {
++    info("Checking thread: " + thread.name);
++
++    for (let sample of thread.samples) {
++      if (sample.frames[0].location != "(root)") {
++        ok(false, "The sample " + sample.toSource() + " doesn't have a root node.");
++      }
++    }
++  }
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js b/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
+new file mode 100644
+index 0000000..03b3868
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
+@@ -0,0 +1,25 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test basic functionality of PerformanceFront
++ */
++
++let WAIT = 1000;
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_URL);
++
++  yield front.startRecording();
++
++  yield busyWait(WAIT);
++
++  let { recordingDuration, profilerData } = yield front.stopRecording();
++
++  ok(recordingDuration > 500, "recordingDuration exists");
++  ok(profilerData, "profilerData exists");
++
++  yield removeTab(target.tab);
++  finish();
++
++}
+diff --git a/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+new file mode 100644
+index 0000000..98523ac
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+@@ -0,0 +1,82 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test basic functionality of PerformanceFront, retrieving timeline data.
++ */
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_URL);
++
++  let lastMemoryDelta = 0;
++  let lastTickDelta = 0;
++
++  let counters = {
++    markers: [],
++    memory: [],
++    ticks: []
++  };
++
++  let deferreds = {
++    markers: Promise.defer(),
++    memory: Promise.defer(),
++    ticks: Promise.defer()
++  }
++
++  front.on("markers", handler);
++  front.on("memory", handler);
++  front.on("ticks", handler);
++
++  yield front.startRecording();
++
++  yield Promise.all(Object.keys(deferreds).map(type => deferreds[type].promise));
++
++  yield front.stopRecording();
++
++  is(counters.markers.length, 1, "one marker event fired.");
++  is(counters.memory.length, 3, "three memory events fired.");
++  is(counters.ticks.length, 3, "three ticks events fired.");
++
++  yield removeTab(target.tab);
++  finish();
++
++  function handler (name, ...args) {
++    if (name === "memory") {
++      let [delta, measurement] = args;
++      is(typeof delta, "number", "received `delta` in memory event");
++      ok(delta > lastMemoryDelta, "received `delta` in memory event");
++      ok(measurement.total, "received `total` in memory event");
++      ok(measurement.domSize, "received `domSize` in memory event");
++      ok(measurement.jsObjectsSize, "received `jsObjectsSize` in memory event");
++
++      counters.memory.push({ delta: delta, measurement: measurement });
++      lastMemoryDelta = delta;
++    } else if (name === "ticks") {
++      let [delta, timestamps] = args;
++      ok(delta > lastTickDelta, "received `delta` in ticks event");
++
++      // First tick doesn't contain any timestamps
++      if (counters.ticks.length) {
++        ok(timestamps.length, "received `timestamps` in ticks event");
++      }
++
++      counters.ticks.push({ delta: delta, timestamps: timestamps});
++      lastTickDelta = delta;
++    } else if (name === "markers") {
++      let [markers] = args;
++      ok(markers[0].start, "received atleast one marker with `start`");
++      ok(markers[0].end, "received atleast one marker with `end`");
++      ok(markers[0].name, "received atleast one marker with `name`");
++      counters.markers.push(markers);
++      front.off(name, handler);
++      deferreds[name].resolve();
++    } else {
++      throw new Error("unknown event");
++    }
++
++    if (name !== "markers" && counters[name].length === 3) {
++      front.off(name, handler);
++      deferreds[name].resolve();
++    }
++  };
++}
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-01.js b/browser/devtools/performance/test/browser_perf-front-profiler-01.js
+new file mode 100644
+index 0000000..2c4aa24
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-01.js
+@@ -0,0 +1,42 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler connection front relays console notifications.
++ */
++
++function spawnTest () {
++  // This test seems to be a bit slow on debug builds.
++  requestLongerTimeout(3);
++
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let front = panel.panelWin.gFront;
++
++  loadFrameScripts();
++
++  let sharedConnection = getPerformanceConnection(panel._toolbox);
++
++  let stackSize = 0;
++  front.on("profile", () => stackSize++);
++  front.on("profileEnd", () => stackSize--);
++
++  for (let i = 0; i < 10; i++) {
++    yield consoleProfile(sharedConnection, i);
++    is(stackSize, i + 1,
++      "The current stack size is correctly: " + (i + 1));
++    is(front.pendingConsoleRecordings.length, i + 1,
++      "The publicly exposed pending recordings array has the correct size.");
++  }
++  for (let i = 9; i >= 0; i--) {
++    yield consoleProfileEnd(sharedConnection);
++    is(stackSize, i,
++      "The current stack size is correctly: " + i);
++    is(front.pendingConsoleRecordings.length, i,
++      "The publicly exposed pending recordings array has the correct size.");
++    is(front.finishedConsoleRecordings.length, 10 - i,
++      "The publicly exposed finished recordings array has the correct size.");
++  }
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-02.js b/browser/devtools/performance/test/browser_perf-front-profiler-02.js
+new file mode 100644
+index 0000000..9bba500
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-02.js
+@@ -0,0 +1,37 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler connection front does not activate the built-in
++ * profiler module if not necessary, and doesn't deactivate it when
++ * a recording is stopped.
++ */
++
++let test = Task.async(function*() {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let front = panel.panelWin.gFront;
++
++  ok(!nsIProfilerModule.IsActive(),
++    "The built-in profiler module should not have been automatically started.");
++
++  let activated = front.once("profiler-activated");
++  yield front.startRecording();
++  yield activated;
++  yield front.stopRecording();
++  ok(nsIProfilerModule.IsActive(),
++    "The built-in profiler module should still be active (1).");
++
++  let alreadyActive = front.once("profiler-already-active");
++  yield front.startRecording();
++  yield alreadyActive;
++  yield front.stopRecording();
++  ok(nsIProfilerModule.IsActive(),
++    "The built-in profiler module should still be active (2).");
++
++  yield teardown(panel);
++
++  ok(!nsIProfilerModule.IsActive(),
++    "The built-in profiler module should have been automatically stoped.");
++
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-03.js b/browser/devtools/performance/test/browser_perf-front-profiler-03.js
+new file mode 100644
+index 0000000..c93c3a7
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-03.js
+@@ -0,0 +1,33 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the built-in profiler module doesn't deactivate when the toolbox
++ * is destroyed if there are other consumers using it.
++ */
++
++let test = Task.async(function*() {
++  let { panel: firstPanel } = yield initPerformance(SIMPLE_URL);
++  let firstFront = firstPanel.panelWin.gFront;
++
++  let activated = firstFront.once("profiler-activated");
++  yield firstFront.startRecording();
++  yield activated;
++
++  let { panel: secondPanel } = yield initPerformance(SIMPLE_URL);
++  let secondFront = secondPanel.panelWin.gFront;
++
++  let alreadyActive = secondFront.once("profiler-already-active");
++  yield secondFront.startRecording();
++  yield alreadyActive;
++
++  yield teardown(firstPanel);
++  ok(nsIProfilerModule.IsActive(),
++    "The built-in profiler module should still be active.");
++
++  yield teardown(secondPanel);
++  ok(!nsIProfilerModule.IsActive(),
++    "The built-in profiler module should have been automatically stoped.");
++
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-04.js b/browser/devtools/performance/test/browser_perf-front-profiler-04.js
+new file mode 100644
+index 0000000..d2097a7
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-04.js
+@@ -0,0 +1,43 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the built-in profiler module is not reactivated if no other
++ * consumer was using it over the remote debugger protocol, and ensures
++ * that the actor will work properly even in such cases (e.g. the Gecko Profiler
++ * addon was installed and automatically activated the profiler module).
++ */
++
++let test = Task.async(function*() {
++  // Ensure the profiler is already running when the test starts.
++  let ENTRIES = 1000000;
++  let INTERVAL = 1;
++  let FEATURES = ["js"];
++  nsIProfilerModule.StartProfiler(ENTRIES, INTERVAL, FEATURES, FEATURES.length);
++
++  let { panel: firstPanel } = yield initPerformance(SIMPLE_URL);
++  let firstFront = firstPanel.panelWin.gFront;
++
++  let alredyActive = firstFront.once("profiler-already-active");
++  yield firstFront.startRecording();
++  yield alredyActive;
++  ok(firstFront._profilingStartTime > 0, "The profiler was not restarted.");
++
++  let { panel: secondPanel } = yield initPerformance(SIMPLE_URL);
++  let secondFront = secondPanel.panelWin.gFront;
++
++  let alreadyActive = secondFront.once("profiler-already-active");
++  yield secondFront.startRecording();
++  yield alreadyActive;
++  ok(secondFront._profilingStartTime > 0, "The profiler was not restarted.");
++
++  yield teardown(firstPanel);
++  ok(nsIProfilerModule.IsActive(),
++    "The built-in profiler module should still be active.");
++
++  yield teardown(secondPanel);
++  ok(!nsIProfilerModule.IsActive(),
++    "The built-in profiler module should have been automatically stoped.");
++
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-05.js b/browser/devtools/performance/test/browser_perf-front-profiler-05.js
+new file mode 100644
+index 0000000..0e98a2e
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-05.js
+@@ -0,0 +1,53 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the timeline front is kept recording only when required.
++ */
++
++let test = Task.async(function*() {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let front = panel.panelWin.gFront;
++
++  loadFrameScripts();
++
++  let sharedConnection = getPerformanceConnection(panel._toolbox);
++
++  ok(!(yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should not be recording yet.");
++
++  yield front.startRecording();
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should now be recording.");
++
++  yield consoleProfile(sharedConnection, "1");
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (1).");
++
++  yield front.startRecording();
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (2).");
++
++  yield consoleProfile(sharedConnection, "2");
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (3).");
++
++  yield front.stopRecording();
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (4).");
++
++  yield consoleProfileEnd(sharedConnection);
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (5).");
++
++  yield front.stopRecording();
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (6).");
++
++  yield consoleProfileEnd(sharedConnection);
++  ok(!(yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should finally have stopped recording.");
++
++  yield teardown(panel);
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-06.js b/browser/devtools/performance/test/browser_perf-front-profiler-06.js
+new file mode 100644
+index 0000000..1e819e5
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-06.js
+@@ -0,0 +1,54 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the timeline front is kept recording only when required,
++ * this time doing everything in reverse.
++ */
++
++let test = Task.async(function*() {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let front = panel.panelWin.gFront;
++
++  loadFrameScripts();
++
++  let sharedConnection = getPerformanceConnection(panel._toolbox);
++
++  ok(!(yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should not be recording yet.");
++
++  yield consoleProfile(sharedConnection, "1");
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should now be recording.");
++
++  yield front.startRecording();
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (1).");
++
++  yield consoleProfile(sharedConnection, "2");
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (2).");
++
++  yield front.startRecording();
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (3).");
++
++  yield consoleProfileEnd(sharedConnection);
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (4).");
++
++  yield front.stopRecording();
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (5).");
++
++  yield consoleProfileEnd(sharedConnection);
++  ok((yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should still be recording (6).");
++
++  yield front.stopRecording();
++  ok(!(yield sharedConnection._timeline.isRecording()),
++    "The timeline actor should finally have stopped recording.");
++
++  yield teardown(panel);
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf-shared-connection-01.js b/browser/devtools/performance/test/browser_perf-shared-connection-01.js
+new file mode 100644
+index 0000000..44a0ba9
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-shared-connection-01.js
+@@ -0,0 +1,45 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if there's only one shared performance connection instance per toolbox.
++ */
++
++let gProfilerConnections = 0;
++Services.obs.addObserver(profilerConnectionObserver, "profiler-connection-created", false);
++
++function spawnTest () {
++  let firstTab = yield addTab(SIMPLE_URL);
++  let firstTarget = TargetFactory.forTab(firstTab);
++  yield firstTarget.makeRemote();
++
++  yield gDevTools.showToolbox(firstTarget, "webconsole");
++  is(gProfilerConnections, 1,
++    "A shared profiler connection should have been created.");
++
++  yield gDevTools.showToolbox(firstTarget, "jsprofiler");
++  is(gProfilerConnections, 1,
++    "No new profiler connections should have been created.");
++
++  let secondTab = yield addTab(SIMPLE_URL);
++  let secondTarget = TargetFactory.forTab(secondTab);
++  yield secondTarget.makeRemote();
++
++  yield gDevTools.showToolbox(secondTarget, "jsprofiler");
++  is(gProfilerConnections, 2,
++    "Only one new profiler connection should have been created.");
++
++  yield removeTab(firstTab);
++  yield removeTab(secondTab);
++
++  finish();
++}
++
++function profilerConnectionObserver(subject, topic, data) {
++  is(topic, "profiler-connection-created", "The correct topic was observed.");
++  gProfilerConnections++;
++}
++
++registerCleanupFunction(() => {
++  Services.obs.removeObserver(profilerConnectionObserver, "profiler-connection-created");
++});
+diff --git a/browser/devtools/performance/test/browser_perf-shared-connection-02.js b/browser/devtools/performance/test/browser_perf-shared-connection-02.js
+new file mode 100644
+index 0000000..1fd52059
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-shared-connection-02.js
+@@ -0,0 +1,48 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the shared performance connection is only opened once.
++ */
++
++let gProfilerConnectionsOpened = 0;
++Services.obs.addObserver(profilerConnectionObserver, "profiler-connection-opened", false);
++
++function spawnTest () {
++  let { target, panel } = yield initPerformance(SIMPLE_URL);
++
++  is(gProfilerConnectionsOpened, 1,
++    "Only one profiler connection was opened.");
++
++  let sharedConnection = getPerformanceConnection(panel._toolbox);
++
++  ok(sharedConnection,
++    "A shared profiler connection for the current toolbox was retrieved.");
++  is(sharedConnection._request, panel.panelWin.gFront._request,
++    "The same shared profiler connection is used by the panel's front.");
++
++  ok(sharedConnection._target,
++    "A target exists for the current profiler connection.");
++  ok(sharedConnection._client,
++    "A target exists for the current profiler connection.");
++  is(sharedConnection._pendingConsoleRecordings.length, 0,
++    "There shouldn't be any pending console recordings yet.");
++  is(sharedConnection._finishedConsoleRecordings.length, 0,
++    "There shouldn't be any finished console recordings yet.");
++
++  yield sharedConnection.open();
++  is(gProfilerConnectionsOpened, 1,
++    "No additional profiler connections were opened.");
++
++  yield teardown(panel);
++  finish();
++}
++
++function profilerConnectionObserver(subject, topic, data) {
++  is(topic, "profiler-connection-opened", "The correct topic was observed.");
++  gProfilerConnectionsOpened++;
++}
++
++registerCleanupFunction(() => {
++  Services.obs.removeObserver(profilerConnectionObserver, "profiler-connection-opened");
++});
+diff --git a/browser/devtools/performance/test/browser_perf-shared-connection-03.js b/browser/devtools/performance/test/browser_perf-shared-connection-03.js
+new file mode 100644
+index 0000000..a20eefe
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-shared-connection-03.js
+@@ -0,0 +1,29 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the shared performance connection can properly send requests.
++ */
++
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let front = panel.panelWin.gFront;
++
++  ok(!nsIProfilerModule.IsActive(),
++    "The built-in profiler module should not have been automatically started.");
++
++  let result = yield front._request("profiler", "startProfiler");
++  is(result.started, true,
++    "The request finished successfully and the profiler should've been started.");
++  ok(nsIProfilerModule.IsActive(),
++    "The built-in profiler module should now be active.");
++
++  result = yield front._request("profiler", "stopProfiler");
++  is(result.started, false,
++    "The request finished successfully and the profiler should've been stopped.");
++  ok(!nsIProfilerModule.IsActive(),
++    "The built-in profiler module should now be inactive.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/doc_simple-test.html b/browser/devtools/performance/test/doc_simple-test.html
+new file mode 100644
+index 0000000..484efb9
+--- /dev/null
++++ b/browser/devtools/performance/test/doc_simple-test.html
+@@ -0,0 +1,22 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Profiler test page</title>
++  </head>
++
++  <body>
++    <script type="text/javascript">
++      function test() {
++        var a = "Hello world!";
++      }
++
++      // Prevent this script from being garbage collected.
++      window.setInterval(test, 1);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+new file mode 100644
+index 0000000..6cca605
+--- /dev/null
++++ b/browser/devtools/performance/test/head.js
+@@ -0,0 +1,205 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++"use strict";
++
++const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++
++let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
++
++// Enable logging for all the tests. Both the debugger server and frontend will
++// be affected by this pref.
++let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
++Services.prefs.setBoolPref("devtools.debugger.log", false);
++
++let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
++let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
++let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
++let { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
++let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
++let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
++let { getPerformanceConnection, PerformanceFront } = devtools.require("devtools/performance/front");
++let nsIProfilerModule = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++let TargetFactory = devtools.TargetFactory;
++let mm = null;
++
++const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
++const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
++const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
++
++// All tests are asynchronous.
++waitForExplicitFinish();
++
++let gToolEnabled = Services.prefs.getBoolPref("devtools.performance_dev.enabled");
++
++gDevTools.testing = true;
++
++/**
++ * Call manually in tests that use frame script utils after initializing
++ * the tool. Must be called after initializing so we can detect
++ * whether or not `content` is a CPOW or not. Call after init but before navigating
++ * to different pages.
++ */
++function loadFrameScripts () {
++  mm = gBrowser.selectedBrowser.messageManager;
++  mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
++}
++
++registerCleanupFunction(() => {
++  gDevTools.testing = false;
++  info("finish() was called, cleaning up...");
++  Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
++  Services.prefs.setBoolPref("devtools.performance_dev.enabled", gToolEnabled);
++  // Make sure the profiler module is stopped when the test finishes.
++  nsIProfilerModule.StopProfiler();
++
++  Cu.forceGC();
++});
++
++function addTab(aUrl, aWindow) {
++  info("Adding tab: " + aUrl);
++
++  let deferred = Promise.defer();
++  let targetWindow = aWindow || window;
++  let targetBrowser = targetWindow.gBrowser;
++
++  targetWindow.focus();
++  let tab = targetBrowser.selectedTab = targetBrowser.addTab(aUrl);
++  let linkedBrowser = tab.linkedBrowser;
++
++  linkedBrowser.addEventListener("load", function onLoad() {
++    linkedBrowser.removeEventListener("load", onLoad, true);
++    info("Tab added and finished loading: " + aUrl);
++    deferred.resolve(tab);
++  }, true);
++
++  return deferred.promise;
++}
++
++function removeTab(aTab, aWindow) {
++  info("Removing tab.");
++
++  let deferred = Promise.defer();
++  let targetWindow = aWindow || window;
++  let targetBrowser = targetWindow.gBrowser;
++  let tabContainer = targetBrowser.tabContainer;
++
++  tabContainer.addEventListener("TabClose", function onClose(aEvent) {
++    tabContainer.removeEventListener("TabClose", onClose, false);
++    info("Tab removed and finished closing.");
++    deferred.resolve();
++  }, false);
++
++  targetBrowser.removeTab(aTab);
++  return deferred.promise;
++}
++
++function handleError(aError) {
++  ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++  finish();
++}
++
++function once(aTarget, aEventName, aUseCapture = false) {
++  info("Waiting for event: '" + aEventName + "' on " + aTarget + ".");
++
++  let deferred = Promise.defer();
++
++  for (let [add, remove] of [
++    ["on", "off"], // Use event emitter before DOM events for consistency
++    ["addEventListener", "removeEventListener"],
++    ["addListener", "removeListener"]
++  ]) {
++    if ((add in aTarget) && (remove in aTarget)) {
++      aTarget[add](aEventName, function onEvent(...aArgs) {
++        aTarget[remove](aEventName, onEvent, aUseCapture);
++        deferred.resolve(...aArgs);
++      }, aUseCapture);
++      break;
++    }
++  }
++
++  return deferred.promise;
++}
++
++function test () {
++  Task.spawn(spawnTest).then(finish, handleError);
++}
++
++function initBackend(aUrl) {
++  info("Initializing a performance front.");
++
++  if (!DebuggerServer.initialized) {
++    DebuggerServer.init(() => true);
++    DebuggerServer.addBrowserActors();
++  }
++
++  return Task.spawn(function*() {
++    let tab = yield addTab(aUrl);
++    let target = TargetFactory.forTab(tab);
++
++    yield target.makeRemote();
++
++    let toolbox = yield gDevTools.showToolbox(target, "performance");
++    let connection = getPerformanceConnection(toolbox);
++    yield connection.open();
++    let front = new PerformanceFront(connection);
++    return { target, front };
++  });
++}
++
++function initPerformance(aUrl) {
++  info("Initializing a performance pane.");
++
++  return Task.spawn(function*() {
++    let tab = yield addTab(aUrl);
++    let target = TargetFactory.forTab(tab);
++
++    yield target.makeRemote();
++
++    Services.prefs.setBoolPref("devtools.performance_dev.enabled", true);
++    let toolbox = yield gDevTools.showToolbox(target, "performance");
++    let panel = toolbox.getCurrentPanel();
++    return { target, panel, toolbox };
++  });
++}
++
++function* teardown(panel) {
++  info("Destroying the performance tool.");
++
++  let tab = panel.target.tab;
++  yield panel._toolbox.destroy();
++  yield removeTab(tab);
++}
++
++function idleWait(time) {
++  return DevToolsUtils.waitForTime(time);
++}
++
++function consoleMethod (...args) {
++  if (!mm) {
++    throw new Error("`loadFrameScripts()` must be called before using frame scripts.");
++  }
++  mm.sendAsyncMessage("devtools:test:console", args);
++}
++
++function* consoleProfile(connection, label) {
++  let notified = connection.once("profile");
++  consoleMethod("profile", label);
++  yield notified;
++}
++
++function* consoleProfileEnd(connection) {
++  let notified = connection.once("profileEnd");
++  consoleMethod("profileEnd");
++  yield notified;
++}
++
++function busyWait(time) {
++  let start = Date.now();
++  let stack;
++  while (Date.now() - start < time) { stack = Components.stack; }
++}
++
++function idleWait(time) {
++  return DevToolsUtils.waitForTime(time);
++}
++
+diff --git a/browser/devtools/shared/frame-script-utils.js b/browser/devtools/shared/frame-script-utils.js
+index 4c71c7a..c4e68f5 100644
+--- a/browser/devtools/shared/frame-script-utils.js
++++ b/browser/devtools/shared/frame-script-utils.js
+@@ -12,11 +12,16 @@ addMessageListener("devtools:test:navigate", function ({ data }) {
+   content.location = data.location;
+ });
+ 
+ addMessageListener("devtools:test:reload", function ({ data }) {
+   data = data || {};
+   content.location.reload(data.forceget);
+ });
+ 
++addMessageListener("devtools:test:console", function ({ data }) {
++  let method = data.shift();
++  content.console[method].apply(content.console, data);
++});
++
+ addEventListener("load", function() {
+   sendAsyncMessage("devtools:test:load");
+ }, true);
+-- 
+1.8.4.2
+
