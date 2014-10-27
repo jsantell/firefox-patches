@@ -1,0 +1,600 @@
+From 5e39ffad7fd62c20047df41d605f4e7e33dc8096 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 22 Oct 2014 17:18:31 -0700
+Subject: Bug 1078539 - Add a doorhanger widget for the developer
+ edition notification to browser console, developer tools, webide and
+ responsive design mode. r=jryans
+
+---
+ browser/app/profile/firefox.js                     |   3 +
+ .../dev-edition-promo/dev-edition-promo.css        |  72 ++++++++++++
+ .../dev-edition-promo/dev-edition-promo.xul        |  36 ++++++
+ browser/devtools/framework/toolbox.js              |  19 ++++
+ browser/devtools/framework/toolbox.xul             |   1 +
+ browser/devtools/jar.mn                            |   2 +
+ .../devtools/responsivedesign/responsivedesign.jsm |   4 +
+ browser/devtools/shared/doorhanger.js              | 122 +++++++++++++++++++++
+ browser/devtools/shared/moz.build                  |   1 +
+ browser/devtools/webconsole/hudservice.js          |   4 +
+ browser/devtools/webide/content/webide.js          |   4 +
+ .../en-US/chrome/browser/devtools/toolbox.dtd      |   8 ++
+ 12 files changed, 276 insertions(+)
+ create mode 100644 browser/devtools/framework/dev-edition-promo/dev-edition-promo.css
+ create mode 100644 browser/devtools/framework/dev-edition-promo/dev-edition-promo.xul
+ create mode 100644 browser/devtools/shared/doorhanger.js
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index 7214837..57c7d97 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1289,16 +1289,19 @@ pref("services.sync.prefs.sync.signon.rememberSignons", true);
+ pref("services.sync.prefs.sync.spellchecker.dictionary", true);
+ pref("services.sync.prefs.sync.xpinstall.whitelist.required", true);
+ #endif
+ 
+ // Developer edition preferences
+ pref("browser.devedition.theme.enabled", false);
+ pref("browser.devedition.theme.showCustomizeButton", false);
+ 
++// Developer edition promo preferences
++pref("devtools.devedition.promo.shown", false);
++
+ // Disable the error console
+ pref("devtools.errorconsole.enabled", false);
+ 
+ // Developer toolbar and GCLI preferences
+ pref("devtools.toolbar.enabled", true);
+ pref("devtools.toolbar.visible", false);
+ pref("devtools.commands.dir", "");
+ 
+diff --git a/browser/devtools/framework/dev-edition-promo/dev-edition-promo.css b/browser/devtools/framework/dev-edition-promo/dev-edition-promo.css
+new file mode 100644
+index 0000000..32d9c12
+--- /dev/null
++++ b/browser/devtools/framework/dev-edition-promo/dev-edition-promo.css
+@@ -0,0 +1,72 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++.doorhanger-container {
++  width: 450px;
++}
++
++.top-panel {
++  padding: 20px;
++  background: #343c45; /* toolbars */
++  color: #8fa1b2; /* body text */
++  font-size: 15px;
++  line-height: 19px;
++  min-height: 100px;
++}
++
++.top-panel h1 {
++  font-weight: bold;
++  font-family: Open Sans, sans-serif;
++  font-size: 1.1em;
++}
++
++.top-panel p {
++  font-family: Open Sans, sans-serif;
++  font-size: 0.9em;
++  margin: 5px 0px;
++}
++
++image.icon {
++  background-image: url("chrome://branding/content/about-logo@2x.png");
++  background-size: 50px 50px;
++  background-repeat: no-repeat;
++  width: 50px;
++  height: 50px;
++  margin-right: 20px;
++}
++
++.lower-panel {
++  padding: 20px;
++  background-color: #252c33; /* tab toolbars */
++  min-height: 60px;
++  border-top: 1px solid #292e33; /* text high contrast (light) */
++}
++
++.button-container {
++  margin: auto 20px;
++}
++
++.button-container button {
++  font: message-box !important;
++  font-size: 16px !important;
++  cursor: pointer;
++  width: 125px;
++  opacity: 1;
++  position: static;
++  -moz-appearance: none;
++  border-radius: 5px;
++  height: 30px;
++  width: 450px;
++}
++
++.closebutton {
++  background-color: transparent;
++  color: #8fa1b2; /* body text */
++}
++
++.gobutton {
++  margin-left: 100px;
++  background-color: #70bf53; /* green */
++  color: #f5f7fa; /* selection text color */
++}
+diff --git a/browser/devtools/framework/dev-edition-promo/dev-edition-promo.xul b/browser/devtools/framework/dev-edition-promo/dev-edition-promo.xul
+new file mode 100644
+index 0000000..9046348
+--- /dev/null
++++ b/browser/devtools/framework/dev-edition-promo/dev-edition-promo.xul
+@@ -0,0 +1,36 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<!DOCTYPE window [
++<!ENTITY % toolboxDTD SYSTEM "chrome://browser/locale/devtools/toolbox.dtd" >
++ %toolboxDTD;
++]>
++<?xml-stylesheet href="chrome://browser/skin/" type="text/css"?>
++<?xml-stylesheet rel="stylesheet" href="chrome://browser/content/devtools/framework/dev-edition-promo.css" type="text/css"?>
++
++<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul" id="dev-edition-promo">
++  <vbox class="doorhanger-container">
++    <hbox flex="1" class="top-panel">
++      <image class="icon" />
++      <vbox class="info">
++        <h1>&deveditionpromo.title;</h1>
++        <p>&deveditionpromo.description;</p>
++      </vbox>
++    </hbox>
++    <hbox class="lower-panel" flex="1">
++      <hbox class="button-container" flex="1">
++        <button class="closebutton"
++                flex="1"
++                standalone="true"
++                label="&deveditionpromo.skipbutton;">
++        </button>
++        <button class="gobutton"
++                flex="1"
++                standalone="true"
++                label="&deveditionpromo.gobutton;">
++        </button>
++      </hbox>
++    </hbox>
++  </vbox>
++</window>
+diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
+index 8ea154d..5149381 100644
+--- a/browser/devtools/framework/toolbox.js
++++ b/browser/devtools/framework/toolbox.js
+@@ -12,24 +12,26 @@ const MIN_ZOOM = 0.5;
+ const MAX_ZOOM = 2;
+ 
+ let {Cc, Ci, Cu} = require("chrome");
+ let {Promise: promise} = require("resource://gre/modules/Promise.jsm");
+ let EventEmitter = require("devtools/toolkit/event-emitter");
+ let Telemetry = require("devtools/shared/telemetry");
+ let {getHighlighterUtils} = require("devtools/framework/toolbox-highlighter-utils");
+ let HUDService = require("devtools/webconsole/hudservice");
++let { showDoorhanger } = require("devtools/shared/doorhanger");
+ 
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ Cu.import("resource:///modules/devtools/scratchpad-manager.jsm");
+ Cu.import("resource:///modules/devtools/DOMHelpers.jsm");
+ Cu.import("resource://gre/modules/Task.jsm");
+ 
++
+ loader.lazyGetter(this, "Hosts", () => require("devtools/framework/toolbox-hosts").Hosts);
+ 
+ loader.lazyImporter(this, "CommandUtils", "resource:///modules/devtools/DeveloperToolbar.jsm");
+ 
+ loader.lazyGetter(this, "toolboxStrings", () => {
+   let bundle = Services.strings.createBundle("chrome://browser/locale/devtools/toolbox.properties");
+   return (name, ...args) => {
+     try {
+@@ -95,16 +97,17 @@ function Toolbox(target, selectedTool, hostType, hostOptions) {
+   this._splitConsoleOnKeypress = this._splitConsoleOnKeypress.bind(this);
+   this.destroy = this.destroy.bind(this);
+   this.highlighterUtils = getHighlighterUtils(this);
+   this._highlighterReady = this._highlighterReady.bind(this);
+   this._highlighterHidden = this._highlighterHidden.bind(this);
+   this._prefChanged = this._prefChanged.bind(this);
+   this._saveSplitConsoleHeight = this._saveSplitConsoleHeight.bind(this);
+   this._onFocus = this._onFocus.bind(this);
++  this._showDevEditionPromo = this._showDevEditionPromo.bind(this);
+ 
+   this._target.on("close", this.destroy);
+ 
+   if (!hostType) {
+     hostType = Services.prefs.getCharPref(this._prefs.LAST_HOST);
+   }
+   if (!selectedTool) {
+     selectedTool = Services.prefs.getCharPref(this._prefs.LAST_TOOL);
+@@ -119,16 +122,18 @@ function Toolbox(target, selectedTool, hostType, hostOptions) {
+   EventEmitter.decorate(this);
+ 
+   this._target.on("navigate", this._refreshHostTitle);
+   this._target.on("frame-update", this._updateFrames);
+ 
+   this.on("host-changed", this._refreshHostTitle);
+   this.on("select", this._refreshHostTitle);
+ 
++  this.on("ready", this._showDevEditionPromo);
++
+   gDevTools.on("tool-registered", this._toolRegistered);
+   gDevTools.on("tool-unregistered", this._toolUnregistered);
+ }
+ exports.Toolbox = Toolbox;
+ 
+ /**
+  * The toolbox can be 'hosted' either embedded in a browser window
+  * or in a separate window.
+@@ -1624,10 +1629,24 @@ Toolbox.prototype = {
+   },
+ 
+   _highlighterReady: function() {
+     this.emit("highlighter-ready");
+   },
+ 
+   _highlighterHidden: function() {
+     this.emit("highlighter-hide");
++  },
++
++
++  /**
++   * For displaying the promotional Doorhanger on first opening of
++   * the developer tools, promoting the Developer Edition.
++   */
++  _showDevEditionPromo: function() {
++    // Do not display in browser toolbox
++    if (this.target.chrome) {
++      return;
++    }
++    let window = this.frame.contentWindow;
++    showDoorhanger({ window, type: "deveditionpromo" });
+   }
+ };
+diff --git a/browser/devtools/framework/toolbox.xul b/browser/devtools/framework/toolbox.xul
+index 1af0f15..f7a08ba 100644
+--- a/browser/devtools/framework/toolbox.xul
++++ b/browser/devtools/framework/toolbox.xul
+@@ -92,9 +92,10 @@
+            height set to a small value without flexing to fill up extra
+            space. There must be a flex on both to ensure that the console
+            panel itself is sized properly -->
+       <deck id="toolbox-deck" flex="1000" minheight="75" />
+       <splitter id="toolbox-console-splitter" class="devtools-horizontal-splitter" hidden="true" />
+       <box minheight="75" flex="1" id="toolbox-panel-webconsole" collapsed="true" />
+     </vbox>
+   </notificationbox>
++
+ </window>
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index c3db0d6..a6787fc 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -97,16 +97,18 @@ browser.jar:
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+     content/browser/devtools/framework/toolbox-options.js              (framework/toolbox-options.js)
+     content/browser/devtools/framework/toolbox.xul                     (framework/toolbox.xul)
+     content/browser/devtools/framework/options-panel.css               (framework/options-panel.css)
+     content/browser/devtools/framework/toolbox-process-window.xul      (framework/toolbox-process-window.xul)
+     content/browser/devtools/framework/toolbox-process-window.js       (framework/toolbox-process-window.js)
++    content/browser/devtools/framework/dev-edition-promo.xul           (framework/dev-edition-promo/dev-edition-promo.xul)
++    content/browser/devtools/framework/dev-edition-promo.css           (framework/dev-edition-promo/dev-edition-promo.css)
+     content/browser/devtools/inspector/inspector.xul                   (inspector/inspector.xul)
+     content/browser/devtools/inspector/inspector.css                   (inspector/inspector.css)
+     content/browser/devtools/connect.xhtml                             (framework/connect/connect.xhtml)
+     content/browser/devtools/connect.css                               (framework/connect/connect.css)
+     content/browser/devtools/connect.js                                (framework/connect/connect.js)
+     content/browser/devtools/app-manager/template.js                   (app-manager/content/template.js)
+     content/browser/devtools/app-manager/utils.js                      (app-manager/content/utils.js)
+     content/browser/devtools/app-manager/connection-footer.js          (app-manager/content/connection-footer.js)
+diff --git a/browser/devtools/responsivedesign/responsivedesign.jsm b/browser/devtools/responsivedesign/responsivedesign.jsm
+index 0546fae..ecc9c64 100644
+--- a/browser/devtools/responsivedesign/responsivedesign.jsm
++++ b/browser/devtools/responsivedesign/responsivedesign.jsm
+@@ -12,16 +12,17 @@ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ Cu.import("resource:///modules/devtools/FloatingScrollbars.jsm");
+ Cu.import("resource://gre/modules/devtools/event-emitter.js");
+ XPCOMUtils.defineLazyModuleGetter(this, "SystemAppProxy",
+                                   "resource://gre/modules/SystemAppProxy.jsm");
+ 
+ var require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ let Telemetry = require("devtools/shared/telemetry");
++let {showDoorhanger} = require("devtools/shared/doorhanger");
+ let {TouchEventHandler} = require("devtools/touch-events");
+ 
+ this.EXPORTED_SYMBOLS = ["ResponsiveUIManager"];
+ 
+ const MIN_WIDTH = 50;
+ const MIN_HEIGHT = 50;
+ 
+ const MAX_WIDTH = 10000;
+@@ -212,16 +213,19 @@ function ResponsiveUI(aWindow, aTab)
+ 
+   if (this.browser.contentWindow.document &&
+       this.browser.contentWindow.document.readyState == "complete") {
+     this.onPageLoad();
+   }
+ 
+   // E10S: We should be using target here. See bug 1028234
+   ResponsiveUIManager.emit("on", { tab: this.tab });
++
++  // Hook to dispaly promotional Developer Edition doorhanger. Only displayed once.
++  showDoorhanger({ window: this.mainWindow, type: "deveditionpromo" });
+ }
+ 
+ ResponsiveUI.prototype = {
+   _transitionsEnabled: true,
+   get transitionsEnabled() this._transitionsEnabled,
+   set transitionsEnabled(aValue) {
+     this._transitionsEnabled = aValue;
+     if (aValue && !this._resizing && this.stack.hasAttribute("responsivemode")) {
+diff --git a/browser/devtools/shared/doorhanger.js b/browser/devtools/shared/doorhanger.js
+new file mode 100644
+index 0000000..9967d2e
+--- /dev/null
++++ b/browser/devtools/shared/doorhanger.js
+@@ -0,0 +1,122 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++const { Ci } = require("chrome");
++const { Services } = require("resource://gre/modules/Services.jsm");
++const { DOMHelpers } = require("resource:///modules/devtools/DOMHelpers.jsm");
++const { Task } = require("resource://gre/modules/Task.jsm");
++const { Promise } = require("resource://gre/modules/Promise.jsm");
++const { getMostRecentBrowserWindow } = require("sdk/window/utils");
++
++const XULNS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
++const DEV_EDITION_PROMO_URL = "chrome://browser/content/devtools/framework/dev-edition-promo.xul";
++const DEV_EDITION_PROMO_SHOWN = "devtools.devedition.promo.shown";
++const DEV_EDITION_PROMO_ACTION_URL = "http://aurora.mozilla.org";
++
++let TYPES = {
++  // The Developer Edition promo doorhanger, called by
++  // opening the toolbox, browser console, WebIDE, or responsive design mode
++  // in Beta releases. Only displayed once per profile.
++  deveditionpromo: {
++    predicate: () => !Services.prefs.getBoolPref(DEV_EDITION_PROMO_SHOWN),
++    success: () => Services.prefs.setBoolPref(DEV_EDITION_PROMO_SHOWN, true),
++    action: () => getGBrowser().selectedTab = getGBrowser().addTab(DEV_EDITION_PROMO_ACTION_URL),
++    url: DEV_EDITION_PROMO_URL
++  }
++};
++
++let panelAttrs = {
++  orient: "vertical",
++  hidden: "false",
++  consumeoutsideclicks: "true",
++  noautofocus: "true",
++  align: "start",
++  role: "alert"
++};
++
++/**
++ * Helper to call a doorhanger, defined in `TYPES`, with defined conditions,
++ * success handlers and loads its own XUL in a frame. Takes an object with
++ * several properties:
++ *
++ * @param {XULWindow} window
++ *        The window that should house the doorhanger.
++ * @param {String} type
++ *        The type of doorhanger to be displayed is, using the `TYPES` definition.
++ */
++exports.showDoorhanger = Task.async(function *({ window, type }) {
++  let { predicate, success, url, action } = TYPES[type];
++  // Abort if predicate fails
++  if (!predicate()) {
++    return;
++  }
++
++  let document = window.document;
++
++  let panel = document.createElementNS(XULNS, "panel");
++  let frame = document.createElementNS(XULNS, "iframe");
++  frame.setAttribute("src", url);
++  let close = () => document.querySelector("window").removeChild(panel);
++
++  setDoorhangerStyle(panel, frame);
++
++  panel.appendChild(frame);
++  document.querySelector("window").appendChild(panel);
++
++  yield onFrameLoad(frame);
++
++  // TODO ? If we implement an anchor later, can just pass in here.
++  panel.openPopup();
++
++  let closeBtn = frame.contentDocument.querySelector(".closebutton");
++  if (closeBtn) {
++    closeBtn.addEventListener("click", close);
++  }
++
++  let goBtn = frame.contentDocument.querySelector(".gobutton");
++  if (goBtn) {
++    goBtn.addEventListener("click", () => {
++      if (action) {
++        action();
++      }
++      close();
++    });
++  }
++
++  // Call success function to set preferences, etc.
++  success();
++});
++
++function setDoorhangerStyle (panel, frame) {
++  Object.keys(panelAttrs).forEach(prop => panel.setAttribute(prop, panelAttrs[prop]));
++  panel.style.margin = "20px";
++  panel.style.borderRadius = "5px";
++  frame.style.borderRadius = "5px";
++  frame.setAttribute("flex", "1");
++  frame.setAttribute("width", "450");
++  frame.setAttribute("height", "175");
++}
++
++function onFrameLoad (frame) {
++  let { resolve, promise } = Promise.defer();
++
++  if (frame.contentWindow) {
++    let domHelper = new DOMHelpers(frame.contentWindow);
++    domHelper.onceDOMReady(resolve);
++  } else {
++    let callback = () => {
++      frame.removeEventListener("DOMContentLoaded", callback);
++      resolve();
++    }
++    frame.addEventListener("DOMContentLoaded", callback);
++  }
++
++  return promise;
++}
++
++function getGBrowser () {
++  return getMostRecentBrowserWindow().gBrowser;
++}
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index 4f137ac..8a8d92a 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -28,16 +28,17 @@ EXTRA_JS_MODULES.devtools += [
+     'widgets/VariablesView.jsm',
+     'widgets/VariablesViewController.jsm',
+     'widgets/ViewHelpers.jsm',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+     'autocomplete-popup.js',
+     'd3.js',
++    'doorhanger.js',
+     'frame-script-utils.js',
+     'inplace-editor.js',
+     'observable-object.js',
+     'telemetry.js',
+     'theme-switching.js',
+     'undo.js',
+ ]
+ 
+diff --git a/browser/devtools/webconsole/hudservice.js b/browser/devtools/webconsole/hudservice.js
+index ed9682e..15449d4 100644
+--- a/browser/devtools/webconsole/hudservice.js
++++ b/browser/devtools/webconsole/hudservice.js
+@@ -14,16 +14,17 @@ let Heritage = require("sdk/core/heritage");
+ loader.lazyGetter(this, "Telemetry", () => require("devtools/shared/telemetry"));
+ loader.lazyGetter(this, "WebConsoleFrame", () => require("devtools/webconsole/webconsole").WebConsoleFrame);
+ loader.lazyImporter(this, "promise", "resource://gre/modules/Promise.jsm", "Promise");
+ loader.lazyImporter(this, "gDevTools", "resource:///modules/devtools/gDevTools.jsm");
+ loader.lazyImporter(this, "devtools", "resource://gre/modules/devtools/Loader.jsm");
+ loader.lazyImporter(this, "Services", "resource://gre/modules/Services.jsm");
+ loader.lazyImporter(this, "DebuggerServer", "resource://gre/modules/devtools/dbg-server.jsm");
+ loader.lazyImporter(this, "DebuggerClient", "resource://gre/modules/devtools/dbg-client.jsm");
++loader.lazyGetter(this, "showDoorhanger", () => require("devtools/shared/doorhanger").showDoorhanger);
+ 
+ const STRINGS_URI = "chrome://browser/locale/devtools/webconsole.properties";
+ let l10n = new WebConsoleUtils.l10n(STRINGS_URI);
+ 
+ const BROWSER_CONSOLE_WINDOW_FEATURES = "chrome,titlebar,toolbar,centerscreen,resizable,dialog=no";
+ 
+ // The preference prefix for all of the Browser Console filters.
+ const BROWSER_CONSOLE_FILTER_PREFS_PREFIX = "devtools.browserconsole.filter.";
+@@ -708,16 +709,19 @@ BrowserConsole.prototype = Heritage.extend(WebConsole.prototype,
+     };
+     window.addEventListener("unload", onClose);
+ 
+     // Make sure Ctrl-W closes the Browser Console window.
+     window.document.getElementById("cmd_close").removeAttribute("disabled");
+ 
+     this._telemetry.toolOpened("browserconsole");
+ 
++    // Hook to display promotional Developer Edition doorhanger. Only displayed once.
++    showDoorhanger({ window, type: "deveditionpromo" });
++
+     this._bc_init = this.$init();
+     return this._bc_init;
+   },
+ 
+   $destroy: WebConsole.prototype.destroy,
+ 
+   /**
+    * Destroy the object.
+diff --git a/browser/devtools/webide/content/webide.js b/browser/devtools/webide/content/webide.js
+index e79d872..ba7ea60 100644
+--- a/browser/devtools/webide/content/webide.js
++++ b/browser/devtools/webide/content/webide.js
+@@ -17,16 +17,17 @@ const {Connection} = require("devtools/client/connection-manager");
+ const {AppManager} = require("devtools/webide/app-manager");
+ const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const ProjectEditor = require("projecteditor/projecteditor");
+ const {Devices} = Cu.import("resource://gre/modules/devtools/Devices.jsm");
+ const {GetAvailableAddons} = require("devtools/webide/addons");
+ const {GetTemplatesJSON, GetAddonsJSON} = require("devtools/webide/remote-resources");
+ const utils = require("devtools/webide/utils");
+ const Telemetry = require("devtools/shared/telemetry");
++const {showDoorhanger} = require("devtools/shared/doorhanger");
+ 
+ const Strings = Services.strings.createBundle("chrome://browser/locale/devtools/webide.properties");
+ 
+ const HTML = "http://www.w3.org/1999/xhtml";
+ const HELP_URL = "https://developer.mozilla.org/docs/Tools/WebIDE/Troubleshooting";
+ 
+ // download template index early
+ GetTemplatesJSON(true);
+@@ -84,16 +85,19 @@ let UI = {
+       }, console.error);
+     }
+     Services.prefs.setBoolPref("devtools.webide.autoinstallADBHelper", false);
+     Services.prefs.setBoolPref("devtools.webide.autoinstallFxdtAdapters", false);
+ 
+     this.lastConnectedRuntime = Services.prefs.getCharPref("devtools.webide.lastConnectedRuntime");
+ 
+     this.setupDeck();
++
++    // Hook to display promotional Developer Edition doorhanger. Only displayed once.
++    showDoorhanger({ window, type: "deveditionpromo" });
+   },
+ 
+   uninit: function() {
+     window.removeEventListener("focus", this.onfocus, true);
+     AppManager.off("app-manager-update", this.appManagerUpdate);
+     AppManager.uninit();
+     window.removeEventListener("message", this.onMessage);
+     this.updateConnectionTelemetry();
+diff --git a/browser/locales/en-US/chrome/browser/devtools/toolbox.dtd b/browser/locales/en-US/chrome/browser/devtools/toolbox.dtd
+index 7abd9d3..951b8ed 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/toolbox.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/toolbox.dtd
+@@ -178,8 +178,16 @@ Gecko platform symbols">
+ <!ENTITY options.sourceeditor.autoclosebrackets.tooltip "Automatically insert closing brackets">
+ <!ENTITY options.sourceeditor.expandtab.label           "Indent using spaces">
+ <!ENTITY options.sourceeditor.expandtab.tooltip         "Use spaces instead of the tab character">
+ <!ENTITY options.sourceeditor.tabsize.label             "Tab size">
+ <!ENTITY options.sourceeditor.tabsize.accesskey         "T">
+ <!ENTITY options.sourceeditor.keybinding.label          "Keybindings">
+ <!ENTITY options.sourceeditor.keybinding.accesskey      "K">
+ <!ENTITY options.sourceeditor.keybinding.default.label  "Default">
++
++<!-- LOCALIZATION NOTE (deveditionpromo.*) For the Developer Edition popup
++  - in Beta to promote the Developer Edition. -->
++
++<!ENTITY deveditionpromo.title       "Introducing Firefox Developer Edition">
++<!ENTITY deveditionpromo.description "Our first browser designed just for developers.">
++<!ENTITY deveditionpromo.gobutton    "Learn more »">
++<!ENTITY deveditionpromo.skipbutton  "Not now">
+-- 
+1.8.4.2
+

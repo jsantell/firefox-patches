@@ -1,0 +1,460 @@
+From 302af2a8736401a029169bc72d9975685f061175 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 21 Oct 2014 11:39:56 -0700
+Subject: Bug 1069673 - Add support methods on devtool's Target, r=jryans
+
+---
+ browser/devtools/framework/target.js               | 125 +++++++++++++++++----
+ browser/devtools/framework/test/browser.ini        |   1 +
+ .../framework/test/browser_target_support.js       |  89 +++++++++++++++
+ browser/devtools/main.js                           |   2 +-
+ browser/devtools/shared/DeveloperToolbar.jsm       |   6 +-
+ toolkit/components/telemetry/Histograms.json       |  14 +++
+ toolkit/devtools/client/dbg-client.jsm             |   9 ++
+ 7 files changed, 223 insertions(+), 23 deletions(-)
+ create mode 100644 browser/devtools/framework/test/browser_target_support.js
+
+diff --git a/browser/devtools/framework/target.js b/browser/devtools/framework/target.js
+index ddaed54..c5391ed 100644
+--- a/browser/devtools/framework/target.js
++++ b/browser/devtools/framework/target.js
+@@ -104,35 +104,25 @@ exports.TargetFactory = {
+     });
+   },
+ };
+ 
+ /**
+  * The 'version' property allows the developer tools equivalent of browser
+  * detection. Browser detection is evil, however while we don't know what we
+  * will need to detect in the future, it is an easy way to postpone work.
+- * We should be looking to use 'supports()' in place of version where
+- * possible.
++ * We should be looking to use the support features added in bug 1069673
++ * in place of version where possible.
+  */
+ function getVersion() {
+   // FIXME: return something better
+   return 20;
+ }
+ 
+ /**
+- * A better way to support feature detection, but we're not yet at a place
+- * where we have the features well enough defined for this to make lots of
+- * sense.
+- */
+-function supports(feature) {
+-  // FIXME: return something better
+-  return false;
+-};
+-
+-/**
+  * A Target represents something that we can debug. Targets are generally
+  * read-only. Any changes that you wish to make to a target should be done via
+  * a Tool that attaches to the target. i.e. a Target is just a pointer saying
+  * "the thing to debug is over there".
+  *
+  * Providing a generalized abstraction of a web-page or web-browser (available
+  * either locally or remotely) is beyond the scope of this class (and maybe
+  * also beyond the scope of this universe) However Target does attempt to
+@@ -146,22 +136,16 @@ function supports(feature) {
+  *     target should close. This event is not currently cancelable.
+  * - navigate: The target window has navigated to a different URL
+  *
+  * Optional events:
+  * - will-navigate: The target window will navigate to a different URL
+  * - hidden: The target is not visible anymore (for TargetTab, another tab is selected)
+  * - visible: The target is visible (for TargetTab, tab is selected)
+  *
+- * Target also supports 2 functions to help allow 2 different versions of
+- * Firefox debug each other. The 'version' property is the equivalent of
+- * browser detection - simple and easy to implement but gets fragile when things
+- * are not quite what they seem. The 'supports' property is the equivalent of
+- * feature detection - harder to setup, but more robust long-term.
+- *
+  * Comparing Targets: 2 instances of a Target object can point at the same
+  * thing, so t1 !== t2 and t1 != t2 even when they represent the same object.
+  * To compare to targets use 't1.equals(t2)'.
+  */
+ function Target() {
+   throw new Error("Use TargetFactory.newXXX or Target.getXXX to create a Target in place of 'new Target()'");
+ }
+ 
+@@ -191,17 +175,119 @@ function TabTarget(tab) {
+     this._client = tab.client;
+     this._chrome = tab.chrome;
+   }
+ }
+ 
+ TabTarget.prototype = {
+   _webProgressListener: null,
+ 
+-  supports: supports,
++  /**
++   * Returns a promise for the protocol description from the root actor.
++   * Used internally with `target.actorHasMethod`. Takes advantage of
++   * caching if definition was fetched previously with the corresponding
++   * actor information. Must be a remote target.
++   *
++   * @return {Promise}
++   * {
++   *   "category": "actor",
++   *   "typeName": "longstractor",
++   *   "methods": [{
++   *     "name": "substring",
++   *     "request": {
++   *       "type": "substring",
++   *       "start": {
++   *         "_arg": 0,
++   *         "type": "primitive"
++   *       },
++   *       "end": {
++   *         "_arg": 1,
++   *         "type": "primitive"
++   *       }
++   *     },
++   *     "response": {
++   *       "substring": {
++   *         "_retval": "primitive"
++   *       }
++   *     }
++   *   }],
++   *  "events": {}
++   * }
++   */
++  getActorDescription: function (actorName) {
++    if (!this.client) {
++      throw new Error("TabTarget#getActorDescription() can only be called on remote tabs.");
++    }
++
++    let deferred = promise.defer();
++
++    if (this._protocolDescription && this._protocolDescription.types[actorName]) {
++      deferred.resolve(this._protocolDescription.types[actorName]);
++    } else {
++      this.client.mainRoot.protocolDescription(description => {
++        this._protocolDescription = description;
++        deferred.resolve(description.types[actorName]);
++      });
++    }
++
++    return deferred.promise;
++  },
++
++  /**
++   * Returns a boolean indicating whether or not the specific actor
++   * type exists. Must be a remote target.
++   *
++   * @param {String} actorName
++   * @return {Boolean}
++   */
++  hasActor: function (actorName) {
++    if (!this.client) {
++      throw new Error("TabTarget#hasActor() can only be called on remote tabs.");
++    }
++    if (this.form) {
++      return !!this.form[actorName + "Actor"];
++    }
++    return false;
++  },
++
++  /**
++   * Queries the protocol description to see if an actor has
++   * an available method. The actor must already be lazily-loaded,
++   * so this is for use inside of tool. Returns a promise that
++   * resolves to a boolean. Must be a remote target.
++   *
++   * @param {String} actorName
++   * @param {String} methodName
++   * @return {Promise}
++   */
++  actorHasMethod: function (actorName, methodName) {
++    if (!this.client) {
++      throw new Error("TabTarget#actorHasMethod() can only be called on remote tabs.");
++    }
++    return this.getActorDescription(actorName).then(desc => {
++      if (desc && desc.methods) {
++        return !!desc.methods.find(method => method.name === methodName);
++      }
++      return false;
++    });
++  },
++
++  /**
++   * Returns a trait from the root actor.
++   *
++   * @param {String} traitName
++   * @return {Mixed}
++   */
++  getTrait: function (traitName) {
++    if (!this.client) {
++      throw new Error("TabTarget#getTrait() can only be called on remote tabs.");
++    }
++    return this.client.traits[traitName];
++  },
++
+   get version() { return getVersion(); },
+ 
+   get tab() {
+     return this._tab;
+   },
+ 
+   get form() {
+     return this._form;
+@@ -604,17 +690,16 @@ TabWebProgressListener.prototype = {
+  */
+ function WindowTarget(window) {
+   EventEmitter.decorate(this);
+   this._window = window;
+   this._setupListeners();
+ }
+ 
+ WindowTarget.prototype = {
+-  supports: supports,
+   get version() { return getVersion(); },
+ 
+   get window() {
+     return this._window;
+   },
+ 
+   get name() {
+     return this._window.document.title;
+diff --git a/browser/devtools/framework/test/browser.ini b/browser/devtools/framework/test/browser.ini
+index 94be1bc..4eb603c 100644
+--- a/browser/devtools/framework/test/browser.ini
++++ b/browser/devtools/framework/test/browser.ini
+@@ -10,16 +10,17 @@ support-files =
+ [browser_devtools_api.js]
+ [browser_devtools_api_destroy.js]
+ skip-if = e10s # Bug 1070837 - devtools/framework/toolbox.js |doc| getter not e10s friendly
+ [browser_dynamic_tool_enabling.js]
+ [browser_keybindings.js]
+ [browser_new_activation_workflow.js]
+ [browser_target_events.js]
+ [browser_target_remote.js]
++[browser_target_support.js]
+ [browser_two_tabs.js]
+ [browser_toolbox_dynamic_registration.js]
+ [browser_toolbox_highlight.js]
+ [browser_toolbox_hosts.js]
+ [browser_toolbox_options.js]
+ [browser_toolbox_options_disable_buttons.js]
+ [browser_toolbox_options_disable_cache.js]
+ skip-if = e10s # Bug 1030318
+diff --git a/browser/devtools/framework/test/browser_target_support.js b/browser/devtools/framework/test/browser_target_support.js
+new file mode 100644
+index 0000000..1d8433f
+--- /dev/null
++++ b/browser/devtools/framework/test/browser_target_support.js
+@@ -0,0 +1,89 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Test support methods on Target, such as `hasActor`, `getActorDescription`,
++// `actorHasMethod` and `getTrait`.
++
++let { DebuggerServer } =
++  Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
++let { DebuggerClient } =
++  Cu.import("resource://gre/modules/devtools/dbg-client.jsm", {});
++let { devtools } =
++  Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
++let { Task } =
++  Cu.import("resource://gre/modules/Task.jsm", {});
++let { WebAudioFront } =
++  devtools.require("devtools/server/actors/webaudio");
++
++function* testTarget (client, target) {
++  yield target.makeRemote();
++
++  ise(target.hasActor("timeline"), true, "target.hasActor() true when actor exists.");
++  ise(target.hasActor("webaudio"), true, "target.hasActor() true when actor exists.");
++  ise(target.hasActor("notreal"), false, "target.hasActor() false when actor does not exist.");
++  // Create a front to ensure the actor is loaded
++  let front = new WebAudioFront(target.client, target.form);
++
++  let desc = yield target.getActorDescription("webaudio");
++  ise(desc.typeName, "webaudio",
++    "target.getActorDescription() returns definition data for corresponding actor");
++  ise(desc.events["start-context"]["type"], "startContext",
++    "target.getActorDescription() returns event data for corresponding actor");
++
++  desc = yield target.getActorDescription("nope");
++  ise(desc, undefined, "target.getActorDescription() returns undefined for non-existing actor");
++  desc = yield target.getActorDescription();
++  ise(desc, undefined, "target.getActorDescription() returns undefined for undefined actor");
++
++  let hasMethod = yield target.actorHasMethod("audionode", "getType");
++  ise(hasMethod, true,
++    "target.actorHasMethod() returns true for existing actor with method");
++  hasMethod = yield target.actorHasMethod("audionode", "nope");
++  ise(hasMethod, false,
++    "target.actorHasMethod() returns false for existing actor with no method");
++  hasMethod = yield target.actorHasMethod("nope", "nope");
++  ise(hasMethod, false,
++    "target.actorHasMethod() returns false for non-existing actor with no method");
++  hasMethod = yield target.actorHasMethod();
++  ise(hasMethod, false,
++    "target.actorHasMethod() returns false for undefined params");
++
++  ise(target.getTrait("customHighlighters")[0], "BoxModelHighlighter",
++    "target.getTrait() returns objects when trait exists");
++  ise(target.getTrait("giddyup"), undefined,
++    "target.getTrait() returns undefined when trait does not exist");
++
++  close(target, client);
++}
++
++// Ensure target is closed if client is closed directly
++function test() {
++  waitForExplicitFinish();
++
++  if (!DebuggerServer.initialized) {
++    DebuggerServer.init(function () { return true; });
++    DebuggerServer.addBrowserActors();
++  }
++
++  var client = new DebuggerClient(DebuggerServer.connectPipe());
++  client.connect(() => {
++    client.listTabs(response => {
++      let options = {
++        form: response,
++        client: client,
++        chrome: true
++      };
++
++      devtools.TargetFactory.forRemoteTab(options).then(Task.async(testTarget).bind(null, client));
++    });
++  });
++}
++
++function close (target, client) {
++  target.on("close", () => {
++    ok(true, "Target was closed");
++    DebuggerServer.destroy();
++    finish();
++  });
++  client.close();
++}
+diff --git a/browser/devtools/main.js b/browser/devtools/main.js
+index 2976c98..8ba98ea 100644
+--- a/browser/devtools/main.js
++++ b/browser/devtools/main.js
+@@ -308,17 +308,17 @@ Tools.timeline = {
+   icon: "chrome://browser/skin/devtools/tool-network.svg",
+   invertIconForLightTheme: true,
+   url: "chrome://browser/content/devtools/timeline/timeline.xul",
+   label: l10n("timeline.label", timelineStrings),
+   panelLabel: l10n("timeline.panelLabel", timelineStrings),
+   tooltip: l10n("timeline.tooltip", timelineStrings),
+ 
+   isTargetSupported: function(target) {
+-    return !target.isAddon;
++    return !target.isAddon && target.hasActor("timeline");
+   },
+ 
+   build: function (iframeWindow, toolbox) {
+     let panel = new TimelinePanel(iframeWindow, toolbox);
+     return panel.open();
+   }
+ };
+ 
+diff --git a/browser/devtools/shared/DeveloperToolbar.jsm b/browser/devtools/shared/DeveloperToolbar.jsm
+index eac77be..6c940a8 100644
+--- a/browser/devtools/shared/DeveloperToolbar.jsm
++++ b/browser/devtools/shared/DeveloperToolbar.jsm
+@@ -188,23 +188,25 @@ let CommandUtils = {
+ 
+   /**
+    * A helper function to create the environment object that is passed to
+    * GCLI commands.
+    * @param targetContainer An object containing a 'target' property which
+    * reflects the current debug target
+    */
+   createEnvironment: function(container, targetProperty='target') {
+-    if (container[targetProperty].supports == null) {
++    if (!container[targetProperty].toString ||
++        !/TabTarget/.test(container[targetProperty].toString())) {
+       throw new Error('Missing target');
+     }
+ 
+     return {
+       get target() {
+-        if (container[targetProperty].supports == null) {
++        if (!container[targetProperty].toString ||
++            !/TabTarget/.test(container[targetProperty].toString())) {
+           throw new Error('Removed target');
+         }
+ 
+         return container[targetProperty];
+       },
+ 
+       get chromeWindow() {
+         return this.target.tab.ownerDocument.defaultView;
+diff --git a/toolkit/components/telemetry/Histograms.json b/toolkit/components/telemetry/Histograms.json
+index ca830eb..7a288c3 100644
+--- a/toolkit/components/telemetry/Histograms.json
++++ b/toolkit/components/telemetry/Histograms.json
+@@ -5134,16 +5134,30 @@
+   },
+   "DEVTOOLS_DEBUGGER_RDP_REMOTE_LISTTABS_MS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000",
+     "n_buckets": "1000",
+     "description": "The time (in milliseconds) that it took a 'listTabs' request to go round trip."
+   },
++  "DEVTOOLS_DEBUGGER_RDP_LOCAL_PROTOCOLDESCRIPTION_MS": {
++    "expires_in_version": "never",
++    "kind": "exponential",
++    "high": "10000",
++    "n_buckets": "1000",
++    "description": "The time (in milliseconds) that it took a 'protocolDescription' request to go round trip."
++  },
++  "DEVTOOLS_DEBUGGER_RDP_REMOTE_PROTOCOLDESCRIPTION_MS": {
++    "expires_in_version": "never",
++    "kind": "exponential",
++    "high": "10000",
++    "n_buckets": "1000",
++    "description": "The time (in milliseconds) that it took a 'protocolDescription' request to go round trip."
++  },
+   "DEVTOOLS_DEBUGGER_RDP_LOCAL_LISTADDONS_MS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000",
+     "n_buckets": "1000",
+     "description": "The time (in milliseconds) that it took a 'listAddons' request to go round trip."
+   },
+   "DEVTOOLS_DEBUGGER_RDP_REMOTE_LISTADDONS_MS": {
+diff --git a/toolkit/devtools/client/dbg-client.jsm b/toolkit/devtools/client/dbg-client.jsm
+index 86cebbc..95f4deb 100644
+--- a/toolkit/devtools/client/dbg-client.jsm
++++ b/toolkit/devtools/client/dbg-client.jsm
+@@ -1446,16 +1446,25 @@ RootClient.prototype = {
+    * List the installed addons.
+    *
+    * @param function aOnResponse
+    *        Called with the response packet.
+    */
+   listAddons: DebuggerClient.requester({ type: "listAddons" },
+                                        { telemetry: "LISTADDONS" }),
+ 
++  /**
++   * Description of protocol's actors and methods.
++   *
++   * @param function aOnResponse
++   *        Called with the response packet.
++   */
++   protocolDescription: DebuggerClient.requester({ type: "protocolDescription" },
++                                                 { telemetry: "PROTOCOLDESCRIPTION" }),
++
+   /*
+    * Methods constructed by DebuggerClient.requester require these forwards
+    * on their 'this'.
+    */
+   get _transport() { return this._client._transport; },
+   get request()    { return this._client.request;    }
+ };
+ 
+-- 
+1.8.4.2
+
