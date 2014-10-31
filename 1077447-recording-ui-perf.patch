@@ -1,149 +1,318 @@
-From 9e4f3e89803aeb7a7ae97a546cce6ef68dc65300 Mon Sep 17 00:00:00 2001
+From 93ce6b55b7f0c33fca2e2f4e923c101e66492ca0 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
 Date: Tue, 28 Oct 2014 17:19:04 -0700
 Subject: Bug 1077447 - Hook up recording UI to the new performance
  tool, r=victorporof
 
 ---
- browser/devtools/performance/performance.js        | 57 +++++++++++++++++-----
- browser/devtools/performance/test/browser.ini      |  1 +
- .../performance/test/browser_perf-ui-recording.js  | 28 +++++++++++
- browser/devtools/performance/test/head.js          | 29 +++++++++++
- 4 files changed, 104 insertions(+), 11 deletions(-)
+ browser/devtools/jar.mn                            |   3 +-
+ browser/devtools/performance/controller.js         | 137 +++++++++++++++++++++
+ browser/devtools/performance/performance.js        |  97 ---------------
+ browser/devtools/performance/performance.xul       |   3 +-
+ browser/devtools/performance/test/browser.ini      |   1 +
+ .../performance/test/browser_perf-ui-recording.js  |  31 +++++
+ browser/devtools/performance/test/head.js          |  56 +++++++++
+ browser/devtools/performance/views/main.js         |  61 +++++++++
+ 8 files changed, 290 insertions(+), 99 deletions(-)
+ create mode 100644 browser/devtools/performance/controller.js
+ delete mode 100644 browser/devtools/performance/performance.js
  create mode 100644 browser/devtools/performance/test/browser_perf-ui-recording.js
+ create mode 100644 browser/devtools/performance/views/main.js
 
-diff --git a/browser/devtools/performance/performance.js b/browser/devtools/performance/performance.js
-index 7171fba..ec21349 100644
---- a/browser/devtools/performance/performance.js
-+++ b/browser/devtools/performance/performance.js
-@@ -11,38 +11,45 @@ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
- 
- devtools.lazyRequireGetter(this, "Services");
- devtools.lazyRequireGetter(this, "promise");
- devtools.lazyRequireGetter(this, "EventEmitter",
-   "devtools/toolkit/event-emitter");
- devtools.lazyRequireGetter(this, "DevToolsUtils",
-   "devtools/toolkit/DevToolsUtils");
- 
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index c3db0d6..0ccd003 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -83,17 +83,18 @@ browser.jar:
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/profiler.xul                              (profiler/profiler.xul)
+     content/browser/devtools/profiler.js                               (profiler/profiler.js)
+     content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+ #ifdef MOZ_DEVTOOLS_PERFTOOLS
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+-    content/browser/devtools/performance.js                            (performance/performance.js)
++    content/browser/devtools/performance/controller.js                 (performance/controller.js)
++    content/browser/devtools/performance/views/main.js                 (performance/views/main.js)
+ #endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+diff --git a/browser/devtools/performance/controller.js b/browser/devtools/performance/controller.js
+new file mode 100644
+index 0000000..9e53a17
+--- /dev/null
++++ b/browser/devtools/performance/controller.js
+@@ -0,0 +1,137 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++
++Cu.import("resource://gre/modules/Task.jsm");
++Cu.import("resource://gre/modules/devtools/Loader.jsm");
++Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
++
++devtools.lazyRequireGetter(this, "Services");
++devtools.lazyRequireGetter(this, "promise");
++devtools.lazyRequireGetter(this, "EventEmitter",
++  "devtools/toolkit/event-emitter");
++devtools.lazyRequireGetter(this, "DevToolsUtils",
++  "devtools/toolkit/DevToolsUtils");
++
 +// Events emitted by the `PerformanceController`
 +const EVENTS = {
-+  // When a recording is started or stopped, via the `stopwatch` button.
++  // When a recording is started or stopped via the controller
 +  RECORDING_STARTED: "Performance:RecordingStarted",
 +  RECORDING_STOPPED: "Performance:RecordingStopped",
++
++  // Emitted by the PerformanceView on record button click
++  UI_START_RECORDING: "Performance:UI:StartRecording",
++  UI_STOP_RECORDING: "Performance:UI:StopRecording"
 +};
 +
- /**
-  * The current target and the profiler connection, set by this tool's host.
-  */
- let gToolbox, gTarget, gFront;
- 
- /**
-  * Initializes the profiler controller and views.
-  */
- let startupPerformance = Task.async(function*() {
-   yield promise.all([
-     PrefObserver.register(),
--    EventsHandler.initialize()
-+    PerformanceController.initialize()
-   ]);
- });
- 
- /**
-  * Destroys the profiler controller and views.
-  */
- let shutdownPerformance = Task.async(function*() {
-   yield promise.all([
-     PrefObserver.unregister(),
--    EventsHandler.destroy()
-+    PerformanceController.destroy()
-   ]);
- });
- 
- /**
-  * Observes pref changes on the devtools.profiler branch and triggers the
-  * required frontend modifications.
-  */
- let PrefObserver = {
-@@ -54,42 +61,70 @@ let PrefObserver = {
-     this.branch.removeObserver("", this);
-   },
-   observe: function(subject, topic, pref) {
-     Prefs.refresh();
-   }
- };
- 
- /**
-- * Functions handling target-related lifetime events.
++/**
++ * The current target and the profiler connection, set by this tool's host.
++ */
++let gToolbox, gTarget, gFront;
++
++/**
++ * Initializes the profiler controller and views.
++ */
++let startupPerformance = Task.async(function*() {
++  yield promise.all([
++    PrefObserver.register(),
++    PerformanceController.initialize(),
++    PerformanceView.initialize()
++  ]);
++});
++
++/**
++ * Destroys the profiler controller and views.
++ */
++let shutdownPerformance = Task.async(function*() {
++  yield promise.all([
++    PrefObserver.unregister(),
++    PerformanceController.destroy(),
++    PerformanceView.destroy()
++  ]);
++});
++
++/**
++ * Observes pref changes on the devtools.profiler branch and triggers the
++ * required frontend modifications.
++ */
++let PrefObserver = {
++  register: function() {
++    this.branch = Services.prefs.getBranch("devtools.profiler.");
++    this.branch.addObserver("", this, false);
++  },
++  unregister: function() {
++    this.branch.removeObserver("", this);
++  },
++  observe: function(subject, topic, pref) {
++    Prefs.refresh();
++  }
++};
++
++/**
 + * Functions handling target-related lifetime events and
 + * UI interaction.
-  */
--let EventsHandler = {
++ */
 +let PerformanceController = {
-   /**
--   * Listen for events emitted by the current tab target.
++  /**
 +   * Listen for events emitted by the current tab target and
 +   * main UI events.
-    */
-   initialize: function() {
-+    this._recordButton = $("#record-button");
++   */
++  initialize: function() {
++    this.startRecording = this.startRecording.bind(this);
++    this.stopRecording = this.stopRecording.bind(this);
 +
-+    this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
-+
-+    this._recordButton.addEventListener("mouseup", this._onRecordButtonClick);
-   },
- 
-   /**
--   * Remove events emitted by the current tab target.
-+   * Remove events handled by the PerformanceController
-    */
-   destroy: function() {
-+    this._recordButton.removeEventListener("mouseup", this._onRecordButtonClick);
++    PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
++    PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
 +  },
 +
++  /**
++   * Remove events handled by the PerformanceController
++   */
++  destroy: function() {
++    PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
++    PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
++  },
++
++  /**
++   * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
++   * when the front is starting to record.
++   */
 +  startRecording: Task.async(function *() {
 +    yield gFront.startRecording();
 +    this.emit(EVENTS.RECORDING_STARTED);
 +  }),
 +
++  /**
++   * Stops recording with the PerformanceFront. Emits `EVENTS.RECORDING_STOPPED`
++   * when the front stops recording.
++   */
 +  stopRecording: Task.async(function *() {
 +    let results = yield gFront.stopRecording();
 +    this.emit(EVENTS.RECORDING_STOPPED, results);
-+  }),
++  })
++};
 +
-+  _onRecordButtonClick: function (e) {
-+    if (this._recordButton.hasAttribute("checked")) {
-+      this._recordButton.removeAttribute("checked");
-+      this.stopRecording();
-+    } else {
-+      this._recordButton.setAttribute("checked", "true");
-+      this.startRecording();
-+    }
-   }
- };
- 
- /**
-- * Shortcuts for accessing various profiler preferences.
++/**
 + * Convenient way of emitting events from the controller.
-  */
--const Prefs = new ViewHelpers.Prefs("devtools.profiler", {
--});
++ */
 +EventEmitter.decorate(PerformanceController);
- 
- /**
-- * Convenient way of emitting events from the panel window.
++
++/**
 + * Shortcuts for accessing various profiler preferences.
-  */
--EventEmitter.decorate(this);
++ */
 +const Prefs = new ViewHelpers.Prefs("devtools.profiler", {
 +});
++
++/**
++ * DOM query helpers.
++ */
++function $(selector, target = document) {
++  return target.querySelector(selector);
++}
++function $$(selector, target = document) {
++  return target.querySelectorAll(selector);
++}
+diff --git a/browser/devtools/performance/performance.js b/browser/devtools/performance/performance.js
+deleted file mode 100644
+index 7171fba..0000000
+--- a/browser/devtools/performance/performance.js
++++ /dev/null
+@@ -1,97 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+-
+-Cu.import("resource://gre/modules/Task.jsm");
+-Cu.import("resource://gre/modules/devtools/Loader.jsm");
+-Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+-
+-devtools.lazyRequireGetter(this, "Services");
+-devtools.lazyRequireGetter(this, "promise");
+-devtools.lazyRequireGetter(this, "EventEmitter",
+-  "devtools/toolkit/event-emitter");
+-devtools.lazyRequireGetter(this, "DevToolsUtils",
+-  "devtools/toolkit/DevToolsUtils");
+-
+-/**
+- * The current target and the profiler connection, set by this tool's host.
+- */
+-let gToolbox, gTarget, gFront;
+-
+-/**
+- * Initializes the profiler controller and views.
+- */
+-let startupPerformance = Task.async(function*() {
+-  yield promise.all([
+-    PrefObserver.register(),
+-    EventsHandler.initialize()
+-  ]);
+-});
+-
+-/**
+- * Destroys the profiler controller and views.
+- */
+-let shutdownPerformance = Task.async(function*() {
+-  yield promise.all([
+-    PrefObserver.unregister(),
+-    EventsHandler.destroy()
+-  ]);
+-});
+-
+-/**
+- * Observes pref changes on the devtools.profiler branch and triggers the
+- * required frontend modifications.
+- */
+-let PrefObserver = {
+-  register: function() {
+-    this.branch = Services.prefs.getBranch("devtools.profiler.");
+-    this.branch.addObserver("", this, false);
+-  },
+-  unregister: function() {
+-    this.branch.removeObserver("", this);
+-  },
+-  observe: function(subject, topic, pref) {
+-    Prefs.refresh();
+-  }
+-};
+-
+-/**
+- * Functions handling target-related lifetime events.
+- */
+-let EventsHandler = {
+-  /**
+-   * Listen for events emitted by the current tab target.
+-   */
+-  initialize: function() {
+-  },
+-
+-  /**
+-   * Remove events emitted by the current tab target.
+-   */
+-  destroy: function() {
+-  }
+-};
+-
+-/**
+- * Shortcuts for accessing various profiler preferences.
+- */
+-const Prefs = new ViewHelpers.Prefs("devtools.profiler", {
+-});
+-
+-/**
+- * Convenient way of emitting events from the panel window.
+- */
+-EventEmitter.decorate(this);
+-
+-/**
+- * DOM query helpers.
+- */
+-function $(selector, target = document) {
+-  return target.querySelector(selector);
+-}
+-function $$(selector, target = document) {
+-  return target.querySelectorAll(selector);
+-}
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 4228b95..859056a 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -9,17 +9,18 @@
+ <?xml-stylesheet href="chrome://browser/skin/devtools/performance.css" type="text/css"?>
+ <!DOCTYPE window [
+   <!ENTITY % profilerDTD SYSTEM "chrome://browser/locale/devtools/profiler.dtd">
+   %profilerDTD;
+ ]>
  
- /**
-  * DOM query helpers.
-  */
- function $(selector, target = document) {
-   return target.querySelector(selector);
- }
- function $$(selector, target = document) {
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+-  <script type="application/javascript" src="performance.js"/>
++  <script type="application/javascript" src="performance/controller.js"/>
++  <script type="application/javascript" src="performance/views/main.js"/>
+ 
+   <vbox class="theme-body" flex="1">
+     <toolbar id="performance-toolbar" class="devtools-toolbar">
+       <hbox id="performance-toolbar-controls-recordings" class="devtools-toolbarbutton-group">
+         <toolbarbutton id="record-button"
+                        class="devtools-toolbarbutton"
+                        tooltiptext="&profilerUI.recordButton.tooltip;"/>
+         <toolbarbutton id="clear-button"
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
 index 0dfd51a..123d520 100644
 --- a/browser/devtools/performance/test/browser.ini
@@ -160,10 +329,10 @@ index 0dfd51a..123d520 100644
 +[browser_perf-ui-recording.js]
 diff --git a/browser/devtools/performance/test/browser_perf-ui-recording.js b/browser/devtools/performance/test/browser_perf-ui-recording.js
 new file mode 100644
-index 0000000..252396a
+index 0000000..e876d94
 --- /dev/null
 +++ b/browser/devtools/performance/test/browser_perf-ui-recording.js
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,31 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -185,18 +354,21 @@ index 0000000..252396a
 +  busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
 +
 +  ok(nsIProfilerModule.IsActive(),
-+    "The built-in profiler module should still be active.");
++    "The built-in profiler module should now be active.");
 +
 +  yield stopRecording(panel);
++
++  ok(nsIProfilerModule.IsActive(),
++    "The built-in profiler module should still be active.");
 +
 +  yield teardown(panel);
 +  finish();
 +}
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 999c010..46f4d3c 100644
+index 999c010..4fde7f0 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
-@@ -202,8 +202,37 @@ function busyWait(time) {
+@@ -202,8 +202,64 @@ function busyWait(time) {
    let stack;
    while (Date.now() - start < time) { stack = Components.stack; }
  }
@@ -207,33 +379,127 @@ index 999c010..46f4d3c 100644
  
 +function* startRecording(panel) {
 +  let win = panel.panelWin;
++  let clicked = panel.panelWin.PerformanceView.once(win.EVENTS.UI_START_RECORDING);
 +  let started = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_STARTED);
 +  let button = win.$("#record-button");
 +
 +  ok(!button.hasAttribute("checked"),
 +    "The record button should not be checked yet.");
 +
++  ok(!button.hasAttribute("locked"),
++    "The record button should not be locked yet.");
++
 +  EventUtils.synthesizeMouseAtCenter(button, {}, win);
++
++  yield clicked;
++
++  ok(button.hasAttribute("checked"),
++    "The record button should now be checked.");
++  ok(button.hasAttribute("locked"),
++    "The record button should be locked.");
++
 +  yield started;
 +
 +  ok(button.hasAttribute("checked"),
-+    "The record button should is now checked.");
++    "The record button should still be checked.");
++  ok(!button.hasAttribute("locked"),
++    "The record button should not be locked.");
 +}
 +
 +function* stopRecording(panel) {
 +  let win = panel.panelWin;
++  let clicked = panel.panelWin.PerformanceView.once(win.EVENTS.UI_STOP_RECORDING);
 +  let ended = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_STOPPED);
 +  let button = win.$("#record-button");
 +
 +  ok(button.hasAttribute("checked"),
 +    "The record button should already be checked.");
++  ok(!button.hasAttribute("locked"),
++    "The record button should not be locked yet.");
 +
 +  EventUtils.synthesizeMouseAtCenter(button, {}, win);
++
++  yield clicked;
++
++  ok(!button.hasAttribute("checked"),
++    "The record button should not be checked.");
++  ok(button.hasAttribute("locked"),
++    "The record button should be locked.");
++
 +  yield ended;
 +
 +  ok(!button.hasAttribute("checked"),
 +    "The record button should not be checked.");
++  ok(!button.hasAttribute("locked"),
++    "The record button should not be locked.");
 +}
+diff --git a/browser/devtools/performance/views/main.js b/browser/devtools/performance/views/main.js
+new file mode 100644
+index 0000000..40bcd25
+--- /dev/null
++++ b/browser/devtools/performance/views/main.js
+@@ -0,0 +1,61 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * Master view handler for the performance tool.
++ */
++let PerformanceView = {
++  /**
++   * Sets up the view with event binding.
++   */
++  initialize: function () {
++    this._recordButton = $("#record-button");
++
++    this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
++    this._unlockRecordButton = this._unlockRecordButton.bind(this);
++
++    this._recordButton.addEventListener("mouseup", this._onRecordButtonClick);
++
++    // Bind to controller events to unlock the record button
++    PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
++    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
++  },
++
++  /**
++   * Unbinds events.
++   */
++  destroy: function () {
++    this._recordButton.removeEventListener("mouseup", this._onRecordButtonClick);
++    PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
++    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
++  },
++
++  /**
++   * Removes the `locked` attribute on the record button.
++   */
++  _unlockRecordButton: function () {
++    this._recordButton.removeAttribute("locked");
++  },
++
++  /**
++   * Handler for clicking the record button.
++   */
++  _onRecordButtonClick: function (e) {
++    if (this._recordButton.hasAttribute("checked")) {
++      this._recordButton.removeAttribute("checked");
++      this._recordButton.setAttribute("locked", "true");
++      this.emit(EVENTS.UI_STOP_RECORDING);
++    } else {
++      this._recordButton.setAttribute("checked", "true");
++      this._recordButton.setAttribute("locked", "true");
++      this.emit(EVENTS.UI_START_RECORDING);
++    }
++  }
++};
++
++/**
++ * Convenient way of emitting events from the view.
++ */
++EventEmitter.decorate(PerformanceView);
 -- 
 1.8.4.2
 
