@@ -1,0 +1,973 @@
+From 2afcb95f7b0f6260f9a234a52c760b3770382627 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 27 Oct 2014 18:09:59 -0700
+Subject: Bug 1023462 - Add an options toolbar button to the web audio
+ editor with the option to toggle on the visibility of garbage collected
+ nodes. r=vp
+
+---
+ browser/app/profile/firefox.js                     |  1 +
+ browser/devtools/jar.mn                            |  1 +
+ browser/devtools/webaudioeditor/controller.js      | 40 +++++++++++
+ browser/devtools/webaudioeditor/includes.js        | 15 +++-
+ browser/devtools/webaudioeditor/models.js          | 32 ++++++++-
+ browser/devtools/webaudioeditor/test/browser.ini   |  5 ++
+ .../test/browser_wa_options-show-dead-nodes-01.js  | 61 ++++++++++++++++
+ .../test/browser_wa_options-show-dead-nodes-02.js  | 66 +++++++++++++++++
+ .../test/browser_wa_options-view-01.js             | 65 +++++++++++++++++
+ .../test/browser_wa_options-view-02.js             | 60 ++++++++++++++++
+ browser/devtools/webaudioeditor/test/head.js       |  9 +++
+ browser/devtools/webaudioeditor/views/context.js   | 15 ++--
+ browser/devtools/webaudioeditor/views/options.js   | 82 ++++++++++++++++++++++
+ browser/devtools/webaudioeditor/webaudioeditor.xul | 17 +++++
+ .../chrome/browser/devtools/webaudioeditor.dtd     |  9 +++
+ .../themes/shared/devtools/webaudioeditor.inc.css  | 19 +++++
+ 16 files changed, 490 insertions(+), 7 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-01.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-02.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_options-view-01.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_options-view-02.js
+ create mode 100644 browser/devtools/webaudioeditor/views/options.js
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index f26d4c4..71bea96 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1435,16 +1435,17 @@ pref("devtools.styleeditor.transitions", true);
+ // Enable the Shader Editor.
+ pref("devtools.shadereditor.enabled", false);
+ 
+ // Enable the Canvas Debugger.
+ pref("devtools.canvasdebugger.enabled", false);
+ 
+ // Enable the Web Audio Editor
+ pref("devtools.webaudioeditor.enabled", false);
++pref("devtools.webaudioeditor.show-dead-nodes", false);
+ 
+ // Default theme ("dark" or "light")
+ pref("devtools.theme", "light");
+ 
+ // Display the introductory text
+ pref("devtools.gcli.hideIntro", false);
+ 
+ // How eager are we to show help: never=1, sometimes=2, always=3
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index c3db0d6..3b540cc 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -74,16 +74,17 @@ browser.jar:
+     content/browser/devtools/canvasdebugger.xul                        (canvasdebugger/canvasdebugger.xul)
+     content/browser/devtools/canvasdebugger.js                         (canvasdebugger/canvasdebugger.js)
+     content/browser/devtools/d3.js                                     (shared/d3.js)
+     content/browser/devtools/webaudioeditor.xul                        (webaudioeditor/webaudioeditor.xul)
+     content/browser/devtools/dagre-d3.js                               (webaudioeditor/lib/dagre-d3.js)
+     content/browser/devtools/webaudioeditor/includes.js                (webaudioeditor/includes.js)
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
++    content/browser/devtools/webaudioeditor/views/options.js           (webaudioeditor/views/options.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/profiler.xul                              (profiler/profiler.xul)
+     content/browser/devtools/profiler.js                               (profiler/profiler.js)
+     content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+ #ifdef MOZ_DEVTOOLS_PERFTOOLS
+diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
+index ee8dc45..876218e 100644
+--- a/browser/devtools/webaudioeditor/controller.js
++++ b/browser/devtools/webaudioeditor/controller.js
+@@ -1,35 +1,48 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++"use strict";
++
++/**
++ * Shortcuts for accessing various web audio editor preferences.
++ */
++let Prefs = new ViewHelpers.Prefs("devtools", {
++  "show-dead-nodes": ["Bool", "webaudioeditor.show-dead-nodes"]
++});
++
+ /**
+  * A collection of `AudioNodeModel`s used throughout the editor
+  * to keep track of audio nodes within the audio context.
+  */
+ let gAudioNodes = new AudioNodesCollection();
+ 
+ /**
+  * Initializes the web audio editor views
+  */
+ function startupWebAudioEditor() {
+   return all([
+     WebAudioEditorController.initialize(),
++    PrefObserver.register(),
++    OptionsView.initialize(),
+     ContextView.initialize(),
+     InspectorView.initialize()
+   ]);
+ }
+ 
+ /**
+  * Destroys the web audio editor controller and views.
+  */
+ function shutdownWebAudioEditor() {
+   return all([
+     WebAudioEditorController.destroy(),
++    PrefObserver.unregister(),
++    OptionsView.destroy(),
+     ContextView.destroy(),
+     InspectorView.destroy(),
+   ]);
+ }
+ 
+ /**
+  * Functions handling target-related lifetime events.
+  */
+@@ -216,8 +229,35 @@ let WebAudioEditorController = {
+ 
+   /**
+    * Called when a node param is changed.
+    */
+   _onChangeParam: function({ actor, param, value }) {
+     window.emit(EVENTS.CHANGE_PARAM, gAudioNodes.get(actor.actorID), param, value);
+   }
+ };
++
++
++/**
++ * Observes pref changes on the devtools.webaudioeditor branch and triggers the
++ * required frontend modifications.
++ */
++let PrefObserver = {
++  events: {
++    "show-dead-nodes": EVENTS.TOGGLE_SHOW_DEAD_NODES
++  },
++  register: function() {
++    this.branch = Services.prefs.getBranch("devtools.webaudioeditor.");
++    this.branch.addObserver("", this, false);
++  },
++  unregister: function() {
++    this.branch.removeObserver("", this);
++  },
++  observe: function(subject, topic, pref) {
++    Prefs.refresh();
++
++    // Emit the general preference change event.
++    window.emit(EVENTS.PREF_CHANGE, pref);
++
++    // And the specific preference change event.
++    window.emit(this.events[pref], Prefs[pref]);
++  }
++};
+diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
+index ddac056..400fdaa 100644
+--- a/browser/devtools/webaudioeditor/includes.js
++++ b/browser/devtools/webaudioeditor/includes.js
+@@ -39,30 +39,43 @@ const EVENTS = {
+ 
+   // When a param has been changed via the UI and successfully
+   // pushed via the actor to the raw audio node.
+   UI_SET_PARAM: "WebAudioEditor:UISetParam",
+ 
+   // When a node is to be set in the InspectorView.
+   UI_SELECT_NODE: "WebAudioEditor:UISelectNode",
+ 
++  // When a node is selected in the ContextView, but it is
++  // already destroyed. Used only for testing at the moment.
++  UI_SELECT_DESTROYED_NODE: "WebAudioEditor:UISelectDestroyedNode",
++
+   // When the inspector is finished setting a new node.
+   UI_INSPECTOR_NODE_SET: "WebAudioEditor:UIInspectorNodeSet",
+ 
+   // When the inspector is finished rendering in or out of view.
+   UI_INSPECTOR_TOGGLED: "WebAudioEditor:UIInspectorToggled",
+ 
+   // When an audio node is finished loading in the Properties tab.
+   UI_PROPERTIES_TAB_RENDERED: "WebAudioEditor:UIPropertiesTabRendered",
+ 
+   // When the Audio Context graph finishes rendering.
+   // Is called with two arguments, first representing number of nodes
+   // rendered, second being the number of edge connections rendering (not counting
+   // param edges), followed by the count of the param edges rendered.
+-  UI_GRAPH_RENDERED: "WebAudioEditor:UIGraphRendered"
++  UI_GRAPH_RENDERED: "WebAudioEditor:UIGraphRendered",
++
++  // Fired when a preference in the `devtools.webaudioeditor` branch is changed.
++  PREF_CHANGE: "WebAudioEditor:PreferenceChange",
++
++  // Fired when the preference for showing dead nodes changes.
++  TOGGLE_SHOW_DEAD_NODES: "WebAudioEditor:PrefToggleShowDeadNodes",
++
++  // Fired when the options menu is opened. Used for tests.
++  OPTIONS_SHOWN: "WebAudioEditor:OptionsMenuShown"
+ };
+ 
+ /**
+  * The current target and the Web Audio Editor front, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+ 
+ /**
+diff --git a/browser/devtools/webaudioeditor/models.js b/browser/devtools/webaudioeditor/models.js
+index e9ce10c..4609fa1 100644
+--- a/browser/devtools/webaudioeditor/models.js
++++ b/browser/devtools/webaudioeditor/models.js
+@@ -82,23 +82,25 @@ const AudioNodeModel = Class({
+    * @return Promise->Object
+    */
+   getParams: function () {
+     return this.actor.getParams();
+   },
+ 
+   /**
+    * Takes a `dagreD3.Digraph` object and adds this node to
+-   * the graph to be rendered.
++   * the graph to be rendered. Add any additional information
++   * here if it's to be accessible to the renderer.
+    *
+    * @param dagreD3.Digraph
+    */
+   addToGraph: function (graph) {
+     graph.addNode(this.id, {
+       type: this.type,
++      destroyed: !!this.destroyed,
+       label: this.type.replace(/Node$/, ""),
+       id: this.id
+     });
+   },
+ 
+   /**
+    * Takes a `dagreD3.Digraph` object and adds edges to
+    * the graph to be rendered. Separate from `addToGraph`,
+@@ -140,16 +142,19 @@ const AudioNodeModel = Class({
+ const AudioNodesCollection = Class({
+   extends: EventTarget,
+ 
+   model: AudioNodeModel,
+ 
+   initialize: function () {
+     this.models = new Set();
+     this._onModelEvent = this._onModelEvent.bind(this);
++    this._onToggleShowDeadNodes = this._onToggleShowDeadNodes.bind(this);
++
++    window.on(EVENTS.TOGGLE_SHOW_DEAD_NODES, this._onToggleShowDeadNodes);
+   },
+ 
+   /**
+    * Iterates over all models within the collection, calling `fn` with the
+    * model as the first argument.
+    *
+    * @param Function fn
+    */
+@@ -184,17 +189,21 @@ const AudioNodesCollection = Class({
+ 
+   /**
+    * Removes an AudioNodeModel from the internal collection. Calls `delete` method
+    * on the model, and emits "remove" on this instance.
+    *
+    * @param AudioNodeModel node
+    */
+   remove: function (node) {
+-    this.models.delete(node);
++    if (Prefs["show-dead-nodes"]) {
++      node.destroyed = true;
++    } else {
++      this.models.delete(node);
++    }
+     coreEmit(this, "remove", node);
+   },
+ 
+   /**
+    * Empties out the internal collection of all AudioNodeModels.
+    */
+   reset: function () {
+     this.models.clear();
+@@ -265,10 +274,29 @@ const AudioNodesCollection = Class({
+       // If a `remove` event from the model, remove it
+       // from the collection, and let the method handle the emitting on
+       // the collection
+       this.remove(node);
+     } else {
+       // Pipe the event to the collection
+       coreEmit(this, eventName, [node].concat(args));
+     }
++  },
++
++  _onToggleShowDeadNodes: function (eventName, showDeadNodes) {
++    // If turned off, delete all the internal nodes that are dead
++    var removedNodes = false;
++    if (!showDeadNodes) {
++      this.forEach(node => {
++        if (node.destroyed) {
++          removedNodes = true;
++          this.models.delete(node);
++        }
++      });
++
++      // If any GC'd nodes were stored and now removed, fire an event
++      // so we can redraw if needed
++      if (removedNodes) {
++        coreEmit(this, "removed-dead-nodes");
++      }
++    }
+   }
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index fd5e02e..a977fe6 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -40,16 +40,21 @@ support-files =
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-render-05.js]
+ [browser_wa_graph-selected.js]
+ [browser_wa_graph-zoom.js]
+ 
++[browser_wa_options-view-01.js]
++[browser_wa_options-view-02.js]
++[browser_wa_options-show-dead-nodes-01.js]
++[browser_wa_options-show-dead-nodes-02.js]
++
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+ 
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-edit-01.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-edit-02.js]
+ skip-if = true # bug 1010423
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-01.js b/browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-01.js
+new file mode 100644
+index 0000000..576f6d0
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-01.js
+@@ -0,0 +1,61 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the option `show-dead-nodes` keeps the nodes available in the
++ * context graph. Toggling this to false will clear them again.
++ */
++
++let setPref = val => Services.prefs.setBoolPref("devtools.webaudioeditor.show-dead-nodes", val);
++
++function spawnTest() {
++  let { target, panel } = yield initWebAudioEditor(DESTROY_NODES_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  setPref(true);
++
++  let destroyed = getN(gAudioNodes, "remove", 10);
++
++  forceCC();
++
++  let [created] = yield Promise.all([
++    getNSpread(gAudioNodes, "add", 13),
++    waitForGraphRendered(panelWin, 13, 2)
++  ]);
++
++  // Flatten array of event args adn take the first (AudioNodeModel)
++  // and get its ID
++  let actorIDs = created.map(ev => ev[0].id);
++
++  forceCC();
++
++  // Wait for destruction and graph to re-render with destroyed nodes
++  yield Promise.all([destroyed, waitForGraphRendered(panelWin, 13, 2)]);
++
++  // Iterate over all nodes and ensure all destroyed nodes
++  // have a correct class
++  is(actorIDs.length, 13, "We have 13 audio node IDs");
++  actorIDs.forEach((id, i) => {
++    let destroyedClass = findGraphNode(panelWin, id).classList.contains("destroyed");
++    if (i < 3) {
++      ok(!destroyedClass, "non-destroyed nodes do not have the destroyed class.");
++    } else {
++      ok(destroyedClass, "destroyed nodes do have the destroyed class.");
++    }
++  });
++
++  let rerendered = waitForGraphRendered(panelWin, 3, 2)
++  setPref(false);
++
++  yield rerendered;
++
++  is(gAudioNodes.length, 3,
++    "After clearing dead nodes, they're no longer stored in the collection.");
++  ok(true,
++    "When switching back to hiding dead nodes, all dead nodes should be cleared.");
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-02.js b/browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-02.js
+new file mode 100644
+index 0000000..46cce2e
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_options-show-dead-nodes-02.js
+@@ -0,0 +1,66 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the option `show-dead-nodes` keeps the nodes available in the
++ * context graph. Toggling this to false will clear them again.
++ */
++
++let setPref = val => Services.prefs.setBoolPref("devtools.webaudioeditor.show-dead-nodes", val);
++
++function spawnTest() {
++  let { target, panel } = yield initWebAudioEditor(DESTROY_NODES_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  setPref(true);
++
++  let destroyed = getN(gAudioNodes, "remove", 10);
++
++  forceCC();
++
++  let [created] = yield Promise.all([
++    getNSpread(gAudioNodes, "add", 13),
++    waitForGraphRendered(panelWin, 13, 2)
++  ]);
++
++  // Flatten array of event args adn take the first (AudioNodeModel)
++  // and get its ID
++  let actorIDs = created.map(ev => ev[0].id);
++
++  // Click a soon-to-be dead buffer node
++  yield clickGraphNode(panelWin, actorIDs[5]);
++
++  forceCC();
++
++  // Wait for destruction and graph to re-render with destroyed nodes
++  yield Promise.all([destroyed, waitForGraphRendered(panelWin, 13, 2)]);
++
++  // Test that the inspector reset to no node selected
++  ok(isVisible($("#web-audio-editor-details-pane-empty")),
++    "InspectorView empty message should show if the currently selected node gets collected.");
++
++  // Click a soon-to-be dead buffer node
++  let selected = once(panelWin, EVENTS.UI_SELECT_DESTROYED_NODE);
++  click(panelWin, findGraphNode(panelWin, actorIDs[5]));
++  yield selected;
++
++  ok(true, "UI_SELECT_DESTROYED_NODE event fired.");
++
++  // Test that the inspector view is still showing empty
++  ok(isVisible($("#web-audio-editor-details-pane-empty")),
++    "InspectorView empty message should show if clicking on a dead node.");
++
++  let rerendered = waitForGraphRendered(panelWin, 3, 2)
++  setPref(false);
++  yield rerendered;
++
++  // Test that the inspector view is still showing empty
++  ok(isVisible($("#web-audio-editor-details-pane-empty")),
++    "InspectorView should still be showing the empty message after clearing out dead nodes.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_options-view-01.js b/browser/devtools/webaudioeditor/test/browser_wa_options-view-01.js
+new file mode 100644
+index 0000000..bf8d324
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_options-view-01.js
+@@ -0,0 +1,65 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that clicking an option appropriately fires an event and sets the preference.
++ */
++
++let getPref = () => Services.prefs.getBoolPref("devtools.webaudioeditor.show-dead-nodes");
++
++function spawnTest() {
++  let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  ok(!getPref(), "target pref false on init");
++
++  let eventsFired = Promise.all([
++    getSpread(panelWin, EVENTS.PREF_CHANGE),
++    getSpread(panelWin, EVENTS.TOGGLE_SHOW_DEAD_NODES)
++  ]);
++
++  info("Turning on devtools.webaudioeditor.show-dead-nodes via click in options");
++
++  yield clickOption();
++  let [[[_, prefChanged]], [[__, toggledValue]]] = yield eventsFired;
++
++  is(prefChanged, "show-dead-nodes", "Correct pref name emitted by EVENTS.PREF_CHANGE");
++  is(toggledValue, true, "Correct pref value emitted by named EVENTS.TOGGLE_SHOW_DEAD_NODES");
++
++  ok(getPref(), "preference is updated to `true`");
++  is($("#option-show-dead-nodes").getAttribute("checked"), "true", "button is 'checked'");
++
++  info("Turning off devtools.webaudioeditor.show-dead-nodes via click in options");
++
++  eventsFired = Promise.all([
++    getSpread(panelWin, EVENTS.PREF_CHANGE),
++    getSpread(panelWin, EVENTS.TOGGLE_SHOW_DEAD_NODES)
++  ]);
++
++  yield clickOption();
++  [[[_, prefChanged]], [[__, toggledValue]]] = yield eventsFired;
++
++  is(prefChanged, "show-dead-nodes", "Correct pref name emitted by EVENTS.PREF_CHANGE");
++  is(toggledValue, false, "Correct pref value emitted by named EVENTS.TOGGLE_SHOW_DEAD_NODES");
++
++  ok(!getPref(), "preference is updated to `false`");
++  ok(!$("#option-show-dead-nodes").getAttribute("checked"), "button is not 'checked'");
++
++  yield teardown(panel);
++  finish();
++
++  function* clickOption () {
++    let opened = once(panelWin, EVENTS.OPTIONS_SHOWN);
++    clickButton(panelWin, $("#web-audio-options"));
++    yield opened;
++    clickButton(panelWin, $("#option-show-dead-nodes"));
++  }
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_options-view-02.js b/browser/devtools/webaudioeditor/test/browser_wa_options-view-02.js
+new file mode 100644
+index 0000000..1c9a810
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_options-view-02.js
+@@ -0,0 +1,60 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that changing a preference via `about:config` fires the correct events
++ * and updates the corresponding option button.
++ */
++
++let getPref = () => Services.prefs.getBoolPref("devtools.webaudioeditor.show-dead-nodes");
++let setPref = val => Services.prefs.setBoolPref("devtools.webaudioeditor.show-dead-nodes", val);
++
++function spawnTest() {
++  let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++
++  ok(!getPref(), "target pref false on init");
++
++  let eventsFired = Promise.all([
++    getSpread(panelWin, EVENTS.PREF_CHANGE),
++    getSpread(panelWin, EVENTS.TOGGLE_SHOW_DEAD_NODES)
++  ]);
++
++  info("Turning on devtools.webaudioeditor.show-dead-nodes via about:config");
++
++  setPref(true);
++
++  let [[[_, prefChanged]], [[__, toggledValue]]] = yield eventsFired;
++
++  is(prefChanged, "show-dead-nodes", "Correct pref name emitted by EVENTS.PREF_CHANGE");
++  is(toggledValue, true, "Correct pref value emitted by named EVENTS.TOGGLE_SHOW_DEAD_NODES");
++
++  is($("#option-show-dead-nodes").getAttribute("checked"), "true", "button is 'checked'");
++
++  info("Turning off devtools.webaudioeditor.show-dead-nodes via about:config");
++
++  eventsFired = Promise.all([
++    getSpread(panelWin, EVENTS.PREF_CHANGE),
++    getSpread(panelWin, EVENTS.TOGGLE_SHOW_DEAD_NODES)
++  ]);
++
++  setPref(false);
++
++  [[[_, prefChanged]], [[__, toggledValue]]] = yield eventsFired;
++
++  is(prefChanged, "show-dead-nodes", "Correct pref name emitted by EVENTS.PREF_CHANGE");
++  is(toggledValue, false, "Correct pref value emitted by named EVENTS.TOGGLE_SHOW_DEAD_NODES");
++
++  ok(!$("#option-show-dead-nodes").getAttribute("checked"), "button is not 'checked'");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index a4d276b..1ce8c11 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -31,23 +31,26 @@ const CONNECT_PARAM_URL = EXAMPLE_URL + "doc_connect-param.html";
+ const CONNECT_MULTI_PARAM_URL = EXAMPLE_URL + "doc_connect-multi-param.html";
+ const IFRAME_CONTEXT_URL = EXAMPLE_URL + "doc_iframe-context.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
++Services.prefs.setBoolPref("devtools.webaudioeditor.show-dead-nodes", false);
++
+ gDevTools.testing = true;
+ 
+ registerCleanupFunction(() => {
+   gDevTools.testing = false;
+   info("finish() was called, cleaning up...");
+   Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
+   Services.prefs.setBoolPref("devtools.webaudioeditor.enabled", gToolEnabled);
++  Services.prefs.setBoolPref("devtools.webaudioeditor.show-dead-nodes", false);
+   Cu.forceGC();
+ });
+ 
+ function addTab(aUrl, aWindow) {
+   info("Adding tab: " + aUrl);
+ 
+   let deferred = Promise.defer();
+   let targetWindow = aWindow || window;
+@@ -306,20 +309,26 @@ function findGraphEdge (win, source, target, param) {
+   return win.document.querySelector(selector);
+ }
+ 
+ function findGraphNode (win, node) {
+   let selector = ".nodes > g[data-id='" + node + "']";
+   return win.document.querySelector(selector);
+ }
+ 
++// Use this click for non-buttons (?)
+ function click (win, element) {
+   EventUtils.sendMouseEvent({ type: "click" }, element, win);
+ }
+ 
++// Use this click method for XUL buttons
++function clickButton (win, element) {
++  EventUtils.synthesizeMouseAtCenter(element, {}, win);
++}
++
+ function mouseOver (win, element) {
+   EventUtils.sendMouseEvent({ type: "mouseover" }, element, win);
+ }
+ 
+ function isVisible (element) {
+   return !element.getAttribute("hidden");
+ }
+ 
+diff --git a/browser/devtools/webaudioeditor/views/context.js b/browser/devtools/webaudioeditor/views/context.js
+index 139047c..4cefb9f 100644
+--- a/browser/devtools/webaudioeditor/views/context.js
++++ b/browser/devtools/webaudioeditor/views/context.js
+@@ -21,17 +21,17 @@ const MARKER_STYLING = {
+   light: "#AAA",
+   dark: "#CED3D9"
+ };
+ 
+ const GRAPH_DEBOUNCE_TIMER = 100;
+ 
+ // `gAudioNodes` events that should require the graph
+ // to redraw
+-const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove"];
++const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove", "removed-dead-nodes"];
+ 
+ /**
+  * Functions handling the graph UI.
+  */
+ let ContextView = {
+   /**
+    * Initialization function, called when the tool is started.
+    */
+@@ -144,17 +144,17 @@ let ContextView = {
+     gAudioNodes.populateGraph(graph);
+ 
+     // Post-render manipulation of the nodes
+     let oldDrawNodes = renderer.drawNodes();
+     renderer.drawNodes(function(graph, root) {
+       let svgNodes = oldDrawNodes(graph, root);
+       svgNodes.attr("class", (n) => {
+         let node = graph.node(n);
+-        return "audionode type-" + node.type;
++        return "audionode type-" + node.type + (node.destroyed ? " destroyed" : "");
+       });
+       svgNodes.attr("data-id", (n) => {
+         let node = graph.node(n);
+         return node.id;
+       });
+       return svgNodes;
+     });
+ 
+@@ -291,15 +291,22 @@ let ContextView = {
+    * Fired when a node in the svg graph is clicked. Used to handle triggering the AudioNodePane.
+    *
+    * @param Event e
+    *        Click event.
+    */
+   _onGraphNodeClick: function (e) {
+     let node = findGraphNodeParent(e.target);
+     // If node not found (clicking outside of an audio node in the graph),
+-    // then ignore this event
+-    if (!node)
++    // then ignore this event.
++    if (!node) {
+       return;
++    }
+ 
++    // If node has already been destroyed, fire an event used
++    // only for testing purposes, and ignore this event.
++    if (!node.classList || node.classList.contains("destroyed")) {
++      window.emit(EVENTS.UI_SELECT_DESTROYED_NODE, node.getAttribute("data-id"));
++      return;
++    }
+     window.emit(EVENTS.UI_SELECT_NODE, node.getAttribute("data-id"));
+   }
+ };
+diff --git a/browser/devtools/webaudioeditor/views/options.js b/browser/devtools/webaudioeditor/views/options.js
+new file mode 100644
+index 0000000..18fd8de
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/views/options.js
+@@ -0,0 +1,82 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++let OptionsView = {
++  // Mapping of preference to the corresponding button
++  selectors: {
++    "show-dead-nodes": "#option-show-dead-nodes"
++  },
++
++  /**
++   * Sets up event handlers for clicking on the option
++   * buttons and preference observer.
++   */
++  initialize: function () {
++    this._onPrefChange = this._onPrefChange.bind(this);
++    this._onOptionChange = this._onOptionChange.bind(this);
++
++    // We use a mutation observer instead of a click handler
++    // because the click handler is fired before the XUL menuitem updates
++    // it's checked status, which cascades incorrectly with the Preference observer.
++    this._observer = new MutationObserver(this._onOptionChange);
++    let observerConfig = { attributes: true, attributeFilter: ["checked"]};
++
++    // Sets click handlers for all options
++    Object.keys(this.selectors).forEach(prefName => {
++      let $el = $(this.selectors[prefName]);
++      $el.setAttribute("checked", Prefs[prefName]);
++      this._observer.observe($el, observerConfig);
++    });
++
++    // Listen to any preference change in the devtools.webaudioeditor branch
++    window.on(EVENTS.PREF_CHANGE, this._onPrefChange);
++  },
++
++  /**
++   * Removes event handlers for all of the option buttons and
++   * preference observer.
++   */
++  destroy: function () {
++    this._observer.disconnect();
++    window.off(EVENTS.PREF_CHANGE, this._onPrefChange);
++  },
++
++  /**
++   * Called when a preference is changed (either via clicking an option
++   * button or by changing it in about:config). Updates the checked status
++   * of the corresponding button.
++   */
++  _onPrefChange: function (_, prefName) {
++    let $el = $(this.selectors[prefName]);
++    let value = Prefs[prefName]
++
++    if (value) {
++      $el.setAttribute("checked", value);
++    } else {
++      $el.removeAttribute("checked");
++    }
++  },
++
++  /**
++   * Mutation handler for handling a change on an options button.
++   * Sets the preference accordingly.
++   */
++  _onOptionChange: function (mutations) {
++    let { target } = mutations[0];
++    let prefName = target.getAttribute("data-pref");
++    let value = target.getAttribute("checked") === "true";
++
++    Prefs[prefName] = value;
++  },
++
++  /**
++   * Fired when the `menupopup` is opened, bound via XUL.
++   * Fires an event used in tests.
++   */
++  _handlePopupShown: function () {
++    window.emit(EVENTS.OPTIONS_SHOWN);
++  }
++};
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor.xul b/browser/devtools/webaudioeditor/webaudioeditor.xul
+index 9be6b2b..8245549 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor.xul
++++ b/browser/devtools/webaudioeditor/webaudioeditor.xul
+@@ -17,16 +17,17 @@
+   <script type="application/javascript;version=1.8"
+           src="chrome://browser/content/devtools/theme-switching.js"/>
+ 
+   <script type="application/javascript" src="chrome://browser/content/devtools/d3.js"/>
+   <script type="application/javascript" src="dagre-d3.js"/>
+   <script type="application/javascript" src="webaudioeditor/includes.js"/>
+   <script type="application/javascript" src="webaudioeditor/models.js"/>
+   <script type="application/javascript" src="webaudioeditor/controller.js"/>
++  <script type="application/javascript" src="webaudioeditor/views/options.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/utils.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/context.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/inspector.js"/>
+ 
+   <vbox class="theme-body" flex="1">
+     <hbox id="reload-notice"
+           class="notice-container"
+           align="center"
+@@ -50,20 +51,36 @@
+       <label id="requests-menu-waiting-notice-label"
+              class="plain"
+              value="&webAudioEditorUI.emptyNotice;"/>
+     </hbox>
+ 
+     <vbox id="content"
+          flex="1"
+          hidden="true">
++      <popupset id="web-audio-popupset">
++        <menupopup id="web-audio-prefs-contextmenu"
++                   onpopupshown="OptionsView._handlePopupShown()"
++                   position="before_end">
++          <menuitem id="option-show-dead-nodes"
++                    type="checkbox"
++                    data-pref="show-dead-nodes"
++                    label="&webAudioEditorUI.options.showDeadNodes;"
++                    accesskey="&webAudioEditorUI.options.showDeadNodes.accesskey;" />
++        </menupopup>
++      </popupset>
+       <toolbar id="web-audio-toolbar" class="devtools-toolbar">
+         <spacer flex="1"></spacer>
+         <toolbarbutton id="inspector-pane-toggle" class="devtools-toolbarbutton"
+                        tabindex="0"/>
++        <toolbarbutton id="web-audio-options"
++                       class="devtools-toolbarbutton devtools-option-toolbarbutton"
++                       tooltiptext="&webAudioEditorUI.optsButton.tooltip;"
++                       popup="web-audio-prefs-contextmenu"
++                       tabindex="1"/>
+       </toolbar>
+       <splitter class="devtools-horizontal-splitter"/>
+       <box id="web-audio-content-pane"
+            class="devtools-responsive-container"
+            flex="1">
+         <hbox flex="1">
+           <box id="web-audio-graph" flex="1">
+             <vbox flex="1">
+diff --git a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd b/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd
+index 7c2d14f..85d0dd0 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd
+@@ -33,8 +33,17 @@
+ 
+ <!-- LOCALIZATION NOTE (webAudioEditorUI.inspectorEmpty): This is the title for the
+   -  AudioNode inspector view empty message. -->
+ <!ENTITY webAudioEditorUI.inspectorEmpty  "No AudioNode selected.">
+ 
+ <!-- LOCALIZATION NOTE (webAudioEditorUI.propertiesEmpty): This is the title for the
+   -  AudioNode inspector view properties tab empty message. -->
+ <!ENTITY webAudioEditorUI.propertiesEmpty "Node does not have any properties.">
++
++<!-- LOCALIZATION NOTE (webAudioEditorUI.optsButton.tooltip): This is the tooltip for
++  -  the configuration options button that opens the options menu. -->
++<!ENTITY webAudioEditorUI.optsButton.tooltip "Web Audio Editor Options">
++
++<!-- LOCALIZATION NOTE (webAudioEditorUI.options.showDeadNodes): The option to toggle
++  -  whether or not garbage collected audio nodes are displayed in the graph. -->
++<!ENTITY webAudioEditorUI.options.showDeadNodes "Display GC'd AudioNodes in graph">
++<!ENTITY webAudioEditorUI.options.showDeadNodes.accesskey "d">
+diff --git a/browser/themes/shared/devtools/webaudioeditor.inc.css b/browser/themes/shared/devtools/webaudioeditor.inc.css
+index 9e33f2b..8d4dd34 100644
+--- a/browser/themes/shared/devtools/webaudioeditor.inc.css
++++ b/browser/themes/shared/devtools/webaudioeditor.inc.css
+@@ -100,16 +100,27 @@ g.edgePath.param-connection {
+ .theme-dark .nodes g.selected rect {
+   fill: #1d4f73; /* Select Highlight Blue */
+ }
+ 
+ .theme-light .nodes g.selected rect {
+   fill: #4c9ed9; /* Select Highlight Blue */
+ }
+ 
++.theme-dark .nodes g.destroyed rect {
++  cursor: default;
++  fill: #343c45; /* Toolbars */
++  stroke: #252c33; /* Tab toolbar */
++}
++.theme-light .nodes g.destroyed rect {
++  cursor: default;
++  fill: #f0f1f2; /* Toolbars */
++  stroke: #ebeced; /* Tab toolbar */
++}
++
+ /* Text in nodes and edges */
+ text {
+   cursor: default; /* override the "text" cursor */
+   font-weight: 300;
+   font-family: "Helvetica Neue", Helvetica, Arial, sans-serf;
+   font-size: 14px;
+ }
+ 
+@@ -117,16 +128,24 @@ text {
+   fill: #b6babf; /* Grey foreground text */
+ }
+ .theme-light text {
+   fill: #585959; /* Grey foreground text */
+ }
+ .theme-light g.selected text {
+   fill: #f0f1f2; /* Toolbars */
+ }
++.theme-dark g.destroyed text {
++  fill: #585959; /* Grey foreground text (light) */
++  cursor: default;
++}
++.theme-light g.destroyed text {
++  fill: #b6babf; /* Grey foreground text (dark) */
++  cursor: default;
++}
+ 
+ .nodes text {
+   cursor: pointer;
+ }
+ 
+ /**
+  * Inspector Styles
+  */
+-- 
+1.8.4.2
+
