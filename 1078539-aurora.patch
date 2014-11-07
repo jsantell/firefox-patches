@@ -1,6 +1,6 @@
-From 52952fe988679e54923503d5b04b3eed0080d3ad Mon Sep 17 00:00:00 2001
+From 162312ee59917b85f3ed7334a590c18af25bdd25 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Tue, 4 Nov 2014 17:28:01 -0500
+Date: Thu, 6 Nov 2014 13:20:14 -0500
 Subject: [PATCH] Bug 1078539 - Add a doorhanger widget for the developer
  edition notification to browser console, developer tools, webide and
  responsive design mode. r=jryans
@@ -8,16 +8,16 @@ Subject: [PATCH] Bug 1078539 - Add a doorhanger widget for the developer
 ---
  browser/app/profile/firefox.js                     |  11 ++
  .../dev-edition-promo/dev-edition-logo.png         | Bin 0 -> 6764 bytes
- .../dev-edition-promo/dev-edition-promo.css        |  74 +++++++++++
- .../dev-edition-promo/dev-edition-promo.xul        |  36 ++++++
+ .../dev-edition-promo/dev-edition-promo.css        |  94 ++++++++++++
+ .../dev-edition-promo/dev-edition-promo.xul        |  36 +++++
  browser/devtools/framework/toolbox.js              |  17 +++
  browser/devtools/jar.mn                            |   3 +
  .../devtools/responsivedesign/responsivedesign.jsm |   8 ++
- browser/devtools/shared/doorhanger.js              | 144 +++++++++++++++++++++
+ browser/devtools/shared/doorhanger.js              | 160 +++++++++++++++++++++
  browser/devtools/shared/moz.build                  |   1 +
- browser/devtools/webconsole/hudservice.js          |   4 +
- browser/devtools/webide/content/webide.js          |   4 +
- 11 files changed, 302 insertions(+)
+ browser/devtools/webconsole/hudservice.js          |   8 ++
+ browser/devtools/webide/content/webide.js          |   6 +
+ 11 files changed, 344 insertions(+)
  create mode 100644 browser/devtools/framework/dev-edition-promo/dev-edition-logo.png
  create mode 100644 browser/devtools/framework/dev-edition-promo/dev-edition-promo.css
  create mode 100644 browser/devtools/framework/dev-edition-promo/dev-edition-promo.xul
@@ -197,13 +197,18 @@ HcmV?d00001
 
 diff --git a/browser/devtools/framework/dev-edition-promo/dev-edition-promo.css b/browser/devtools/framework/dev-edition-promo/dev-edition-promo.css
 new file mode 100644
-index 0000000..69de6ee
+index 0000000..615ffc9
 --- /dev/null
 +++ b/browser/devtools/framework/dev-edition-promo/dev-edition-promo.css
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,94 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++window {
++  -moz-appearance: none;
++  background-color: transparent;
++}
 +
 +#doorhanger-container {
 +  width: 450px;
@@ -213,7 +218,20 @@ index 0000000..69de6ee
 +  padding: 20px;
 +  background: #343c45; /* toolbars */
 +  color: #8fa1b2; /* body text */
++/*
++ * Sloppy preprocessing since UNIX_BUT_NOT_MAC is only defined
++ * in `browser/app/profile/firefox.js`, which this file cannot
++ * depend on. Must style font-size to target linux.
++ */
++%ifdef XP_UNIX
++%ifndef XP_MACOSX
++  font-size: 13px;
++%else
 +  font-size: 15px;
++%endif
++%else
++  font-size: 15px;
++%endif
 +  line-height: 19px;
 +  min-height: 100px;
 +}
@@ -263,6 +281,8 @@ index 0000000..69de6ee
 +  border-radius: 5px;
 +  height: 30px;
 +  width: 450px;
++  /* Override embossed borders on Windows/Linux */
++  border: none;
 +}
 +
 +#close {
@@ -401,7 +421,7 @@ index 8ea154d..f161c33 100644
    }
  };
 diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
-index 1b58101..94040b6 100644
+index 1b58101..b255ab5 100644
 --- a/browser/devtools/jar.mn
 +++ b/browser/devtools/jar.mn
 @@ -93,16 +93,19 @@ browser.jar:
@@ -414,7 +434,7 @@ index 1b58101..94040b6 100644
      content/browser/devtools/framework/toolbox-process-window.xul      (framework/toolbox-process-window.xul)
      content/browser/devtools/framework/toolbox-process-window.js       (framework/toolbox-process-window.js)
 +    content/browser/devtools/framework/dev-edition-promo.xul           (framework/dev-edition-promo/dev-edition-promo.xul)
-+    content/browser/devtools/framework/dev-edition-promo.css           (framework/dev-edition-promo/dev-edition-promo.css)
++*   content/browser/devtools/framework/dev-edition-promo.css           (framework/dev-edition-promo/dev-edition-promo.css)
 +    content/browser/devtools/framework/dev-edition-logo.png            (framework/dev-edition-promo/dev-edition-logo.png)
      content/browser/devtools/inspector/inspector.xul                   (inspector/inspector.xul)
      content/browser/devtools/inspector/inspector.css                   (inspector/inspector.css)
@@ -472,10 +492,10 @@ index 0546fae..4feb039 100644
      if (aValue && !this._resizing && this.stack.hasAttribute("responsivemode")) {
 diff --git a/browser/devtools/shared/doorhanger.js b/browser/devtools/shared/doorhanger.js
 new file mode 100644
-index 0000000..003d8a7
+index 0000000..c2315c5
 --- /dev/null
 +++ b/browser/devtools/shared/doorhanger.js
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,160 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -487,6 +507,7 @@ index 0000000..003d8a7
 +const { DOMHelpers } = require("resource:///modules/devtools/DOMHelpers.jsm");
 +const { Task } = require("resource://gre/modules/Task.jsm");
 +const { Promise } = require("resource://gre/modules/Promise.jsm");
++const { setTimeout } = require("sdk/timers");
 +const { getMostRecentBrowserWindow } = require("sdk/window/utils");
 +
 +const XULNS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
@@ -553,6 +574,14 @@ index 0000000..003d8a7
 +    return;
 +  }
 +
++  // Call success function to set preferences/cleanup immediately,
++  // so if triggered multiple times, only happens once (Windows/Linux)
++  success();
++
++  // Wait 200ms to prevent flickering where the popup is displayed
++  // before the underlying window (Windows 7, 64bit)
++  yield wait(200);
++
 +  let document = window.document;
 +
 +  let panel = document.createElementNS(XULNS, "panel");
@@ -585,15 +614,16 @@ index 0000000..003d8a7
 +      close();
 +    });
 +  }
-+
-+  // Call success function to set preferences, etc.
-+  success();
 +});
 +
 +function setDoorhangerStyle (panel, frame) {
 +  Object.keys(panelAttrs).forEach(prop => panel.setAttribute(prop, panelAttrs[prop]));
 +  panel.style.margin = "20px";
 +  panel.style.borderRadius = "5px";
++  panel.style.border = "none";
++  panel.style.MozAppearance = "none";
++  panel.style.backgroundColor = "transparent";
++
 +  frame.style.borderRadius = "5px";
 +  frame.setAttribute("flex", "1");
 +  frame.setAttribute("width", "450");
@@ -620,6 +650,12 @@ index 0000000..003d8a7
 +function getGBrowser () {
 +  return getMostRecentBrowserWindow().gBrowser;
 +}
++
++function wait (n) {
++  let { resolve, promise } = Promise.defer();
++  setTimeout(resolve, n);
++  return promise;
++}
 diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
 index 4f137ac..8a8d92a 100644
 --- a/browser/devtools/shared/moz.build
@@ -643,7 +679,7 @@ index 4f137ac..8a8d92a 100644
  ]
  
 diff --git a/browser/devtools/webconsole/hudservice.js b/browser/devtools/webconsole/hudservice.js
-index ed9682e..15449d4 100644
+index ed9682e..8749565 100644
 --- a/browser/devtools/webconsole/hudservice.js
 +++ b/browser/devtools/webconsole/hudservice.js
 @@ -14,16 +14,17 @@ let Heritage = require("sdk/core/heritage");
@@ -664,7 +700,17 @@ index ed9682e..15449d4 100644
  
  // The preference prefix for all of the Browser Console filters.
  const BROWSER_CONSOLE_FILTER_PREFS_PREFIX = "devtools.browserconsole.filter.";
-@@ -708,16 +709,19 @@ BrowserConsole.prototype = Heritage.extend(WebConsole.prototype,
+@@ -699,25 +700,32 @@ BrowserConsole.prototype = Heritage.extend(WebConsole.prototype,
+     this.ui._filterPrefsPrefix = BROWSER_CONSOLE_FILTER_PREFS_PREFIX;
+ 
+     let window = this.iframeWindow;
+ 
+     // Make sure that the closing of the Browser Console window destroys this
+     // instance.
+     let onClose = () => {
+       window.removeEventListener("unload", onClose);
++      window.removeEventListener("focus", onFocus);
+       this.destroy();
      };
      window.addEventListener("unload", onClose);
  
@@ -673,8 +719,11 @@ index ed9682e..15449d4 100644
  
      this._telemetry.toolOpened("browserconsole");
  
++    // Create an onFocus handler just to display the dev edition promo.
++    // This is to prevent race conditions in some environments.
 +    // Hook to display promotional Developer Edition doorhanger. Only displayed once.
-+    showDoorhanger({ window, type: "deveditionpromo" });
++    let onFocus = () => showDoorhanger({ window, type: "deveditionpromo" });
++    window.addEventListener("focus", onFocus);
 +
      this._bc_init = this.$init();
      return this._bc_init;
@@ -685,7 +734,7 @@ index ed9682e..15449d4 100644
    /**
     * Destroy the object.
 diff --git a/browser/devtools/webide/content/webide.js b/browser/devtools/webide/content/webide.js
-index df883f1..66c7b8e 100644
+index df883f1..bedfc88 100644
 --- a/browser/devtools/webide/content/webide.js
 +++ b/browser/devtools/webide/content/webide.js
 @@ -18,16 +18,17 @@ const {AppManager} = require("devtools/webide/app-manager");
@@ -706,26 +755,28 @@ index df883f1..66c7b8e 100644
  
  // download template index early
  GetTemplatesJSON(true);
-@@ -91,16 +92,19 @@ let UI = {
- 
-     if (Services.prefs.getBoolPref("devtools.webide.widget.autoinstall") &&
-         !Services.prefs.getBoolPref("devtools.webide.widget.enabled")) {
-       Services.prefs.setBoolPref("devtools.webide.widget.enabled", true);
-       gDevToolsBrowser.moveWebIDEWidgetInNavbar();
+@@ -120,16 +121,21 @@ let UI = {
+     // if a modification happened, it happened when the window was
+     // not focused.
+     if (AppManager.selectedProject &&
+         AppManager.selectedProject.type != "mainProcess" &&
+         AppManager.selectedProject.type != "runtimeApp" &&
+         AppManager.selectedProject.type != "tab") {
+       AppManager.validateProject(AppManager.selectedProject);
      }
- 
-     this.setupDeck();
 +
 +    // Hook to display promotional Developer Edition doorhanger. Only displayed once.
++    // Hooked into the `onfocus` event because sometimes does not work
++    // when run at the end of `init`. ¯\(°_o)/¯
 +    showDoorhanger({ window, type: "deveditionpromo", anchor: document.querySelector("#deck") });
    },
  
-   uninit: function() {
-     window.removeEventListener("focus", this.onfocus, true);
-     AppManager.off("app-manager-update", this.appManagerUpdate);
-     AppManager.uninit();
-     window.removeEventListener("message", this.onMessage);
-     this.updateConnectionTelemetry();
+   appManagerUpdate: function(event, what, details) {
+     // Got a message from app-manager.js
+     switch (what) {
+       case "runtimelist":
+         this.updateRuntimeList();
+         this.autoConnectRuntime();
 -- 
 1.8.4.2
 

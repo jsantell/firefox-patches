@@ -1,0 +1,78 @@
+From 435c6de3050f8fc674fc0b596055cea60983e389 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 7 Nov 2014 15:09:25 -0500
+Subject: Bug 1078539 - part 2, delay showing a doorhanger to prevent
+ flickering in windows, and call success immediately to prevent duplicates.
+ r=jryans
+
+---
+ browser/devtools/shared/doorhanger.js | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/browser/devtools/shared/doorhanger.js b/browser/devtools/shared/doorhanger.js
+index 0179545..c2315c5 100644
+--- a/browser/devtools/shared/doorhanger.js
++++ b/browser/devtools/shared/doorhanger.js
+@@ -71,16 +71,24 @@ let panelAttrs = {
+  */
+ exports.showDoorhanger = Task.async(function *({ window, type, anchor }) {
+   let { predicate, success, url, action } = TYPES[type];
+   // Abort if predicate fails
+   if (!predicate()) {
+     return;
+   }
+ 
++  // Call success function to set preferences/cleanup immediately,
++  // so if triggered multiple times, only happens once (Windows/Linux)
++  success();
++
++  // Wait 200ms to prevent flickering where the popup is displayed
++  // before the underlying window (Windows 7, 64bit)
++  yield wait(200);
++
+   let document = window.document;
+ 
+   let panel = document.createElementNS(XULNS, "panel");
+   let frame = document.createElementNS(XULNS, "iframe");
+   let parentEl = document.querySelector("window");
+ 
+   frame.setAttribute("src", url);
+   let close = () => parentEl.removeChild(panel);
+@@ -103,19 +111,16 @@ exports.showDoorhanger = Task.async(function *({ window, type, anchor }) {
+   if (goBtn) {
+     goBtn.addEventListener("click", () => {
+       if (action) {
+         action();
+       }
+       close();
+     });
+   }
+-
+-  // Call success function to set preferences, etc.
+-  success();
+ });
+ 
+ function setDoorhangerStyle (panel, frame) {
+   Object.keys(panelAttrs).forEach(prop => panel.setAttribute(prop, panelAttrs[prop]));
+   panel.style.margin = "20px";
+   panel.style.borderRadius = "5px";
+   panel.style.border = "none";
+   panel.style.MozAppearance = "none";
+@@ -142,8 +147,14 @@ function onFrameLoad (frame) {
+   }
+ 
+   return promise;
+ }
+ 
+ function getGBrowser () {
+   return getMostRecentBrowserWindow().gBrowser;
+ }
++
++function wait (n) {
++  let { resolve, promise } = Promise.defer();
++  setTimeout(resolve, n);
++  return promise;
++}
+-- 
+1.8.4.2
+
