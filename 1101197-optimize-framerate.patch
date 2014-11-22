@@ -1,0 +1,421 @@
+From c455c032fe859bc91ad10116ed63386a9d5ec6d7 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 19 Nov 2014 23:32:41 -0800
+Subject: Bug 1101197 - optimize framerate rendering in new performance
+ tool, r=vp
+
+diff --git a/browser/devtools/performance/controller.js b/browser/devtools/performance/controller.js
+index 59cf85b..280de76 100644
+--- a/browser/devtools/performance/controller.js
++++ b/browser/devtools/performance/controller.js
+@@ -13,16 +13,18 @@ let require = devtools.require;
+ devtools.lazyRequireGetter(this, "Services");
+ devtools.lazyRequireGetter(this, "promise");
+ devtools.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ devtools.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ devtools.lazyRequireGetter(this, "FramerateFront",
+   "devtools/server/actors/framerate", true);
++devtools.lazyRequireGetter(this, "sparsifyLineData",
++  "resource:///modules/devtools/graph-utils", true);
+ devtools.lazyRequireGetter(this, "L10N",
+   "devtools/profiler/global", true);
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyRequireGetter(this, "CallView",
+   "devtools/profiler/tree-view", true);
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/profiler/tree-model", true);
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 292a0a4..cdf5585 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -1,21 +1,24 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const OVERVIEW_UPDATE_INTERVAL = 100;
+ const FRAMERATE_CALC_INTERVAL = 16; // ms
+ const FRAMERATE_GRAPH_HEIGHT = 60; // px
++const FRAMERATE_MIN_DISTANCE_BETWEEN_POINTS = 9; // sqrt(x) px
+ 
+ /**
+  * View handler for the overview panel's time view, displaying
+  * framerate over time.
+  */
++let count = 0, originalLength, sparseLength;
++
+ let OverviewView = {
+ 
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     this._framerateEl = $("#time-framerate");
+     this._ticksData = [];
+@@ -41,27 +44,42 @@ let OverviewView = {
+   },
+ 
+   /**
+    * Called at most every OVERVIEW_UPDATE_INTERVAL milliseconds
+    * and uses data fetched from `_onTimelineData` to render
+    * data into all the corresponding overview graphs.
+    */
+   _onRecordingTick: Task.async(function *() {
+-    yield this.framerateGraph.setDataWhenReady(this._ticksData);
++    let { minValue, maxValue, sumValues, data } = yield sparsifyLineData({
++      data: this._ticksData,
++      width: this.framerateGraph.width,
++      height: this.framerateGraph.height,
++      dampenValuesFactor: this.framerateGraph.dampenValuesFactor,
++      dataOffsetX: this.framerateGraph.dataOffsetX,
++      minDistanceBetweenPoints: this.framerateGraph.minDistanceBetweenPoints
++    });
++
++    count++;
++    sparseLength = data.length;
++    originalLength = this._ticksData.length;
++
++    yield this.framerateGraph.setDataWhenReady(data, { minValue, maxValue, sumValues });
++
+     this.emit(EVENTS.OVERVIEW_RENDERED);
+     this._draw();
+   }),
+ 
+   /**
+    * Sets up the framerate graph.
+    */
+   _initializeFramerateGraph: function () {
+     let graph = new LineGraphWidget(this._framerateEl, L10N.getStr("graphs.fps"));
+-    graph.minDistanceBetweenPoints = 1;
++
++    graph.minDistanceBetweenPoints = FRAMERATE_MIN_DISTANCE_BETWEEN_POINTS;
+     graph.fixedHeight = FRAMERATE_GRAPH_HEIGHT;
+     graph.selectionEnabled = false;
+     this.framerateGraph = graph;
+   },
+ 
+   /**
+    * Called to refresh the timer to keep firing _onRecordingTick.
+    */
+@@ -78,16 +96,17 @@ let OverviewView = {
+    */
+ 
+   _start: function () {
+     this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
+     this.framerateGraph.dropSelection();
+   },
+ 
+   _stop: function () {
++           console.log(count, originalLength, sparseLength);
+     clearTimeout(this._timeoutId);
+     this.framerateGraph.selectionEnabled = true;
+   },
+ 
+   /**
+    * Called when the TimelineFront has new data for
+    * framerate, markers or memory, and stores the data
+    * to be plotted subsequently.
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index 8a8d92a..1bfb3a9 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -17,16 +17,18 @@ EXTRA_JS_MODULES.devtools += [
+     'Parser.jsm',
+     'SplitView.jsm',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools += [
+     'widgets/AbstractTreeItem.jsm',
+     'widgets/BreadcrumbsWidget.jsm',
+     'widgets/Chart.jsm',
++    'widgets/graph-utils-worker.js',
++    'widgets/graph-utils.js',
+     'widgets/Graphs.jsm',
+     'widgets/SideMenuWidget.jsm',
+     'widgets/SimpleListWidget.jsm',
+     'widgets/VariablesView.jsm',
+     'widgets/VariablesViewController.jsm',
+     'widgets/ViewHelpers.jsm',
+ ]
+ 
+diff --git a/browser/devtools/shared/widgets/Graphs.jsm b/browser/devtools/shared/widgets/Graphs.jsm
+index 1822910..f34f057 100644
+--- a/browser/devtools/shared/widgets/Graphs.jsm
++++ b/browser/devtools/shared/widgets/Graphs.jsm
+@@ -309,35 +309,39 @@ AbstractCanvasGraph.prototype = {
+   dataScaleX: 1,
+   dataScaleY: 1,
+ 
+   /**
+    * Sets the data source for this graph.
+    *
+    * @param object data
+    *        The data source. The actual format is specified by subclasses.
++   * @param object cached
++   *        Additional information that may be used to reduce rendering
++   *        time for the next draw. Should be cleared out after draw.
+    */
+-  setData: function(data) {
++  setData: function(data, cached) {
+     this._data = data;
++    this._cachedData = cached;
+     this._cachedBackgroundImage = this.buildBackgroundImage();
+     this._cachedGraphImage = this.buildGraphImage();
+     this._shouldRedraw = true;
+   },
+ 
+   /**
+    * Same as `setData`, but waits for this graph to finish initializing first.
+    *
+    * @param object data
+    *        The data source. The actual format is specified by subclasses.
+    * @return promise
+    *         A promise resolved once the data is set.
+    */
+-  setDataWhenReady: Task.async(function*(data) {
++  setDataWhenReady: Task.async(function*(data, cached) {
+     yield this.ready();
+-    this.setData(data);
++    this.setData(data, cached);
+   }),
+ 
+   /**
+    * Adds a mask to this graph.
+    *
+    * @param any mask, options
+    *        See `buildMaskImage` in inheriting classes for the required args.
+    */
+@@ -1233,21 +1237,36 @@ LineGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     let height = this._height;
+ 
+     let totalTicks = this._data.length;
+     let firstTick = totalTicks ? this._data[0].delta : 0;
+     let lastTick = totalTicks ? this._data[totalTicks - 1].delta : 0;
+     let maxValue = Number.MIN_SAFE_INTEGER;
+     let minValue = Number.MAX_SAFE_INTEGER;
+     let sumValues = 0;
+-
+-    for (let { delta, value } of this._data) {
+-      maxValue = Math.max(value, maxValue);
+-      minValue = Math.min(value, minValue);
+-      sumValues += value;
++    // If we use cached minValue, maxValue and sumValues,
++    // then we can assume that we've already removed points
++    // that did not meet the minDistanceBetweenPoints requirement
++    let forceDrawAllPoints = false;
++
++    if (this._cachedData &&
++        "minValue" in this._cachedData &&
++        "maxValue" in this._cachedData &&
++        "sumValues" in this._cachedData) {
++      minValue = this._cachedData.minValue;
++      maxValue = this._cachedData.maxValue;
++      sumValues = this._cachedData.sumValues;
++      forceDrawAllPoints = true;
++      this._cachedData = null;
++    } else {
++      for (let { delta, value } of this._data) {
++        maxValue = Math.max(value, maxValue);
++        minValue = Math.min(value, minValue);
++        sumValues += value;
++      }
+     }
+ 
+     let dataScaleX = this.dataScaleX = width / (lastTick - this.dataOffsetX);
+     let dataScaleY = this.dataScaleY = height / maxValue * this.dampenValuesFactor;
+ 
+     /**
+      * Calculates the squared distance between two 2D points.
+      */
+@@ -1277,18 +1296,17 @@ LineGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+       let currX = (delta - this.dataOffsetX) * dataScaleX;
+       let currY = height - value * dataScaleY;
+ 
+       if (delta == firstTick) {
+         ctx.moveTo(-LINE_GRAPH_STROKE_WIDTH, height);
+         ctx.lineTo(-LINE_GRAPH_STROKE_WIDTH, currY);
+       }
+ 
+-      let distance = distSquared(prevX, prevY, currX, currY);
+-      if (distance >= this.minDistanceBetweenPoints) {
++      if (forceDrawAllPoints || distSquared(prevX, prevY, currX, currY) >= this.minDistanceBetweenPoints) {
+         ctx.lineTo(currX, currY);
+         prevX = currX;
+         prevY = currY;
+       }
+ 
+       if (delta == lastTick) {
+         ctx.lineTo(width + LINE_GRAPH_STROKE_WIDTH, currY);
+         ctx.lineTo(width + LINE_GRAPH_STROKE_WIDTH, height);
+diff --git a/browser/devtools/shared/widgets/graph-utils-worker.js b/browser/devtools/shared/widgets/graph-utils-worker.js
+new file mode 100644
+index 0000000..9fc42a8
+--- /dev/null
++++ b/browser/devtools/shared/widgets/graph-utils-worker.js
+@@ -0,0 +1,113 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++// MIN_VALUE_DELTA is a heuristic for whether or not to render
++// two framerate values at the same delta, and should only
++// render if the value difference is > MIN_VALUE_DELTA
++const MIN_VALUE_DELTA = 3;
++// How many values can be thrown away in a row before one is automatically added
++const MAX_CONSECUTIVE_SKIPPED_TICKS = 10;
++
++self.onmessage = (event) => {
++  const { data } = event;
++
++  try {
++    if (data.type === "sparsifyLineData") {
++      let { data: sparseData, minValue, maxValue, sumValues } = sparsifyLineData(data);
++      self.postMessage({
++        id: data.id,
++        data: sparseData,
++        minValue: minValue,
++        maxValue: maxValue,
++        sumValues: sumValues
++      });
++    }
++  } catch (e) {
++    self.postMessage({
++      id: data.id,
++      error: e.message + "\n" + e.stack
++    });
++  }
++};
++
++function distSquared (x0, y0, x1, y1) {
++  return (x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0);
++}
++
++/**
++ * Reduce an array for a LineGraph based off of minDistanceBetweenPoints
++ * for the points to use with before passing into being rendered by
++ * LineGraph.
++ */
++function sparsifyLineData ({ data, width, height, dampenValuesFactor, dataOffsetX, minDistanceBetweenPoints }) {
++  let result = [];
++  let totalTicks = data.length;
++  let maxValue = Number.MIN_SAFE_INTEGER;
++  let minValue = Number.MAX_SAFE_INTEGER;
++  let sumValues = 0;
++
++  // We need the maxValue so might as well calculate other things
++  // to cache the work so Graphs.jsm doesn't need to do this again
++  for (let { value } of data) {
++    maxValue = Math.max(value, maxValue);
++    minValue = Math.min(value, minValue);
++    sumValues += value;
++  }
++
++  let firstTick = totalTicks ? data[0].delta : 0;
++  let lastTick = totalTicks ? data[totalTicks - 1].delta : 0;
++  let dataScaleX = width / (lastTick - dataOffsetX);
++  let dataScaleY = height / maxValue * dampenValuesFactor;
++  let prevX = 0;
++  let prevY = 0;
++  let prevValue = null;
++  let prevDelta = null;
++  let skippedTicks = 0;
++
++  for (let i = 0; i < data.length; i++) {
++    let { delta, value } = data[i];
++
++    // Now filter out if line distance < 1
++    let currX = (delta - dataOffsetX) * dataScaleX;
++    let currY = height - value * dataScaleY;
++
++    let dist = distSquared(prevX, prevY, currX, currY);
++
++    prevX = currX;
++    prevY = currY;
++
++    // If distance is far enough from previous point, render the first
++    if (dist >= minDistanceBetweenPoints || ++skippedTicks > MAX_CONSECUTIVE_SKIPPED_TICKS) {
++
++      // If the previous value was not saved, and the difference
++      // between the current and last unsaved value is > MIN_VALUE_DELTA,
++      // also save the previous value.
++      if (prevValue !== null && Math.abs(value - prevValue) > MIN_VALUE_DELTA) {
++        result.push({ delta: prevDelta, value: prevValue });
++      }
++
++      result.push({ delta, value });
++      skippedTicks = 0;
++
++      // Since we're pushing the current value,
++      // nullify prevValue and prevDelta, so the next loop doesn't add this twice
++      prevValue = prevDelta = null;
++
++      continue;
++    } else {
++      // Since this tick didn't make the cut,
++      // store the values so that the next loop may add it if a large
++      // enough gap
++      prevDelta = delta;
++      prevValue = value;
++    }
++
++    if (delta === firstTick || delta === lastTick) {
++      result.push({ delta, value });
++    }
++  }
++
++  return { minValue, maxValue, sumValues, data: result };
++}
+diff --git a/browser/devtools/shared/widgets/graph-utils.js b/browser/devtools/shared/widgets/graph-utils.js
+new file mode 100644
+index 0000000..4537896
+--- /dev/null
++++ b/browser/devtools/shared/widgets/graph-utils.js
+@@ -0,0 +1,40 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Promise } = require("resource://gre/modules/Promise.jsm");
++const { ChromeWorker } = require("chrome");
++let graphTaskId = 0;
++let graphUtilsWorker;
++
++/**
++ * Takes an array that would be rendered via LineGraph, as well as
++ * some of the graph's properties, to render a filtered array
++ * off the main thread.
++ */
++exports.sparsifyLineData = function ({ data, width, height, dampenValuesFactor, dataOffsetX, minDistanceBetweenPoints }) {
++  let worker = graphUtilsWorker || new ChromeWorker("resource:///modules/devtools/graph-utils-worker.js");
++  let id = graphTaskId++;
++  let { promise, resolve } = Promise.defer();
++
++  worker.addEventListener("message", function listener ({ data }) {
++    if (data.id === id) {
++      worker.removeEventListener("message", listener);
++      resolve(data);
++    }
++  });
++
++  worker.postMessage({
++    id: id,
++    data: data,
++    width: width,
++    height: height,
++    dampenValuesFactor: dampenValuesFactor,
++    dataOffsetX: dataOffsetX,
++    minDistanceBetweenPoints: minDistanceBetweenPoints,
++    type: "sparsifyLineData"
++  });
++
++  return promise;
++};
+-- 
+1.8.4.2
+

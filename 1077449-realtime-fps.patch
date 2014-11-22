@@ -1,0 +1,503 @@
+From df88867a9c7f16c3b9452e52f7aa4abf4f3e1aab Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 17 Nov 2014 14:07:30 -0800
+Subject: Bug 1077449 - Render framerate data realtime in performance
+ tool. r=vp
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 1d08b1b..7f4d8ee 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -85,16 +85,17 @@ browser.jar:
+     content/browser/devtools/profiler.xul                              (profiler/profiler.xul)
+     content/browser/devtools/profiler.js                               (profiler/profiler.js)
+     content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+ #ifdef MOZ_DEVTOOLS_PERFTOOLS
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/controller.js                 (performance/controller.js)
+     content/browser/devtools/performance/views/main.js                 (performance/views/main.js)
++    content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
+ #endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+diff --git a/browser/devtools/performance/controller.js b/browser/devtools/performance/controller.js
+index 9e53a17..89b0c39 100644
+--- a/browser/devtools/performance/controller.js
++++ b/browser/devtools/performance/controller.js
+@@ -4,58 +4,72 @@
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ Cu.import("resource://gre/modules/Task.jsm");
+ Cu.import("resource://gre/modules/devtools/Loader.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ 
++let require = devtools.require;
+ devtools.lazyRequireGetter(this, "Services");
+ devtools.lazyRequireGetter(this, "promise");
+ devtools.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ devtools.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
++devtools.lazyRequireGetter(this, "FramerateFront",
++  "devtools/server/actors/framerate", true);
++devtools.lazyRequireGetter(this, "L10N",
++  "devtools/profiler/global", true);
++devtools.lazyImporter(this, "LineGraphWidget",
++  "resource:///modules/devtools/Graphs.jsm");
+ 
+ // Events emitted by the `PerformanceController`
+ const EVENTS = {
+   // When a recording is started or stopped via the controller
+   RECORDING_STARTED: "Performance:RecordingStarted",
+   RECORDING_STOPPED: "Performance:RecordingStopped",
++  // When the PerformanceActor front emits `framerate` data
++  TIMELINE_DATA: "Performance:TimelineData",
+ 
+   // Emitted by the PerformanceView on record button click
+   UI_START_RECORDING: "Performance:UI:StartRecording",
+-  UI_STOP_RECORDING: "Performance:UI:StopRecording"
++  UI_STOP_RECORDING: "Performance:UI:StopRecording",
++
++  // Emitted by the OverviewView when more data has been rendered
++  OVERVIEW_RENDERED: "Performance:UI:OverviewRendered"
+ };
+ 
+ /**
+  * The current target and the profiler connection, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+ 
+ /**
+  * Initializes the profiler controller and views.
+  */
+ let startupPerformance = Task.async(function*() {
+   yield promise.all([
+     PrefObserver.register(),
+     PerformanceController.initialize(),
+-    PerformanceView.initialize()
++    PerformanceView.initialize(),
++    OverviewView.initialize()
+   ]);
+ });
+ 
+ /**
+  * Destroys the profiler controller and views.
+  */
+ let shutdownPerformance = Task.async(function*() {
+   yield promise.all([
+     PrefObserver.unregister(),
+     PerformanceController.destroy(),
+-    PerformanceView.destroy()
++    PerformanceView.destroy(),
++    OverviewView.destroy()
+   ]);
+ });
+ 
+ /**
+  * Observes pref changes on the devtools.profiler branch and triggers the
+  * required frontend modifications.
+  */
+ let PrefObserver = {
+@@ -78,19 +92,21 @@ let PrefObserver = {
+ let PerformanceController = {
+   /**
+    * Listen for events emitted by the current tab target and
+    * main UI events.
+    */
+   initialize: function() {
+     this.startRecording = this.startRecording.bind(this);
+     this.stopRecording = this.stopRecording.bind(this);
++    this._onTimelineData = this._onTimelineData.bind(this);
+ 
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
++    gFront.on("ticks", this._onTimelineData);
+   },
+ 
+   /**
+    * Remove events handled by the PerformanceController
+    */
+   destroy: function() {
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+@@ -107,17 +123,24 @@ let PerformanceController = {
+ 
+   /**
+    * Stops recording with the PerformanceFront. Emits `EVENTS.RECORDING_STOPPED`
+    * when the front stops recording.
+    */
+   stopRecording: Task.async(function *() {
+     let results = yield gFront.stopRecording();
+     this.emit(EVENTS.RECORDING_STOPPED, results);
+-  })
++  }),
++
++  /**
++   * Fired whenever the gFront emits a ticks, memory, or markers event.
++   */
++  _onTimelineData: function (eventName, ...data) {
++    this.emit(EVENTS.TIMELINE_DATA, eventName, ...data);
++  }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+ /**
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 859056a..2ad5567 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -11,16 +11,17 @@
+   <!ENTITY % profilerDTD SYSTEM "chrome://browser/locale/devtools/profiler.dtd">
+   %profilerDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+   <script type="application/javascript" src="performance/controller.js"/>
+   <script type="application/javascript" src="performance/views/main.js"/>
++  <script type="application/javascript" src="performance/views/overview.js"/>
+ 
+   <vbox class="theme-body" flex="1">
+     <toolbar id="performance-toolbar" class="devtools-toolbar">
+       <hbox id="performance-toolbar-controls-recordings" class="devtools-toolbarbutton-group">
+         <toolbarbutton id="record-button"
+                        class="devtools-toolbarbutton"
+                        tooltiptext="&profilerUI.recordButton.tooltip;"/>
+         <toolbarbutton id="clear-button"
+@@ -33,16 +34,17 @@
+                        class="devtools-toolbarbutton"
+                        label="&profilerUI.importButton;"/>
+       </hbox>
+     </toolbar>
+     <splitter class="devtools-horizontal-splitter" />
+     <box id="overview-pane"
+          class="devtools-responsive-container"
+          flex="1">
++      <vbox id="time-framerate" flex="1"/>
+     </box>
+     <splitter class="devtools-horizontal-splitter" />
+     <box id="details-pane"
+          class="devtools-responsive-container"
+          flex="1">
+     </box>
+   </vbox>
+ </window>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 123d520..ed279c0 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -24,8 +24,10 @@ support-files =
+ #[browser_perf-shared-connection-01.js]
+ [browser_perf-shared-connection-02.js]
+ [browser_perf-shared-connection-03.js]
+ # bug 1077464
+ #[browser_perf-shared-connection-04.js]
+ [browser_perf-data-samples.js]
+ [browser_perf-data-massaging-01.js]
+ [browser_perf-ui-recording.js]
++[browser_perf-overview-render-01.js]
++[browser_perf-overview-render-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-overview-render-01.js b/browser/devtools/performance/test/browser_perf-overview-render-01.js
+new file mode 100644
+index 0000000..4394ca6
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-overview-render-01.js
+@@ -0,0 +1,20 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the overview renders content when recording.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, OverviewView } = panel.panelWin;
++
++  yield startRecording(panel);
++ 
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++
++  yield stopRecording(panel);
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-overview-render-02.js b/browser/devtools/performance/test/browser_perf-overview-render-02.js
+new file mode 100644
+index 0000000..383b40f
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-overview-render-02.js
+@@ -0,0 +1,41 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the overview graphs cannot be selected during recording
++ * and that they're cleared upon rerecording.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, OverviewView } = panel.panelWin;
++
++  yield startRecording(panel);
++
++  ok("selectionEnabled" in OverviewView.framerateGraph,
++    "The selection should not be enabled for the framerate overview (1).");
++  is(OverviewView.framerateGraph.selectionEnabled, false,
++    "The selection should not be enabled for the framerate overview (2).");
++  is(OverviewView.framerateGraph.hasSelection(), false,
++    "The framerate overview shouldn't have a selection before recording.");
++
++  let updated = 0;
++  OverviewView.on(EVENTS.OVERVIEW_RENDERED, () => updated++);
++
++  ok((yield waitUntil(() => updated > 10)),
++    "The overviews were updated several times.");
++
++  ok("selectionEnabled" in OverviewView.framerateGraph,
++    "The selection should still not be enabled for the framerate overview (1).");
++  is(OverviewView.framerateGraph.selectionEnabled, false,
++    "The selection should still not be enabled for the framerate overview (2).");
++  is(OverviewView.framerateGraph.hasSelection(), false,
++    "The framerate overview still shouldn't have a selection before recording.");
++
++  yield stopRecording(panel);
++
++  is(OverviewView.framerateGraph.selectionEnabled, true,
++    "The selection should now be enabled for the framerate overview.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 4fde7f0..4654ad9 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -214,17 +214,17 @@ function* startRecording(panel) {
+   let button = win.$("#record-button");
+ 
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked yet.");
+ 
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked yet.");
+ 
+-  EventUtils.synthesizeMouseAtCenter(button, {}, win);
++  EventUtils.sendMouseEvent({ type: "click" }, button, win);
+ 
+   yield clicked;
+ 
+   ok(button.hasAttribute("checked"),
+     "The record button should now be checked.");
+   ok(button.hasAttribute("locked"),
+     "The record button should be locked.");
+ 
+@@ -242,24 +242,43 @@ function* stopRecording(panel) {
+   let ended = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_STOPPED);
+   let button = win.$("#record-button");
+ 
+   ok(button.hasAttribute("checked"),
+     "The record button should already be checked.");
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked yet.");
+ 
+-  EventUtils.synthesizeMouseAtCenter(button, {}, win);
++  EventUtils.sendMouseEvent({ type: "click" }, button, win);
+ 
+   yield clicked;
+ 
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked.");
+   ok(button.hasAttribute("locked"),
+     "The record button should be locked.");
+ 
+   yield ended;
+ 
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked.");
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked.");
+ }
++
++/**
++ * Waits until a predicate returns true.
++ *
++ * @param function predicate
++ *        Invoked once in a while until it returns true.
++ * @param number interval [optional]
++ *        How often the predicate is invoked, in milliseconds.
++ */
++function waitUntil(predicate, interval = 10) {
++  if (predicate()) {
++    return Promise.resolve(true);
++  }
++  let deferred = Promise.defer();
++  setTimeout(function() {
++    waitUntil(predicate).then(() => deferred.resolve(true));
++  }, interval);
++  return deferred.promise;
++}
+diff --git a/browser/devtools/performance/views/main.js b/browser/devtools/performance/views/main.js
+index 40bcd25..9a579ea 100644
+--- a/browser/devtools/performance/views/main.js
++++ b/browser/devtools/performance/views/main.js
+@@ -11,28 +11,28 @@ let PerformanceView = {
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     this._recordButton = $("#record-button");
+ 
+     this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
+     this._unlockRecordButton = this._unlockRecordButton.bind(this);
+ 
+-    this._recordButton.addEventListener("mouseup", this._onRecordButtonClick);
++    this._recordButton.addEventListener("click", this._onRecordButtonClick);
+ 
+     // Bind to controller events to unlock the record button
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+-    this._recordButton.removeEventListener("mouseup", this._onRecordButtonClick);
++    this._recordButton.removeEventListener("click", this._onRecordButtonClick);
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
+   },
+ 
+   /**
+    * Removes the `locked` attribute on the record button.
+    */
+   _unlockRecordButton: function () {
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+new file mode 100644
+index 0000000..292a0a4
+--- /dev/null
++++ b/browser/devtools/performance/views/overview.js
+@@ -0,0 +1,107 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const OVERVIEW_UPDATE_INTERVAL = 100;
++const FRAMERATE_CALC_INTERVAL = 16; // ms
++const FRAMERATE_GRAPH_HEIGHT = 60; // px
++
++/**
++ * View handler for the overview panel's time view, displaying
++ * framerate over time.
++ */
++let OverviewView = {
++
++  /**
++   * Sets up the view with event binding.
++   */
++  initialize: function () {
++    this._framerateEl = $("#time-framerate");
++    this._ticksData = [];
++
++    this._start = this._start.bind(this);
++    this._stop = this._stop.bind(this);
++    this._onTimelineData = this._onTimelineData.bind(this);
++    this._onRecordingTick = this._onRecordingTick.bind(this);
++
++    this._initializeFramerateGraph();
++
++    PerformanceController.on(EVENTS.RECORDING_STARTED, this._start);
++    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._stop);
++    PerformanceController.on(EVENTS.TIMELINE_DATA, this._onTimelineData);
++  },
++
++  /**
++   * Unbinds events.
++   */
++  destroy: function () {
++    PerformanceController.off(EVENTS.RECORDING_STARTED, this._start);
++    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._stop);
++  },
++
++  /**
++   * Called at most every OVERVIEW_UPDATE_INTERVAL milliseconds
++   * and uses data fetched from `_onTimelineData` to render
++   * data into all the corresponding overview graphs.
++   */
++  _onRecordingTick: Task.async(function *() {
++    yield this.framerateGraph.setDataWhenReady(this._ticksData);
++    this.emit(EVENTS.OVERVIEW_RENDERED);
++    this._draw();
++  }),
++
++  /**
++   * Sets up the framerate graph.
++   */
++  _initializeFramerateGraph: function () {
++    let graph = new LineGraphWidget(this._framerateEl, L10N.getStr("graphs.fps"));
++    graph.minDistanceBetweenPoints = 1;
++    graph.fixedHeight = FRAMERATE_GRAPH_HEIGHT;
++    graph.selectionEnabled = false;
++    this.framerateGraph = graph;
++  },
++
++  /**
++   * Called to refresh the timer to keep firing _onRecordingTick.
++   */
++  _draw: function () {
++    // Check here to see if there's still a _timeoutId, incase
++    // `stop` was called before the _draw call was executed.
++    if (this._timeoutId) {
++      this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
++    }
++  },
++
++  /**
++   * Event handlers
++   */
++
++  _start: function () {
++    this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
++    this.framerateGraph.dropSelection();
++  },
++
++  _stop: function () {
++    clearTimeout(this._timeoutId);
++    this.framerateGraph.selectionEnabled = true;
++  },
++
++  /**
++   * Called when the TimelineFront has new data for
++   * framerate, markers or memory, and stores the data
++   * to be plotted subsequently.
++   */
++  _onTimelineData: function (_, eventName, ...data) {
++    if (eventName === "ticks") {
++      let [delta, timestamps] = data;
++      // the `ticks` event on the TimelineFront returns all ticks for the
++      // recording session, so just convert to plottable values
++      // and store.
++      this._ticksData = FramerateFront.plotFPS(timestamps, FRAMERATE_CALC_INTERVAL);
++    }
++  }
++};
++
++// Decorates the OverviewView as an EventEmitter
++EventEmitter.decorate(OverviewView);
+-- 
+1.8.4.2
+

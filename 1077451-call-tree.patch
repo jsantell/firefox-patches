@@ -1,0 +1,672 @@
+From c0f1bd0ac0734cec41580834bfbee4106634fbc5 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 18 Nov 2014 15:44:35 -0800
+Subject: Bug 1077451 - Render profiler call tree in new performance
+ tool. r=vp
+
+---
+ browser/devtools/jar.mn                            |   2 +
+ browser/devtools/performance/controller.js         |  16 +-
+ browser/devtools/performance/performance.xul       |  31 +++
+ browser/devtools/performance/test/browser.ini      |   1 +
+ .../browser_perf-details-calltree-render-01.js     |  34 ++++
+ browser/devtools/performance/views/call-tree.js    |  73 +++++++
+ browser/devtools/performance/views/details.js      |  39 ++++
+ browser/devtools/performance/views/main.js         |  14 +-
+ browser/themes/shared/devtools/performance.inc.css | 223 +++++++++++++++++++++
+ 9 files changed, 426 insertions(+), 7 deletions(-)
+ create mode 100644 browser/devtools/performance/test/browser_perf-details-calltree-render-01.js
+ create mode 100644 browser/devtools/performance/views/call-tree.js
+ create mode 100644 browser/devtools/performance/views/details.js
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 7f4d8ee..b899990 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -86,16 +86,18 @@ browser.jar:
+     content/browser/devtools/profiler.js                               (profiler/profiler.js)
+     content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+ #ifdef MOZ_DEVTOOLS_PERFTOOLS
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/controller.js                 (performance/controller.js)
+     content/browser/devtools/performance/views/main.js                 (performance/views/main.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
++    content/browser/devtools/performance/views/details.js              (performance/views/details.js)
++    content/browser/devtools/performance/views/call-tree.js            (performance/views/call-tree.js)
+ #endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+diff --git a/browser/devtools/performance/controller.js b/browser/devtools/performance/controller.js
+index 89b0c39..59cf85b 100644
+--- a/browser/devtools/performance/controller.js
++++ b/browser/devtools/performance/controller.js
+@@ -17,59 +17,64 @@ devtools.lazyRequireGetter(this, "EventEmitter",
+ devtools.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ devtools.lazyRequireGetter(this, "FramerateFront",
+   "devtools/server/actors/framerate", true);
+ devtools.lazyRequireGetter(this, "L10N",
+   "devtools/profiler/global", true);
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
++devtools.lazyRequireGetter(this, "CallView",
++  "devtools/profiler/tree-view", true);
++devtools.lazyRequireGetter(this, "ThreadNode",
++  "devtools/profiler/tree-model", true);
+ 
+ // Events emitted by the `PerformanceController`
+ const EVENTS = {
+   // When a recording is started or stopped via the controller
+   RECORDING_STARTED: "Performance:RecordingStarted",
+   RECORDING_STOPPED: "Performance:RecordingStopped",
+   // When the PerformanceActor front emits `framerate` data
+   TIMELINE_DATA: "Performance:TimelineData",
+ 
+   // Emitted by the PerformanceView on record button click
+   UI_START_RECORDING: "Performance:UI:StartRecording",
+   UI_STOP_RECORDING: "Performance:UI:StopRecording",
+ 
+   // Emitted by the OverviewView when more data has been rendered
+-  OVERVIEW_RENDERED: "Performance:UI:OverviewRendered"
++  OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
++
++  // Emitted by the CallTreeView when a call tree has been rendered
++  CALL_TREE_RENDERED: "Performance:UI:CallTreeRendered"
+ };
+ 
+ /**
+  * The current target and the profiler connection, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+ 
+ /**
+  * Initializes the profiler controller and views.
+  */
+ let startupPerformance = Task.async(function*() {
+   yield promise.all([
+     PrefObserver.register(),
+     PerformanceController.initialize(),
+-    PerformanceView.initialize(),
+-    OverviewView.initialize()
++    PerformanceView.initialize()
+   ]);
+ });
+ 
+ /**
+  * Destroys the profiler controller and views.
+  */
+ let shutdownPerformance = Task.async(function*() {
+   yield promise.all([
+     PrefObserver.unregister(),
+     PerformanceController.destroy(),
+-    PerformanceView.destroy(),
+-    OverviewView.destroy()
++    PerformanceView.destroy()
+   ]);
+ });
+ 
+ /**
+  * Observes pref changes on the devtools.profiler branch and triggers the
+  * required frontend modifications.
+  */
+ let PrefObserver = {
+@@ -142,16 +147,17 @@ let PerformanceController = {
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+ /**
+  * Shortcuts for accessing various profiler preferences.
+  */
+ const Prefs = new ViewHelpers.Prefs("devtools.profiler", {
++  showPlatformData: ["Bool", "ui.show-platform-data"]
+ });
+ 
+ /**
+  * DOM query helpers.
+  */
+ function $(selector, target = document) {
+   return target.querySelector(selector);
+ }
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 2ad5567..e475948 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -12,16 +12,18 @@
+   %profilerDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+   <script type="application/javascript" src="performance/controller.js"/>
+   <script type="application/javascript" src="performance/views/main.js"/>
+   <script type="application/javascript" src="performance/views/overview.js"/>
++  <script type="application/javascript" src="performance/views/details.js"/>
++  <script type="application/javascript" src="performance/views/call-tree.js"/>
+ 
+   <vbox class="theme-body" flex="1">
+     <toolbar id="performance-toolbar" class="devtools-toolbar">
+       <hbox id="performance-toolbar-controls-recordings" class="devtools-toolbarbutton-group">
+         <toolbarbutton id="record-button"
+                        class="devtools-toolbarbutton"
+                        tooltiptext="&profilerUI.recordButton.tooltip;"/>
+         <toolbarbutton id="clear-button"
+@@ -40,11 +42,40 @@
+          class="devtools-responsive-container"
+          flex="1">
+       <vbox id="time-framerate" flex="1"/>
+     </box>
+     <splitter class="devtools-horizontal-splitter" />
+     <box id="details-pane"
+          class="devtools-responsive-container"
+          flex="1">
++      <vbox class="call-tree" flex="1">
++        <hbox class="call-tree-headers-container">
++          <label class="plain call-tree-header"
++                 type="duration"
++                 crop="end"
++                 value="&profilerUI.table.totalDuration;"/>
++          <label class="plain call-tree-header"
++                 type="percentage"
++                 crop="end"
++                 value="&profilerUI.table.totalPercentage;"/>
++          <label class="plain call-tree-header"
++                 type="self-duration"
++                 crop="end"
++                 value="&profilerUI.table.selfDuration;"/>
++          <label class="plain call-tree-header"
++                 type="self-percentage"
++                 crop="end"
++                 value="&profilerUI.table.selfPercentage;"/>
++          <label class="plain call-tree-header"
++                 type="samples"
++                 crop="end"
++                 value="&profilerUI.table.samples;"/>
++          <label class="plain call-tree-header"
++                 type="function"
++                 crop="end"
++                 value="&profilerUI.table.function;"/>
++        </hbox>
++        <vbox class="call-tree-cells-container" flex="1"/>
++      </vbox>
+     </box>
+   </vbox>
+ </window>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index ed279c0..9b7496e 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -26,8 +26,9 @@ support-files =
+ [browser_perf-shared-connection-03.js]
+ # bug 1077464
+ #[browser_perf-shared-connection-04.js]
+ [browser_perf-data-samples.js]
+ [browser_perf-data-massaging-01.js]
+ [browser_perf-ui-recording.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
++[browser_perf-details-calltree-render-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-details-calltree-render-01.js b/browser/devtools/performance/test/browser_perf-details-calltree-render-01.js
+new file mode 100644
+index 0000000..076b716
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-details-calltree-render-01.js
+@@ -0,0 +1,34 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the call tree view renders after recording.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, CallTreeView } = panel.panelWin;
++
++  let updated = 0;
++  CallTreeView.on(EVENTS.CALL_TREE_RENDERED, () => updated++);
++
++  yield startRecording(panel);
++  yield busyWait(100);
++
++  let rendered = once(CallTreeView, EVENTS.CALL_TREE_RENDERED);
++  yield stopRecording(panel);
++  yield rendered;
++
++  ok(true, "CallTreeView rendered on recording completed.");
++
++  yield startRecording(panel);
++  yield busyWait(100);
++
++  rendered = once(CallTreeView, EVENTS.CALL_TREE_RENDERED);
++  yield stopRecording(panel);
++  yield rendered;
++
++  ok(true, "CallTreeView rendered again after recording completed a second time.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/views/call-tree.js b/browser/devtools/performance/views/call-tree.js
+new file mode 100644
+index 0000000..ea3943c
+--- /dev/null
++++ b/browser/devtools/performance/views/call-tree.js
+@@ -0,0 +1,73 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * CallTree view containing profiler call tree, controlled by DetailsView.
++ */
++let CallTreeView = {
++  /**
++   * Sets up the view with event binding.
++   */
++  initialize: function () {
++    this.el = $(".call-tree");
++    this._graphEl = $(".call-tree-cells-container");
++    this._stop = this._stop.bind(this);
++
++    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._stop);
++  },
++
++  /**
++   * Unbinds events.
++   */
++  destroy: function () {
++    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._stop);
++  },
++
++  _stop: function (_, { profilerData }) {
++    this._prepareCallTree(profilerData);
++  },
++
++  /**
++   * Called when the recording is stopped and prepares data to
++   * populate the call tree.
++   */
++  _prepareCallTree: function (profilerData, beginAt, endAt, options={}) {
++    let threadSamples = profilerData.profile.threads[0].samples;
++    let contentOnly = !Prefs.showPlatformData;
++    // TODO handle inverted tree bug 1102347
++    let invertTree = false;
++
++    let threadNode = new ThreadNode(threadSamples, contentOnly, beginAt, endAt, invertTree);
++    options.inverted = invertTree && threadNode.samples > 0;
++
++    this._populateCallTree(threadNode, options);
++  },
++
++  /**
++   * Renders the call tree.
++   */
++  _populateCallTree: function (frameNode, options={}) {
++    let root = new CallView({
++      autoExpandDepth: options.inverted ? 0 : undefined,
++      frame: frameNode,
++      hidden: options.inverted,
++      inverted: options.inverted
++    });
++
++    // Clear out other graphs
++    this._graphEl.innerHTML = "";
++    root.attachTo(this._graphEl);
++
++    let contentOnly = !Prefs.showPlatformData;
++    root.toggleCategories(!contentOnly);
++
++    this.emit(EVENTS.CALL_TREE_RENDERED);
++  }
++};
++
++/**
++ * Convenient way of emitting events from the view.
++ */
++EventEmitter.decorate(CallTreeView);
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+new file mode 100644
+index 0000000..4ba01d4
+--- /dev/null
++++ b/browser/devtools/performance/views/details.js
+@@ -0,0 +1,39 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * Details view containing profiler call tree. Manages
++ * subviews and toggles visibility between them.
++ */
++let DetailsView = {
++  /**
++   * Sets up the view with event binding, initializes
++   * subviews.
++   */
++  initialize: function () {
++    this.views = {
++      callTree: CallTreeView
++    };
++
++    // Initialize subviews
++    return promise.all([
++      CallTreeView.initialize()
++    ]);
++  },
++
++  /**
++   * Unbinds events, destroys subviews.
++   */
++  destroy: function () {
++    return promise.all([
++      CallTreeView.destroy()
++    ]);
++  }
++};
++
++/**
++ * Convenient way of emitting events from the view.
++ */
++EventEmitter.decorate(DetailsView);
+diff --git a/browser/devtools/performance/views/main.js b/browser/devtools/performance/views/main.js
+index 9a579ea..a4b4dc5 100644
+--- a/browser/devtools/performance/views/main.js
++++ b/browser/devtools/performance/views/main.js
+@@ -3,38 +3,48 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * Master view handler for the performance tool.
+  */
+ let PerformanceView = {
+   /**
+-   * Sets up the view with event binding.
++   * Sets up the view with event binding and main subviews.
+    */
+   initialize: function () {
+     this._recordButton = $("#record-button");
+ 
+     this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
+     this._unlockRecordButton = this._unlockRecordButton.bind(this);
+ 
+     this._recordButton.addEventListener("click", this._onRecordButtonClick);
+ 
+     // Bind to controller events to unlock the record button
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
++
++    return promise.all([
++      OverviewView.initialize(),
++      DetailsView.initialize()
++    ]);
+   },
+ 
+   /**
+-   * Unbinds events.
++   * Unbinds events and destroys subviews.
+    */
+   destroy: function () {
+     this._recordButton.removeEventListener("click", this._onRecordButtonClick);
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
++
++    return promise.all([
++      OverviewView.destroy(),
++      DetailsView.destroy()
++    ]);
+   },
+ 
+   /**
+    * Removes the `locked` attribute on the record button.
+    */
+   _unlockRecordButton: function () {
+     this._recordButton.removeAttribute("locked");
+   },
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 0cd8f18..c059b81 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -27,8 +27,231 @@
+ 
+ #record-button[checked] {
+   list-style-image: url(profiler-stopwatch-checked.svg);
+ }
+ 
+ #record-button[locked] {
+   pointer-events: none;
+ }
++
++/* Profile call tree */
++
++.theme-dark .call-tree-headers-container {
++  border-top: 1px solid #000;
++}
++
++.theme-light .call-tree-headers-container {
++  border-top: 1px solid #aaa;
++}
++
++.call-tree-cells-container {
++  /* Hack: force hardware acceleration */
++  transform: translateZ(1px);
++  overflow: auto;
++}
++
++.call-tree-cells-container[categories-hidden] .call-tree-category {
++  display: none;
++}
++
++.call-tree-header[type="duration"],
++.call-tree-cell[type="duration"],
++.call-tree-header[type="self-duration"],
++.call-tree-cell[type="self-duration"] {
++  width: 9em;
++}
++
++.call-tree-header[type="percentage"],
++.call-tree-cell[type="percentage"],
++.call-tree-header[type="self-percentage"],
++.call-tree-cell[type="self-percentage"] {
++  width: 6em;
++}
++
++.call-tree-header[type="samples"],
++.call-tree-cell[type="samples"] {
++  width: 5em;
++}
++
++.call-tree-header[type="function"],
++.call-tree-cell[type="function"] {
++  -moz-box-flex: 1;
++}
++
++.call-tree-header,
++.call-tree-cell {
++  -moz-box-align: center;
++  overflow: hidden;
++  padding: 1px 4px;
++}
++
++.call-tree-header:not(:last-child),
++.call-tree-cell:not(:last-child) {
++  -moz-border-end: 1px solid;
++}
++
++.theme-dark .call-tree-header,
++.theme-dark .call-tree-cell {
++  -moz-border-end-color: rgba(255,255,255,0.15);
++  color: #8fa1b2; /* Body Text */
++}
++
++.theme-light .call-tree-header,
++.theme-light .call-tree-cell {
++  -moz-border-end-color: rgba(0,0,0,0.15);
++  color: #18191a; /* Body Text */
++}
++
++.call-tree-header:not(:last-child) {
++  text-align: center;
++}
++
++.call-tree-cell:not(:last-child) {
++  text-align: end;
++}
++
++.theme-dark .call-tree-header {
++  background-color: #252c33; /* Tab Toolbar */
++}
++
++.theme-light .call-tree-header {
++  background-color: #ebeced; /* Tab Toolbar */
++}
++
++.theme-dark .call-tree-item:last-child:not(:focus) {
++  border-bottom: 1px solid rgba(255,255,255,0.15);
++}
++
++.theme-light .call-tree-item:last-child:not(:focus) {
++  border-bottom: 1px solid rgba(0,0,0,0.15);
++}
++
++.theme-dark .call-tree-item:nth-child(2n) {
++  background-color: rgba(29,79,115,0.15);
++}
++
++.theme-light .call-tree-item:nth-child(2n) {
++  background-color: rgba(76,158,217,0.1);
++}
++
++.theme-dark .call-tree-item:hover {
++  background-color: rgba(29,79,115,0.25);
++}
++
++.theme-light .call-tree-item:hover {
++  background-color: rgba(76,158,217,0.2);
++}
++
++.theme-dark .call-tree-item:focus {
++  background-color: #1d4f73; /* Select Highlight Blue */
++}
++
++.theme-light .call-tree-item:focus {
++  background-color: #4c9ed9; /* Select Highlight Blue */
++}
++
++.call-tree-item:focus label {
++  color: #f5f7fa !important; /* Light foreground text */
++}
++
++.theme-dark .call-tree-item:focus .call-tree-cell {
++  -moz-border-end-color: rgba(0,0,0,0.3);
++}
++
++.theme-light .call-tree-item:focus .call-tree-cell {
++  -moz-border-end-color: rgba(255,255,255,0.5);
++}
++
++.call-tree-item:not([origin="content"]) .call-tree-name,
++.call-tree-item:not([origin="content"]) .call-tree-url,
++.call-tree-item:not([origin="content"]) .call-tree-line {
++  /* Style chrome and non-JS nodes differently. */
++  opacity: 0.6;
++}
++
++.call-tree-url {
++  -moz-margin-start: 4px !important;
++  cursor: pointer;
++}
++
++.call-tree-url:hover {
++  text-decoration: underline;
++}
++
++.theme-dark .call-tree-url {
++  color: #46afe3;
++}
++
++.theme-light .call-tree-url {
++  color: #0088cc;
++}
++
++.theme-dark .call-tree-line {
++  color: #d96629;
++}
++
++.theme-light .call-tree-line {
++  color: #f13c00;
++}
++
++.call-tree-host {
++  -moz-margin-start: 8px !important;
++  font-size: 90%;
++}
++
++.theme-dark .call-tree-host {
++  color: #8fa1b2;
++}
++
++.theme-light .call-tree-host {
++  color: #8fa1b2;
++}
++
++.call-tree-url[value=""],
++.call-tree-line[value=""],
++.call-tree-host[value=""] {
++  display: none;
++}
++
++.call-tree-zoom {
++  -moz-appearance: none;
++  background-color: transparent;
++  background-position: center;
++  background-repeat: no-repeat;
++  background-size: 11px;
++  min-width: 11px;
++  -moz-margin-start: 8px !important;
++  cursor: zoom-in;
++  opacity: 0;
++}
++
++.theme-dark .call-tree-zoom {
++  background-image: url(magnifying-glass.png);
++}
++
++.theme-light .call-tree-zoom {
++  background-image: url(magnifying-glass-light.png);
++}
++
++@media (min-resolution: 2dppx) {
++  .theme-dark .call-tree-zoom {
++    background-image: url(magnifying-glass@2x.png);
++  }
++
++  .theme-light .call-tree-zoom {
++    background-image: url(magnifying-glass-light@2x.png);
++  }
++}
++
++.call-tree-item:hover .call-tree-zoom {
++  transition: opacity 0.3s ease-in;
++  opacity: 1;
++}
++
++.call-tree-item:hover .call-tree-zoom:hover {
++  opacity: 0;
++}
++
++.call-tree-category {
++  transform: scale(0.75);
++  transform-origin: center right;
++}
+-- 
+1.8.4.2
+
