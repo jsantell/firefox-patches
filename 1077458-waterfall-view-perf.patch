@@ -1,0 +1,941 @@
+From 4c0ebfe35eb01afde15f888797bb3f3f1dc0861f Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 24 Nov 2014 15:27:37 -0800
+Subject: Bug 1077458 - Implement marker's waterfall view in new
+ performance tool, with details view toggling between waterfall and call tree
+ views. r=vp
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index b899990..55c1c44 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -88,16 +88,17 @@ browser.jar:
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+ #ifdef MOZ_DEVTOOLS_PERFTOOLS
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/controller.js                 (performance/controller.js)
+     content/browser/devtools/performance/views/main.js                 (performance/views/main.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/call-tree.js            (performance/views/call-tree.js)
++    content/browser/devtools/performance/views/waterfall.js            (performance/views/waterfall.js)
+ #endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+diff --git a/browser/devtools/performance/controller.js b/browser/devtools/performance/controller.js
+index 59cf85b..e5a5317 100644
+--- a/browser/devtools/performance/controller.js
++++ b/browser/devtools/performance/controller.js
+@@ -17,16 +17,20 @@ devtools.lazyRequireGetter(this, "EventEmitter",
+ devtools.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ devtools.lazyRequireGetter(this, "FramerateFront",
+   "devtools/server/actors/framerate", true);
+ devtools.lazyRequireGetter(this, "L10N",
+   "devtools/profiler/global", true);
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
++devtools.lazyRequireGetter(this, "Waterfall",
++  "devtools/timeline/waterfall", true);
++devtools.lazyRequireGetter(this, "MarkerDetails",
++  "devtools/timeline/marker-details", true);
+ devtools.lazyRequireGetter(this, "CallView",
+   "devtools/profiler/tree-view", true);
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/profiler/tree-model", true);
+ 
+ // Events emitted by the `PerformanceController`
+ const EVENTS = {
+   // When a recording is started or stopped via the controller
+@@ -37,18 +41,24 @@ const EVENTS = {
+ 
+   // Emitted by the PerformanceView on record button click
+   UI_START_RECORDING: "Performance:UI:StartRecording",
+   UI_STOP_RECORDING: "Performance:UI:StopRecording",
+ 
+   // Emitted by the OverviewView when more data has been rendered
+   OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
+ 
++  // Emitted by the DetailsView when a subview is selected
++  DETAILS_VIEW_SELECTED: "Performance:UI:DetailsViewSelected",
++
+   // Emitted by the CallTreeView when a call tree has been rendered
+-  CALL_TREE_RENDERED: "Performance:UI:CallTreeRendered"
++  CALL_TREE_RENDERED: "Performance:UI:CallTreeRendered",
++  
++  // Emitted by the WaterfallView when it has been rendered
++  WATERFALL_RENDERED: "Performance:UI:WaterfallRendered"
+ };
+ 
+ /**
+  * The current target and the profiler connection, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+ 
+ /**
+@@ -102,33 +112,36 @@ let PerformanceController = {
+   initialize: function() {
+     this.startRecording = this.startRecording.bind(this);
+     this.stopRecording = this.stopRecording.bind(this);
+     this._onTimelineData = this._onTimelineData.bind(this);
+ 
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     gFront.on("ticks", this._onTimelineData);
++    gFront.on("markers", this._onTimelineData);
+   },
+ 
+   /**
+    * Remove events handled by the PerformanceController
+    */
+   destroy: function() {
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
++    gFront.off("ticks", this._onTimelineData);
++    gFront.off("markers", this._onTimelineData);
+   },
+ 
+   /**
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front is starting to record.
+    */
+   startRecording: Task.async(function *() {
+-    yield gFront.startRecording();
+-    this.emit(EVENTS.RECORDING_STARTED);
++    let startTime = yield gFront.startRecording();
++    this.emit(EVENTS.RECORDING_STARTED, startTime);
+   }),
+ 
+   /**
+    * Stops recording with the PerformanceFront. Emits `EVENTS.RECORDING_STOPPED`
+    * when the front stops recording.
+    */
+   stopRecording: Task.async(function *() {
+     let results = yield gFront.stopRecording();
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index ffd1fda..072b2a90 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -232,39 +232,42 @@ PerformanceFront.prototype = {
+     } else {
+       this._profilingStartTime = currentTime;
+       this.emit("profiler-already-active");
+     }
+ 
+     // The timeline actor is target-dependent, so just make sure
+     // it's recording.
+     let withMemory = showTimelineMemory();
+-    yield this._request("timeline", "start", { withTicks: true, withMemory: withMemory });
++
++    // Return start time from timeline actor
++    return yield this._request("timeline", "start", { withTicks: true, withMemory: withMemory });
+   }),
+ 
+   /**
+    * Manually ends the current recording session.
+    *
+    * @return object
+    *         A promise that is resolved once recording has stopped,
+    *         with the profiler and timeline data.
+    */
+   stopRecording: Task.async(function*() {
+     // We'll need to filter out all samples that fall out of current profile's
+     // range. This is necessary because the profiler is continuously running.
+     let profilerData = yield this._request("profiler", "getProfile");
+     filterSamples(profilerData, this._profilingStartTime);
+     offsetSampleTimes(profilerData, this._profilingStartTime);
+ 
+-    yield this._request("timeline", "stop");
++    let endTime = yield this._request("timeline", "stop");
+ 
+     // Join all the acquired data and return it for outside consumers.
+     return {
+       recordingDuration: profilerData.currentTime - this._profilingStartTime,
+-      profilerData: profilerData
++      profilerData: profilerData,
++      endTime: endTime
+     };
+   }),
+ 
+   /**
+    * Overrides the options sent to the built-in profiler module when activating,
+    * such as the maximum entries count, the sampling interval etc.
+    *
+    * Used in tests and for older backend implementations.
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index e475948..f4ec980 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -14,16 +14,17 @@
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+   <script type="application/javascript" src="performance/controller.js"/>
+   <script type="application/javascript" src="performance/views/main.js"/>
+   <script type="application/javascript" src="performance/views/overview.js"/>
+   <script type="application/javascript" src="performance/views/details.js"/>
+   <script type="application/javascript" src="performance/views/call-tree.js"/>
++  <script type="application/javascript" src="performance/views/waterfall.js"/>
+ 
+   <vbox class="theme-body" flex="1">
+     <toolbar id="performance-toolbar" class="devtools-toolbar">
+       <hbox id="performance-toolbar-controls-recordings" class="devtools-toolbarbutton-group">
+         <toolbarbutton id="record-button"
+                        class="devtools-toolbarbutton"
+                        tooltiptext="&profilerUI.recordButton.tooltip;"/>
+         <toolbarbutton id="clear-button"
+@@ -39,20 +40,38 @@
+     </toolbar>
+     <splitter class="devtools-horizontal-splitter" />
+     <box id="overview-pane"
+          class="devtools-responsive-container"
+          flex="1">
+       <vbox id="time-framerate" flex="1"/>
+     </box>
+     <splitter class="devtools-horizontal-splitter" />
++    <toolbar id="details-toolbar" class="devtools-toolbar">
++      <hbox class="devtools-toolbarbutton-group">
++        <toolbarbutton id="select-waterfall-view"
++                       class="devtools-toolbarbutton"
++                       tooltiptext="waterfall"
++                       data-view="waterfall"/>
++        <toolbarbutton id="select-calltree-view"
++                       class="devtools-toolbarbutton"
++                       tooltiptext="calltree"
++                       data-view="calltree"/>
++      </hbox>
++    </toolbar>
+     <box id="details-pane"
+          class="devtools-responsive-container"
+          flex="1">
+-      <vbox class="call-tree" flex="1">
++      <hbox id="waterfall-view" flex="1">
++        <vbox id="waterfall-graph" flex="1" />
++        <splitter class="devtools-side-splitter"/>
++        <vbox id="waterfall-details" class="theme-sidebar" width="150" height="150"/>
++      </hbox>
++
++      <vbox id="calltree-view" class="call-tree" flex="1">
+         <hbox class="call-tree-headers-container">
+           <label class="plain call-tree-header"
+                  type="duration"
+                  crop="end"
+                  value="&profilerUI.table.totalDuration;"/>
+           <label class="plain call-tree-header"
+                  type="percentage"
+                  crop="end"
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 9b7496e..8b03d2e 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -4,16 +4,17 @@ subsuite = devtools
+ support-files =
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
+ # that need to be moved over to performance tool
+ 
+ [browser_perf-aaa-run-first-leaktest.js]
++[browser_perf-front.js]
+ [browser_perf-front-basic-timeline-01.js]
+ [browser_perf-front-basic-profiler-01.js]
+ # bug 1077464
+ #[browser_perf-front-profiler-01.js]
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ # bug 1077464
+@@ -26,9 +27,12 @@ support-files =
+ [browser_perf-shared-connection-03.js]
+ # bug 1077464
+ #[browser_perf-shared-connection-04.js]
+ [browser_perf-data-samples.js]
+ [browser_perf-data-massaging-01.js]
+ [browser_perf-ui-recording.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
++
++[browser_perf-details.js]
+ [browser_perf-details-calltree-render-01.js]
++[browser_perf-details-waterfall-render-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-details-waterfall-render-01.js b/browser/devtools/performance/test/browser_perf-details-waterfall-render-01.js
+new file mode 100644
+index 0000000..6a449f7
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-details-waterfall-render-01.js
+@@ -0,0 +1,25 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the waterfall view renders content after recording.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, WaterfallView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield idleWait(500);
++
++  let rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++
++  yield stopRecording(panel);
++
++  yield rendered;
++  ok(true, "WaterfallView rendered after recording is stopped.");
++
++  ok(WaterfallView._markers.length, "WaterfallView contains markers");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-details.js b/browser/devtools/performance/test/browser_perf-details.js
+new file mode 100644
+index 0000000..ee3256d
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-details.js
+@@ -0,0 +1,46 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the details view toggles subviews.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, $, DetailsView, document: doc } = panel.panelWin;
++
++  info("views on startup");
++  checkViews(DetailsView, doc, "waterfall");
++
++  // Select calltree view
++  let viewChanged = once(DetailsView, EVENTS.DETAILS_VIEW_SELECTED);
++  click(panel.panelWin, $("toolbarbutton[data-view='calltree']"));
++  let viewName = yield viewChanged;
++  is(viewName, "calltree", "DETAILS_VIEW_SELECTED fired with view name");
++  checkViews(DetailsView, "calltree");
++ 
++  // Select waterfall view
++  viewChanged = once(DetailsView, EVENTS.DETAILS_VIEW_SELECTED);
++  click(panel.panelWin, $("toolbarbutton[data-view='waterfall']"));
++  viewName = yield viewChanged;
++  is(viewName, "waterfall", "DETAILS_VIEW_SELECTED fired with view name");
++  checkViews(DetailsView, "waterfall");
++
++
++  yield teardown(panel);
++  finish();
++}
++
++function checkViews (DetailsView, doc, currentView) {
++  for (let viewName in DetailsView.views) {
++    let view = DetailsView.views[viewName].el;
++    let button = doc.querySelector("toolbarbutton[data-view='" + viewName + "']");
++
++    if (viewName === currentView) {
++      ok(!view.getAttribute("hidden"), view + " view displayed");
++      ok(button.getAttribute("checked"), view + " button checked");
++    } else {
++      ok(view.getAttribute("hidden"), view + " view hidden");
++      ok(!button.getAttribute("checked"), view + " button not checked");
++    }
++  }
++}
+diff --git a/browser/devtools/performance/test/browser_perf-front.js b/browser/devtools/performance/test/browser_perf-front.js
+new file mode 100644
+index 0000000..183e03f
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front.js
+@@ -0,0 +1,27 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test basic functionality of PerformanceFront, emitting start and endtime values
++ */
++
++let WAIT = 1000;
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_URL);
++
++  let startTime = yield front.startRecording();
++
++  ok(startTime, "front.startRecording() emits start time");
++
++  yield busyWait(WAIT);
++
++  let { endTime } = yield front.stopRecording();
++
++  ok(endTime, "front.stopRecording() emits end time");
++  ok(endTime > startTime, "endTime is after startTime");
++
++  yield removeTab(target.tab);
++  finish();
++
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 4654ad9..e5a132e 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -198,33 +198,33 @@ function* consoleProfileEnd(connection) {
+ }
+ 
+ function busyWait(time) {
+   let start = Date.now();
+   let stack;
+   while (Date.now() - start < time) { stack = Components.stack; }
+ }
+ 
+-function idleWait(time) {
+-  return DevToolsUtils.waitForTime(time);
++function click (win, button) {
++  EventUtils.sendMouseEvent({ type: "click" }, button, win);
+ }
+ 
+ function* startRecording(panel) {
+   let win = panel.panelWin;
+   let clicked = panel.panelWin.PerformanceView.once(win.EVENTS.UI_START_RECORDING);
+   let started = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_STARTED);
+   let button = win.$("#record-button");
+ 
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked yet.");
+ 
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked yet.");
+ 
+-  EventUtils.sendMouseEvent({ type: "click" }, button, win);
++  click(win, button);
+ 
+   yield clicked;
+ 
+   ok(button.hasAttribute("checked"),
+     "The record button should now be checked.");
+   ok(button.hasAttribute("locked"),
+     "The record button should be locked.");
+ 
+@@ -242,17 +242,17 @@ function* stopRecording(panel) {
+   let ended = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_STOPPED);
+   let button = win.$("#record-button");
+ 
+   ok(button.hasAttribute("checked"),
+     "The record button should already be checked.");
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked yet.");
+ 
+-  EventUtils.sendMouseEvent({ type: "click" }, button, win);
++  click(win, button);
+ 
+   yield clicked;
+ 
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked.");
+   ok(button.hasAttribute("locked"),
+     "The record button should be locked.");
+ 
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+index 4ba01d4..7465da5 100644
+--- a/browser/devtools/performance/views/details.js
++++ b/browser/devtools/performance/views/details.js
+@@ -1,39 +1,71 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
++const DEFAULT_DETAILS_SUBVIEW = "waterfall";
++
+ /**
+  * Details view containing profiler call tree. Manages
+  * subviews and toggles visibility between them.
+  */
+ let DetailsView = {
+   /**
+    * Sets up the view with event binding, initializes
+    * subviews.
+    */
+   initialize: function () {
+     this.views = {
+-      callTree: CallTreeView
++      calltree: CallTreeView,
++      waterfall: WaterfallView
+     };
+ 
++    this._onViewToggle = this._onViewToggle.bind(this);
++    for (let button of $$("toolbarbutton[data-view]", $("#details-toolbar"))) {
++      button.addEventListener("command", this._onViewToggle);
++    }
++
+     // Initialize subviews
+     return promise.all([
+-      CallTreeView.initialize()
+-    ]);
++      CallTreeView.initialize(),
++      WaterfallView.initialize()
++    ]).then(() => this.selectView(DEFAULT_DETAILS_SUBVIEW));
++  },
++
++  selectView: function (selectedView) {
++    for (let button of $$("toolbarbutton[data-view]", $("#details-toolbar"))) {
++      let viewName = button.getAttribute("data-view");
++      if (viewName === selectedView) {
++        button.setAttribute("checked", true);
++        this.views[viewName].el.removeAttribute("hidden");
++      } else {
++        button.removeAttribute("checked");
++        this.views[viewName].el.setAttribute("hidden", true);
++      }
++    }
++    this.emit(EVENTS.DETAILS_VIEW_SELECTED, selectedView);
++  },
++
++  _onViewToggle: function (e) {
++    this.selectView(e.target.getAttribute("data-view"));
+   },
+ 
+   /**
+    * Unbinds events, destroys subviews.
+    */
+   destroy: function () {
++    for (let button of $$("toolbarbutton[data-view]", $("#details-toolbar"))) {
++      button.removeEventListener("command", this._onViewToggle);
++    }
++
+     return promise.all([
+-      CallTreeView.destroy()
++      CallTreeView.destroy(),
++      WaterfallView.destroy()
+     ]);
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the view.
+  */
+ EventEmitter.decorate(DetailsView);
+diff --git a/browser/devtools/performance/views/waterfall.js b/browser/devtools/performance/views/waterfall.js
+new file mode 100644
+index 0000000..b2e6726
+--- /dev/null
++++ b/browser/devtools/performance/views/waterfall.js
+@@ -0,0 +1,116 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * Waterfall view containing waterfall view, controlled by DetailsView.
++ */
++let WaterfallView = {
++  _startTime: 0,
++  _endTime: 0,
++  _markers: [],
++
++  /**
++   * Sets up the view with event binding.
++   */
++  initialize: Task.async(function *() {
++    this.el = $("#waterfall-view");
++    this._stop = this._stop.bind(this);
++    this._start = this._start.bind(this);
++    this._onTimelineData = this._onTimelineData.bind(this);
++    this._onMarkerSelected = this._onMarkerSelected.bind(this);
++    this._onResize = this._onResize.bind(this);
++
++    this.graph = new Waterfall($("#waterfall-graph"), $("#details-pane"));
++    this.markerDetails = new MarkerDetails($("#waterfall-details"));
++
++    this.graph.on("selected", this._onMarkerSelected);
++    this.graph.on("unselected", this._onMarkerSelected);
++    this.markerDetails.on("resize", this._onResize);
++
++    PerformanceController.on(EVENTS.RECORDING_STARTED, this._start);
++    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._stop);
++    PerformanceController.on(EVENTS.TIMELINE_DATA, this._onTimelineData);
++    yield this.graph.recalculateBounds();
++  }),
++
++  /**
++   * Unbinds events.
++   */
++  destroy: function () {
++    this.graph.off("selected", this._onMarkerSelected);
++    this.graph.off("unselected", this._onMarkerSelected);
++    this.markerDetails.off("resize", this._onResize);
++
++    PerformanceController.off(EVENTS.RECORDING_STARTED, this._start);
++    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._stop);
++    PerformanceController.off(EVENTS.TIMELINE_DATA, this._onTimelineData);
++  },
++
++  render: Task.async(function *() {
++    yield this.graph.recalculateBounds();
++    this.graph.setData(this._markers, this._startTime, this._startTime, this._endTime);
++    this.emit(EVENTS.WATERFALL_RENDERED);
++  }),
++
++  /**
++   * Event handlers
++   */
++
++  /**
++   * Called when recording starts.
++   */
++  _start: function (_, startTime) {
++    this._startTime = startTime;
++    this._endTime = startTime;
++    this.graph.clearView();
++  },
++
++  /**
++   * Called when recording stops.
++   */
++  _stop: Task.async(function *(_, { endTime }) {
++    this._endTime = endTime;
++    this._markers = this._markers.sort((a,b) => (a.start > b.start));
++    this.render();
++  }),
++
++  /**
++   * Called when a marker is selected in the waterfall view,
++   * updating the markers detail view.
++   */
++  _onMarkerSelected: function (event, marker) {
++    if (event === "selected") {
++      this.markerDetails.render(marker);
++    }
++    if (event === "unselected") {
++      this.markerDetails.empty();
++    }
++  },
++
++  /**
++   * Called when the marker details view is resized.
++   */
++  _onResize: function () {
++    this.render();
++  },
++
++  /**
++   * Called when the TimelineFront has new data for
++   * framerate, markers or memory, and stores the data
++   * to be plotted subsequently.
++   */
++  _onTimelineData: function (_, eventName, ...data) {
++    if (eventName === "markers") {
++      let [markers, endTime] = data;
++      Array.prototype.push.apply(this._markers, markers);
++    }
++  }
++};
++
++
++/**
++ * Convenient way of emitting events from the view.
++ */
++EventEmitter.decorate(WaterfallView);
+diff --git a/browser/devtools/timeline/widgets/marker-details.js b/browser/devtools/timeline/widgets/marker-details.js
+index 4972350..15ea26f 100644
+--- a/browser/devtools/timeline/widgets/marker-details.js
++++ b/browser/devtools/timeline/widgets/marker-details.js
+@@ -22,17 +22,17 @@ loader.lazyRequireGetter(this, "EventEmitter",
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the view.
+  */
+ function MarkerDetails(parent) {
+   EventEmitter.decorate(this);
+   this._document = parent.ownerDocument;
+   this._parent = parent;
+-  this._splitter = this._document.querySelector("#timeline-waterfall-container > splitter");
++  this._splitter = this._parent.parentNode.querySelector("splitter");
+   this._splitter.addEventListener("mouseup", () => this.emit("resize"));
+ }
+ 
+ MarkerDetails.prototype = {
+   destroy: function() {
+     this.empty();
+     this._parent = null;
+   },
+diff --git a/browser/devtools/timeline/widgets/waterfall.js b/browser/devtools/timeline/widgets/waterfall.js
+index d0839ba..aca84ef 100644
+--- a/browser/devtools/timeline/widgets/waterfall.js
++++ b/browser/devtools/timeline/widgets/waterfall.js
+@@ -43,21 +43,25 @@ const WATERFALL_MARKER_BAR_WIDTH_MIN = 5; // px
+ 
+ const WATERFALL_ROWCOUNT_ONPAGEUPDOWN = 10;
+ 
+ /**
+  * A detailed waterfall view for the timeline data.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the waterfall.
++ * @param nsIDOMNode container
++ *        The container node that key events should be bound to.
++ *        Defaults to `this._document.querySelector("#timeline-pane")`
+  */
+-function Waterfall(parent) {
++function Waterfall(parent, container) {
+   EventEmitter.decorate(this);
+   this._parent = parent;
+   this._document = parent.ownerDocument;
++  this._container = container || this._document.querySelector("#timeline-pane");
+   this._fragment = this._document.createDocumentFragment();
+   this._outstandingMarkers = [];
+ 
+   this._headerContents = this._document.createElement("hbox");
+   this._headerContents.className = "waterfall-header-contents";
+   this._parent.appendChild(this._headerContents);
+ 
+   this._listContents = this._document.createElement("vbox");
+@@ -105,17 +109,17 @@ Waterfall.prototype = {
+     this._buildMarkers(this._listContents, markers, startTime, endTime, dataScale);
+     this.selectRow(this._selectedRowIdx);
+   },
+ 
+   /**
+    * Keybindings.
+    */
+   setupKeys: function() {
+-    let pane = this._document.querySelector("#timeline-pane");
++    let pane = this._container;
+     pane.parentNode.parentNode.addEventListener("keydown", e => {
+       if (e.keyCode === Ci.nsIDOMKeyEvent.DOM_VK_UP) {
+         e.preventDefault();
+         this.selectNearestRow(this._selectedRowIdx - 1);
+       }
+       if (e.keyCode === Ci.nsIDOMKeyEvent.DOM_VK_DOWN) {
+         e.preventDefault();
+         this.selectNearestRow(this._selectedRowIdx + 1);
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index c059b81..eceab4f 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -28,16 +28,34 @@
+ #record-button[checked] {
+   list-style-image: url(profiler-stopwatch-checked.svg);
+ }
+ 
+ #record-button[locked] {
+   pointer-events: none;
+ }
+ 
++/* Details Panel */
++
++#select-waterfall-view {
++  list-style-image: url(profiler-stopwatch.svg);
++}
++
++#select-waterfall-view[checked] {
++  list-style-image: url(profiler-stopwatch-checked.svg);
++}
++
++#select-calltree-view {
++  list-style-image: url(profiler-stopwatch.svg);
++}
++
++#select-calltree-view[checked] {
++  list-style-image: url(profiler-stopwatch-checked.svg);
++}
++
+ /* Profile call tree */
+ 
+ .theme-dark .call-tree-headers-container {
+   border-top: 1px solid #000;
+ }
+ 
+ .theme-light .call-tree-headers-container {
+   border-top: 1px solid #aaa;
+@@ -250,8 +268,153 @@
+ .call-tree-item:hover .call-tree-zoom:hover {
+   opacity: 0;
+ }
+ 
+ .call-tree-category {
+   transform: scale(0.75);
+   transform-origin: center right;
+ }
++
++/**
++ * Details Waterfall Styles
++ */
++
++.waterfall-list-contents {
++  /* Hack: force hardware acceleration */
++  transform: translateZ(1px);
++  overflow-x: hidden;
++  overflow-y: auto;
++}
++
++.waterfall-header-contents {
++  overflow-x: hidden;
++}
++
++.waterfall-background-ticks {
++  /* Background created on a <canvas> in js. */
++  /* @see browser/devtools/timeline/widgets/waterfall.js */
++  background-image: -moz-element(#waterfall-background);
++  background-repeat: repeat-y;
++  background-position: -1px center;
++}
++
++.waterfall-marker-container[is-spacer] {
++  pointer-events: none;
++}
++
++.theme-dark .waterfall-marker-container:not([is-spacer]):nth-child(2n) {
++  background-color: rgba(255,255,255,0.03);
++}
++
++.theme-light .waterfall-marker-container:not([is-spacer]):nth-child(2n) {
++  background-color: rgba(128,128,128,0.03);
++}
++
++.theme-dark .waterfall-marker-container:hover {
++  background-color: rgba(255,255,255,0.1) !important;
++}
++
++.theme-light .waterfall-marker-container:hover {
++  background-color: rgba(128,128,128,0.1) !important;
++}
++
++.waterfall-marker-item {
++  overflow: hidden;
++}
++
++.waterfall-sidebar {
++  -moz-border-end: 1px solid;
++}
++
++.theme-dark .waterfall-sidebar {
++  -moz-border-end-color: #000;
++}
++
++.theme-light .waterfall-sidebar {
++  -moz-border-end-color: #aaa;
++}
++
++.waterfall-marker-container:hover > .waterfall-sidebar {
++  background-color: transparent;
++}
++
++.waterfall-header-name {
++  padding: 4px;
++}
++
++.waterfall-header-tick {
++  width: 100px;
++  font-size: 9px;
++  transform-origin: left center;
++}
++
++.theme-dark .waterfall-header-tick {
++  color: #a9bacb;
++}
++
++.theme-light .waterfall-header-tick {
++  color: #292e33;
++}
++
++.waterfall-header-tick:not(:first-child) {
++  -moz-margin-start: -100px !important; /* Don't affect layout. */
++}
++
++.waterfall-marker-bullet {
++  width: 8px;
++  height: 8px;
++  -moz-margin-start: 8px;
++  -moz-margin-end: 6px;
++  border: 1px solid;
++  border-radius: 1px;
++}
++
++.waterfall-marker-name {
++  font-size: 95%;
++  padding-bottom: 1px !important;
++}
++
++.waterfall-marker-bar {
++  height: 9px;
++  border: 1px solid;
++  border-radius: 1px;
++  transform-origin: left center;
++}
++
++.theme-light .waterfall-marker-container.selected > .waterfall-sidebar,
++.theme-light .waterfall-marker-container.selected > .waterfall-marker-item {
++  background-color: #4c9ed9; /* Select Highlight Blue */
++  color: #f5f7fa; /* Light foreground text */
++}
++
++.theme-dark .waterfall-marker-container.selected > .waterfall-sidebar,
++.theme-dark .waterfall-marker-container.selected > .waterfall-marker-item {
++  background-color: #1d4f73; /* Select Highlight Blue */
++  color: #f5f7fa; /* Light foreground text */
++}
++
++.waterfall-marker-container.selected .waterfall-marker-bullet,
++.waterfall-marker-container.selected .waterfall-marker-bar {
++  border-color: initial!important;
++}
++
++#waterfall-details {
++  padding-top: 28px;
++  overflow: auto;
++}
++
++.marker-details-bullet {
++  width: 8px;
++  height: 8px;
++  margin: 0 8px;
++  border: 1px solid;
++  border-radius: 1px;
++}
++
++.marker-details-type {
++  font-size: 1.2em;
++  font-weight: bold;
++}
++
++.marker-details-duration {
++  font-weight: bold;
++}
+diff --git a/toolkit/devtools/server/actors/timeline.js b/toolkit/devtools/server/actors/timeline.js
+index f132c65..f7e45af 100644
+--- a/toolkit/devtools/server/actors/timeline.js
++++ b/toolkit/devtools/server/actors/timeline.js
+@@ -236,17 +236,22 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+       this._framerateActor = null;
+     }
+ 
+     for (let docShell of this.docShells) {
+       docShell.recordProfileTimelineMarkers = false;
+     }
+ 
+     clearTimeout(this._dataPullTimeout);
+-  }, {}),
++    return this.docShells[0].now();
++  }, {
++    response: {
++      value: RetVal("number")
++    }
++  }),
+ 
+   /**
+    * When a new window becomes available in the tabActor, start recording its
+    * markers if we were recording.
+    */
+   _onWindowReady: function({window}) {
+     if (this._isRecording) {
+       let docShell = window.QueryInterface(Ci.nsIInterfaceRequestor)
+-- 
+1.8.4.2
+
