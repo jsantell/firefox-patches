@@ -1,0 +1,1044 @@
+From 290a9e177b93198935891aa812168cef47964561 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 4 Dec 2014 13:22:13 -0800
+Subject: Bug 1055217 - Implement UI for bypassing audio nodes in the
+ web audio editor, r=vp
+
+---
+ browser/devtools/webaudioeditor/controller.js      |   7 +-
+ browser/devtools/webaudioeditor/includes.js        |   5 +
+ browser/devtools/webaudioeditor/models.js          |  32 ++++-
+ browser/devtools/webaudioeditor/views/context.js   |  71 ++++++-----
+ browser/devtools/webaudioeditor/views/inspector.js |  61 ++++++++--
+ browser/devtools/webaudioeditor/webaudioeditor.xul |  12 +-
+ .../browser/devtools/webaudioeditor.properties     |   4 +
+ browser/themes/linux/jar.mn                        |   1 +
+ browser/themes/osx/jar.mn                          |   1 +
+ browser/themes/shared/devtools/images/power.svg    |  14 +++
+ .../themes/shared/devtools/webaudioeditor.inc.css  |  28 +++++
+ browser/themes/windows/jar.mn                      |   2 +
+ toolkit/devtools/server/actors/webaudio.js         | 131 +++++++++++++--------
+ 13 files changed, 268 insertions(+), 101 deletions(-)
+ create mode 100644 browser/themes/shared/devtools/images/power.svg
+
+diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
+index ee8dc45..fdb05d5 100644
+--- a/browser/devtools/webaudioeditor/controller.js
++++ b/browser/devtools/webaudioeditor/controller.js
+@@ -32,17 +32,17 @@ function shutdownWebAudioEditor() {
+ 
+ /**
+  * Functions handling target-related lifetime events.
+  */
+ let WebAudioEditorController = {
+   /**
+    * Listen for events emitted by the current tab target.
+    */
+-  initialize: function() {
++  initialize: Task.async(function* () {
+     telemetry.toolOpened("webaudioeditor");
+     this._onTabNavigated = this._onTabNavigated.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
+ 
+     gTarget.on("will-navigate", this._onTabNavigated);
+     gTarget.on("navigate", this._onTabNavigated);
+     gFront.on("start-context", this._onStartContext);
+     gFront.on("create-node", this._onCreateNode);
+@@ -51,17 +51,20 @@ let WebAudioEditorController = {
+     gFront.on("disconnect-node", this._onDisconnectNode);
+     gFront.on("change-param", this._onChangeParam);
+     gFront.on("destroy-node", this._onDestroyNode);
+ 
+     // Hook into theme change so we can change
+     // the graph's marker styling, since we can't do this
+     // with CSS
+     gDevTools.on("pref-changed", this._onThemeChange);
+-  },
++
++    // Store the AudioNode definitions from the WebAudioFront
++    DEFINITION = yield gFront.getDefinition();
++  }),
+ 
+   /**
+    * Remove events emitted by the current tab target.
+    */
+   destroy: function() {
+     telemetry.toolClosed("webaudioeditor");
+     gTarget.off("will-navigate", this._onTabNavigated);
+     gTarget.off("navigate", this._onTabNavigated);
+diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
+index ddac056..38c0d5f 100644
+--- a/browser/devtools/webaudioeditor/includes.js
++++ b/browser/devtools/webaudioeditor/includes.js
+@@ -9,24 +9,29 @@ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ 
+ const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ 
+ let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ let { EventTarget } = require("sdk/event/target");
++
+ const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ const { Class } = require("sdk/core/heritage");
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const STRINGS_URI = "chrome://browser/locale/devtools/webaudioeditor.properties"
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const Telemetry = require("devtools/shared/telemetry");
+ const telemetry = new Telemetry();
+ 
++// `DEFINITION` defined in the controller's initialization,
++// which describes all the properties of an AudioNode
++let DEFINITION;
++
+ // Override DOM promises with Promise.jsm helpers
+ const { defer, all } = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ 
+ /* Events fired on `window` to indicate state or actions*/
+ const EVENTS = {
+   // Fired when the first AudioNode has been created, signifying
+   // that the AudioContext is being used and should be tracked via the editor.
+   START_CONTEXT: "WebAudioEditor:StartContext",
+diff --git a/browser/devtools/webaudioeditor/models.js b/browser/devtools/webaudioeditor/models.js
+index e9ce10c..e46117e 100644
+--- a/browser/devtools/webaudioeditor/models.js
++++ b/browser/devtools/webaudioeditor/models.js
+@@ -30,16 +30,22 @@ const AudioNodeModel = Class({
+   /**
+    * After instantiating the AudioNodeModel, calling `setup` caches values
+    * from the actor onto the model. In this case, only the type of audio node.
+    *
+    * @return promise
+    */
+   setup: Task.async(function* () {
+     yield this.getType();
++
++    // Query bypass status on start up
++    this._bypassed = yield this.isBypassed();
++
++    // Store whether or not this node is bypassable in the first place
++    this.bypassable = !DEFINITION[this.type].unbypassable;
+   }),
+ 
+   /**
+    * A proxy for the underlying AudioNodeActor to fetch its type
+    * and subsequently assign the type to the instance.
+    *
+    * @return Promise->String
+    */
+@@ -71,16 +77,37 @@ const AudioNodeModel = Class({
+    * Clears out all internal connection data. Emits "disconnect" event.
+    */
+   disconnect: function () {
+     this.connections.length = 0;
+     coreEmit(this, "disconnect", this);
+   },
+ 
+   /**
++   * Gets the bypass status of the audio node.
++   *
++   * @return Promise->Boolean
++   */
++  isBypassed: function () {
++    return this.actor.isBypassed();
++  },
++
++  /**
++   * Sets the bypass value of an AudioNode.
++   *
++   * @param Boolean enable
++   * @return Promise
++   */
++  bypass: function (enable) {
++    this._bypassed = enable;
++    coreEmit(this, "bypass", this, enable);
++    return this.actor.bypass(enable);
++  },
++
++  /**
+    * Returns a promise that resolves to an array of objects containing
+    * both a `param` name property and a `value` property.
+    *
+    * @return Promise->Object
+    */
+   getParams: function () {
+     return this.actor.getParams();
+   },
+@@ -90,17 +117,18 @@ const AudioNodeModel = Class({
+    * the graph to be rendered.
+    *
+    * @param dagreD3.Digraph
+    */
+   addToGraph: function (graph) {
+     graph.addNode(this.id, {
+       type: this.type,
+       label: this.type.replace(/Node$/, ""),
+-      id: this.id
++      id: this.id,
++      bypassed: this._bypassed
+     });
+   },
+ 
+   /**
+    * Takes a `dagreD3.Digraph` object and adds edges to
+    * the graph to be rendered. Separate from `addToGraph`,
+    * as while we depend on D3/Dagre's constraints, we cannot
+    * add edges for nodes that have not yet been added to the graph.
+@@ -263,12 +291,12 @@ const AudioNodesCollection = Class({
+   _onModelEvent: function (eventName, node, ...args) {
+     if (eventName === "remove") {
+       // If a `remove` event from the model, remove it
+       // from the collection, and let the method handle the emitting on
+       // the collection
+       this.remove(node);
+     } else {
+       // Pipe the event to the collection
+-      coreEmit(this, eventName, [node].concat(args));
++      coreEmit(this, eventName, node, ...args);
+     }
+   }
+ });
+diff --git a/browser/devtools/webaudioeditor/views/context.js b/browser/devtools/webaudioeditor/views/context.js
+index 139047c..75acae4 100644
+--- a/browser/devtools/webaudioeditor/views/context.js
++++ b/browser/devtools/webaudioeditor/views/context.js
+@@ -31,41 +31,42 @@ const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove"];
+ /**
+  * Functions handling the graph UI.
+  */
+ let ContextView = {
+   /**
+    * Initialization function, called when the tool is started.
+    */
+   initialize: function() {
+-    this._onGraphNodeClick = this._onGraphNodeClick.bind(this);
++    this._onGraphClick = this._onGraphClick.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
+     this._onNodeSelect = this._onNodeSelect.bind(this);
+     this._onStartContext = this._onStartContext.bind(this);
+     this._onEvent = this._onEvent.bind(this);
+ 
+     this.draw = debounce(this.draw.bind(this), GRAPH_DEBOUNCE_TIMER);
+-    $('#graph-target').addEventListener('click', this._onGraphNodeClick, false);
++    $("#graph-target").addEventListener("click", this._onGraphClick, false);
+ 
+     window.on(EVENTS.THEME_CHANGE, this._onThemeChange);
+     window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
+     window.on(EVENTS.START_CONTEXT, this._onStartContext);
+     gAudioNodes.on("*", this._onEvent);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     // If the graph was rendered at all, then the handler
+     // for zooming in will be set. We must remove it to prevent leaks.
+     if (this._zoomBinding) {
+       this._zoomBinding.on("zoom", null);
+     }
+-    $('#graph-target').removeEventListener('click', this._onGraphNodeClick, false);
++    $("#graph-target").removeEventListener("click", this._onGraphClick, false);
++
+     window.off(EVENTS.THEME_CHANGE, this._onThemeChange);
+     window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
+     window.off(EVENTS.START_CONTEXT, this._onStartContext);
+     gAudioNodes.off("*", this._onEvent);
+   },
+ 
+   /**
+    * Called when a page is reloaded and waiting for a "start-context" event
+@@ -126,68 +127,68 @@ let ContextView = {
+   /**
+    * Takes an actorID and returns the corresponding DOM SVG element in the graph
+    */
+   _getNodeByID: function (actorID) {
+     return $(".nodes > g[data-id='" + actorID + "']");
+   },
+ 
+   /**
++   * Sets the appropriate class on an SVG node when its bypass
++   * status is toggled.
++   */
++  _bypassNode: function (node, enabled) {
++    let el = this._getNodeByID(node.id);
++    el.classList[enabled ? "add" : "remove"]("bypassed");
++  },
++
++  /**
+    * This method renders the nodes currently available in `gAudioNodes` and is
+    * throttled to be called at most every `GRAPH_DEBOUNCE_TIMER` milliseconds.
+    * It's called whenever the audio context routing changes, after being debounced.
+    */
+   draw: function () {
+     // Clear out previous SVG information
+     this.clearGraph();
+ 
+     let graph = new dagreD3.Digraph();
+     let renderer = new dagreD3.Renderer();
+     gAudioNodes.populateGraph(graph);
+ 
+     // Post-render manipulation of the nodes
+     let oldDrawNodes = renderer.drawNodes();
+     renderer.drawNodes(function(graph, root) {
+       let svgNodes = oldDrawNodes(graph, root);
+-      svgNodes.attr("class", (n) => {
+-        let node = graph.node(n);
+-        return "audionode type-" + node.type;
+-      });
+-      svgNodes.attr("data-id", (n) => {
++      svgNodes.each(function (n) {
+         let node = graph.node(n);
+-        return node.id;
++        let classString = "audionode type-" + node.type + (node.bypassed ? " bypassed" : "");
++        this.setAttribute("class", classString);
++        this.setAttribute("data-id", node.id);
++        this.setAttribute("data-type", node.type);
+       });
+       return svgNodes;
+     });
+ 
+     // Post-render manipulation of edges
+-    // TODO do all of this more efficiently, rather than
+-    // using the direct D3 helper utilities to loop over each
+-    // edge several times
+     let oldDrawEdgePaths = renderer.drawEdgePaths();
++    let defaultClasses = "edgePath enter";
++
+     renderer.drawEdgePaths(function(graph, root) {
+       let svgEdges = oldDrawEdgePaths(graph, root);
+-      svgEdges.attr("data-source", (n) => {
+-        let edge = graph.edge(n);
+-        return edge.source;
+-      });
+-      svgEdges.attr("data-target", (n) => {
+-        let edge = graph.edge(n);
+-        return edge.target;
+-      });
+-      svgEdges.attr("data-param", (n) => {
+-        let edge = graph.edge(n);
+-        return edge.param ? edge.param : null;
+-      });
+-      // We have to manually specify the default classes on the edges
+-      // as to not overwrite them
+-      let defaultClasses = "edgePath enter";
+-      svgEdges.attr("class", (n) => {
+-        let edge = graph.edge(n);
+-        return defaultClasses + (edge.param ? (" param-connection " + edge.param) : "");
++      svgEdges.each(function (e) {
++        let edge = graph.edge(e);
++
++        // We have to manually specify the default classes on the edges
++        // as to not overwrite them
++        let edgeClass = defaultClasses + (edge.param ? (" param-connection " + edge.param) : "");
++
++        this.setAttribute("data-source", edge.source);
++        this.setAttribute("data-target", edge.target);
++        this.setAttribute("data-param", edge.param ? edge.param : null);
++        this.setAttribute("class", edgeClass);
+       });
+ 
+       return svgEdges;
+     });
+ 
+     // Override Dagre-d3's post render function by passing in our own.
+     // This way we can leave styles out of it.
+     renderer.postRender((graph, root) => {
+@@ -262,16 +263,21 @@ let ContextView = {
+     this.draw();
+   },
+ 
+   /**
+    * Called when `gAudioNodes` fires an event -- most events (listed
+    * in GRAPH_REDRAW_EVENTS) qualify as a redraw event.
+    */
+   _onEvent: function (eventName, ...args) {
++    // If bypassing, just toggle the class on the SVG node
++    // rather than rerendering everything
++    if (eventName === "bypass") {
++      this._bypassNode.apply(this, args);
++    }
+     if (~GRAPH_REDRAW_EVENTS.indexOf(eventName)) {
+       this.draw();
+     }
+   },
+ 
+   _onNodeSelect: function (eventName, id) {
+     this.focusNode(id);
+   },
+@@ -283,22 +289,23 @@ let ContextView = {
+     let markerColor = MARKER_STYLING[theme];
+     let marker = $("#arrowhead");
+     if (marker) {
+       marker.setAttribute("style", "fill: " + markerColor);
+     }
+   },
+ 
+   /**
+-   * Fired when a node in the svg graph is clicked. Used to handle triggering the AudioNodePane.
++   * Fired when a click occurs in the graph. Forks to handling a direct node click
++   * for inspector selection, and individual node controls.
+    *
+    * @param Event e
+    *        Click event.
+    */
+-  _onGraphNodeClick: function (e) {
++  _onGraphClick: function (e) {
+     let node = findGraphNodeParent(e.target);
+     // If node not found (clicking outside of an audio node in the graph),
+     // then ignore this event
+     if (!node)
+       return;
+ 
+     window.emit(EVENTS.UI_SELECT_NODE, node.getAttribute("data-id"));
+   }
+diff --git a/browser/devtools/webaudioeditor/views/inspector.js b/browser/devtools/webaudioeditor/views/inspector.js
+index 0a80755..ce55a04 100644
+--- a/browser/devtools/webaudioeditor/views/inspector.js
++++ b/browser/devtools/webaudioeditor/views/inspector.js
+@@ -51,60 +51,63 @@ let InspectorView = {
+     this.bindToggle();
+ 
+     // Hide inspector view on startup
+     this.hideImmediately();
+ 
+     this._onEval = this._onEval.bind(this);
+     this._onNodeSelect = this._onNodeSelect.bind(this);
+     this._onDestroyNode = this._onDestroyNode.bind(this);
++    this._onCommandClick = this._onCommandClick.bind(this);
+ 
+     this._propsView = new VariablesView($("#properties-tabpanel-content"), GENERIC_VARIABLES_VIEW_SETTINGS);
+     this._propsView.eval = this._onEval;
+ 
++    $("#audio-node-toolbar toolbarbutton").addEventListener("command", this._onCommandClick);
+     window.on(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
+     gAudioNodes.on("remove", this._onDestroyNode);
+   },
+ 
+   /**
+    * Destruction function called when the tool cleans up.
+    */
+   destroy: function () {
+     this.unbindToggle();
++    $("#audio-node-toolbar toolbarbutton").removeEventListener("command", this._onCommandClick);
+     window.off(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
+     gAudioNodes.off("remove", this._onDestroyNode);
+ 
+     this.el = null;
+     this.button = null;
+     this._tabsPane = null;
+   },
+ 
+   /**
+    * Takes a AudioNodeView `node` and sets it as the current
+    * node and scaffolds the inspector view based off of the new node.
+    */
+-  setCurrentAudioNode: function (node) {
++  setCurrentAudioNode: Task.async(function* (node) {
+     this._currentNode = node || null;
+ 
+     // If no node selected, set the inspector back to "no AudioNode selected"
+     // view.
+     if (!node) {
+       $("#web-audio-editor-details-pane-empty").removeAttribute("hidden");
+       $("#web-audio-editor-tabs").setAttribute("hidden", "true");
+       window.emit(EVENTS.UI_INSPECTOR_NODE_SET, null);
+     }
+     // Otherwise load up the tabs view and hide the empty placeholder
+     else {
+       $("#web-audio-editor-details-pane-empty").setAttribute("hidden", "true");
+       $("#web-audio-editor-tabs").removeAttribute("hidden");
+-      this._setTitle();
+-      this._buildPropertiesView()
+-        .then(() => window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id));
++      yield this._buildToolbar();
++      yield this._buildPropertiesView();
++      window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id);
+     }
+-  },
++  }),
+ 
+   /**
+    * Returns the current AudioNodeView.
+    */
+   getCurrentAudioNode: function () {
+     return this._currentNode;
+   },
+ 
+@@ -115,24 +118,35 @@ let InspectorView = {
+     this._propsView.empty();
+     // Set current node to empty to load empty view
+     this.setCurrentAudioNode();
+ 
+     // Reset AudioNode inspector and hide
+     this.hideImmediately();
+   },
+ 
+-  /**
+-   * Sets the title of the Inspector view
+-   */
+-  _setTitle: function () {
+-    let node = this._currentNode;
+-    let title = node.type.replace(/Node$/, "");
+-    $("#web-audio-inspector-title").setAttribute("value", title);
+-  },
++  _buildToolbar: Task.async(function* () {
++    let node = this.getCurrentAudioNode();
++
++    let bypassable = node.bypassable;
++    let bypassed = yield node.isBypassed();
++    let button = $("#audio-node-toolbar .bypass");
++
++    if (!bypassable) {
++      button.setAttribute("disabled", true);
++    } else {
++      button.removeAttribute("disabled");
++    }
++
++    if (!bypassable || bypassed) {
++      button.removeAttribute("checked");
++    } else {
++      button.setAttribute("checked", true);
++    }
++  }),
+ 
+   /**
+    * Reconstructs the `Properties` tab in the inspector
+    * with the `this._currentNode` as it's source.
+    */
+   _buildPropertiesView: Task.async(function* () {
+     let propsView = this._propsView;
+     let node = this._currentNode;
+@@ -231,10 +245,31 @@ let InspectorView = {
+   /**
+    * Called when `DESTROY_NODE` is fired to remove the node from props view if
+    * it's currently selected.
+    */
+   _onDestroyNode: function (node) {
+     if (this._currentNode && this._currentNode.id === node.id) {
+       this.setCurrentAudioNode(null);
+     }
++  },
++
++  _onCommandClick: function (e) {
++    let node = this.getCurrentAudioNode();
++    let button = e.target;
++    let command = button.getAttribute("data-command");
++    let checked = button.getAttribute("checked");
++
++    if (button.getAttribute("disabled")) {
++      return;
++    }
++
++    if (command === "bypass") {
++      if (checked) {
++        button.removeAttribute("checked");
++        node.bypass(true);
++      } else {
++        button.setAttribute("checked", true);
++        node.bypass(false);
++      }
++    }
+   }
+ };
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor.xul b/browser/devtools/webaudioeditor/webaudioeditor.xul
+index 9be6b2b..f2b665c 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor.xul
++++ b/browser/devtools/webaudioeditor/webaudioeditor.xul
+@@ -1,17 +1,17 @@
+ <?xml version="1.0"?>
+ <!-- This Source Code Form is subject to the terms of the Mozilla Public
+    - License, v. 2.0. If a copy of the MPL was not distributed with this
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ <?xml-stylesheet href="chrome://browser/skin/" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/content/devtools/widgets.css" type="text/css"?>
+ <?xml-stylesheet href="chrome://browser/skin/devtools/common.css" type="text/css"?>
+ <?xml-stylesheet href="chrome://browser/skin/devtools/widgets.css" type="text/css"?>
+ <?xml-stylesheet href="chrome://browser/skin/devtools/webaudioeditor.css" type="text/css"?>
+-<?xml-stylesheet href="chrome://browser/content/devtools/widgets.css" type="text/css"?>
+ <!DOCTYPE window [
+   <!ENTITY % debuggerDTD SYSTEM "chrome://browser/locale/devtools/webaudioeditor.dtd">
+   %debuggerDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+ 
+   <script type="application/javascript;version=1.8"
+@@ -72,26 +72,30 @@
+                   xmlns:xlink="http://www.w3.org/1999/xlink">
+                 <g id="graph-target" transform="translate(20,20)"/>
+               </svg>
+             </vbox>
+           </box>
+         </hbox>
+         <splitter class="devtools-side-splitter"/>
+         <vbox id="web-audio-inspector" hidden="true">
+-          <hbox class="devtools-toolbar">
+-            <label id="web-audio-inspector-title" value="&webAudioEditorUI.inspectorTitle;"></label>
+-          </hbox>
+           <deck id="web-audio-editor-details-pane" flex="1">
+             <vbox id="web-audio-editor-details-pane-empty" flex="1">
+               <label value="&webAudioEditorUI.inspectorEmpty;"></label>
+             </vbox>
+             <tabbox id="web-audio-editor-tabs"
+                     class="devtools-sidebar-tabs"
+                     handleCtrlTab="false">
++              <toolbar id="audio-node-toolbar" class="devtools-toolbar">
++                <hbox class="devtools-toolbarbutton-group">
++                  <toolbarbutton class="bypass devtools-toolbarbutton"
++                                 data-command="bypass"
++                                 tabindex="0"/>
++                </hbox>
++              </toolbar>
+               <tabs>
+                 <tab id="properties-tab"
+                      label="&webAudioEditorUI.tab.properties;"/>
+               </tabs>
+               <tabpanels flex="1">
+                 <tabpanel id="properties-tabpanel"
+                           class="tabpanel-content">
+                   <vbox id="properties-tabpanel-content" flex="1">
+diff --git a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.properties b/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.properties
+index 8018ec7..0f682e3 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.properties
+@@ -28,8 +28,12 @@ ToolboxWebAudioEditor1.tooltip=Web Audio context visualizer and audio node inspe
+ # LOCALIZATION NOTE (collapseInspector): This is the tooltip for the button
+ # that collapses the inspector in the web audio tool UI.
+ collapseInspector=Collapse inspector
+ 
+ # LOCALIZATION NOTE (expandInspector): This is the tooltip for the button
+ # that expands the inspector in the web audio tool UI.
+ expandInspector=Expand inspector
+ 
++# LOCALIZATION NOTE (webAudioEditorTooltipBypass): This is the tooltip for the
++# button that bypasses an AudioNode
++webAudioEditorTooltipBypass=Bypass AudioNode
++
+diff --git a/browser/themes/linux/jar.mn b/browser/themes/linux/jar.mn
+index 5c2ebcc..3ac5c11 100644
+--- a/browser/themes/linux/jar.mn
++++ b/browser/themes/linux/jar.mn
+@@ -217,16 +217,17 @@ browser.jar:
+   skin/classic/browser/devtools/controls.png          (../shared/devtools/images/controls.png)
+   skin/classic/browser/devtools/controls@2x.png       (../shared/devtools/images/controls@2x.png)
+   skin/classic/browser/devtools/performance-icons.svg  (../shared/devtools/images/performance-icons.svg)
+   skin/classic/browser/devtools/newtab.png             (../shared/devtools/images/newtab.png)
+   skin/classic/browser/devtools/newtab@2x.png          (../shared/devtools/images/newtab@2x.png)
+   skin/classic/browser/devtools/newtab-inverted.png    (../shared/devtools/images/newtab-inverted.png)
+   skin/classic/browser/devtools/newtab-inverted@2x.png (../shared/devtools/images/newtab-inverted@2x.png)
+ * skin/classic/browser/devtools/widgets.css           (devtools/widgets.css)
++  skin/classic/browser/devtools/power.svg                     (../shared/devtools/images/power.svg)
+   skin/classic/browser/devtools/filetype-dir-close.svg        (../shared/devtools/images/filetypes/dir-close.svg)
+   skin/classic/browser/devtools/filetype-dir-open.svg         (../shared/devtools/images/filetypes/dir-open.svg)
+   skin/classic/browser/devtools/filetype-globe.svg            (../shared/devtools/images/filetypes/globe.svg)
+   skin/classic/browser/devtools/filetype-store.svg            (../shared/devtools/images/filetypes/store.svg)
+   skin/classic/browser/devtools/commandline-icon.png          (../shared/devtools/images/commandline-icon.png)
+   skin/classic/browser/devtools/commandline-icon@2x.png       (../shared/devtools/images/commandline-icon@2x.png)
+   skin/classic/browser/devtools/command-paintflashing.png     (../shared/devtools/images/command-paintflashing.png)
+   skin/classic/browser/devtools/command-paintflashing@2x.png  (../shared/devtools/images/command-paintflashing@2x.png)
+diff --git a/browser/themes/osx/jar.mn b/browser/themes/osx/jar.mn
+index a4f6956..18ca933 100644
+--- a/browser/themes/osx/jar.mn
++++ b/browser/themes/osx/jar.mn
+@@ -343,16 +343,17 @@ browser.jar:
+   skin/classic/browser/devtools/controls.png                (../shared/devtools/images/controls.png)
+   skin/classic/browser/devtools/controls@2x.png             (../shared/devtools/images/controls@2x.png)
+   skin/classic/browser/devtools/performance-icons.svg       (../shared/devtools/images/performance-icons.svg)
+   skin/classic/browser/devtools/newtab.png                  (../shared/devtools/images/newtab.png)
+   skin/classic/browser/devtools/newtab@2x.png               (../shared/devtools/images/newtab@2x.png)
+   skin/classic/browser/devtools/newtab-inverted.png         (../shared/devtools/images/newtab-inverted.png)
+   skin/classic/browser/devtools/newtab-inverted@2x.png      (../shared/devtools/images/newtab-inverted@2x.png)
+ * skin/classic/browser/devtools/widgets.css                 (devtools/widgets.css)
++  skin/classic/browser/devtools/power.svg                   (../shared/devtools/images/power.svg)
+   skin/classic/browser/devtools/filetype-dir-close.svg      (../shared/devtools/images/filetypes/dir-close.svg)
+   skin/classic/browser/devtools/filetype-dir-open.svg       (../shared/devtools/images/filetypes/dir-open.svg)
+   skin/classic/browser/devtools/filetype-globe.svg          (../shared/devtools/images/filetypes/globe.svg)
+   skin/classic/browser/devtools/filetype-store.svg          (../shared/devtools/images/filetypes/store.svg)
+   skin/classic/browser/devtools/commandline-icon.png        (../shared/devtools/images/commandline-icon.png)
+   skin/classic/browser/devtools/commandline-icon@2x.png     (../shared/devtools/images/commandline-icon@2x.png)
+   skin/classic/browser/devtools/command-paintflashing.png     (../shared/devtools/images/command-paintflashing.png)
+   skin/classic/browser/devtools/command-paintflashing@2x.png  (../shared/devtools/images/command-paintflashing@2x.png)
+diff --git a/browser/themes/shared/devtools/images/power.svg b/browser/themes/shared/devtools/images/power.svg
+new file mode 100644
+index 0000000..2888951
+--- /dev/null
++++ b/browser/themes/shared/devtools/images/power.svg
+@@ -0,0 +1,14 @@
++<!--
++Logo from raphaeljs.com, MIT License
++
++Copyright © 2008 Dmitry Baranovskiy
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
++
++The software is provided “as is”, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose and noninfringement. In no event shall the authors or copyright holders be liable for any claim, damages or other liability, whether in an action of contract, tort or otherwise, arising from, out of or in connection with the software or the use or other dealings in the software.
++-->
++<svg width="16" height="16" xmlns="http://www.w3.org/2000/svg">
++  <path stroke="#edf0f1" d="m10.89891,2.50043c-0.49827,-0.24134 -1.09841,-0.03411 -1.34129,0.46514c-0.24185,0.49928 -0.03311,1.09942 0.46517,1.34128c1.56306,0.76071 2.64193,2.36094 2.64092,4.21555c-0.00501,2.58626 -2.09749,4.6787 -4.68322,4.68321c-2.58623,-0.005 -4.67869,-2.09746 -4.68371,-4.68321c-0.001,-1.85561 1.07834,-3.45731 2.64294,-4.21654c0.49928,-0.24185 0.7065,-0.84201 0.46514,-1.34129c-0.24185,-0.49825 -0.84098,-0.70697 -1.34029,-0.46513c-2.23396,1.08135 -3.77446,3.37351 -3.77545,6.02296c0.00099,3.69518 2.99518,6.68989 6.69138,6.69088c3.6957,-0.00099 6.69037,-2.9957 6.69089,-6.69088c-0.00102,-2.64846 -1.53948,-4.9391 -3.77247,-6.02197zm-2.91842,4.9346c0.55398,0 1.00309,-0.44861 1.00309,-1.00357l0,-4.68373c0,-0.55446 -0.44911,-1.00309 -1.00309,-1.00309c-0.555,0 -1.00358,0.44911 -1.00358,1.00309l0,4.68321c0,0.55499 0.44858,1.00409 1.00358,1.00409z" stroke-width="0" fill="#edf0f1"/>
++</svg>
+diff --git a/browser/themes/shared/devtools/webaudioeditor.inc.css b/browser/themes/shared/devtools/webaudioeditor.inc.css
+index 274c41d..8625d0b 100644
+--- a/browser/themes/shared/devtools/webaudioeditor.inc.css
++++ b/browser/themes/shared/devtools/webaudioeditor.inc.css
+@@ -79,16 +79,24 @@ g.edgePath.param-connection {
+   cursor: pointer;
+ }
+ 
+ .nodes rect {
+   stroke: var(--theme-tab-toolbar-background);
+   fill: var(--theme-toolbar-background);
+ }
+ 
++.nodes g.bypassed rect {
++  opacity: 0.5;
++}
++
++.nodes g.bypassed text {
++  opacity: 0.8;
++}
++
+ .nodes g.selected rect {
+   fill: var(--theme-selection-background);
+ }
+ 
+ /* Text in nodes and edges */
+ text {
+   cursor: default; /* override the "text" cursor */
+   font-weight: 300;
+@@ -160,16 +168,36 @@ text {
+   }
+ 
+   .web-audio-inspector .error {
+     background-image: url(alerticon-warning@2x.png);
+   }
+ }
+ 
+ /**
++ * Inspector toolbar
++ */
++
++#audio-node-toolbar .bypass {
++  list-style-image: url(power.svg);
++}
++
++#audio-node-toolbar toolbarbutton[disabled] {
++  opacity: 0.5;
++  background-color: none;
++}
++
++.theme-dark #audio-node-toolbar toolbarbutton[checked] {
++  background-color: #1d4f73; /* Select Highlight Blue */
++}
++.theme-light #audio-node-toolbar toolbarbutton[checked] {
++  background-color: #4c9ed9; /* Select Highlight Blue */
++}
++
++/**
+  * Responsive Styles
+  * `.devtools-responsive-container` takes care of most of
+  * the changing of host types.
+  */
+ @media (max-width: 700px) {
+   /**
+    * Override the inspector toggle so it's always open
+    * in the portrait view, with the toggle button hidden.
+diff --git a/browser/themes/windows/jar.mn b/browser/themes/windows/jar.mn
+index 9f06d41..c5a13f3 100644
+--- a/browser/themes/windows/jar.mn
++++ b/browser/themes/windows/jar.mn
+@@ -252,16 +252,17 @@ browser.jar:
+         skin/classic/browser/devtools/controls.png                  (../shared/devtools/images/controls.png)
+         skin/classic/browser/devtools/controls@2x.png               (../shared/devtools/images/controls@2x.png)
+         skin/classic/browser/devtools/performance-icons.svg         (../shared/devtools/images/performance-icons.svg)
+         skin/classic/browser/devtools/newtab.png                    (../shared/devtools/images/newtab.png)
+         skin/classic/browser/devtools/newtab@2x.png                 (../shared/devtools/images/newtab@2x.png)
+         skin/classic/browser/devtools/newtab-inverted.png           (../shared/devtools/images/newtab-inverted.png)
+         skin/classic/browser/devtools/newtab-inverted@2x.png        (../shared/devtools/images/newtab-inverted@2x.png)
+ *       skin/classic/browser/devtools/widgets.css                   (devtools/widgets.css)
++        skin/classic/browser/devtools/power.svg                     (../shared/devtools/images/power.svg)
+         skin/classic/browser/devtools/filetype-dir-close.svg        (../shared/devtools/images/filetypes/dir-close.svg)
+         skin/classic/browser/devtools/filetype-dir-open.svg         (../shared/devtools/images/filetypes/dir-open.svg)
+         skin/classic/browser/devtools/filetype-globe.svg            (../shared/devtools/images/filetypes/globe.svg)
+         skin/classic/browser/devtools/filetype-store.svg            (../shared/devtools/images/filetypes/store.svg)
+         skin/classic/browser/devtools/commandline-icon.png          (../shared/devtools/images/commandline-icon.png)
+         skin/classic/browser/devtools/commandline-icon@2x.png          (../shared/devtools/images/commandline-icon@2x.png)
+         skin/classic/browser/devtools/alerticon-warning.png         (../shared/devtools/images/alerticon-warning.png)
+         skin/classic/browser/devtools/alerticon-warning@2x.png      (../shared/devtools/images/alerticon-warning@2x.png)
+@@ -698,16 +699,17 @@ browser.jar:
+         skin/classic/aero/browser/devtools/controls.png              (../shared/devtools/images/controls.png)
+         skin/classic/aero/browser/devtools/controls@2x.png           (../shared/devtools/images/controls@2x.png)
+         skin/classic/aero/browser/devtools/performance-icons.svg     (../shared/devtools/images/performance-icons.svg)
+         skin/classic/aero/browser/devtools/newtab.png                (../shared/devtools/images/newtab.png)
+         skin/classic/aero/browser/devtools/newtab@2x.png             (../shared/devtools/images/newtab@2x.png)
+         skin/classic/aero/browser/devtools/newtab-inverted.png       (../shared/devtools/images/newtab-inverted.png)
+         skin/classic/aero/browser/devtools/newtab-inverted@2x.png    (../shared/devtools/images/newtab-inverted@2x.png)
+ *       skin/classic/aero/browser/devtools/widgets.css               (devtools/widgets.css)
++        skin/classic/aero/browser/devtools/power.svg                 (../shared/devtools/images/power.svg)
+         skin/classic/aero/browser/devtools/filetype-dir-close.svg    (../shared/devtools/images/filetypes/dir-close.svg)
+         skin/classic/aero/browser/devtools/filetype-dir-open.svg     (../shared/devtools/images/filetypes/dir-open.svg)
+         skin/classic/aero/browser/devtools/filetype-globe.svg        (../shared/devtools/images/filetypes/globe.svg)
+         skin/classic/aero/browser/devtools/filetype-store.svg        (../shared/devtools/images/filetypes/store.svg)
+         skin/classic/aero/browser/devtools/commandline-icon.png      (../shared/devtools/images/commandline-icon.png)
+         skin/classic/aero/browser/devtools/commandline-icon@2x.png      (../shared/devtools/images/commandline-icon@2x.png)
+         skin/classic/aero/browser/devtools/command-paintflashing.png    (../shared/devtools/images/command-paintflashing.png)
+         skin/classic/aero/browser/devtools/command-paintflashing@2x.png (../shared/devtools/images/command-paintflashing@2x.png)
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 09aebd6..6301f81 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -30,83 +30,106 @@ const NODE_CREATION_METHODS = [
+ ];
+ 
+ const NODE_ROUTING_METHODS = [
+   "connect", "disconnect"
+ ];
+ 
+ const NODE_PROPERTIES = {
+   "OscillatorNode": {
+-    "type": {},
+-    "frequency": {},
+-    "detune": {}
++    "properties": {
++      "type": {},
++      "frequency": {},
++      "detune": {}
++    }
+   },
+   "GainNode": {
+-    "gain": {}
++    "properties": { "gain": {}}
+   },
+   "DelayNode": {
+-    "delayTime": {}
++    "properties": { "delayTime": {}}
+   },
+   "AudioBufferSourceNode": {
+-    "buffer": { "Buffer": true },
+-    "playbackRate": {},
+-    "loop": {},
+-    "loopStart": {},
+-    "loopEnd": {}
++    "properties": {
++      "buffer": { "Buffer": true },
++      "playbackRate": {},
++      "loop": {},
++      "loopStart": {},
++      "loopEnd": {}
++    }
+   },
+   "ScriptProcessorNode": {
+-    "bufferSize": { "readonly": true }
++    "properties": { "bufferSize": { "readonly": true }}
+   },
+   "PannerNode": {
+-    "panningModel": {},
+-    "distanceModel": {},
+-    "refDistance": {},
+-    "maxDistance": {},
+-    "rolloffFactor": {},
+-    "coneInnerAngle": {},
+-    "coneOuterAngle": {},
+-    "coneOuterGain": {}
++    "properties": {
++      "panningModel": {},
++      "distanceModel": {},
++      "refDistance": {},
++      "maxDistance": {},
++      "rolloffFactor": {},
++      "coneInnerAngle": {},
++      "coneOuterAngle": {},
++      "coneOuterGain": {}
++    }
+   },
+   "ConvolverNode": {
+-    "buffer": { "Buffer": true },
+-    "normalize": {},
++    "properties": {
++      "buffer": { "Buffer": true },
++      "normalize": {},
++    }
+   },
+   "DynamicsCompressorNode": {
+-    "threshold": {},
+-    "knee": {},
+-    "ratio": {},
+-    "reduction": {},
+-    "attack": {},
+-    "release": {}
++    "properties": {
++      "threshold": {},
++      "knee": {},
++      "ratio": {},
++      "reduction": {},
++      "attack": {},
++      "release": {}
++    }
+   },
+   "BiquadFilterNode": {
+-    "type": {},
+-    "frequency": {},
+-    "Q": {},
+-    "detune": {},
+-    "gain": {}
++    "properties": {
++      "type": {},
++      "frequency": {},
++      "Q": {},
++      "detune": {},
++      "gain": {}
++    }
+   },
+   "WaveShaperNode": {
+-    "curve": { "Float32Array": true },
+-    "oversample": {}
++    "properties": {
++      "curve": { "Float32Array": true },
++      "oversample": {}
++    }
+   },
+   "AnalyserNode": {
+-    "fftSize": {},
+-    "minDecibels": {},
+-    "maxDecibels": {},
+-    "smoothingTimeConstant": {},
+-    "frequencyBinCount": { "readonly": true },
+-  },
+-  "AudioDestinationNode": {},
+-  "ChannelSplitterNode": {},
+-  "ChannelMergerNode": {},
++    "properties": {
++      "fftSize": {},
++      "minDecibels": {},
++      "maxDecibels": {},
++      "smoothingTimeConstant": {},
++      "frequencyBinCount": { "readonly": true },
++    }
++  },
++  "AudioDestinationNode": {
++    "unbypassable": true
++  },
++  "ChannelSplitterNode": {
++    "unbypassable": true
++  },
++  "ChannelMergerNode": {
++    "unbypassable": true
++  },
+   "MediaElementAudioSourceNode": {},
+   "MediaStreamAudioSourceNode": {},
+   "MediaStreamAudioDestinationNode": {
+-    "stream": { "MediaStream": true }
++    "unbypassable": true,
++    "properties": { "stream": { "MediaStream": true }}
+   }
+ };
+ 
+ /**
+  * An Audio Node actor allowing communication to a specific audio node in the
+  * Audio Context graph.
+  */
+ types.addActorType("audionode");
+@@ -164,17 +187,19 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+    * @return Boolean
+    */
+   isBypassed: method(function () {
+     let node = this.node.get();
+     if (node === null) {
+       return false;
+     }
+ 
+-    return node.passThrough;
++    // Cast to boolean incase `passThrough` is undefined,
++    // like for AudioDestinationNode
++    return !!node.passThrough;
+   }, {
+     response: { bypassed: RetVal("boolean") }
+   }),
+ 
+   /**
+    * Takes a boolean, either enabling or disabling the "passThrough" option
+    * on an AudioNode. If a node is bypassed, an effects processing node (like gain, biquad),
+    * will allow the audio stream to pass through the node, unaffected.
+@@ -269,28 +294,28 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+    * Get an object containing key-value pairs of additional attributes
+    * to be consumed by a front end, like if a property should be read only,
+    * or is a special type (Float32Array, Buffer, etc.)
+    *
+    * @param String param
+    *        Name of the AudioParam whose flags are desired.
+    */
+   getParamFlags: method(function (param) {
+-    return (NODE_PROPERTIES[this.type] || {})[param];
++    return ((NODE_PROPERTIES[this.type] || {}).properties || {})[param];
+   }, {
+     request: { param: Arg(0, "string") },
+     response: { flags: RetVal("nullable:primitive") }
+   }),
+ 
+   /**
+    * Get an array of objects each containing a `param` and `value` property,
+    * corresponding to a property name and current value of the audio node.
+    */
+   getParams: method(function (param) {
+-    let props = Object.keys(NODE_PROPERTIES[this.type]);
++    let props = Object.keys(NODE_PROPERTIES[this.type].properties || {});
+     return props.map(prop =>
+       ({ param: prop, value: this.getParam(prop), flags: this.getParamFlags(prop) }));
+   }, {
+     response: { params: RetVal("json") }
+   }),
+ 
+   /**
+    * Connects this audionode to an AudioParam via `node.connect(param)`.
+@@ -414,16 +439,26 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   },
+ 
+   destroy: function(conn) {
+     protocol.Actor.prototype.destroy.call(this, conn);
+     this.finalize();
+   },
+ 
+   /**
++   * Returns definition of all AudioNodes, such as AudioParams, and
++   * flags.
++   */
++  getDefinition: method(function () {
++    return NODE_PROPERTIES;
++  }, {
++    response: { definition: RetVal("json") }
++  }),
++
++  /**
+    * Starts waiting for the current tab actor's document global to be
+    * created, in order to instrument the Canvas context and become
+    * aware of everything the content does with Web Audio.
+    *
+    * See ContentObserver and WebAudioInstrumenter for more details.
+    */
+   setup: method(function({ reload }) {
+     // Used to track when something is happening with the web audio API
+@@ -593,17 +628,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+ 
+   /**
+    * Takes an XrayWrapper node, and attaches the node's `nativeID`
+    * to the AudioParams as `_parentID`, as well as the the type of param
+    * as a string on `_paramName`.
+    */
+   _instrumentParams: function (node) {
+     let type = getConstructorName(node);
+-    Object.keys(NODE_PROPERTIES[type])
++    Object.keys(NODE_PROPERTIES[type].properties || {})
+       .filter(isAudioParam.bind(null, node))
+       .forEach(paramName => {
+         let param = node[paramName];
+         param._parentID = node.id;
+         param._paramName = paramName;
+       });
+   },
+ 
+-- 
+1.8.4.2
+
