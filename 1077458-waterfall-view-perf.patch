@@ -1,32 +1,7 @@
-From ffe3caabbb2abda4dbe4f7b686bbdc330f50f093 Mon Sep 17 00:00:00 2001
+From bceb8a2295e08eb53858850196549765930b61e7 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 24 Nov 2014 15:27:37 -0800
-Subject: Bug 1077458 - Implement marker's waterfall view in new
- performance tool, with details view toggling between
- waterfall and call tree views. r=vp
-
----
- browser/devtools/jar.mn                            |   1 +
- browser/devtools/performance/controller.js         |  29 +++-
- browser/devtools/performance/modules/front.js      |  14 +-
- browser/devtools/performance/performance.xul       |  21 ++-
- browser/devtools/performance/test/browser.ini      |   4 +
- .../browser_perf-details-waterfall-render-01.js    |  25 ++++
- .../performance/test/browser_perf-details.js       |  46 ++++++
- .../performance/test/browser_perf-front.js         |  27 ++++
- browser/devtools/performance/test/head.js          |  14 +-
- browser/devtools/performance/views/details.js      |  57 +++++--
- browser/devtools/performance/views/waterfall.js    | 116 +++++++++++++++
- browser/devtools/timeline/timeline.js              |   4 +-
- .../devtools/timeline/widgets/marker-details.js    |   6 +-
- browser/devtools/timeline/widgets/waterfall.js     |  14 +-
- browser/themes/shared/devtools/performance.inc.css | 163 +++++++++++++++++++++
- toolkit/devtools/server/actors/timeline.js         |   7 +-
- 16 files changed, 516 insertions(+), 32 deletions(-)
- create mode 100644 browser/devtools/performance/test/browser_perf-details-waterfall-render-01.js
- create mode 100644 browser/devtools/performance/test/browser_perf-details.js
- create mode 100644 browser/devtools/performance/test/browser_perf-front.js
- create mode 100644 browser/devtools/performance/views/waterfall.js
+Date: Tue, 2 Dec 2014 19:51:39 -0800
+Subject: Bug 1077458 - Implement marker's waterfall view in new performance tool, with details view toggling between  waterfall and call tree views. r=vp
 
 diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
 index b899990..55c1c44 100644
@@ -159,7 +134,7 @@ index b18b6e2..c5e6007 100644
    _onTimelineData: function (eventName, ...data) {
      this.emit(EVENTS.TIMELINE_DATA, eventName, ...data);
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index ffd1fda..892f16d 100644
+index ffd1fda..723008a 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
 @@ -232,39 +232,45 @@ PerformanceFront.prototype = {
@@ -195,9 +170,8 @@ index ffd1fda..892f16d 100644
      offsetSampleTimes(profilerData, this._profilingStartTime);
  
 -    yield this._request("timeline", "stop");
--
 +    let endTime = this._endTime = yield this._request("timeline", "stop");
-+    
+ 
      // Join all the acquired data and return it for outside consumers.
      return {
        recordingDuration: profilerData.currentTime - this._profilingStartTime,
@@ -213,7 +187,7 @@ index ffd1fda..892f16d 100644
     *
     * Used in tests and for older backend implementations.
 diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
-index e475948..f4ec980 100644
+index e475948..a6fbb7d 100644
 --- a/browser/devtools/performance/performance.xul
 +++ b/browser/devtools/performance/performance.xul
 @@ -14,16 +14,17 @@
@@ -243,19 +217,20 @@ index e475948..f4ec980 100644
        <vbox id="time-framerate" flex="1"/>
      </box>
      <splitter class="devtools-horizontal-splitter" />
+-    <box id="details-pane"
 +    <toolbar id="details-toolbar" class="devtools-toolbar">
 +      <hbox class="devtools-toolbarbutton-group">
 +        <toolbarbutton id="select-waterfall-view"
 +                       class="devtools-toolbarbutton"
 +                       tooltiptext="waterfall"
-+                       data-view="waterfall"/>
++                       data-view="waterfall" />
 +        <toolbarbutton id="select-calltree-view"
 +                       class="devtools-toolbarbutton"
 +                       tooltiptext="calltree"
-+                       data-view="calltree"/>
++                       data-view="calltree" />
 +      </hbox>
 +    </toolbar>
-     <box id="details-pane"
++    <deck id="details-pane"
           class="devtools-responsive-container"
           flex="1">
 -      <vbox class="call-tree" flex="1">
@@ -274,6 +249,19 @@ index e475948..f4ec980 100644
            <label class="plain call-tree-header"
                   type="percentage"
                   crop="end"
+@@ -71,11 +90,11 @@
+                  value="&profilerUI.table.samples;"/>
+           <label class="plain call-tree-header"
+                  type="function"
+                  crop="end"
+                  value="&profilerUI.table.function;"/>
+         </hbox>
+         <vbox class="call-tree-cells-container" flex="1"/>
+       </vbox>
+-    </box>
++    </deck>
+   </vbox>
+ </window>
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
 index dff4fc4..6e56842 100644
 --- a/browser/devtools/performance/test/browser.ini
@@ -312,10 +300,10 @@ index dff4fc4..6e56842 100644
 +[browser_perf-details-waterfall-render-01.js]
 diff --git a/browser/devtools/performance/test/browser_perf-details-waterfall-render-01.js b/browser/devtools/performance/test/browser_perf-details-waterfall-render-01.js
 new file mode 100644
-index 0000000..6a449f7
+index 0000000..571bfe8
 --- /dev/null
 +++ b/browser/devtools/performance/test/browser_perf-details-waterfall-render-01.js
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -327,7 +315,8 @@ index 0000000..6a449f7
 +  let { EVENTS, WaterfallView } = panel.panelWin;
 +
 +  yield startRecording(panel);
-+  yield idleWait(500);
++
++  yield waitUntil(() => WaterfallView._markers.length);
 +
 +  let rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
 +
@@ -427,7 +416,7 @@ index 0000000..a39a5ba
 +
 +}
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 5f74789..89a6837 100644
+index b2f9498..25ae10f 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
 @@ -206,33 +206,39 @@ function* consoleProfileEnd(connection) {
@@ -493,7 +482,7 @@ index 5f74789..89a6837 100644
      "The record button should be locked.");
  
 diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
-index 4ba01d4..47863d6 100644
+index 4ba01d4..9319c24 100644
 --- a/browser/devtools/performance/views/details.js
 +++ b/browser/devtools/performance/views/details.js
 @@ -1,39 +1,74 @@
@@ -510,22 +499,31 @@ index 4ba01d4..47863d6 100644
   */
  let DetailsView = {
    /**
++   * Name to index mapping of subviews, used by selecting view.
++   */
++  viewIndexes: {
++    waterfall: 0,
++    calltree: 1
++  },
++
++  /**
     * Sets up the view with event binding, initializes
     * subviews.
     */
 -  initialize: function () {
-+  initialize: Task.async(function *() {
-     this.views = {
+-    this.views = {
 -      callTree: CallTreeView
-+      calltree: CallTreeView,
-+      waterfall: WaterfallView
-     };
- 
+-    };
+-
 -    // Initialize subviews
 -    return promise.all([
 -      CallTreeView.initialize()
 -    ]);
++  initialize: Task.async(function *() {
++    this.el = $("#details-pane");
++
 +    this._onViewToggle = this._onViewToggle.bind(this);
++
 +    for (let button of $$("toolbarbutton[data-view]", $("#details-toolbar"))) {
 +      button.addEventListener("command", this._onViewToggle);
 +    }
@@ -543,19 +541,13 @@ index 4ba01d4..47863d6 100644
 +   *         Name of the view to be shown.
 +   */
 +  selectView: function (selectedView) {
-+    for (let button of $$("toolbarbutton[data-view]", $("#details-toolbar"))) {
-+      let viewName = button.getAttribute("data-view");
-+      if (viewName === selectedView) {
-+        button.setAttribute("checked", true);
-+        this.views[viewName].el.removeAttribute("hidden");
-+      } else {
-+        button.removeAttribute("checked");
-+        this.views[viewName].el.setAttribute("hidden", true);
-+      }
-+    }
++    this.el.selectedIndex = this.viewIndexes[selectedView];
 +    this.emit(EVENTS.DETAILS_VIEW_SELECTED, selectedView);
 +  },
 +
++  /**
++   * Called when a view button is clicked.
++   */
 +  _onViewToggle: function (e) {
 +    this.selectView(e.target.getAttribute("data-view"));
    },
@@ -705,7 +697,7 @@ index 0000000..9039f12
 + */
 +EventEmitter.decorate(WaterfallView);
 diff --git a/browser/devtools/timeline/timeline.js b/browser/devtools/timeline/timeline.js
-index 2324f85..04c2a2d 100644
+index 2324f85..73f67c0 100644
 --- a/browser/devtools/timeline/timeline.js
 +++ b/browser/devtools/timeline/timeline.js
 @@ -246,18 +246,18 @@ let TimelineController = {
@@ -729,11 +721,32 @@ index 2324f85..04c2a2d 100644
      this.markerDetails.on("resize", this._onRefresh);
  
      this._onMarkerSelected = this._onMarkerSelected.bind(this);
+@@ -268,18 +268,20 @@ let TimelineView = {
+     yield this.waterfall.recalculateBounds();
+   }),
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     this.markerDetails.off("resize", this._onRefresh);
++    this.markerDetails.destroy();
+     this.waterfall.off("selected", this._onMarkerSelected);
+     this.waterfall.off("unselected", this._onMarkerSelected);
++    this.waterfall.destroy();
+     this.markersOverview.off("selecting", this._onSelecting);
+     this.markersOverview.off("refresh", this._onRefresh);
+     this.markersOverview.destroy();
+ 
+     // The memory overview graph is not always available.
+     if (this.memoryOverview) {
+       this.memoryOverview.destroy();
+     }
 diff --git a/browser/devtools/timeline/widgets/marker-details.js b/browser/devtools/timeline/widgets/marker-details.js
-index 4972350..82492a5 100644
+index 4972350..01cb442 100644
 --- a/browser/devtools/timeline/widgets/marker-details.js
 +++ b/browser/devtools/timeline/widgets/marker-details.js
-@@ -17,22 +17,24 @@ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+@@ -17,29 +17,32 @@ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
  loader.lazyRequireGetter(this, "EventEmitter",
    "devtools/toolkit/event-emitter");
  
@@ -759,9 +772,17 @@ index 4972350..82492a5 100644
    destroy: function() {
      this.empty();
      this._parent = null;
++    this._splitter = null;
+   },
+ 
+   /**
+    * Clears the view.
+    */
+   empty: function() {
+     this._parent.innerHTML = "";
    },
 diff --git a/browser/devtools/timeline/widgets/waterfall.js b/browser/devtools/timeline/widgets/waterfall.js
-index d0839ba..55390fc 100644
+index d0839ba..951d0e3 100644
 --- a/browser/devtools/timeline/widgets/waterfall.js
 +++ b/browser/devtools/timeline/widgets/waterfall.js
 @@ -43,21 +43,24 @@ const WATERFALL_MARKER_BAR_WIDTH_MIN = 5; // px
@@ -790,7 +811,7 @@ index d0839ba..55390fc 100644
    this._parent.appendChild(this._headerContents);
  
    this._listContents = this._document.createElement("vbox");
-@@ -73,16 +76,19 @@ function Waterfall(parent) {
+@@ -73,19 +76,25 @@ function Waterfall(parent) {
    this._l10n = L10N;
    this._blueprint = TIMELINE_BLUEPRINT;
    this._setNamedTimeout = setNamedTimeout;
@@ -805,12 +826,18 @@ index d0839ba..55390fc 100644
  }
  
  Waterfall.prototype = {
++  destroy: function() {
++    this._parent = this._document = this._container = null;
++  },
    /**
     * Populates this view with the provided data source.
     *
     * @param array markers
     *        A list of markers received from the controller.
-@@ -105,17 +111,17 @@ Waterfall.prototype = {
+    * @param number timeEpoch
+    *        The absolute time (in milliseconds) when the recording started.
+    * @param number startTime
+@@ -105,17 +114,17 @@ Waterfall.prototype = {
      this._buildMarkers(this._listContents, markers, startTime, endTime, dataScale);
      this.selectRow(this._selectedRowIdx);
    },
@@ -829,7 +856,7 @@ index d0839ba..55390fc 100644
        if (e.keyCode === Ci.nsIDOMKeyEvent.DOM_VK_DOWN) {
          e.preventDefault();
          this.selectNearestRow(this._selectedRowIdx + 1);
-@@ -125,21 +131,21 @@ Waterfall.prototype = {
+@@ -125,21 +134,21 @@ Waterfall.prototype = {
          this.selectNearestRow(0);
        }
        if (e.keyCode === Ci.nsIDOMKeyEvent.DOM_VK_END) {
@@ -854,10 +881,10 @@ index d0839ba..55390fc 100644
     */
    clearView: function() {
 diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
-index c059b81..eceab4f 100644
+index c059b81..28a18e5 100644
 --- a/browser/themes/shared/devtools/performance.inc.css
 +++ b/browser/themes/shared/devtools/performance.inc.css
-@@ -28,16 +28,34 @@
+@@ -28,16 +28,27 @@
  #record-button[checked] {
    list-style-image: url(profiler-stopwatch-checked.svg);
  }
@@ -869,20 +896,13 @@ index c059b81..eceab4f 100644
 +/* Details Panel */
 +
 +#select-waterfall-view {
-+  list-style-image: url(profiler-stopwatch.svg);
-+}
-+
-+#select-waterfall-view[checked] {
-+  list-style-image: url(profiler-stopwatch-checked.svg);
++  list-style-image: url(performance-icons.svg#waterfall);
 +}
 +
 +#select-calltree-view {
-+  list-style-image: url(profiler-stopwatch.svg);
++  list-style-image: url(performance-icons.svg#call-tree);
 +}
 +
-+#select-calltree-view[checked] {
-+  list-style-image: url(profiler-stopwatch-checked.svg);
-+}
 +
  /* Profile call tree */
  
@@ -892,7 +912,7 @@ index c059b81..eceab4f 100644
  
  .theme-light .call-tree-headers-container {
    border-top: 1px solid #aaa;
-@@ -250,8 +268,153 @@
+@@ -250,8 +261,153 @@
  .call-tree-item:hover .call-tree-zoom:hover {
    opacity: 0;
  }
@@ -1047,10 +1067,10 @@ index c059b81..eceab4f 100644
 +  font-weight: bold;
 +}
 diff --git a/toolkit/devtools/server/actors/timeline.js b/toolkit/devtools/server/actors/timeline.js
-index f132c65..f7e45af 100644
+index f132c65..a7b596c 100644
 --- a/toolkit/devtools/server/actors/timeline.js
 +++ b/toolkit/devtools/server/actors/timeline.js
-@@ -236,17 +236,22 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+@@ -236,17 +236,24 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
        this._framerateActor = null;
      }
  
@@ -1063,7 +1083,9 @@ index f132c65..f7e45af 100644
 +    return this.docShells[0].now();
 +  }, {
 +    response: {
-+      value: RetVal("number")
++      // Set as possibly nullable due to the end time possibly being
++      // undefined during destruction
++      value: RetVal("nullable:number")
 +    }
 +  }),
  
@@ -1075,5 +1097,5 @@ index f132c65..f7e45af 100644
      if (this._isRecording) {
        let docShell = window.QueryInterface(Ci.nsIInterfaceRequestor)
 -- 
-1.7.12.4 (Apple Git-37)
+1.8.4.2
 
