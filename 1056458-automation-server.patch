@@ -1,0 +1,1262 @@
+From e19aa22fb640fe7975299db1a1bfeb6bbcb0dfcd Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 8 Dec 2014 20:06:21 -0800
+Subject: Bug 1056458 - Add backend for recording automation events in
+ the web audio API for developer tools. r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |   5 +
+ ...browser_audionode-actor-add-automation-event.js |  53 ++++
+ ...owser_audionode-actor-get-automation-data-01.js |  54 ++++
+ ...owser_audionode-actor-get-automation-data-02.js |  39 +++
+ .../browser_webaudio-actor-automation-event.js     |  52 +++
+ .../webaudioeditor/test/doc_automation.html        |  30 ++
+ browser/devtools/webaudioeditor/test/head.js       |  33 +-
+ .../server/actors/utils/automation-timeline.js     | 353 +++++++++++++++++++++
+ toolkit/devtools/server/actors/webaudio.js         | 243 +++++++++++++-
+ toolkit/devtools/server/moz.build                  |   1 +
+ 10 files changed, 856 insertions(+), 7 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-add-automation-event.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-01.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_webaudio-actor-automation-event.js
+ create mode 100644 browser/devtools/webaudioeditor/test/doc_automation.html
+ create mode 100644 toolkit/devtools/server/actors/utils/automation-timeline.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index fd5e02e..1adf13e 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -5,31 +5,36 @@ support-files =
+   doc_complex-context.html
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-param.html
+   doc_connect-multi-param.html
+   doc_iframe-context.html
++  doc_automation.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_audionode-actor-bypass.js]
+ [browser_audionode-actor-connectnode-disconnect.js]
+ [browser_audionode-actor-connectparam.js]
++[browser_audionode-actor-add-automation-event.js]
++[browser_audionode-actor-get-automation-data-01.js]
++[browser_audionode-actor-get-automation-data-02.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
+ [browser_webaudio-actor-connect-param.js]
++[browser_webaudio-actor-automation-event.js]
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ [browser_wa_reset-04.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-add-automation-event.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-add-automation-event.js
+new file mode 100644
+index 0000000..744816b
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-add-automation-event.js
+@@ -0,0 +1,53 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode#addAutomationEvent();
++ */
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_CONTEXT_URL);
++  let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
++    front.setup({ reload: true }),
++    get3(front, "create-node")
++  ]);
++  let count = 0;
++  let counter = () => count++;
++  front.on("automation-event", counter);
++
++  let t0 = 0, t1 = 0.1, t2 = 0.2, t3 = 0.3, t4 = 0.4, t5 = 0.6, t6 = 0.7, t7 = 1;
++  let curve = [-1, 0, 1];
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.2, t0]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.3, t1]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.4, t2]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [1, t3]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [0.15, t4]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.75, t5]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.5, t6]);
++  yield oscNode.addAutomationEvent("frequency", "setValueCurveAtTime", [curve, t7, t7 - t6]);
++  yield oscNode.addAutomationEvent("frequency", "setTargetAtTime", [20, 2, 5]);
++
++  ok(true, "successfully set automation events for valid automation events");
++
++  try {
++    yield oscNode.addAutomationEvent("frequency", "notAMethod", 20, 2, 5);
++    ok(false, "non-automation methods should not be successful");
++  } catch (e) {
++    ok(/invalid/.test(e.message), "AudioNode:addAutomationEvent fails for invalid automation methods");
++  }
++
++  try {
++    yield oscNode.addAutomationEvent("invalidparam", "setValueAtTime", 0.2, t0);
++    ok(false, "automating non-AudioParams should not be successful");
++  } catch (e) {
++    ok(/invalid/.test(e.message), "AudioNode:addAutomationEvent fails for a non AudioParam");
++  }
++
++  front.off("automation-event", counter);
++
++  is(count, 9,
++    "when calling `addAutomationEvent`, the WebAudioActor should still fire `automation-event`.");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-01.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-01.js
+new file mode 100644
+index 0000000..5a9b5b0
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-01.js
+@@ -0,0 +1,54 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode#addAutomationEvent() checking automation values, also using
++ * a curve as the last event to check duration spread.
++ */
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_CONTEXT_URL);
++  let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
++    front.setup({ reload: true }),
++    get3(front, "create-node")
++  ]);
++
++  let t0 = 0, t1 = 0.1, t2 = 0.2, t3 = 0.3, t4 = 0.4, t5 = 0.6, t6 = 0.7, t7 = 1;
++  let curve = [-1, 0, 1];
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.2, t0]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.3, t1]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.4, t2]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [1, t3]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [0.15, t4]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.75, t5]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.05, t6]);
++  // End with a curve here so we can get proper results on the last event (which takes into account
++  // duration)
++  yield oscNode.addAutomationEvent("frequency", "setValueCurveAtTime", [curve, t6, t7 - t6]);
++
++  let { events, values } = yield oscNode.getAutomationData("frequency");
++
++  is(events.length, 8, "8 recorded events returned.");
++  is(values.length, 2000, "2000 value points returned.");
++
++  checkAutomationValue(values, 0.05, 0.2);
++  checkAutomationValue(values, 0.1, 0.3);
++  checkAutomationValue(values, 0.15, 0.3);
++  checkAutomationValue(values, 0.2, 0.4);
++  checkAutomationValue(values, 0.25, 0.7);
++  checkAutomationValue(values, 0.3, 1);
++  checkAutomationValue(values, 0.35, 0.575);
++  checkAutomationValue(values, 0.4, 0.15);
++  checkAutomationValue(values, 0.45, 0.15 * Math.pow(0.75/0.15,0.05/0.2));
++  checkAutomationValue(values, 0.5, 0.15 * Math.pow(0.75/0.15,0.5));
++  checkAutomationValue(values, 0.55, 0.15 * Math.pow(0.75/0.15,0.15/0.2));
++  checkAutomationValue(values, 0.6, 0.75);
++  checkAutomationValue(values, 0.65, 0.75 * Math.pow(0.05/0.75, 0.5));
++  checkAutomationValue(values, 0.705, -1); // Increase this time a bit to prevent off by the previous exponential amount
++  checkAutomationValue(values, 0.8, 0);
++  checkAutomationValue(values, 0.9, 1);
++  checkAutomationValue(values, 1, 1);
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js
+new file mode 100644
+index 0000000..8631084
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js
+@@ -0,0 +1,39 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test AudioNode#addAutomationEvent() when automation series ends with
++ * `setTargetAtTime`, which approaches its target to infinity.
++ */
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_CONTEXT_URL);
++  let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
++    front.setup({ reload: true }),
++    get3(front, "create-node")
++  ]);
++
++  let t0 = 0, t1 = 0.1, t2 = 0.2, t3 = 0.3, t4 = 0.4, t5 = 0.6, t6 = 0.7, t7 = 1;
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.2, t0]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.3, t1]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.4, t2]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [1, t3]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [0.15, t4]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.75, t5]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.05, t6]);
++  // End with a setTargetAtTime event, as the target approaches infinity, which will
++  // give us more points to render than the default 2000
++  yield oscNode.addAutomationEvent("frequency", "setTargetAtTime", [1, t7, 0.5]);
++
++  let { events, values } = yield oscNode.getAutomationData("frequency");
++
++  is(events.length, 8, "8 recorded events returned.");
++  is(values.length, 4000, "6000 value points returned when ending with exponentiall approaching automator.");
++
++  checkAutomationValue(values, 1, 0.05);
++  checkAutomationValue(values, 2, 0.87);
++  checkAutomationValue(values, 3, 0.98);
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/browser_webaudio-actor-automation-event.js b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-automation-event.js
+new file mode 100644
+index 0000000..73c1f1a
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-automation-event.js
+@@ -0,0 +1,52 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test that the WebAudioActor receives and emits the `automation-event` events
++ * with correct arguments from the content.
++ */
++
++function spawnTest () {
++  let { target, front } = yield initBackend(AUTOMATION_URL);
++  let events = [];
++
++  let expected = [
++    ["setValueAtTime", 0.2, 0],
++    ["linearRampToValueAtTime", 1, 0.3],
++    ["exponentialRampToValueAtTime", 0.75, 0.6],
++    ["setValueCurveAtTime", [-1, 0 ,1], 0.7, 0.3],
++  ];
++
++  front.on("automation-event", onAutomationEvent);
++
++  let [_, __, [destNode, oscNode, gainNode], [connect1, connect2]] = yield Promise.all([
++    front.setup({ reload: true }),
++    once(front, "start-context"),
++    get3(front, "create-node"),
++    get2(front, "connect-node")
++  ]);
++
++  is(events.length, 4, "correct number of events fired");
++
++  function onAutomationEvent (e) {
++    let { eventName, paramName, args } = e;
++    let exp = expected[events.length];
++
++    is(eventName, exp[0], "correct eventName in event");
++    is(paramName, "frequency", "correct paramName in event");
++    is(args.length, exp.length - 1, "correct length in args");
++    args.forEach((a, i) => {
++      // In the case of an array
++      if (typeof a === "object") {
++        a.forEach((f, j) => is(f, exp[i + 1][j], "correct argument in args"));
++      } else {
++        is(a, exp[i + 1], "correct argument in args");
++      }
++    });
++    events.push([eventName].concat(args));
++  }
++
++  front.off("automation-event", onAutomationEvent);
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/webaudioeditor/test/doc_automation.html b/browser/devtools/webaudioeditor/test/doc_automation.html
+new file mode 100644
+index 0000000..6f07420
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_automation.html
+@@ -0,0 +1,30 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++      let gain = ctx.createGain();
++      gain.gain.value = 0;
++      osc.frequency.setValueAtTime(0.2, 0);
++      osc.frequency.linearRampToValueAtTime(1, 0.3);
++      osc.frequency.exponentialRampToValueAtTime(0.75, 0.6);
++      osc.frequency.setValueCurveAtTime(new Float32Array([-1, 0, 1]), 0.7, 0.3);
++      osc.connect(gain);
++      gain.connect(ctx.destination);
++      osc.start(0);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index 25dbda6..30f855d 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -4,17 +4,17 @@
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ 
+ // Enable logging for all the tests. Both the debugger server and frontend will
+ // be affected by this pref.
+ let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
+-Services.prefs.setBoolPref("devtools.debugger.log", true);
++Services.prefs.setBoolPref("devtools.debugger.log", false);
+ 
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
+ 
+ let { WebAudioFront } = devtools.require("devtools/server/actors/webaudio");
+@@ -25,16 +25,17 @@ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
+ const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
+ const DESTROY_NODES_URL = EXAMPLE_URL + "doc_destroy-nodes.html";
+ const CONNECT_PARAM_URL = EXAMPLE_URL + "doc_connect-param.html";
+ const CONNECT_MULTI_PARAM_URL = EXAMPLE_URL + "doc_connect-multi-param.html";
+ const IFRAME_CONTEXT_URL = EXAMPLE_URL + "doc_iframe-context.html";
++const AUTOMATION_URL = EXAMPLE_URL + "doc_automation.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.webaudioeditor.enabled");
+ 
+ gDevTools.testing = true;
+ 
+@@ -391,16 +392,46 @@ function countGraphObjects (win) {
+ */
+ function forceCC () {
+   SpecialPowers.DOMWindowUtils.cycleCollect();
+   SpecialPowers.DOMWindowUtils.garbageCollect();
+   SpecialPowers.DOMWindowUtils.garbageCollect();
+ }
+ 
+ /**
++ * Takes a `values` array of automation value entries,
++ * looking for the value at `time` seconds, checking
++ * to see if the value is close to `expected`.
++ */
++function checkAutomationValue (values, time, expected) {
++  // Remain flexible on values as we can approximate points
++  let EPSILON = 0.01;
++
++  let value = getValueAt(values, time);
++  ok(Math.abs(value - expected) < EPSILON, "Timeline value at " + time + " with value " + value + " should have value very close to " + expected);
++
++  /**
++   * Entries are ordered in `values` according to time, so if we can't find an exact point
++   * on a time of interest, return the point in between the threshold. This should
++   * get us a very close value.
++   */
++  function getValueAt (values, time) {
++    for (let i = 0; i < values.length; i++) {
++      if (values[i].t === time) {
++        return values[i].value;
++      }
++      if (values[i].t > time) {
++        return (values[i - 1].value + values[i].value) / 2;
++      }
++    }
++    return values[values.length - 1].value;
++  }
++}
++
++/**
+  * List of audio node properties to test against expectations of the AudioNode actor
+  */
+ 
+ const NODE_DEFAULT_VALUES = {
+   "AudioDestinationNode": {},
+   "MediaElementAudioSourceNode": {},
+   "MediaStreamAudioSourceNode": {},
+   "MediaStreamAudioDestinationNode": {
+diff --git a/toolkit/devtools/server/actors/utils/automation-timeline.js b/toolkit/devtools/server/actors/utils/automation-timeline.js
+new file mode 100644
+index 0000000..830f6d4
+--- /dev/null
++++ b/toolkit/devtools/server/actors/utils/automation-timeline.js
+@@ -0,0 +1,353 @@
++/**
++ * web-audio-automation-timeline - 1.0.0
++ * https://github.com/jsantell/web-audio-automation-timeline
++ * MIT License, copyright (c) 2014 Jordan Santell
++ */
++!function(e){if("object"==typeof exports&&"undefined"!=typeof module)module.exports=e();else if("function"==typeof define&&define.amd)define([],e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),f.Timeline=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
++module.exports = require("./lib/timeline").Timeline;
++
++},{"./lib/timeline":4}],2:[function(require,module,exports){
++var F = require("./formulas");
++
++function TimelineEvent (eventName, value, time, timeConstant, duration) {
++  this.type = eventName;
++  this.value = value;
++  this.time = time;
++  this.constant = timeConstant || 0;
++  this.duration = duration || 0;
++}
++exports.TimelineEvent = TimelineEvent;
++
++
++TimelineEvent.prototype.exponentialApproach = function (lastValue, time) {
++  return F.exponentialApproach(this.time, lastValue, this.value, this.constant, time);
++}
++
++TimelineEvent.prototype.extractValueFromCurve = function (time) {
++  return F.extractValueFromCurve(this.time, this.value, this.value.length, this.duration, time);
++}
++
++TimelineEvent.prototype.linearInterpolate = function (next, time) {
++  return F.linearInterpolate(this.time, this.value, next.time, next.value, time);
++}
++
++TimelineEvent.prototype.exponentialInterpolate = function (next, time) {
++  return F.exponentialInterpolate(this.time, this.value, next.time, next.value, time);
++}
++
++},{"./formulas":3}],3:[function(require,module,exports){
++var EPSILON = 0.0000000001;
++
++exports.linearInterpolate = function (t0, v0, t1, v1, t) {
++  return v0 + (v1 - v0) * ((t - t0) / (t1 - t0));
++};
++
++exports.exponentialInterpolate = function (t0, v0, t1, v1, t) {
++  return v0 * Math.pow(v1 / v0, (t - t0) / (t1 - t0));
++};
++
++exports.extractValueFromCurve = function (start, curve, curveLength, duration, t) {
++  var ratio;
++
++  // If time is after duration, return the last curve value,
++  // or if ratio is >= 1
++  if (t >= start + duration || (ratio = Math.max((t - start) / duration, 0)) >= 1) {
++    return curve[curveLength - 1];
++  }
++
++  return curve[~~(curveLength * ratio)];
++};
++
++exports.exponentialApproach = function (t0, v0, v1, timeConstant, t) {
++  return v1 + (v0 - v1) * Math.exp(-(t - t0) / timeConstant);
++};
++
++// Since we are going to accumulate error by adding 0.01 multiple times
++// in a loop, we want to fuzz teh equality check in `getValueAtTime`
++exports.fuzzyEqual = function (lhs, rhs) {
++  return Math.abs(lhs - rhs) < EPSILON;
++};
++
++},{}],4:[function(require,module,exports){
++var TimelineEvent = require("./event").TimelineEvent;
++var F = require("./formulas");
++
++exports.Timeline = Timeline;
++
++function Timeline (defaultValue) {
++  this.events = [];
++
++  this._value = defaultValue || 0;
++
++  // This is the value of this AudioParam we computed at the last call.
++  this._computedValue = defaultValue || 0;
++  // This is the value of this AudioParam at the last tick of the previous event.
++  this._lastComputedValue = defaultValue || 0;
++}
++
++Timeline.prototype.getEventCount = function () {
++  return this.events.length;
++};
++
++Timeline.prototype.value = function () {
++  return this._value;
++};
++
++Timeline.prototype.setValue = function (value) {
++  if (this.events.length === 0) {
++    this._computedValue = this._lastComputedValue = this._value = value;
++  }
++};
++
++Timeline.prototype.getValue = function () {
++  if (this.events.length) {
++    throw new Error("Can only call `getValue` when there are 0 events.");
++  }
++
++  return this._value;
++};
++
++Timeline.prototype.getValueAtTime = function (time) {
++  this._computedValue = this._getValueAtTimeHelper(time);
++  return this._computedValue;
++};
++
++Timeline.prototype._getValueAtTimeHelper = function (time) {
++  var bailOut = false;
++  var previous = null;
++  var next = null;
++  var events = this.events;
++  var e;
++
++  for (var i = 0; !bailOut && i < events.length; i++) {
++    if (F.fuzzyEqual(time, events[i].time)) {
++      this._lastComputedValue = this._computedValue;
++
++      // Find the last event with the same time as `time`
++      do {
++        ++i;
++      } while (i < events.length && F.fuzzyEqual(time, events[i].time));
++
++      e = events[i - 1];
++
++      // `setTargetAtTime` can be handled no matter what their next event is (if they have one)
++      if (e.type === "setTargetAtTime") {
++        return e.exponentialApproach(this._lastComputedValue, time);
++      }
++
++      // `setValueCurveAtTime` events can be handled no matter what their next event node is
++      // (if they have one)
++      if (e.type === "setValueCurveAtTime") {
++        return e.extractValueFromCurve(time);
++      }
++
++      // For other event types
++      return e.value;
++    }
++    previous = next;
++    next = events[i];
++
++    if (time < events[i].time) {
++      bailOut = true;
++    }
++  }
++
++  // Handle the case where the time is past all of the events
++  if (!bailOut) {
++    previous = next;
++    next = null;
++  }
++
++  // Just return the default value if we did not find anything
++  if (!previous && !next) {
++    return this._value;
++  }
++
++  // If the requested time is before all of the existing events
++  if (!previous) {
++    return this._value;
++  }
++
++  // `setTargetAtTime` can be handled no matter what their next event is (if they have one)
++  if (previous.type === "setTargetAtTime") {
++    return previous.exponentialApproach(this._lastComputedValue, time);
++  }
++
++  // `setValueCurveAtTime` events can be handled no matter what their next event node is
++  // (if they have one)
++  if (previous.type === "setValueCurveAtTime") {
++    return previous.extractValueFromCurve(time);
++  }
++
++  if (!next) {
++    if (~["setValueAtTime", "linearRampToValueAtTime", "exponentialRampToValueAtTime"].indexOf(previous.type)) {
++      return previous.value;
++    }
++    if (previous.type === "setValueCurveAtTime") {
++      return previous.extractValueFromCurve(time);
++    }
++    if (previous.type === "setTargetAtTime") {
++      throw new Error("unreached");
++    }
++    throw new Error("unreached");
++  }
++
++  // Finally handle the case where we have both a previous and a next event
++  // First handle the case where our range ends up in a ramp event
++  if (next.type === "linearRampToValueAtTime") {
++    return previous.linearInterpolate(next, time);
++  } else if (next.type === "exponentialRampToValueAtTime") {
++    return previous.exponentialInterpolate(next, time);
++  }
++
++  // Now handle all other cases
++  if (~["setValueAtTime", "linearRampToValueAtTime", "exponentialRampToValueAtTime"].indexOf(previous.type)) {
++    // If the next event type is neither linear or exponential ramp,
++    // the value is constant.
++    return previous.value;
++  }
++  if (previous.type === "setValueCurveAtTime") {
++    return previous.extractValueFromCurve(time);
++  }
++  if (previous.type === "setTargetAtTime") {
++    throw new Error("unreached");
++  }
++  throw new Error("unreached");
++};
++
++Timeline.prototype._insertEvent = function (ev) {
++  var events = this.events;
++
++  if (ev.type === "setValueCurveAtTime") {
++    if (!ev.value || !ev.value.length) {
++      throw new Error("NS_ERROR_DOM_SYNTAX_ERR");
++    }
++  }
++
++  if (ev.type === "setTargetAtTime") {
++    if (F.fuzzyEqual(ev.constant, 0)) {
++      throw new Error("NS_ERROR_DOM_SYNTAX_ERR");
++    }
++  }
++
++  // Make sure that non-curve events don't fall within the duration of a
++  // curve event.
++  for (var i = 0; i < events.length; i++) {
++    if (events[i].type === "setValueCurveAtTime" &&
++        events[i].time <= ev.time &&
++        (events[i].time + events[i].duration) >= ev.time) {
++      throw new Error("NS_ERROR_DOM_SYNTAX_ERR");
++    }
++  }
++
++  // Make sure that curve events don't fall in a range which includes other
++  // events.
++  if (ev.type === "setValueCurveAtTime") {
++    for (var i = 0; i < events.length; i++) {
++      if (events[i].time > ev.time &&
++          events[i].time < (ev.time + ev.duration)) {
++        throw new Error("NS_ERROR_DOM_SYNTAX_ERR");
++      }
++    }
++  }
++
++  // Make sure that invalid values are not used for exponential curves
++  if (ev.type === "exponentialRampToValueAtTime") {
++    if (ev.value <= 0) throw new Error("NS_ERROR_DOM_SYNTAX_ERR");
++    var prev = this._getPreviousEvent(ev.time);
++    if (prev) {
++      if (prev.value <= 0) {
++        throw new Error("NS_ERROR_DOM_SYNTAX_ERR");
++      }
++    } else {
++      if (this._value <= 0) {
++        throw new Error("NS_ERROR_DOM_SYNTAX_ERR");
++      }
++    }
++  }
++
++  for (var i = 0; i < events.length; i++) {
++    if (ev.time === events[i].time) {
++      if (ev.type === events[i].type) {
++        // If times and types are equal, replace the event;
++        events[i] = ev;
++      } else {
++        // Otherwise, place the elemetn after the last event of another type
++        do { i++; }
++        while (i < events.length && ev.type !== events[i].type && ev.time === events[i].time);
++        events.splice(i, 0, ev);
++      }
++      return;
++    }
++    // Otherwise, place the event right after the latest existing event
++    if (ev.time < events[i].time) {
++      events.splice(i, 0, ev);
++      return;
++    }
++  }
++
++  // If we couldn't find a place for the event, just append it to the list
++  this.events.push(ev);
++};
++
++Timeline.prototype._getPreviousEvent = function (time) {
++  var previous = null, next = null;
++  var bailOut = false;
++  var events = this.events;
++
++  for (var i = 0; !bailOut && i < events.length; i++) {
++    if (time === events[i]) {
++      do { ++i; }
++      while (i < events.length && time === events[i].time);
++      return events[i - 1];
++    }
++    previous = next;
++    next = events[i];
++    if (time < events[i].time) {
++      bailOut = true;
++    }
++  }
++
++  // Handle the case where the time is past all the events
++  if (!bailOut) {
++    previous = next;
++  }
++
++  return previous;
++};
++
++Timeline.prototype.setValueAtTime = function (value, startTime) {
++  this._insertEvent(new TimelineEvent("setValueAtTime", value, startTime));
++};
++
++Timeline.prototype.linearRampToValueAtTime = function (value, endTime) {
++  this._insertEvent(new TimelineEvent("linearRampToValueAtTime", value, endTime));
++};
++
++Timeline.prototype.exponentialRampToValueAtTime = function (value, endTime) {
++  this._insertEvent(new TimelineEvent("exponentialRampToValueAtTime", value, endTime));
++};
++
++Timeline.prototype.setTargetAtTime = function (value, startTime, timeConstant) {
++  this._insertEvent(new TimelineEvent("setTargetAtTime", value, startTime, timeConstant));
++};
++
++Timeline.prototype.setValueCurveAtTime = function (value, startTime, duration) {
++  this._insertEvent(new TimelineEvent("setValueCurveAtTime", value, startTime, null, duration));
++};
++
++Timeline.prototype.cancelScheduledValues = function (time) {
++  for (var i = 0; i < this.events.length; i++) {
++    if (this.events[i].time >= time) {
++      this.events = this.events.slice(0, i);
++      break;
++    }
++  }
++};
++
++Timeline.prototype.cancelAllEvents = function () {
++  this.events.length = 0;
++};
++
++},{"./event":2,"./formulas":3}]},{},[1])(1)
++});
+\ No newline at end of file
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 09aebd6..2988999 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -8,32 +8,41 @@ const {Cc, Ci, Cu, Cr} = require("chrome");
+ const Services = require("Services");
+ 
+ const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const events = require("sdk/event/core");
+ const { on: systemOn, off: systemOff } = require("sdk/system/events");
+ const protocol = require("devtools/server/protocol");
+ const { CallWatcherActor, CallWatcherFront } = require("devtools/server/actors/call-watcher");
+ const { ThreadActor } = require("devtools/server/actors/script");
++const AutomationTimeline = require("./utils/automation-timeline");
+ 
+ const { on, once, off, emit } = events;
+ const { types, method, Arg, Option, RetVal } = protocol;
+ 
++const AUTOMATION_GRANULARITY = 2000;
++const AUTOMATION_GRANULARITY_MAX = 6000;
++
+ const AUDIO_GLOBALS = [
+-  "AudioContext", "AudioNode"
++  "AudioContext", "AudioNode", "AudioParam"
+ ];
+ 
+ const NODE_CREATION_METHODS = [
+   "createBufferSource", "createMediaElementSource", "createMediaStreamSource",
+   "createMediaStreamDestination", "createScriptProcessor", "createAnalyser",
+   "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
+   "createPanner", "createConvolver", "createChannelSplitter", "createChannelMerger",
+   "createDynamicsCompressor", "createOscillator"
+ ];
+ 
++const AUTOMATION_METHODS = [
++  "setValueAtTime", "linearRampToValueAtTime", "exponentialRampToValueAtTime",
++  "setTargetAtTime", "setValueCurveAtTime"
++];
++
+ const NODE_ROUTING_METHODS = [
+   "connect", "disconnect"
+ ];
+ 
+ const NODE_PROPERTIES = {
+   "OscillatorNode": {
+     "type": {},
+     "frequency": {},
+@@ -125,21 +134,31 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+     protocol.Actor.prototype.initialize.call(this, conn);
+ 
+     // Store ChromeOnly property `id` to identify AudioNode,
+     // rather than storing a strong reference, and store a weak
+     // ref to underlying node for controlling.
+     this.nativeID = node.id;
+     this.node = Cu.getWeakReference(node);
+ 
++    // Stores the AutomationTimelines for this node's AudioParams.
++    this.automation = {};
++
+     try {
+       this.type = getConstructorName(node);
+     } catch (e) {
+       this.type = "";
+     }
++
++    // Create automation timelines for all AudioParams
++    Object.keys(NODE_PROPERTIES[this.type])
++      .filter(isAudioParam.bind(null, node))
++      .forEach(paramName => {
++        this.automation[paramName] = new AutomationTimeline(node[paramName].defaultValue);
++      });
+   },
+ 
+   /**
+    * Returns the name of the audio type.
+    * Examples: "OscillatorNode", "MediaElementAudioSourceNode"
+    */
+   getType: method(function () {
+     return this.type;
+@@ -207,20 +226,23 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+   setParam: method(function (param, value) {
+     let node = this.node.get();
+ 
+     if (node === null) {
+       return CollectedAudioNodeError();
+     }
+ 
+     try {
+-      if (isAudioParam(node, param))
++      if (isAudioParam(node, param)) {
+         node[param].value = value;
+-      else
++        this.automation[param].setValue(value);
++      }
++      else {
+         node[param] = value;
++      }
+       return undefined;
+     } catch (e) {
+       return constructError(e);
+     }
+   }, {
+     request: {
+       param: Arg(0, "string"),
+       value: Arg(1, "nullable:primitive")
+@@ -279,17 +301,17 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+     request: { param: Arg(0, "string") },
+     response: { flags: RetVal("nullable:primitive") }
+   }),
+ 
+   /**
+    * Get an array of objects each containing a `param` and `value` property,
+    * corresponding to a property name and current value of the audio node.
+    */
+-  getParams: method(function (param) {
++  getParams: method(function () {
+     let props = Object.keys(NODE_PROPERTIES[this.type]);
+     return props.map(prop =>
+       ({ param: prop, value: this.getParam(prop), flags: this.getParamFlags(prop) }));
+   }, {
+     response: { params: RetVal("json") }
+   }),
+ 
+   /**
+@@ -367,18 +389,143 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+       // patched method that fires the webaudio actor's `disconnect` event.
+       XPCNativeWrapper.unwrap(node).disconnect(output);
+     } catch (e) {
+       return constructError(e);
+     }
+   }, {
+     request: { output: Arg(0, "nullable:number") },
+     response: { error: RetVal("nullable:json") }
+-  })
++  }),
++
++  getAutomationData: method(function (paramName) {
++    let timeline = this.automation[paramName];
++    let events = timeline.events;
++    let values = [];
++    let i = 0;
++
++    if (!timeline) {
++      return null;
++    }
++
++    if (!timeline.events.length) {
++      return { events, values };
++    }
++
++    let firstEvent = events[0];
++    let lastEvent = events[timeline.events.length - 1];
++    // `setValueCurveAtTime` will have a duration value -- other
++    // events will have duration of `0`.
++    let timeDelta = (lastEvent.time + lastEvent.duration) - firstEvent.time;
++    let scale = timeDelta / AUTOMATION_GRANULARITY;
++
++    for (; i < AUTOMATION_GRANULARITY; i++) {
++      let t = firstEvent.time + (i * scale);
++      let value = timeline.getValueAtTime(t);
++      values.push({ t, value });
++    }
++
++    // If the last event is setTargetAtTime, the automation
++    // doesn't actually begin until the event's time, and exponentially
++    // approaches the target value. In this case, we add more values
++    // until we're "close enough" to the target.
++    if (lastEvent.type === "setTargetAtTime") {
++      for (; i < AUTOMATION_GRANULARITY_MAX; i++) {
++        let t = firstEvent.time + (++i * scale);
++        let value = timeline.getValueAtTime(t);
++        values.push({ t, value });
++      }
++    }
++
++    return { events, values };
++  }, {
++    request: { paramName: Arg(0, "string") },
++    response: { values: RetVal("nullable:json") }
++  }),
++
++  /**
++   * Called via WebAudioActor, registers an automation event
++   * for the AudioParam called.
++   *
++   * @param String paramName
++   *        Name of the AudioParam.
++   * @param String eventName
++   *        Name of the automation event called.
++   * @param Array args
++   *        Arguments passed into the automation call.
++   */
++  addAutomationEvent: method(function (paramName, eventName, args=[]) {
++    let node = this.node.get();
++    let timeline = this.automation[paramName];
++
++    if (node === null) {
++      return CollectedAudioNodeError();
++    }
++
++    if (!timeline || !node[paramName][eventName]) {
++      return InvalidCommandError();
++    }
++
++    try {
++      // Using the unwrapped node and parameter, the corresponding
++      // WebAudioActor event will be fired, subsequently calling
++      // `_recordAutomationEvent`. Some finesse is required to handle
++      // the cast of TypedArray arguments over the protocol, which is
++      // taken care of below. The event will cast the argument back
++      // into an array to be broadcasted from WebAudioActor, but the
++      // double-casting will only occur when starting from `addAutomationEvent`,
++      // which is only used in tests.
++      let param = XPCNativeWrapper.unwrap(node[paramName]);
++
++      // If calling `setValueCurveAtTime`, the first argument
++      // is a Float32Array, which won't be able to be serialized
++      // over the protocol. Cast a normal array to a Float32Array here.
++      if (eventName === "setValueCurveAtTime") {
++        let contentGlobal = Cu.getGlobalForObject(param);
++        // Since we cannot iterate over and modify the actual Float32Array
++        // in the content, we'll have to pass in an array to the constructor
++        // from the same context, since we can iterate over non-TypedArrays.
++        let contentArray = copyInto(new contentGlobal.Array(), args[0]);
++
++        // Create a Float32Array from the content, seeding with an array
++        // from the same scope.
++        let curve = new contentGlobal.Float32Array(contentArray);
++        args[0] = curve;
++      }
++
++      param[eventName].apply(param, args);
++    } catch (e) {
++      return constructError(e);
++    }
++  }, {
++    request: {
++      paramName: Arg(0, "string"),
++      eventName: Arg(1, "string"),
++      args: Arg(2, "nullable:json")
++    },
++    response: { error: RetVal("nullable:json") }
++  }),
+ 
++  /**
++   * Registers the automation event in the AudioNodeActor's
++   * internal timeline. Called when setting automation via
++   * `addAutomationEvent`, or from the WebAudioActor's listening
++   * to the event firing via content.
++   *
++   * @param String paramName
++   *        Name of the AudioParam.
++   * @param String eventName
++   *        Name of the automation event called.
++   * @param Array args
++   *        Arguments passed into the automation call.
++   */
++  _recordAutomationEvent: function (paramName, eventName, args) {
++    let timeline = this.automation[paramName];
++    timeline[eventName].apply(timeline, args);
++  }
+ });
+ 
+ /**
+  * The corresponding Front object for the AudioNodeActor.
+  */
+ let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
+   initialize: function (client, form) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+@@ -470,20 +617,23 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     // All Web Audio nodes inherit from AudioNode's prototype, so
+     // hook into the `connect` and `disconnect` methods
+     if (WebAudioFront.NODE_ROUTING_METHODS.has(name)) {
+       this._handleRoutingCall(functionCall);
+     }
+     else if (WebAudioFront.NODE_CREATION_METHODS.has(name)) {
+       this._handleCreationCall(functionCall);
+     }
++    else if (WebAudioFront.AUTOMATION_METHODS.has(name)) {
++      this._handleAutomationCall(functionCall);
++    }
+   },
+ 
+   _handleRoutingCall: function(functionCall) {
+-    let { caller, args, window, name } = functionCall.details;
++    let { caller, args, name } = functionCall.details;
+     let source = caller;
+     let dest = args[0];
+     let isAudioParam = dest ? getConstructorName(dest) === "AudioParam" : false;
+ 
+     // audionode.connect(param)
+     if (name === "connect" && isAudioParam) {
+       this._onConnectParam(source, dest);
+     }
+@@ -508,16 +658,36 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+       // and trigger a `create-node` event for the context destination
+       this._onStartContext();
+       this._onCreateNode(caller.destination);
+       this._firstNodeCreated = true;
+     }
+     this._onCreateNode(result);
+   },
+ 
++  _handleAutomationCall: function (functionCall) {
++    let { caller, name, args } = functionCall.details;
++    let wrappedParam = new XPCNativeWrapper(caller);
++
++    // Sanitize arguments, as these should all be numbers,
++    // with the exception of a TypedArray, which needs
++    // casted to an Array
++    args = sanitizeAutomationArgs(args);
++
++    let nodeActor = this._getActorByNativeID(wrappedParam._parentID);
++    nodeActor._recordAutomationEvent(wrappedParam._paramName, name, args);
++
++    this._onAutomationEvent({
++      node: nodeActor,
++      paramName: wrappedParam._paramName,
++      eventName: name,
++      args: args
++    });
++  },
++
+   /**
+    * Stops listening for document global changes and puts this actor
+    * to hibernation. This method is called automatically just before the
+    * actor is destroyed.
+    */
+   finalize: method(function() {
+     if (!this._initialized) {
+       return;
+@@ -566,16 +736,23 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     },
+     "create-node": {
+       type: "createNode",
+       source: Arg(0, "audionode")
+     },
+     "destroy-node": {
+       type: "destroyNode",
+       source: Arg(0, "audionode")
++    },
++    "automation-event": {
++      type: "automationEvent",
++      node: Option(0, "audionode"),
++      paramName: Option(0, "string"),
++      eventName: Option(0, "string"),
++      args: Option(0, "json")
+     }
+   },
+ 
+   /**
+    * Helper for constructing an AudioNodeActor, assigning to
+    * internal weak map, and tracking via `manage` so it is assigned
+    * an `actorID`.
+    */
+@@ -707,16 +884,28 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+    * Ensures that the new global has recording on
+    * so we can proxy the function calls.
+    */
+   _onGlobalCreated: function () {
+     this._callWatcher.resumeRecording();
+   },
+ 
+   /**
++   * Fired when an automation event is added to an AudioNode.
++   */
++  _onAutomationEvent: function ({node, paramName, eventName, args}) {
++    emit(this, "automation-event",  {
++      node: node,
++      paramName: paramName,
++      eventName: eventName,
++      args: args
++    });
++  },
++
++  /**
+    * Called when the underlying ContentObserver fires `global-destroyed`
+    * so we can cleanup some things between the global being destroyed and
+    * when the actor's `finalize` method gets called.
+    */
+   _onGlobalDestroyed: function ({id}) {
+     if (this._callWatcher._tracedWindowId !== id) {
+       return;
+     }
+@@ -733,16 +922,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+  */
+ let WebAudioFront = exports.WebAudioFront = protocol.FrontClass(WebAudioActor, {
+   initialize: function(client, { webaudioActor }) {
+     protocol.Front.prototype.initialize.call(this, client, { actor: webaudioActor });
+     this.manage(this);
+   }
+ });
+ 
++WebAudioFront.AUTOMATION_METHODS = new Set(AUTOMATION_METHODS);
+ WebAudioFront.NODE_CREATION_METHODS = new Set(NODE_CREATION_METHODS);
+ WebAudioFront.NODE_ROUTING_METHODS = new Set(NODE_ROUTING_METHODS);
+ 
+ /**
+  * Determines whether or not property is an AudioParam.
+  *
+  * @param AudioNode node
+  *        An AudioNode.
+@@ -776,16 +966,23 @@ function constructError (err) {
+  */
+ function CollectedAudioNodeError () {
+   return {
+     message: "AudioNode has been garbage collected and can no longer be reached.",
+     type: "UnreachableAudioNode"
+   };
+ }
+ 
++function InvalidCommandError () {
++  return {
++    message: "The command on AudioNode is invalid.",
++    type: "InvalidCommand"
++  };
++}
++
+ /**
+  * Takes an object and converts it's `toString()` form, like
+  * "[object OscillatorNode]" or "[object Float32Array]",
+  * or XrayWrapper objects like "[object XrayWrapper [object Array]]"
+  * to a string of just the constructor name, like "OscillatorNode",
+  * or "Float32Array".
+  */
+ function getConstructorName (obj) {
+@@ -802,8 +999,42 @@ function createObjectGrip (value) {
+     type: "object",
+     preview: {
+       kind: "ObjectWithText",
+       text: ""
+     },
+     class: getConstructorName(value)
+   };
+ }
++
++/**
++ * Converts all TypedArrays of the array that cannot
++ * be passed over the wire into a normal Array equivilent.
++ */
++function sanitizeAutomationArgs (args) {
++  return args.reduce((newArgs, el) => {
++    newArgs.push(typeof el === "object" && getConstructorName(el) === "Float32Array" ? castToArray(el) : el);
++    return newArgs;
++  }, []);
++}
++
++/**
++ * Casts TypedArray to a normal array via a
++ * new scope.
++ */
++function castToArray (typedArray) {
++  // The Xray machinery for TypedArrays denies indexed access on the grounds
++  // that it's slow, and advises callers to do a structured clone instead.
++  let global = Cu.getGlobalForObject(this);
++  let safeView = Cu.cloneInto(typedArray.subarray(), global);
++  return copyInto([], safeView);
++}
++
++/**
++ * Copies values of an array-like `source` into
++ * a similarly array-like `dest`.
++ */
++function copyInto (dest, source) {
++  for (let i = 0; i < source.length; i++) {
++    dest[i] = source[i];
++  }
++  return dest;
++}
+diff --git a/toolkit/devtools/server/moz.build b/toolkit/devtools/server/moz.build
+index 5f4aa1f..f8dd5b7 100644
+--- a/toolkit/devtools/server/moz.build
++++ b/toolkit/devtools/server/moz.build
+@@ -64,12 +64,13 @@ EXTRA_JS_MODULES.devtools.server.actors += [
+     'actors/webapps.js',
+     'actors/webaudio.js',
+     'actors/webbrowser.js',
+     'actors/webconsole.js',
+     'actors/webgl.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.server.actors.utils += [
++    'actors/utils/automation-timeline.js',
+     'actors/utils/make-debugger.js',
+     'actors/utils/map-uri-to-addon-id.js'
+ ]
+ 
+-- 
+1.8.4.2
+
