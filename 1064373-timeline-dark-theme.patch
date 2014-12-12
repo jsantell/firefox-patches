@@ -1,0 +1,514 @@
+From 0977c30d3ce2c7a62a435fb004b5dc1d86246f68 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 11 Dec 2014 17:04:02 -0800
+Subject: Bug 1064373 - Render timeline graphs in dark theme if toolbox
+ is using dark theme. r=vp
+
+---
+ browser/devtools/timeline/test/browser.ini         |  1 +
+ .../test/browser_timeline_overview-theme.js        | 78 ++++++++++++++++++++++
+ browser/devtools/timeline/timeline.js              | 27 ++++++++
+ .../devtools/timeline/widgets/markers-overview.js  | 63 ++++++++++++-----
+ .../devtools/timeline/widgets/memory-overview.js   | 40 +++++++++--
+ 5 files changed, 187 insertions(+), 22 deletions(-)
+ create mode 100644 browser/devtools/timeline/test/browser_timeline_overview-theme.js
+
+diff --git a/browser/devtools/timeline/test/browser.ini b/browser/devtools/timeline/test/browser.ini
+index 691cc33..072eec5 100644
+--- a/browser/devtools/timeline/test/browser.ini
++++ b/browser/devtools/timeline/test/browser.ini
+@@ -4,15 +4,16 @@ support-files =
+   doc_simple-test.html
+   head.js
+ 
+ [browser_timeline_aaa_run_first_leaktest.js]
+ [browser_timeline_blueprint.js]
+ [browser_timeline_overview-initial-selection-01.js]
+ [browser_timeline_overview-initial-selection-02.js]
+ [browser_timeline_overview-update.js]
++[browser_timeline_overview-theme.js]
+ [browser_timeline_panels.js]
+ [browser_timeline_recording-without-memory.js]
+ [browser_timeline_recording.js]
+ [browser_timeline_waterfall-background.js]
+ [browser_timeline_waterfall-generic.js]
+ [browser_timeline_waterfall-styles.js]
+ [browser_timeline_waterfall-sidebar.js]
+diff --git a/browser/devtools/timeline/test/browser_timeline_overview-theme.js b/browser/devtools/timeline/test/browser_timeline_overview-theme.js
+new file mode 100644
+index 0000000..5210e11
+--- /dev/null
++++ b/browser/devtools/timeline/test/browser_timeline_overview-theme.js
+@@ -0,0 +1,78 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the markers and memory overviews render with the correct
++ * theme on load, and rerenders when changed.
++ */
++
++const LIGHT_BG = "#fff";
++const DARK_BG = "#14171A";
++
++let test = Task.async(function*() {
++  let { target, panel } = yield initTimelinePanel("about:blank");
++  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
++
++  $("#memory-checkbox").checked = true;
++
++  setTheme("dark");
++
++  yield TimelineController.updateMemoryRecording();
++  is(TimelineView.markersOverview.backgroundColor, DARK_BG,
++    "correct theme on load for markers.");
++  is(TimelineView.memoryOverview.backgroundColor, DARK_BG,
++    "correct theme on load for memory.");
++
++  yield TimelineController.toggleRecording();
++  ok(true, "Recording has started.");
++
++  yield TimelineController.toggleRecording();
++  ok(true, "Recording has ended.");
++
++  let refreshed = Promise.all([
++    once(TimelineView.markersOverview, "refresh"),
++    once(TimelineView.memoryOverview, "refresh"),
++  ]);
++
++  setTheme("light");
++  yield refreshed;
++
++  ok(true, "Both memory and markers were rerendered after theme change.");
++  is(TimelineView.markersOverview.backgroundColor, LIGHT_BG,
++    "correct theme on after toggle for markers.");
++  is(TimelineView.memoryOverview.backgroundColor, LIGHT_BG,
++    "correct theme on after toggle for memory.");
++
++  refreshed = Promise.all([
++    once(TimelineView.markersOverview, "refresh"),
++    once(TimelineView.memoryOverview, "refresh"),
++  ]);
++
++  setTheme("dark");
++  yield refreshed;
++
++  ok(true, "Both memory and markers were rerendered after theme change.");
++  is(TimelineView.markersOverview.backgroundColor, DARK_BG,
++    "correct theme on after toggle for markers once more.");
++  is(TimelineView.memoryOverview.backgroundColor, DARK_BG,
++    "correct theme on after toggle for memory once more.");
++
++  yield teardown(panel);
++  finish();
++});
++
++/**
++ * Mimics selecting the theme selector in the toolbox;
++ * sets the preference and emits an event on gDevTools to trigger
++ * the themeing.
++ */
++function setTheme (newTheme) {
++  let oldTheme = Services.prefs.getCharPref("devtools.theme");
++  info("Setting `devtools.theme` to \"" + newTheme + "\"");
++  Services.prefs.setCharPref("devtools.theme", newTheme);
++  gDevTools.emit("pref-changed", {
++    pref: "devtools.theme",
++    newValue: newTheme,
++    oldValue: oldTheme
++  });
++}
+diff --git a/browser/devtools/timeline/timeline.js b/browser/devtools/timeline/timeline.js
+index 73f67c0..3ee2574 100644
+--- a/browser/devtools/timeline/timeline.js
++++ b/browser/devtools/timeline/timeline.js
+@@ -1,17 +1,19 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
++Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/Task.jsm");
+ Cu.import("resource://gre/modules/devtools/Loader.jsm");
++Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ 
+ devtools.lazyRequireGetter(this, "promise");
+ devtools.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ 
+ devtools.lazyRequireGetter(this, "MarkersOverview",
+   "devtools/timeline/markers-overview", true);
+ devtools.lazyRequireGetter(this, "MemoryOverview",
+@@ -80,16 +82,17 @@ let TimelineController = {
+ 
+   /**
+    * Initialization function, called when the tool is started.
+    */
+   initialize: function() {
+     this._onRecordingTick = this._onRecordingTick.bind(this);
+     this._onMarkers = this._onMarkers.bind(this);
+     this._onMemory = this._onMemory.bind(this);
++
+     gFront.on("markers", this._onMarkers);
+     gFront.on("memory", this._onMemory);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+@@ -249,34 +252,41 @@ let TimelineView = {
+   /**
+    * Initialization function, called when the tool is started.
+    */
+   initialize: Task.async(function*() {
+     this.markersOverview = new MarkersOverview($("#markers-overview"));
+     this.waterfall = new Waterfall($("#timeline-waterfall"), $("#timeline-pane"));
+     this.markerDetails = new MarkerDetails($("#timeline-waterfall-details"), $("#timeline-waterfall-container > splitter"));
+ 
++    this._onThemeChange = this._onThemeChange.bind(this);
+     this._onSelecting = this._onSelecting.bind(this);
+     this._onRefresh = this._onRefresh.bind(this);
++
++    gDevTools.on("pref-changed", this._onThemeChange);
+     this.markersOverview.on("selecting", this._onSelecting);
+     this.markersOverview.on("refresh", this._onRefresh);
+     this.markerDetails.on("resize", this._onRefresh);
+ 
+     this._onMarkerSelected = this._onMarkerSelected.bind(this);
+     this.waterfall.on("selected", this._onMarkerSelected);
+     this.waterfall.on("unselected", this._onMarkerSelected);
+ 
++    let theme = Services.prefs.getCharPref("devtools.theme");
++    this.markersOverview.setTheme(theme);
++
+     yield this.markersOverview.ready();
+     yield this.waterfall.recalculateBounds();
+   }),
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
++    gDevTools.off("pref-changed", this._onThemeChange);
+     this.markerDetails.off("resize", this._onRefresh);
+     this.markerDetails.destroy();
+     this.waterfall.off("selected", this._onMarkerSelected);
+     this.waterfall.off("unselected", this._onMarkerSelected);
+     this.waterfall.destroy();
+     this.markersOverview.off("selecting", this._onSelecting);
+     this.markersOverview.off("refresh", this._onRefresh);
+     this.markersOverview.destroy();
+@@ -286,17 +296,20 @@ let TimelineView = {
+       this.memoryOverview.destroy();
+     }
+   },
+ 
+   /**
+    * Shows the memory overview graph.
+    */
+   showMemoryOverview: Task.async(function*() {
++    let theme = Services.prefs.getCharPref("devtools.theme");
++
+     this.memoryOverview = new MemoryOverview($("#memory-overview"));
++    this.memoryOverview.setTheme(theme);
+     yield this.memoryOverview.ready();
+ 
+     let interval = TimelineController.getInterval();
+     let memory = TimelineController.getMemory();
+     this.memoryOverview.setData({ interval, memory });
+ 
+     CanvasGraphUtils.linkAnimation(this.markersOverview, this.memoryOverview);
+     CanvasGraphUtils.linkSelection(this.markersOverview, this.memoryOverview);
+@@ -429,16 +442,30 @@ let TimelineView = {
+   },
+ 
+   /**
+    * Callback handling the "refresh" event on the timeline overview.
+    */
+   _onRefresh: function() {
+     this.waterfall.recalculateBounds();
+     this.updateWaterfall();
++  },
++
++  /**
++   * Called when the developer tools theme changes. Redraws
++   * the graphs with the new theme setting.
++   */
++  _onThemeChange: function (_, theme) {
++    if (this.memoryOverview) {
++      this.memoryOverview.setTheme(theme.newValue);
++      this.memoryOverview.refresh({ force: true });
++    }
++
++    this.markersOverview.setTheme(theme.newValue);
++    this.markersOverview.refresh({ force: true });
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the panel window.
+  */
+ EventEmitter.decorate(this);
+ 
+diff --git a/browser/devtools/timeline/widgets/markers-overview.js b/browser/devtools/timeline/widgets/markers-overview.js
+index 13d6953..811a06e 100644
+--- a/browser/devtools/timeline/widgets/markers-overview.js
++++ b/browser/devtools/timeline/widgets/markers-overview.js
+@@ -14,41 +14,49 @@ const {Cc, Ci, Cu, Cr} = require("chrome");
+ Cu.import("resource:///modules/devtools/Graphs.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ 
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/timeline/global", true);
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/timeline/global", true);
+ 
+-const HTML_NS = "http://www.w3.org/1999/xhtml";
+-
+ const OVERVIEW_HEADER_HEIGHT = 14; // px
+ const OVERVIEW_BODY_HEIGHT = 55; // 11px * 5 groups
++const OVERVIEW_SELECTION_LINE_COLOR = "#666";
++const OVERVIEW_CLIPHEAD_LINE_COLOR = "#555";
+ 
++/* default, light theme */
+ const OVERVIEW_BACKGROUND_COLOR = "#fff";
+-const OVERVIEW_CLIPHEAD_LINE_COLOR = "#666";
+-const OVERVIEW_SELECTION_LINE_COLOR = "#555";
+-const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76,158,217,0.25)";
++const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76, 158, 217, 0.25)";
+ const OVERVIEW_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
++const OVERVIEW_HEADER_BACKGROUND = "#fff";
++const OVERVIEW_HEADER_TEXT_COLOR = "#18191a";
++const OVERVIEW_TIMELINE_STROKES = "#ccc";
++const OVERVIEW_GROUP_ALTERNATING_BACKGROUND = "rgba(0,0,0,0.05)";
++
++/* dark theme */
++const OVERVIEW_BACKGROUND_COLOR_DARK = "#14171A";
++const OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK = "rgba(29, 79, 115, 0.25)";
++const OVERVIEW_SELECTION_STRIPES_COLOR_DARK = "rgba(255,255,255,0.1)";
++const OVERVIEW_HEADER_BACKGROUND_DARK = "#14171A";
++const OVERVIEW_HEADER_TEXT_COLOR_DARK = "#A9BACB";
++const OVERVIEW_TIMELINE_STROKES_DARK = "rgba(255, 255, 255, 0.25)";
++const OVERVIEW_GROUP_ALTERNATING_BACKGROUND_DARK = "rgba(255, 255, 255, 0.03)";
+ 
+ const OVERVIEW_HEADER_TICKS_MULTIPLE = 100; // ms
+ const OVERVIEW_HEADER_TICKS_SPACING_MIN = 75; // px
+ const OVERVIEW_HEADER_SAFE_BOUNDS = 50; // px
+-const OVERVIEW_HEADER_BACKGROUND = "#fff";
+-const OVERVIEW_HEADER_TEXT_COLOR = "#18191a";
+ const OVERVIEW_HEADER_TEXT_FONT_SIZE = 9; // px
+ const OVERVIEW_HEADER_TEXT_FONT_FAMILY = "sans-serif";
+ const OVERVIEW_HEADER_TEXT_PADDING_LEFT = 6; // px
+ const OVERVIEW_HEADER_TEXT_PADDING_TOP = 1; // px
+-const OVERVIEW_TIMELINE_STROKES = "#ccc";
+ const OVERVIEW_MARKERS_COLOR_STOPS = [0, 0.1, 0.75, 1];
+ const OVERVIEW_MARKER_DURATION_MIN = 4; // ms
+ const OVERVIEW_GROUP_VERTICAL_PADDING = 5; // px
+-const OVERVIEW_GROUP_ALTERNATING_BACKGROUND = "rgba(0,0,0,0.05)";
+ 
+ /**
+  * An overview for the markers data.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the overview.
+  */
+ function MarkersOverview(parent, ...args) {
+@@ -59,20 +67,25 @@ function MarkersOverview(parent, ...args) {
+ 
+     // Populate this overview with some dummy initial data.
+     this.setData({ interval: { startTime: 0, endTime: 1000 }, markers: [] });
+   });
+ }
+ 
+ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+   fixedHeight: OVERVIEW_HEADER_HEIGHT + OVERVIEW_BODY_HEIGHT,
++  backgroundColor: OVERVIEW_BACKGROUND_COLOR,
+   clipheadLineColor: OVERVIEW_CLIPHEAD_LINE_COLOR,
+-  selectionLineColor: OVERVIEW_SELECTION_LINE_COLOR,
+   selectionBackgroundColor: OVERVIEW_SELECTION_BACKGROUND_COLOR,
++  selectionLineColor: OVERVIEW_SELECTION_LINE_COLOR,
+   selectionStripesColor: OVERVIEW_SELECTION_STRIPES_COLOR,
++  headerBackgroundColor: OVERVIEW_HEADER_BACKGROUND,
++  headerTextColor: OVERVIEW_HEADER_TEXT_COLOR,
++  headerTimelineStrokeColor: OVERVIEW_TIMELINE_STROKES,
++  alternateBackgroundColor: OVERVIEW_GROUP_ALTERNATING_BACKGROUND,
+ 
+   /**
+    * List of names and colors used to paint this overview.
+    * @see TIMELINE_BLUEPRINT in timeline/widgets/global.js
+    */
+   setBlueprint: function(blueprint) {
+     this._paintBatches = new Map();
+     this._lastGroup = 0;
+@@ -120,25 +133,25 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     let groupHeight = OVERVIEW_BODY_HEIGHT * this._pixelRatio / totalGroups;
+     let groupPadding = OVERVIEW_GROUP_VERTICAL_PADDING * this._pixelRatio;
+ 
+     let totalTime = (endTime - startTime) || 0;
+     let dataScale = this.dataScaleX = availableWidth / totalTime;
+ 
+     // Draw the header and overview background.
+ 
+-    ctx.fillStyle = OVERVIEW_HEADER_BACKGROUND;
++    ctx.fillStyle = this.headerBackgroundColor;
+     ctx.fillRect(0, 0, canvasWidth, headerHeight);
+ 
+-    ctx.fillStyle = OVERVIEW_BACKGROUND_COLOR;
++    ctx.fillStyle = this.backgroundColor;
+     ctx.fillRect(0, headerHeight, canvasWidth, canvasHeight);
+ 
+     // Draw the alternating odd/even group backgrounds.
+ 
+-    ctx.fillStyle = OVERVIEW_GROUP_ALTERNATING_BACKGROUND;
++    ctx.fillStyle = this.alternatingBackgroundColor;
+     ctx.beginPath();
+ 
+     for (let i = 0; i < totalGroups; i += 2) {
+       let top = headerHeight + i * groupHeight;
+       ctx.rect(0, top, canvasWidth, groupHeight);
+     }
+ 
+     ctx.fill();
+@@ -148,18 +161,18 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     let fontSize = OVERVIEW_HEADER_TEXT_FONT_SIZE * this._pixelRatio;
+     let fontFamily = OVERVIEW_HEADER_TEXT_FONT_FAMILY;
+     let textPaddingLeft = OVERVIEW_HEADER_TEXT_PADDING_LEFT * this._pixelRatio;
+     let textPaddingTop = OVERVIEW_HEADER_TEXT_PADDING_TOP * this._pixelRatio;
+     let tickInterval = this._findOptimalTickInterval(dataScale);
+ 
+     ctx.textBaseline = "middle";
+     ctx.font = fontSize + "px " + fontFamily;
+-    ctx.fillStyle = OVERVIEW_HEADER_TEXT_COLOR;
+-    ctx.strokeStyle = OVERVIEW_TIMELINE_STROKES;
++    ctx.fillStyle = this.headerTextColor;
++    ctx.strokeStyle = this.headerTimelineStrokeColor;
+     ctx.beginPath();
+ 
+     for (let x = 0; x < availableWidth; x += tickInterval) {
+       let lineLeft = x;
+       let textLeft = lineLeft + textPaddingLeft;
+       let time = Math.round(x / dataScale);
+       let label = L10N.getFormatStr("timeline.tick", time);
+       ctx.fillText(label, textLeft, headerHeight / 2 + textPaddingTop);
+@@ -214,12 +227,32 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     while (true) {
+       let scaledStep = dataScale * timingStep;
+       if (scaledStep < spacingMin) {
+         timingStep <<= 1;
+         continue;
+       }
+       return scaledStep;
+     }
++  },
++
++  setTheme: function (theme) {
++    if (theme === "light") {
++      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR;
++      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR;
++      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR;
++      this.headerBackgroundColor = OVERVIEW_HEADER_BACKGROUND;
++      this.headerTextColor = OVERVIEW_HEADER_TEXT_COLOR;
++      this.headerTimelineStrokeColor = OVERVIEW_TIMELINE_STROKES;
++      this.alternatingBackgroundColor = OVERVIEW_GROUP_ALTERNATING_BACKGROUND;
++    } else if (theme === "dark") {
++      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR_DARK;
++      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK;
++      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR_DARK;
++      this.headerBackgroundColor = OVERVIEW_HEADER_BACKGROUND_DARK;
++      this.headerTextColor = OVERVIEW_HEADER_TEXT_COLOR_DARK;
++      this.headerTimelineStrokeColor = OVERVIEW_TIMELINE_STROKES_DARK;
++      this.alternatingBackgroundColor = OVERVIEW_GROUP_ALTERNATING_BACKGROUND_DARK;
++    }
+   }
+ });
+ 
+ exports.MarkersOverview = MarkersOverview;
+diff --git a/browser/devtools/timeline/widgets/memory-overview.js b/browser/devtools/timeline/widgets/memory-overview.js
+index e4f1ca5..41ce85b 100644
+--- a/browser/devtools/timeline/widgets/memory-overview.js
++++ b/browser/devtools/timeline/widgets/memory-overview.js
+@@ -14,31 +14,39 @@ Cu.import("resource:///modules/devtools/Graphs.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ 
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/timeline/global", true);
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ 
+ const OVERVIEW_HEIGHT = 30; // px
+-
+-const OVERVIEW_BACKGROUND_COLOR = "#fff";
+-const OVERVIEW_BACKGROUND_GRADIENT_START = "rgba(0,136,204,0.1)";
+-const OVERVIEW_BACKGROUND_GRADIENT_END = "rgba(0,136,204,0.0)";
+ const OVERVIEW_STROKE_WIDTH = 1; // px
+-const OVERVIEW_STROKE_COLOR = "rgba(0,136,204,1)";
+-const OVERVIEW_CLIPHEAD_LINE_COLOR = "#666";
+-const OVERVIEW_SELECTION_LINE_COLOR = "#555";
+ const OVERVIEW_MAXIMUM_LINE_COLOR = "rgba(0,136,204,0.4)";
+ const OVERVIEW_AVERAGE_LINE_COLOR = "rgba(0,136,204,0.7)";
+ const OVERVIEW_MINIMUM_LINE_COLOR = "rgba(0,136,204,0.9)";
++const OVERVIEW_CLIPHEAD_LINE_COLOR = "#666";
++const OVERVIEW_SELECTION_LINE_COLOR = "#555";
+ 
++/* default, light theme */
++const OVERVIEW_BACKGROUND_COLOR = "#fff";
++const OVERVIEW_BACKGROUND_GRADIENT_START = "rgba(0,136,204,0.1)";
++const OVERVIEW_BACKGROUND_GRADIENT_END = "rgba(0,136,204,0.0)";
++const OVERVIEW_STROKE_COLOR = "rgba(0,136,204,1)";
+ const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76,158,217,0.25)";
+ const OVERVIEW_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
+ 
++/* dark theme */
++const OVERVIEW_BACKGROUND_COLOR_DARK = "#14171A";
++const OVERVIEW_BACKGROUND_GRADIENT_START_DARK = "rgba(70, 175, 227, 0.1)";
++const OVERVIEW_BACKGROUND_GRADIENT_END_DARK = "rgba(70, 175, 227, 0.0)";
++const OVERVIEW_STROKE_COLOR_DARK = "rgba(70, 175, 227, 1)";
++const OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK = "rgba(29, 79, 115, 0.25)";
++const OVERVIEW_SELECTION_STRIPES_COLOR_DARK = "rgba(255,255,255,0.1)";
++
+ /**
+  * An overview for the memory data.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the overview.
+  */
+ function MemoryOverview(parent) {
+   LineGraphWidget.call(this, parent, L10N.getStr("graphs.memory"));
+@@ -77,12 +85,30 @@ MemoryOverview.prototype = Heritage.extend(LineGraphWidget.prototype, {
+   },
+ 
+   /**
+    * Sets the data source for this graph.
+    */
+   setData: function({ interval, memory }) {
+     this.dataOffsetX = interval.startTime;
+     LineGraphWidget.prototype.setData.call(this, memory);
++  },
++
++  setTheme: function (theme) {
++    if (theme === "light") {
++      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR;
++      this.backgroundGradientStart = OVERVIEW_BACKGROUND_GRADIENT_START;
++      this.backgroundGradientEnd = OVERVIEW_BACKGROUND_GRADIENT_END;
++      this.strokeColor = OVERVIEW_STROKE_COLOR;
++      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR;
++      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR;
++    } else if (theme === "dark") {
++      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR_DARK;
++      this.backgroundGradientStart = OVERVIEW_BACKGROUND_GRADIENT_START_DARK;
++      this.backgroundGradientEnd = OVERVIEW_BACKGROUND_GRADIENT_END_DARK;
++      this.strokeColor = OVERVIEW_STROKE_COLOR_DARK;
++      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK;
++      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR_DARK;
++    }
+   }
+ });
+ 
+ exports.MemoryOverview = MemoryOverview;
+-- 
+1.8.4.2
+
