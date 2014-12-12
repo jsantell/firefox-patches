@@ -1,0 +1,278 @@
+From 6dfd6aa71f34dddb9695888f96860e53933764d0 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 10 Dec 2014 16:11:39 -0800
+Subject: Bug 1102347 - Add jump to lines in the debugger from new
+ performance call tree. r=vp
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 245f60b..4a4bc4d 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -50,16 +50,20 @@ const EVENTS = {
+   OVERVIEW_RANGE_CLEARED: "Performance:UI:OverviewRangeCleared",
+ 
+   // Emitted by the DetailsView when a subview is selected
+   DETAILS_VIEW_SELECTED: "Performance:UI:DetailsViewSelected",
+ 
+   // Emitted by the CallTreeView when a call tree has been rendered
+   CALL_TREE_RENDERED: "Performance:UI:CallTreeRendered",
+ 
++  // When a source is shown in the JavaScript Debugger at a specific location.
++  SOURCE_SHOWN_IN_JS_DEBUGGER: "Performance:UI:SourceShownInJsDebugger",
++  SOURCE_NOT_FOUND_IN_JS_DEBUGGER: "Performance:UI:SourceNotFoundInJsDebugger",
++
+   // Emitted by the WaterfallView when it has been rendered
+   WATERFALL_RENDERED: "Performance:UI:WaterfallRendered"
+ };
+ 
+ /**
+  * The current target and the profiler connection, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 6e56842..bca94be 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -30,11 +30,13 @@ support-files =
+ [browser_perf-data-samples.js]
+ [browser_perf-data-massaging-01.js]
+ [browser_perf-ui-recording.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
+ [browser_perf-overview-selection.js]
+ 
+ [browser_perf-details.js]
++[browser_perf-jump-to-debugger-01.js]
++[browser_perf-jump-to-debugger-02.js]
+ [browser_perf-details-calltree-render-01.js]
+ [browser_perf-details-calltree-render-02.js]
+ [browser_perf-details-waterfall-render-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js b/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js
+new file mode 100644
+index 0000000..8e967fe
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js
+@@ -0,0 +1,27 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the performance tool can jump to the debugger.
++ */
++
++function spawnTest () {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let { viewSourceInDebugger } = panel.panelWin;
++
++  yield viewSourceInDebugger(SIMPLE_URL, 14);
++
++  let debuggerPanel = toolbox.getPanel("jsdebugger");
++  ok(debuggerPanel, "The debugger panel was opened.");
++
++  let { DebuggerView } = debuggerPanel.panelWin;
++  let Sources = DebuggerView.Sources;
++
++  is(Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
++    "The correct source is shown in the debugger.");
++  is(DebuggerView.editor.getCursor().line + 1, 14,
++    "The correct line is highlighted in the debugger's source editor.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js b/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js
+new file mode 100644
+index 0000000..d72a291
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js
+@@ -0,0 +1,41 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the performance tool can jump to the debugger, when the source was already
++ * loaded in that tool.
++ */
++
++function spawnTest() {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL, "jsdebugger");
++  let debuggerWin = panel.panelWin;
++  let debuggerEvents = debuggerWin.EVENTS;
++  let { DebuggerView } = debuggerWin;
++  let Sources = DebuggerView.Sources;
++
++  yield debuggerWin.once(debuggerEvents.SOURCE_SHOWN);
++  ok("A source was shown in the debugger.");
++
++  is(Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
++    "The correct source is initially shown in the debugger.");
++  is(DebuggerView.editor.getCursor().line, 0,
++    "The correct line is initially highlighted in the debugger's source editor.");
++
++  yield toolbox.selectTool("performance");
++  let perfPanel = toolbox.getCurrentPanel();
++  let perfWin = perfPanel.panelWin;
++  let { viewSourceInDebugger } = perfWin;
++
++  yield viewSourceInDebugger(SIMPLE_URL, 14);
++
++  panel = toolbox.getPanel("jsdebugger");
++  ok(panel, "The debugger panel was reselected.");
++
++  is(DebuggerView.Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
++    "The correct source is still shown in the debugger.");
++  is(DebuggerView.editor.getCursor().line + 1, 14,
++    "The correct line is now highlighted in the debugger's source editor.");
++
++  yield teardown(perfPanel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 25ae10f..1cf7ef5 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -153,27 +153,27 @@ function initBackend(aUrl) {
+ 
+     let connection = getPerformanceActorsConnection(target);
+     yield connection.open();
+     let front = new PerformanceFront(connection);
+     return { target, front };
+   });
+ }
+ 
+-function initPerformance(aUrl) {
++function initPerformance(aUrl, selectedTool="performance") {
+   info("Initializing a performance pane.");
+ 
+   return Task.spawn(function*() {
+     let tab = yield addTab(aUrl);
+     let target = TargetFactory.forTab(tab);
+ 
+     yield target.makeRemote();
+ 
+     Services.prefs.setBoolPref("devtools.performance_dev.enabled", true);
+-    let toolbox = yield gDevTools.showToolbox(target, "performance");
++    let toolbox = yield gDevTools.showToolbox(target, selectedTool);
+     let panel = toolbox.getCurrentPanel();
+     return { target, panel, toolbox };
+   });
+ }
+ 
+ function* teardown(panel) {
+   info("Destroying the performance tool.");
+ 
+@@ -312,8 +312,13 @@ function dragStop(graph, x, y = 1) {
+   graph._onMouseMove({ clientX: x, clientY: y });
+   graph._onMouseUp({ clientX: x, clientY: y });
+ }
+ 
+ function dropSelection(graph) {
+   graph.dropSelection();
+   graph.emit("mouseup");
+ }
++
++function getSourceActor(aSources, aURL) {
++  let item = aSources.getItemForAttachment(a => a.source.url === aURL);
++  return item && item.value;
++}
+diff --git a/browser/devtools/performance/views/details-call-tree.js b/browser/devtools/performance/views/details-call-tree.js
+index a97f206..9149738 100644
+--- a/browser/devtools/performance/views/details-call-tree.js
++++ b/browser/devtools/performance/views/details-call-tree.js
+@@ -9,16 +9,17 @@
+ let CallTreeView = {
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     this.el = $(".call-tree");
+     this._graphEl = $(".call-tree-cells-container");
+     this._onRangeChange = this._onRangeChange.bind(this);
++    this._onLink = this._onLink.bind(this);
+     this._stop = this._stop.bind(this);
+ 
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_SELECTED, this._onRangeChange);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_CLEARED, this._onRangeChange);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._stop);
+   },
+ 
+   /**
+@@ -53,16 +54,23 @@ let CallTreeView = {
+    */
+   _onRangeChange: function (_, params) {
+     // When a range is cleared, we'll have no beginAt/endAt data,
+     // so the rebuild will just render all the data again.
+     let { beginAt, endAt } = params || {};
+     this.render(this._profilerData, beginAt, endAt);
+   },
+ 
++  _onLink: function (_, treeItem) {
++    let { url, line } = treeItem.frame.getInfo();
++    viewSourceInDebugger(url, line).then(
++      () => this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER),
++      () => this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER));
++  },
++
+   /**
+    * Called when the recording is stopped and prepares data to
+    * populate the call tree.
+    */
+   _prepareCallTree: function (profilerData, beginAt, endAt, options) {
+     let threadSamples = profilerData.profile.threads[0].samples;
+     let contentOnly = !Prefs.showPlatformData;
+     // TODO handle inverted tree bug 1102347
+@@ -80,21 +88,51 @@ let CallTreeView = {
+   _populateCallTree: function (frameNode, options={}) {
+     let root = new CallView({
+       autoExpandDepth: options.inverted ? 0 : undefined,
+       frame: frameNode,
+       hidden: options.inverted,
+       inverted: options.inverted
+     });
+ 
++    // Bind events
++    root.on("link", this._onLink);
++
+     // Clear out other graphs
+     this._graphEl.innerHTML = "";
+     root.attachTo(this._graphEl);
+ 
+     let contentOnly = !Prefs.showPlatformData;
+     root.toggleCategories(!contentOnly);
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the view.
+  */
+ EventEmitter.decorate(CallTreeView);
++
++/**
++ * Opens/selects the debugger in this toolbox and jumps to the specified
++ * file name and line number.
++ * @param string url
++ * @param number line
++ */
++let viewSourceInDebugger = Task.async(function *(url, line) {
++  // If the Debugger was already open, switch to it and try to show the
++  // source immediately. Otherwise, initialize it and wait for the sources
++  // to be added first.
++  let debuggerAlreadyOpen = gToolbox.getPanel("jsdebugger");
++
++  let { panelWin: dbg } = yield gToolbox.selectTool("jsdebugger");
++
++  if (!debuggerAlreadyOpen) {
++    yield new Promise((resolve) => dbg.once(dbg.EVENTS.SOURCES_ADDED, () => resolve(dbg)));
++  }
++
++  let { DebuggerView } = dbg;
++  let item = DebuggerView.Sources.getItemForAttachment(a => a.source.url === url);
++  
++  if (item) {
++    return DebuggerView.setEditorLocation(item.attachment.source.actor, line, { noDebug: true });
++  }
++  return Promise.reject();
++});
+-- 
+1.8.4.2
+
