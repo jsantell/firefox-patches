@@ -1,18 +1,82 @@
-From 0977c30d3ce2c7a62a435fb004b5dc1d86246f68 Mon Sep 17 00:00:00 2001
+From 44468d69d2ac9cd165ea9077a2f3c6f748bcee28 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Thu, 11 Dec 2014 17:04:02 -0800
-Subject: Bug 1064373 - Render timeline graphs in dark theme if toolbox
- is using dark theme. r=vp
+Date: Tue, 16 Dec 2014 19:27:23 -0800
+Subject: Bug 1064373 - Add dark theme for timeline's memory and marker
+ overviews, r=vp
 
 ---
+ browser/devtools/shared/test/browser_css_color.js  | 24 +++++++
  browser/devtools/timeline/test/browser.ini         |  1 +
  .../test/browser_timeline_overview-theme.js        | 78 ++++++++++++++++++++++
  browser/devtools/timeline/timeline.js              | 27 ++++++++
- .../devtools/timeline/widgets/markers-overview.js  | 63 ++++++++++++-----
- .../devtools/timeline/widgets/memory-overview.js   | 40 +++++++++--
- 5 files changed, 187 insertions(+), 22 deletions(-)
+ .../devtools/timeline/widgets/markers-overview.js  | 46 +++++++------
+ .../devtools/timeline/widgets/memory-overview.js   | 38 ++++++-----
+ toolkit/devtools/css-color.js                      | 32 ++++++++-
+ 7 files changed, 209 insertions(+), 37 deletions(-)
  create mode 100644 browser/devtools/timeline/test/browser_timeline_overview-theme.js
 
+diff --git a/browser/devtools/shared/test/browser_css_color.js b/browser/devtools/shared/test/browser_css_color.js
+index ab498db..fad36f6 100644
+--- a/browser/devtools/shared/test/browser_css_color.js
++++ b/browser/devtools/shared/test/browser_css_color.js
+@@ -48,16 +48,17 @@ function testColorUtils() {
+     is(color.hex, hex, "color.hex === hex");
+     is(color.hsl, hsl, "color.hsl === hsl");
+     is(color.rgb, rgb, "color.rgb === rgb");
+ 
+     testToString(color, name, hex, hsl, rgb);
+     testColorMatch(name, hex, hsl, rgb, color.rgba);
+   }
+   testProcessCSSString();
++  testSetAlpha();
+   finishUp();
+ }
+ 
+ function testToString(color, name, hex, hsl, rgb) {
+   switchColorUnit(colorUtils.CssColor.COLORUNIT.name);
+   is(color.toString(), name, "toString() with authored type");
+ 
+   switchColorUnit(colorUtils.CssColor.COLORUNIT.hex);
+@@ -133,16 +134,39 @@ function testProcessCSSString() {
+                  "color #0F0; font-weight: bold; " +
+                  "background-color: transparent; " +
+                  "border-top-color: rgba(0, 0, 255, 0.5);";
+   let after = colorUtils.processCSSString(before);
+ 
+   is(after, expected, "CSS string processed correctly");
+ }
+ 
++function testSetAlpha() {
++  let values = [
++    ["longhex", "#ff0000", 0.5, "rgba(255, 0, 0, 0.5)"],
++    ["hex", "#f0f", 0.2, "rgba(255, 0, 255, 0.2)"],
++    ["rgba", "rgba(120, 34, 23, 1)", 0.25, "rgba(120, 34, 23, 0.25)"],
++    ["rgb", "rgb(120, 34, 23)", 0.25, "rgba(120, 34, 23, 0.25)"],
++    ["hsl", "hsl(208, 100%, 97%)", 0.75, "rgba(239, 247, 255, 0.75)"],
++    ["hsla", "hsla(208, 100%, 97%, 1)", 0.75, "rgba(239, 247, 255, 0.75)"]
++  ];
++  values.forEach(([type, value, alpha, expected]) => {
++    is(colorUtils.setAlpha(value, alpha), expected, "correctly sets alpha value for " + type);
++  });
++
++  try {
++    colorUtils.setAlpha("rgb(24, 25, 45, 1)", 1);
++    ok(false, "Should fail when passing in an invalid color.");
++  } catch (e) {
++    ok(true, "Fails when setAlpha receives an invalid color.");
++  }
++
++  is(colorUtils.setAlpha("#fff"), "rgba(255, 255, 255, 1)", "sets alpha to 1 if invalid.");
++}
++
+ function finishUp() {
+   Services = colorUtils = Loader = null;
+   gBrowser.removeCurrentTab();
+   finish();
+ }
+ 
+ function getTestData() {
+   return [
 diff --git a/browser/devtools/timeline/test/browser.ini b/browser/devtools/timeline/test/browser.ini
 index 691cc33..072eec5 100644
 --- a/browser/devtools/timeline/test/browser.ini
@@ -255,13 +319,21 @@ index 73f67c0..3ee2574 100644
  EventEmitter.decorate(this);
  
 diff --git a/browser/devtools/timeline/widgets/markers-overview.js b/browser/devtools/timeline/widgets/markers-overview.js
-index 13d6953..811a06e 100644
+index 3dbeb32..12444bd 100644
 --- a/browser/devtools/timeline/widgets/markers-overview.js
 +++ b/browser/devtools/timeline/widgets/markers-overview.js
-@@ -14,41 +14,49 @@ const {Cc, Ci, Cu, Cr} = require("chrome");
+@@ -9,69 +9,61 @@
+  * markers are visible in the "waterfall".
+  */
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ 
  Cu.import("resource:///modules/devtools/Graphs.jsm");
  Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
  
++const { colorUtils: { setAlpha }} = require("devtools/css-color");
++const { getColor } = require("devtools/shared/theme");
++
  loader.lazyRequireGetter(this, "L10N",
    "devtools/timeline/global", true);
  loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
@@ -271,29 +343,14 @@ index 13d6953..811a06e 100644
 -
  const OVERVIEW_HEADER_HEIGHT = 14; // px
  const OVERVIEW_BODY_HEIGHT = 55; // 11px * 5 groups
-+const OVERVIEW_SELECTION_LINE_COLOR = "#666";
-+const OVERVIEW_CLIPHEAD_LINE_COLOR = "#555";
- 
-+/* default, light theme */
- const OVERVIEW_BACKGROUND_COLOR = "#fff";
+-
+-const OVERVIEW_BACKGROUND_COLOR = "#fff";
 -const OVERVIEW_CLIPHEAD_LINE_COLOR = "#666";
 -const OVERVIEW_SELECTION_LINE_COLOR = "#555";
 -const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76,158,217,0.25)";
-+const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76, 158, 217, 0.25)";
- const OVERVIEW_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
-+const OVERVIEW_HEADER_BACKGROUND = "#fff";
-+const OVERVIEW_HEADER_TEXT_COLOR = "#18191a";
-+const OVERVIEW_TIMELINE_STROKES = "#ccc";
-+const OVERVIEW_GROUP_ALTERNATING_BACKGROUND = "rgba(0,0,0,0.05)";
-+
-+/* dark theme */
-+const OVERVIEW_BACKGROUND_COLOR_DARK = "#14171A";
-+const OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK = "rgba(29, 79, 115, 0.25)";
-+const OVERVIEW_SELECTION_STRIPES_COLOR_DARK = "rgba(255,255,255,0.1)";
-+const OVERVIEW_HEADER_BACKGROUND_DARK = "#14171A";
-+const OVERVIEW_HEADER_TEXT_COLOR_DARK = "#A9BACB";
-+const OVERVIEW_TIMELINE_STROKES_DARK = "rgba(255, 255, 255, 0.25)";
-+const OVERVIEW_GROUP_ALTERNATING_BACKGROUND_DARK = "rgba(255, 255, 255, 0.03)";
+-const OVERVIEW_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
++const OVERVIEW_SELECTION_LINE_COLOR = "#666";
++const OVERVIEW_CLIPHEAD_LINE_COLOR = "#555";
  
  const OVERVIEW_HEADER_TICKS_MULTIPLE = 100; // ms
  const OVERVIEW_HEADER_TICKS_SPACING_MIN = 75; // px
@@ -317,7 +374,11 @@ index 13d6953..811a06e 100644
   *        The parent node holding the overview.
   */
  function MarkersOverview(parent, ...args) {
-@@ -59,20 +67,25 @@ function MarkersOverview(parent, ...args) {
+   AbstractCanvasGraph.apply(this, [parent, "markers-overview", ...args]);
++  this.setTheme();
+   this.once("ready", () => {
+     // Set the list of names, properties and colors used to paint this overview.
+     this.setBlueprint(TIMELINE_BLUEPRINT);
  
      // Populate this overview with some dummy initial data.
      this.setData({ interval: { startTime: 0, endTime: 1000 }, markers: [] });
@@ -325,28 +386,21 @@ index 13d6953..811a06e 100644
  }
  
  MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
-   fixedHeight: OVERVIEW_HEADER_HEIGHT + OVERVIEW_BODY_HEIGHT,
-+  backgroundColor: OVERVIEW_BACKGROUND_COLOR,
    clipheadLineColor: OVERVIEW_CLIPHEAD_LINE_COLOR,
--  selectionLineColor: OVERVIEW_SELECTION_LINE_COLOR,
-   selectionBackgroundColor: OVERVIEW_SELECTION_BACKGROUND_COLOR,
-+  selectionLineColor: OVERVIEW_SELECTION_LINE_COLOR,
-   selectionStripesColor: OVERVIEW_SELECTION_STRIPES_COLOR,
-+  headerBackgroundColor: OVERVIEW_HEADER_BACKGROUND,
-+  headerTextColor: OVERVIEW_HEADER_TEXT_COLOR,
-+  headerTimelineStrokeColor: OVERVIEW_TIMELINE_STROKES,
-+  alternateBackgroundColor: OVERVIEW_GROUP_ALTERNATING_BACKGROUND,
+   selectionLineColor: OVERVIEW_SELECTION_LINE_COLOR,
+-  selectionBackgroundColor: OVERVIEW_SELECTION_BACKGROUND_COLOR,
+-  selectionStripesColor: OVERVIEW_SELECTION_STRIPES_COLOR,
+   headerHeight: OVERVIEW_HEADER_HEIGHT,
+   bodyHeight: OVERVIEW_BODY_HEIGHT,
+   groupPadding: OVERVIEW_GROUP_VERTICAL_PADDING,
  
    /**
-    * List of names and colors used to paint this overview.
-    * @see TIMELINE_BLUEPRINT in timeline/widgets/global.js
+    * Compute the height of the overview.
     */
-   setBlueprint: function(blueprint) {
-     this._paintBatches = new Map();
-     this._lastGroup = 0;
-@@ -120,25 +133,25 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
-     let groupHeight = OVERVIEW_BODY_HEIGHT * this._pixelRatio / totalGroups;
-     let groupPadding = OVERVIEW_GROUP_VERTICAL_PADDING * this._pixelRatio;
+   get fixedHeight() {
+@@ -129,25 +121,25 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     let groupHeight = this.bodyHeight * this._pixelRatio / totalGroups;
+     let groupPadding = this.groupPadding * this._pixelRatio;
  
      let totalTime = (endTime - startTime) || 0;
      let dataScale = this.dataScaleX = availableWidth / totalTime;
@@ -373,7 +427,7 @@ index 13d6953..811a06e 100644
      }
  
      ctx.fill();
-@@ -148,18 +161,18 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -157,18 +149,18 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
      let fontSize = OVERVIEW_HEADER_TEXT_FONT_SIZE * this._pixelRatio;
      let fontFamily = OVERVIEW_HEADER_TEXT_FONT_FAMILY;
      let textPaddingLeft = OVERVIEW_HEADER_TEXT_PADDING_LEFT * this._pixelRatio;
@@ -394,7 +448,7 @@ index 13d6953..811a06e 100644
        let time = Math.round(x / dataScale);
        let label = L10N.getFormatStr("timeline.tick", time);
        ctx.fillText(label, textLeft, headerHeight / 2 + textPaddingTop);
-@@ -214,12 +227,32 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -223,12 +215,28 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
      while (true) {
        let scaledStep = dataScale * timingStep;
        if (scaledStep < spacingMin) {
@@ -405,35 +459,40 @@ index 13d6953..811a06e 100644
      }
 +  },
 +
++  /**
++   * Sets the theme via `theme` to either "light" or "dark",
++   * and updates the internal styling to match. Requires a redraw
++   * to see the effects.
++   */
 +  setTheme: function (theme) {
-+    if (theme === "light") {
-+      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR;
-+      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR;
-+      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR;
-+      this.headerBackgroundColor = OVERVIEW_HEADER_BACKGROUND;
-+      this.headerTextColor = OVERVIEW_HEADER_TEXT_COLOR;
-+      this.headerTimelineStrokeColor = OVERVIEW_TIMELINE_STROKES;
-+      this.alternatingBackgroundColor = OVERVIEW_GROUP_ALTERNATING_BACKGROUND;
-+    } else if (theme === "dark") {
-+      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR_DARK;
-+      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK;
-+      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR_DARK;
-+      this.headerBackgroundColor = OVERVIEW_HEADER_BACKGROUND_DARK;
-+      this.headerTextColor = OVERVIEW_HEADER_TEXT_COLOR_DARK;
-+      this.headerTimelineStrokeColor = OVERVIEW_TIMELINE_STROKES_DARK;
-+      this.alternatingBackgroundColor = OVERVIEW_GROUP_ALTERNATING_BACKGROUND_DARK;
-+    }
++    theme = theme || "light";
++    this.backgroundColor = getColor("body-background", theme);
++    this.selectionBackgroundColor = setAlpha(getColor("selection-background", theme), 0.25);
++    this.selectionStripesColor = setAlpha("#fff", 0.1);
++    this.headerBackgroundColor = getColor("body-background", theme);
++    this.headerTextColor = getColor("body-color", theme);
++    this.headerTimelineStrokeColor = setAlpha(getColor("body-color-alt", theme), 0.1);
++    this.alternatingBackgroundColor = setAlpha(getColor("body-color", theme), 0.05);
    }
  });
  
  exports.MarkersOverview = MarkersOverview;
 diff --git a/browser/devtools/timeline/widgets/memory-overview.js b/browser/devtools/timeline/widgets/memory-overview.js
-index e4f1ca5..41ce85b 100644
+index e4f1ca5..436181d 100644
 --- a/browser/devtools/timeline/widgets/memory-overview.js
 +++ b/browser/devtools/timeline/widgets/memory-overview.js
-@@ -14,31 +14,39 @@ Cu.import("resource:///modules/devtools/Graphs.jsm");
+@@ -8,67 +8,56 @@
+  * of all the memory measurements taken while streaming the timeline data.
+  */
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ 
+ Cu.import("resource:///modules/devtools/Graphs.jsm");
  Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
  
++const { colorUtils: { setAlpha }} = require("devtools/css-color");
++const { getColor } = require("devtools/shared/theme");
++
  loader.lazyRequireGetter(this, "L10N",
    "devtools/timeline/global", true);
  
@@ -451,25 +510,12 @@ index e4f1ca5..41ce85b 100644
  const OVERVIEW_MAXIMUM_LINE_COLOR = "rgba(0,136,204,0.4)";
  const OVERVIEW_AVERAGE_LINE_COLOR = "rgba(0,136,204,0.7)";
  const OVERVIEW_MINIMUM_LINE_COLOR = "rgba(0,136,204,0.9)";
+-
+-const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76,158,217,0.25)";
+-const OVERVIEW_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
 +const OVERVIEW_CLIPHEAD_LINE_COLOR = "#666";
 +const OVERVIEW_SELECTION_LINE_COLOR = "#555";
  
-+/* default, light theme */
-+const OVERVIEW_BACKGROUND_COLOR = "#fff";
-+const OVERVIEW_BACKGROUND_GRADIENT_START = "rgba(0,136,204,0.1)";
-+const OVERVIEW_BACKGROUND_GRADIENT_END = "rgba(0,136,204,0.0)";
-+const OVERVIEW_STROKE_COLOR = "rgba(0,136,204,1)";
- const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76,158,217,0.25)";
- const OVERVIEW_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
- 
-+/* dark theme */
-+const OVERVIEW_BACKGROUND_COLOR_DARK = "#14171A";
-+const OVERVIEW_BACKGROUND_GRADIENT_START_DARK = "rgba(70, 175, 227, 0.1)";
-+const OVERVIEW_BACKGROUND_GRADIENT_END_DARK = "rgba(70, 175, 227, 0.0)";
-+const OVERVIEW_STROKE_COLOR_DARK = "rgba(70, 175, 227, 1)";
-+const OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK = "rgba(29, 79, 115, 0.25)";
-+const OVERVIEW_SELECTION_STRIPES_COLOR_DARK = "rgba(255,255,255,0.1)";
-+
  /**
   * An overview for the memory data.
   *
@@ -478,7 +524,38 @@ index e4f1ca5..41ce85b 100644
   */
  function MemoryOverview(parent) {
    LineGraphWidget.call(this, parent, L10N.getStr("graphs.memory"));
-@@ -77,12 +85,30 @@ MemoryOverview.prototype = Heritage.extend(LineGraphWidget.prototype, {
+-
++  this.setTheme();
+   this.once("ready", () => {
+     // Populate this overview with some dummy initial data.
+     this.setData({ interval: { startTime: 0, endTime: 1000 }, memory: [] });
+   });
+ }
+ 
+ MemoryOverview.prototype = Heritage.extend(LineGraphWidget.prototype, {
+   dampenValuesFactor: 0.95,
+   fixedHeight: OVERVIEW_HEIGHT,
+-  backgroundColor: OVERVIEW_BACKGROUND_COLOR,
+-  backgroundGradientStart: OVERVIEW_BACKGROUND_GRADIENT_START,
+-  backgroundGradientEnd: OVERVIEW_BACKGROUND_GRADIENT_END,
+-  strokeColor: OVERVIEW_STROKE_COLOR,
+   strokeWidth: OVERVIEW_STROKE_WIDTH,
+   maximumLineColor: OVERVIEW_MAXIMUM_LINE_COLOR,
+   averageLineColor: OVERVIEW_AVERAGE_LINE_COLOR,
+   minimumLineColor: OVERVIEW_MINIMUM_LINE_COLOR,
+   clipheadLineColor: OVERVIEW_CLIPHEAD_LINE_COLOR,
+   selectionLineColor: OVERVIEW_SELECTION_LINE_COLOR,
+-  selectionBackgroundColor: OVERVIEW_SELECTION_BACKGROUND_COLOR,
+-  selectionStripesColor: OVERVIEW_SELECTION_STRIPES_COLOR,
+   withTooltipArrows: false,
+   withFixedTooltipPositions: true,
+ 
+   /**
+    * Disables selection and empties this graph.
+    */
+   clearView: function() {
+     this.selectionEnabled = false;
+@@ -77,12 +66,27 @@ MemoryOverview.prototype = Heritage.extend(LineGraphWidget.prototype, {
    },
  
    /**
@@ -489,26 +566,88 @@ index e4f1ca5..41ce85b 100644
      LineGraphWidget.prototype.setData.call(this, memory);
 +  },
 +
++  /**
++   * Sets the theme via `theme` to either "light" or "dark",
++   * and updates the internal styling to match. Requires a redraw
++   * to see the effects.
++   */
 +  setTheme: function (theme) {
-+    if (theme === "light") {
-+      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR;
-+      this.backgroundGradientStart = OVERVIEW_BACKGROUND_GRADIENT_START;
-+      this.backgroundGradientEnd = OVERVIEW_BACKGROUND_GRADIENT_END;
-+      this.strokeColor = OVERVIEW_STROKE_COLOR;
-+      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR;
-+      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR;
-+    } else if (theme === "dark") {
-+      this.backgroundColor = OVERVIEW_BACKGROUND_COLOR_DARK;
-+      this.backgroundGradientStart = OVERVIEW_BACKGROUND_GRADIENT_START_DARK;
-+      this.backgroundGradientEnd = OVERVIEW_BACKGROUND_GRADIENT_END_DARK;
-+      this.strokeColor = OVERVIEW_STROKE_COLOR_DARK;
-+      this.selectionBackgroundColor = OVERVIEW_SELECTION_BACKGROUND_COLOR_DARK;
-+      this.selectionStripesColor = OVERVIEW_SELECTION_STRIPES_COLOR_DARK;
-+    }
++    theme = theme || "light";
++    this.backgroundColor = getColor("body-background", theme);
++    this.backgroundGradientStart = setAlpha(getColor("highlight-blue", theme), 0.1);
++    this.backgroundGradientEnd = setAlpha(getColor("highlight-blue", theme), 0);
++    this.strokeColor = getColor("highlight-blue", theme);
++    this.selectionBackgroundColor = setAlpha(getColor("selection-background", theme), 0.25);
++    this.selectionStripesColor = "rgba(255, 255, 255, 0.1)";
    }
  });
  
  exports.MemoryOverview = MemoryOverview;
+diff --git a/toolkit/devtools/css-color.js b/toolkit/devtools/css-color.js
+index da5ef24..4cfabd6 100644
+--- a/toolkit/devtools/css-color.js
++++ b/toolkit/devtools/css-color.js
+@@ -74,17 +74,18 @@ const SPECIALVALUES = new Set([
+ 
+ function CssColor(colorValue) {
+   this.newColor(colorValue);
+ }
+ 
+ module.exports.colorUtils = {
+   CssColor: CssColor,
+   processCSSString: processCSSString,
+-  rgbToHsl: rgbToHsl
++  rgbToHsl: rgbToHsl,
++  setAlpha: setAlpha
+ };
+ 
+ /**
+  * Values used in COLOR_UNIT_PREF
+  */
+ CssColor.COLORUNIT = {
+   "authored": "authored",
+   "hex": "hex",
+@@ -398,11 +399,40 @@ function rgbToHsl([r,g,b]) {
+     if (h < 0) {
+       h += 360;
+     }
+   }
+ 
+   return [Math.round(h), Math.round(s * 100), Math.round(l * 100)];
+ }
+ 
++/**
++ * Takes a color value of any type (hex, hsl, hsla, rgb, rgba)
++ * and an alpha value to generate an rgba string with the correct
++ * alpha value.
++ *
++ * @param  {String} colorValue
++ *         Color in the form of hex, hsl, hsla, rgb, rgba.
++ * @param  {Number} alpha
++ *         Alpha value for the color, between 0 and 1.
++ * @return {String}
++ *         Converted color with `alpha` value in rgba form.
++ */
++function setAlpha(colorValue, alpha) {
++  let color = new CssColor(colorValue);
++
++  // Throw if the color supplied is not valid.
++  if (!color.valid) {
++    throw new Error("Invalid color.");
++  }
++
++  // If an invalid alpha valid, just set to 1.
++  if (!(alpha >= 0 && alpha <= 1)) {
++    alpha = 1;
++  }
++
++  let { r, g, b } = color._getRGBATuple();
++  return "rgba(" + r + ", " + g + ", " + b + ", " + alpha + ")";
++}
++
+ loader.lazyGetter(this, "DOMUtils", function () {
+   return Cc["@mozilla.org/inspector/dom-utils;1"].getService(Ci.inIDOMUtils);
+ });
 -- 
 1.8.4.2
 
