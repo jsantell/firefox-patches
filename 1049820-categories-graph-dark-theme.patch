@@ -1,0 +1,430 @@
+From fe5854d2860177d01d97a62696244f1c9709af71 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 5 Jan 2015 15:42:39 -0800
+Subject: Bug 1049820 Add a dark theme style for the profiler's
+ category graphs. r=vp
+
+diff --git a/browser/devtools/profiler/profiler.js b/browser/devtools/profiler/profiler.js
+index c261c55..ae2354e 100644
+--- a/browser/devtools/profiler/profiler.js
++++ b/browser/devtools/profiler/profiler.js
+@@ -3,16 +3,17 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ Cu.import("resource://gre/modules/Task.jsm");
+ Cu.import("resource://gre/modules/devtools/Loader.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
++Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ 
+ devtools.lazyRequireGetter(this, "Services");
+ devtools.lazyRequireGetter(this, "promise");
+ devtools.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ devtools.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ devtools.lazyRequireGetter(this, "FramerateFront",
+diff --git a/browser/devtools/profiler/test/browser.ini b/browser/devtools/profiler/test/browser.ini
+index 8d96926..ab4a089 100644
+--- a/browser/devtools/profiler/test/browser.ini
++++ b/browser/devtools/profiler/test/browser.ini
+@@ -104,8 +104,9 @@ skip-if = true # Bug 1047124
+ [browser_profiler_tree-model-05.js]
+ [browser_profiler_tree-view-01.js]
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
++[browser_profiler_theme.js]
+diff --git a/browser/devtools/profiler/test/browser_profiler_theme.js b/browser/devtools/profiler/test/browser_profiler_theme.js
+new file mode 100644
+index 0000000..d56ef41
+--- /dev/null
++++ b/browser/devtools/profiler/test/browser_profiler_theme.js
+@@ -0,0 +1,51 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the graphs rerender with the correct theme once the theme changes.
++ */
++
++const LIGHT_BG = "#fcfcfc";
++const DARK_BG = "#14171a";
++
++let test = Task.async(function*() {
++  let [target, debuggee, panel] = yield initFrontend(SIMPLE_URL);
++  let { $, EVENTS, ProfileView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel, { waitForDisplay: true });
++
++  let graph = ProfileView._getCategoriesGraph();
++  let refreshed = once(graph, "refresh");
++  setTheme("dark");
++
++  yield refreshed;
++  is(graph.backgroundColor, DARK_BG,
++    "correct theme (dark) after toggle.");
++
++  refreshed = once(graph, "refresh");
++  setTheme("light");
++
++  yield refreshed;
++  is(graph.backgroundColor, LIGHT_BG,
++    "correct theme (light) after toggle.");
++
++  yield teardown(panel);
++  finish();
++});
++
++/**
++ * Mimics selecting the theme selector in the toolbox;
++ * sets the preference and emits an event on gDevTools to trigger
++ * the themeing.
++ */
++function setTheme (newTheme) {
++  let oldTheme = Services.prefs.getCharPref("devtools.theme");
++  info("Setting `devtools.theme` to \"" + newTheme + "\"");
++  Services.prefs.setCharPref("devtools.theme", newTheme);
++  gDevTools.emit("pref-changed", {
++    pref: "devtools.theme",
++    newValue: newTheme,
++    oldValue: oldTheme
++  });
++}
+diff --git a/browser/devtools/profiler/test/head.js b/browser/devtools/profiler/test/head.js
+index 5e4dd0b..0facc47 100644
+--- a/browser/devtools/profiler/test/head.js
++++ b/browser/devtools/profiler/test/head.js
+@@ -158,8 +158,39 @@ function* stopRecording(panel, { waitForDisplay }) {
+       "The record button should not be locked anymore.");
+   }
+ }
+ 
+ function getSourceActor(aSources, aURL) {
+   let item = aSources.getItemForAttachment(a => a.source.url === aURL);
+   return item && item.value;
+ }
++
++/**
++ * Wait for eventName on target.
++ * @param {Object} target An observable object that either supports on/off or
++ * addEventListener/removeEventListener
++ * @param {String} eventName
++ * @param {Boolean} useCapture Optional, for addEventListener/removeEventListener
++ * @return A promise that resolves when the event has been handled
++ */
++function once(target, eventName, useCapture=false) {
++  info("Waiting for event: '" + eventName + "' on " + target + ".");
++
++  let deferred = promise.defer();
++
++  for (let [add, remove] of [
++    ["addEventListener", "removeEventListener"],
++    ["addListener", "removeListener"],
++    ["on", "off"]
++  ]) {
++    if ((add in target) && (remove in target)) {
++      target[add](eventName, function onEvent(...aArgs) {
++        info("Got event: '" + eventName + "' on " + target + ".");
++        target[remove](eventName, onEvent, useCapture);
++        deferred.resolve.apply(deferred, aArgs);
++      }, useCapture);
++      break;
++    }
++  }
++
++  return deferred.promise;
++}
+diff --git a/browser/devtools/profiler/ui-profile.js b/browser/devtools/profiler/ui-profile.js
+index 5ef4411..79d2f96 100644
+--- a/browser/devtools/profiler/ui-profile.js
++++ b/browser/devtools/profiler/ui-profile.js
+@@ -31,31 +31,35 @@ let ProfileView = {
+     this._onNewTabClick = this._onNewTabClick.bind(this);
+     this._onInvertTree = this._onInvertTree.bind(this);
+     this._onGraphLegendSelection = this._onGraphLegendSelection.bind(this);
+     this._onGraphMouseUp = this._onGraphMouseUp.bind(this);
+     this._onGraphScroll = this._onGraphScroll.bind(this);
+     this._onCallViewFocus = this._onCallViewFocus.bind(this);
+     this._onCallViewLink = this._onCallViewLink.bind(this);
+     this._onCallViewZoom = this._onCallViewZoom.bind(this);
++    this._onThemeChange = this._onThemeChange.bind(this);
+ 
+     this._panels.addEventListener("select", this._onTabSelect, false);
+     this._newtabButton.addEventListener("click", this._onNewTabClick, false);
+     this._invertTree.addEventListener("command", this._onInvertTree, false);
++
++    gDevTools.on("pref-changed", this._onThemeChange);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     this.removeAllTabs();
+ 
+     this._panels.removeEventListener("select", this._onTabSelect, false);
+     this._newtabButton.removeEventListener("click", this._onNewTabClick, false);
+     this._invertTree.removeEventListener("command", this._onInvertTree, false);
++    gDevTools.off("pref-changed", this._onThemeChange);
+   },
+ 
+   /**
+    * Shows a message detailing that there are is no data available.
+    * The tabbed browser will also be hidden.
+    */
+   showEmptyNotice: function() {
+     $("#profile-pane").selectedPanel = $("#empty-notice");
+@@ -422,16 +426,18 @@ let ProfileView = {
+       oldGraph.destroy();
+     }
+     // Don't create a graph if there's not enough data to show.
+     if (!categoriesData || categoriesData.length < 2) {
+       return null;
+     }
+ 
+     let graph = new BarGraphWidget($(".categories", panel));
++    let theme = Services.prefs.getCharPref("devtools.theme");
++    graph.setTheme(theme);
+     graph.fixedHeight = CATEGORIES_GRAPH_HEIGHT;
+     graph.minBarsWidth = CATEGORIES_GRAPH_MIN_BARS_WIDTH;
+     graph.format = CATEGORIES.sort((a, b) => a.ordinal > b.ordinal);
+     graph.dataOffsetX = beginAt;
+ 
+     yield graph.setDataWhenReady(categoriesData);
+ 
+     graph.on("legend-selection", this._onGraphLegendSelection);
+@@ -602,16 +608,28 @@ let ProfileView = {
+     viewSourceInDebugger(url, line);
+   },
+ 
+   /**
+    * Listener handling the "zoom" event for the call tree in this container.
+    */
+   _onCallViewZoom: function(event, treeItem) {
+     this._spawnTabFromFrameNode(treeItem.frame);
++  },
++
++  /**
++   * Called when the developer tools theme changes. Redraws
++   * the graphs with the new theme setting.
++   */
++  _onThemeChange: function (_, { newValue: theme }) {
++    let graph = this._getCategoriesGraph();
++    if (graph) {
++      graph.setTheme(theme);
++      graph.refresh({ force: true });
++    }
+   }
+ };
+ 
+ /**
+  * Utility functions handling recording data.
+  */
+ let RecordingUtils = {
+   _frameratePlotsCache: new WeakMap(),
+diff --git a/browser/devtools/shared/widgets/Graphs.jsm b/browser/devtools/shared/widgets/Graphs.jsm
+index 826ab55..199b0e6 100644
+--- a/browser/devtools/shared/widgets/Graphs.jsm
++++ b/browser/devtools/shared/widgets/Graphs.jsm
+@@ -1,20 +1,23 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const Cu = Components.utils;
+ 
++const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ const {EventEmitter} = Cu.import("resource://gre/modules/devtools/event-emitter.js", {});
+ const {Task} = Cu.import("resource://gre/modules/Task.jsm", {});
+ 
++const {getColor} = require("devtools/shared/theme");
++
+ this.EXPORTED_SYMBOLS = [
+   "AbstractCanvasGraph",
+   "LineGraphWidget",
+   "BarGraphWidget",
+   "CanvasGraphUtils"
+ ];
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+@@ -71,17 +74,17 @@ const LINE_GRAPH_REGION_STRIPES_COLOR = "rgba(237,38,85,0.2)";
+ 
+ const BAR_GRAPH_DAMPEN_VALUES = 0.75;
+ const BAR_GRAPH_BARS_MARGIN_TOP = 1; // px
+ const BAR_GRAPH_BARS_MARGIN_END = 1; // px
+ const BAR_GRAPH_MIN_BARS_WIDTH = 5; // px
+ const BAR_GRAPH_MIN_BLOCKS_HEIGHT = 1; // px
+ 
+ const BAR_GRAPH_BACKGROUND_GRADIENT_START = "rgba(0,136,204,0.0)";
+-const BAR_GRAPH_BACKGROUND_GRADIENT_END = "rgba(255,255,255,0.25)";
++const BAR_GRAPH_BACKGROUND_GRADIENT_END = "rgba(255,255,255,0.1)";
+ 
+ const BAR_GRAPH_CLIPHEAD_LINE_COLOR = "#666";
+ const BAR_GRAPH_SELECTION_LINE_COLOR = "#555";
+ const BAR_GRAPH_SELECTION_BACKGROUND_COLOR = "rgba(0,136,204,0.25)";
+ const BAR_GRAPH_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
+ const BAR_GRAPH_REGION_BACKGROUND_COLOR = "transparent";
+ const BAR_GRAPH_REGION_STRIPES_COLOR = "rgba(237,38,85,0.2)";
+ 
+@@ -1531,16 +1534,17 @@ LineGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+  */
+ this.BarGraphWidget = function(parent, ...args) {
+   AbstractCanvasGraph.apply(this, [parent, "bar-graph", ...args]);
+ 
+   // Populated with [node, event, listener] entries which need to be removed
+   // when this graph is being destroyed.
+   this.outstandingEventListeners = [];
+ 
++  this.setTheme();
+   this.once("ready", () => {
+     this._onLegendMouseOver = this._onLegendMouseOver.bind(this);
+     this._onLegendMouseOut = this._onLegendMouseOut.bind(this);
+     this._onLegendMouseDown = this._onLegendMouseDown.bind(this);
+     this._onLegendMouseUp = this._onLegendMouseUp.bind(this);
+     this._createLegend();
+   });
+ 
+@@ -1548,16 +1552,18 @@ this.BarGraphWidget = function(parent, ...args) {
+     for (let [node, event, listener] of this.outstandingEventListeners) {
+       node.removeEventListener(event, listener);
+     }
+     this.outstandingEventListeners = null;
+   });
+ };
+ 
+ BarGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
++  backgroundGradientStart: BAR_GRAPH_BACKGROUND_GRADIENT_START,
++  backgroundGradientEnd: BAR_GRAPH_BACKGROUND_GRADIENT_END,
+   clipheadLineColor: BAR_GRAPH_CLIPHEAD_LINE_COLOR,
+   selectionLineColor: BAR_GRAPH_SELECTION_LINE_COLOR,
+   selectionBackgroundColor: BAR_GRAPH_SELECTION_BACKGROUND_COLOR,
+   selectionStripesColor: BAR_GRAPH_SELECTION_STRIPES_COLOR,
+   regionBackgroundColor: BAR_GRAPH_REGION_BACKGROUND_COLOR,
+   regionStripesColor: BAR_GRAPH_REGION_STRIPES_COLOR,
+ 
+   /**
+@@ -1593,19 +1599,23 @@ BarGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+    * Renders the graph's background.
+    * @see AbstractCanvasGraph.prototype.buildBackgroundImage
+    */
+   buildBackgroundImage: function() {
+     let { canvas, ctx } = this._getNamedCanvas("bar-graph-background");
+     let width = this._width;
+     let height = this._height;
+ 
++    // Draw the background.
++    ctx.fillStyle = this.backgroundColor;
++    ctx.fillRect(0, 0, width, height);
++
+     let gradient = ctx.createLinearGradient(0, 0, 0, height);
+-    gradient.addColorStop(0, BAR_GRAPH_BACKGROUND_GRADIENT_START);
+-    gradient.addColorStop(1, BAR_GRAPH_BACKGROUND_GRADIENT_END);
++    gradient.addColorStop(0, this.backgroundGradientStart);
++    gradient.addColorStop(1, this.backgroundGradientEnd);
+     ctx.fillStyle = gradient;
+     ctx.fillRect(0, 0, width, height);
+ 
+     return canvas;
+   },
+ 
+   /**
+    * Renders the graph's data source.
+@@ -1912,16 +1922,26 @@ BarGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+   },
+ 
+   /**
+    * Invoked whenever a color node in the legend is released.
+    */
+   _onLegendMouseUp: function(e) {
+     e.preventDefault();
+     e.stopPropagation();
++  },
++
++  /**
++   * Sets the theme via `theme` to either "light" or "dark",
++   * and updates the internal styling to match. Requires a redraw
++   * to see the effects.
++   */
++  setTheme: function (theme) {
++    theme = theme || "light";
++    this.backgroundColor = getColor("body-background", theme);
+   }
+ });
+ 
+ // Helper functions.
+ 
+ /**
+  * Creates an iframe element with the provided source URL, appends it to
+  * the specified node and invokes the callback once the content is loaded.
+diff --git a/browser/themes/shared/devtools/widgets.inc.css b/browser/themes/shared/devtools/widgets.inc.css
+index 7994046..0818419 100644
+--- a/browser/themes/shared/devtools/widgets.inc.css
++++ b/browser/themes/shared/devtools/widgets.inc.css
+@@ -988,20 +988,16 @@
+ }
+ 
+ .line-graph-widget-tooltip[type=average] > [text=value] {
+   color: #d97e00;
+ }
+ 
+ /* Bar graph widget */
+ 
+-.bar-graph-widget-canvas {
+-  background: #f7f7f7;
+-}
+-
+ .bar-graph-widget-legend {
+   position: absolute;
+   top: 4px;
+   left: 8px;
+   color: #292e33;
+   font-size: 80%;
+   pointer-events: none;
+ }
+@@ -1022,23 +1018,32 @@
+   height: 8px;
+   border: 1px solid #fff;
+   border-radius: 1px;
+   -moz-margin-end: 4px;
+   pointer-events: all;
+   cursor: pointer;
+ }
+ 
+-.bar-graph-widget-legend-item > [view="label"] {
++.theme-light .bar-graph-widget-legend-item > [view="label"] {
++  color: var(--theme-body-color);
+   text-shadow: 1px  0px rgba(255,255,255,0.8),
+               -1px  0px rgba(255,255,255,0.8),
+                0px -1px rgba(255,255,255,0.8),
+                0px  1px rgba(255,255,255,0.8);
+ }
+ 
++.theme-dark .bar-graph-widget-legend-item > [view="label"] {
++  color: var(--theme-selection-color);
++  text-shadow: 1px  0px rgba(0,0,0,0.8),
++              -1px  0px rgba(0,0,0,0.8),
++               0px -1px rgba(0,0,0,0.8),
++               0px  1px rgba(0,0,0,0.8);
++}
++
+ /* Charts */
+ 
+ .generic-chart-container {
+   /* Hack: force hardware acceleration */
+   transform: translateZ(1px);
+ }
+ 
+ .theme-dark .generic-chart-container {
+-- 
+2.2.1
+

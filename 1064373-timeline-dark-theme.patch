@@ -1,19 +1,8 @@
-From 44468d69d2ac9cd165ea9077a2f3c6f748bcee28 Mon Sep 17 00:00:00 2001
+From bc74083968299426e728cb985e268660dd240315 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Tue, 16 Dec 2014 19:27:23 -0800
-Subject: Bug 1064373 - Add dark theme for timeline's memory and marker
- overviews, r=vp
-
----
- browser/devtools/shared/test/browser_css_color.js  | 24 +++++++
- browser/devtools/timeline/test/browser.ini         |  1 +
- .../test/browser_timeline_overview-theme.js        | 78 ++++++++++++++++++++++
- browser/devtools/timeline/timeline.js              | 27 ++++++++
- .../devtools/timeline/widgets/markers-overview.js  | 46 +++++++------
- .../devtools/timeline/widgets/memory-overview.js   | 38 ++++++-----
- toolkit/devtools/css-color.js                      | 32 ++++++++-
- 7 files changed, 209 insertions(+), 37 deletions(-)
- create mode 100644 browser/devtools/timeline/test/browser_timeline_overview-theme.js
+Date: Mon, 5 Jan 2015 14:53:17 -0800
+Subject: Bug 1064373 -  Add dark theme for timeline's memory and
+ marker overviews, r=vp
 
 diff --git a/browser/devtools/shared/test/browser_css_color.js b/browser/devtools/shared/test/browser_css_color.js
 index ab498db..fad36f6 100644
@@ -78,15 +67,15 @@ index ab498db..fad36f6 100644
  function getTestData() {
    return [
 diff --git a/browser/devtools/timeline/test/browser.ini b/browser/devtools/timeline/test/browser.ini
-index 691cc33..072eec5 100644
+index baf7dfd..8bb9ae9 100644
 --- a/browser/devtools/timeline/test/browser.ini
 +++ b/browser/devtools/timeline/test/browser.ini
-@@ -4,15 +4,16 @@ support-files =
-   doc_simple-test.html
+@@ -5,15 +5,16 @@ support-files =
    head.js
  
  [browser_timeline_aaa_run_first_leaktest.js]
  [browser_timeline_blueprint.js]
+ [browser_timeline_filters.js]
  [browser_timeline_overview-initial-selection-01.js]
  [browser_timeline_overview-initial-selection-02.js]
  [browser_timeline_overview-update.js]
@@ -100,10 +89,10 @@ index 691cc33..072eec5 100644
  [browser_timeline_waterfall-sidebar.js]
 diff --git a/browser/devtools/timeline/test/browser_timeline_overview-theme.js b/browser/devtools/timeline/test/browser_timeline_overview-theme.js
 new file mode 100644
-index 0000000..5210e11
+index 0000000..4a45bef
 --- /dev/null
 +++ b/browser/devtools/timeline/test/browser_timeline_overview-theme.js
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,84 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -112,10 +101,10 @@ index 0000000..5210e11
 + * theme on load, and rerenders when changed.
 + */
 +
-+const LIGHT_BG = "#fff";
-+const DARK_BG = "#14171A";
++const LIGHT_BG = "#fcfcfc";
++const DARK_BG = "#14171a";
 +
-+let test = Task.async(function*() {
++add_task(function*() {
 +  let { target, panel } = yield initTimelinePanel("about:blank");
 +  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
 +
@@ -163,8 +152,14 @@ index 0000000..5210e11
 +  is(TimelineView.memoryOverview.backgroundColor, DARK_BG,
 +    "correct theme on after toggle for memory once more.");
 +
-+  yield teardown(panel);
-+  finish();
++  refreshed = Promise.all([
++    once(TimelineView.markersOverview, "refresh"),
++    once(TimelineView.memoryOverview, "refresh"),
++  ]);
++
++  // Set theme back to light
++  setTheme("light");
++  yield refreshed;
 +});
 +
 +/**
@@ -183,10 +178,10 @@ index 0000000..5210e11
 +  });
 +}
 diff --git a/browser/devtools/timeline/timeline.js b/browser/devtools/timeline/timeline.js
-index 73f67c0..3ee2574 100644
+index 68fc4e7..fc33702 100644
 --- a/browser/devtools/timeline/timeline.js
 +++ b/browser/devtools/timeline/timeline.js
-@@ -1,17 +1,19 @@
+@@ -1,18 +1,20 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this file,
   * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -197,6 +192,7 @@ index 73f67c0..3ee2574 100644
 +Cu.import("resource://gre/modules/Services.jsm");
  Cu.import("resource://gre/modules/Task.jsm");
  Cu.import("resource://gre/modules/devtools/Loader.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
 +Cu.import("resource:///modules/devtools/gDevTools.jsm");
  
  devtools.lazyRequireGetter(this, "promise");
@@ -206,8 +202,7 @@ index 73f67c0..3ee2574 100644
  devtools.lazyRequireGetter(this, "MarkersOverview",
    "devtools/timeline/markers-overview", true);
  devtools.lazyRequireGetter(this, "MemoryOverview",
-@@ -80,16 +82,17 @@ let TimelineController = {
- 
+@@ -93,16 +95,17 @@ let TimelineController = {
    /**
     * Initialization function, called when the tool is started.
     */
@@ -215,22 +210,23 @@ index 73f67c0..3ee2574 100644
      this._onRecordingTick = this._onRecordingTick.bind(this);
      this._onMarkers = this._onMarkers.bind(this);
      this._onMemory = this._onMemory.bind(this);
+     this._onFrames = this._onFrames.bind(this);
 +
      gFront.on("markers", this._onMarkers);
      gFront.on("memory", this._onMemory);
+     gFront.on("frames", this._onFrames);
    },
  
    /**
     * Destruction function, called when the tool is closed.
     */
-   destroy: function() {
-@@ -249,34 +252,41 @@ let TimelineView = {
-   /**
+@@ -288,37 +291,44 @@ let TimelineView = {
     * Initialization function, called when the tool is started.
     */
    initialize: Task.async(function*() {
-     this.markersOverview = new MarkersOverview($("#markers-overview"));
-     this.waterfall = new Waterfall($("#timeline-waterfall"), $("#timeline-pane"));
+     let blueprint = this._getFilteredBluePrint();
+     this.markersOverview = new MarkersOverview($("#markers-overview"), blueprint);
+     this.waterfall = new Waterfall($("#timeline-waterfall"), $("#timeline-pane"), blueprint);
      this.markerDetails = new MarkerDetails($("#timeline-waterfall-details"), $("#timeline-waterfall-container > splitter"));
  
 +    this._onThemeChange = this._onThemeChange.bind(this);
@@ -250,7 +246,10 @@ index 73f67c0..3ee2574 100644
 +    this.markersOverview.setTheme(theme);
 +
      yield this.markersOverview.ready();
+ 
      yield this.waterfall.recalculateBounds();
+ 
+     this._buildFilterPopup();
    }),
  
    /**
@@ -266,7 +265,7 @@ index 73f67c0..3ee2574 100644
      this.markersOverview.off("selecting", this._onSelecting);
      this.markersOverview.off("refresh", this._onRefresh);
      this.markersOverview.destroy();
-@@ -286,17 +296,20 @@ let TimelineView = {
+@@ -328,17 +338,20 @@ let TimelineView = {
        this.memoryOverview.destroy();
      }
    },
@@ -287,18 +286,17 @@ index 73f67c0..3ee2574 100644
  
      CanvasGraphUtils.linkAnimation(this.markersOverview, this.memoryOverview);
      CanvasGraphUtils.linkSelection(this.markersOverview, this.memoryOverview);
-@@ -429,16 +442,30 @@ let TimelineView = {
-   },
+@@ -570,16 +583,30 @@ let TimelineView = {
+       // Style used by pseudo element ::before in timeline.css.in
+       let bulletStyle = `--bullet-bg: ${markerDetails.fill};`
+       bulletStyle += `--bullet-border: ${markerDetails.stroke}`;
+       menuitem.setAttribute("style", bulletStyle);
  
-   /**
-    * Callback handling the "refresh" event on the timeline overview.
-    */
-   _onRefresh: function() {
-     this.waterfall.recalculateBounds();
-     this.updateWaterfall();
-+  },
+       popup.appendChild(menuitem);
+     }
+   },
 +
-+  /**
++  /*
 +   * Called when the developer tools theme changes. Redraws
 +   * the graphs with the new theme setting.
 +   */
@@ -310,7 +308,7 @@ index 73f67c0..3ee2574 100644
 +
 +    this.markersOverview.setTheme(theme.newValue);
 +    this.markersOverview.refresh({ force: true });
-   }
++  }
  };
  
  /**
@@ -318,11 +316,12 @@ index 73f67c0..3ee2574 100644
   */
  EventEmitter.decorate(this);
  
+ /**
 diff --git a/browser/devtools/timeline/widgets/markers-overview.js b/browser/devtools/timeline/widgets/markers-overview.js
-index 3dbeb32..12444bd 100644
+index 48bf991..6d7e857 100644
 --- a/browser/devtools/timeline/widgets/markers-overview.js
 +++ b/browser/devtools/timeline/widgets/markers-overview.js
-@@ -9,69 +9,61 @@
+@@ -9,70 +9,65 @@
   * markers are visible in the "waterfall".
   */
  
@@ -336,19 +335,18 @@ index 3dbeb32..12444bd 100644
 +
  loader.lazyRequireGetter(this, "L10N",
    "devtools/timeline/global", true);
- loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
-   "devtools/timeline/global", true);
  
 -const HTML_NS = "http://www.w3.org/1999/xhtml";
 -
  const OVERVIEW_HEADER_HEIGHT = 14; // px
- const OVERVIEW_BODY_HEIGHT = 55; // 11px * 5 groups
--
+ const OVERVIEW_ROW_HEIGHT = 11; // row height
+ 
 -const OVERVIEW_BACKGROUND_COLOR = "#fff";
 -const OVERVIEW_CLIPHEAD_LINE_COLOR = "#666";
 -const OVERVIEW_SELECTION_LINE_COLOR = "#555";
 -const OVERVIEW_SELECTION_BACKGROUND_COLOR = "rgba(76,158,217,0.25)";
 -const OVERVIEW_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
++const OVERVIEW_BODY_HEIGHT = 55; // 11px * 5 groups
 +const OVERVIEW_SELECTION_LINE_COLOR = "#666";
 +const OVERVIEW_CLIPHEAD_LINE_COLOR = "#555";
  
@@ -372,14 +370,18 @@ index 3dbeb32..12444bd 100644
   *
   * @param nsIDOMNode parent
   *        The parent node holding the overview.
+  * @param Object blueprint
+  *        List of names and colors defining markers.
   */
- function MarkersOverview(parent, ...args) {
+ function MarkersOverview(parent, blueprint, ...args) {
    AbstractCanvasGraph.apply(this, [parent, "markers-overview", ...args]);
-+  this.setTheme();
-   this.once("ready", () => {
-     // Set the list of names, properties and colors used to paint this overview.
-     this.setBlueprint(TIMELINE_BLUEPRINT);
  
++  this.setTheme();
++
+   // Set the list of names, properties and colors used to paint this overview.
+   this.setBlueprint(blueprint);
+ 
+   this.once("ready", () => {
      // Populate this overview with some dummy initial data.
      this.setData({ interval: { startTime: 0, endTime: 1000 }, markers: [] });
    });
@@ -391,15 +393,15 @@ index 3dbeb32..12444bd 100644
 -  selectionBackgroundColor: OVERVIEW_SELECTION_BACKGROUND_COLOR,
 -  selectionStripesColor: OVERVIEW_SELECTION_STRIPES_COLOR,
    headerHeight: OVERVIEW_HEADER_HEIGHT,
-   bodyHeight: OVERVIEW_BODY_HEIGHT,
+   rowHeight: OVERVIEW_ROW_HEIGHT,
    groupPadding: OVERVIEW_GROUP_VERTICAL_PADDING,
  
    /**
     * Compute the height of the overview.
     */
    get fixedHeight() {
-@@ -129,25 +121,25 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
-     let groupHeight = this.bodyHeight * this._pixelRatio / totalGroups;
+@@ -133,25 +128,25 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     let groupHeight = this.rowHeight * this._pixelRatio;
      let groupPadding = this.groupPadding * this._pixelRatio;
  
      let totalTime = (endTime - startTime) || 0;
@@ -427,7 +429,7 @@ index 3dbeb32..12444bd 100644
      }
  
      ctx.fill();
-@@ -157,18 +149,18 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -161,18 +156,18 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
      let fontSize = OVERVIEW_HEADER_TEXT_FONT_SIZE * this._pixelRatio;
      let fontFamily = OVERVIEW_HEADER_TEXT_FONT_FAMILY;
      let textPaddingLeft = OVERVIEW_HEADER_TEXT_PADDING_LEFT * this._pixelRatio;
@@ -448,7 +450,7 @@ index 3dbeb32..12444bd 100644
        let time = Math.round(x / dataScale);
        let label = L10N.getFormatStr("timeline.tick", time);
        ctx.fillText(label, textLeft, headerHeight / 2 + textPaddingTop);
-@@ -223,12 +215,28 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -227,12 +222,28 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
      while (true) {
        let scaledStep = dataScale * timingStep;
        if (scaledStep < spacingMin) {
@@ -649,5 +651,5 @@ index da5ef24..4cfabd6 100644
    return Cc["@mozilla.org/inspector/dom-utils;1"].getService(Ci.inIDOMUtils);
  });
 -- 
-1.8.4.2
+2.2.1
 
