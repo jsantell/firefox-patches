@@ -1,0 +1,1875 @@
+From 00b141044a65b7e41d661085afe49403c397e1a7 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 2 Jan 2015 15:52:33 -0800
+Subject: [PATCH] Bug 1108928 - UI for rendering automation data for web audio
+ editor. r=vp
+
+---
+ browser/devtools/jar.mn                            |   2 +
+ browser/devtools/webaudioeditor/controller.js      |   7 +-
+ browser/devtools/webaudioeditor/includes.js        |  13 +-
+ browser/devtools/webaudioeditor/models.js          |  11 ++
+ browser/devtools/webaudioeditor/test/browser.ini   |   3 +
+ .../browser_audionode-actor-get-param-flags.js     |   2 -
+ .../test/browser_audionode-actor-get-params-01.js  |   2 -
+ .../test/browser_wa_automation-view-01.js          |  55 +++++++
+ .../test/browser_wa_automation-view-02.js          |  56 +++++++
+ .../test/browser_wa_inspector-toggle.js            |   3 +-
+ .../webaudioeditor/test/browser_wa_inspector.js    |   8 +-
+ .../test/browser_wa_properties-view-edit-01.js     |  12 +-
+ .../test/browser_wa_properties-view-edit-02.js     |   6 +-
+ .../test/browser_wa_properties-view-media-nodes.js |   6 +-
+ .../browser_wa_properties-view-params-objects.js   |   8 +-
+ .../test/browser_wa_properties-view-params.js      |   6 +-
+ .../test/browser_wa_properties-view.js             |  16 +-
+ .../webaudioeditor/test/doc_automation.html        |   2 +-
+ browser/devtools/webaudioeditor/test/head.js       |  16 +-
+ .../devtools/webaudioeditor/views/automation.js    | 160 ++++++++++++++++++++
+ browser/devtools/webaudioeditor/views/context.js   |  13 +-
+ browser/devtools/webaudioeditor/views/inspector.js | 125 ++--------------
+ .../devtools/webaudioeditor/views/properties.js    | 164 +++++++++++++++++++++
+ browser/devtools/webaudioeditor/webaudioeditor.xul |  31 +++-
+ .../chrome/browser/devtools/webaudioeditor.dtd     |  13 ++
+ .../themes/shared/devtools/webaudioeditor.inc.css  |  14 ++
+ toolkit/devtools/server/actors/webaudio.js         |  80 +++++++---
+ 27 files changed, 644 insertions(+), 190 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_wa_automation-view-02.js
+ create mode 100644 browser/devtools/webaudioeditor/views/automation.js
+ create mode 100644 browser/devtools/webaudioeditor/views/properties.js
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index dd3329f..0606390 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -77,16 +77,18 @@ browser.jar:
+     content/browser/devtools/webaudioeditor.xul                        (webaudioeditor/webaudioeditor.xul)
+     content/browser/devtools/dagre-d3.js                               (webaudioeditor/lib/dagre-d3.js)
+     content/browser/devtools/webaudioeditor/includes.js                (webaudioeditor/includes.js)
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
++    content/browser/devtools/webaudioeditor/views/properties.js        (webaudioeditor/views/properties.js)
++    content/browser/devtools/webaudioeditor/views/automation.js        (webaudioeditor/views/automation.js)
+     content/browser/devtools/profiler.xul                              (profiler/profiler.xul)
+     content/browser/devtools/profiler.js                               (profiler/profiler.js)
+     content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+ #ifdef MOZ_DEVTOOLS_PERFTOOLS
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/performance-controller.js     (performance/performance-controller.js)
+     content/browser/devtools/performance/performance-view.js           (performance/performance-view.js)
+diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
+index ee8dc45..79d2105 100644
+--- a/browser/devtools/webaudioeditor/controller.js
++++ b/browser/devtools/webaudioeditor/controller.js
+@@ -10,28 +10,32 @@ let gAudioNodes = new AudioNodesCollection();
+ 
+ /**
+  * Initializes the web audio editor views
+  */
+ function startupWebAudioEditor() {
+   return all([
+     WebAudioEditorController.initialize(),
+     ContextView.initialize(),
+-    InspectorView.initialize()
++    InspectorView.initialize(),
++    PropertiesView.initialize(),
++    AutomationView.initialize()
+   ]);
+ }
+ 
+ /**
+  * Destroys the web audio editor controller and views.
+  */
+ function shutdownWebAudioEditor() {
+   return all([
+     WebAudioEditorController.destroy(),
+     ContextView.destroy(),
+     InspectorView.destroy(),
++    PropertiesView.destroy(),
++    AutomationView.destroy()
+   ]);
+ }
+ 
+ /**
+  * Functions handling target-related lifetime events.
+  */
+ let WebAudioEditorController = {
+   /**
+@@ -78,16 +82,17 @@ let WebAudioEditorController = {
+   /**
+    * Called when page is reloaded to show the reload notice and waiting
+    * for an audio context notice.
+    */
+   reset: function () {
+     $("#content").hidden = true;
+     ContextView.resetUI();
+     InspectorView.resetUI();
++    PropertiesView.resetUI();
+   },
+ 
+   // Since node create and connect are probably executed back to back,
+   // and the controller's `_onCreateNode` needs to look up type,
+   // the edge creation could be called before the graph node is actually
+   // created. This way, we can check and listen for the event before
+   // adding an edge.
+   _waitForNodeCreation: function (sourceActor, destActor) {
+diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
+index ddac056..db84a68 100644
+--- a/browser/devtools/webaudioeditor/includes.js
++++ b/browser/devtools/webaudioeditor/includes.js
+@@ -5,27 +5,30 @@
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ 
+-const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
++const devtools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
++const { require } = devtools;
+ 
+ let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ let { EventTarget } = require("sdk/event/target");
+ const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ const { Class } = require("sdk/core/heritage");
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const STRINGS_URI = "chrome://browser/locale/devtools/webaudioeditor.properties"
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const Telemetry = require("devtools/shared/telemetry");
+ const telemetry = new Telemetry();
++devtools.lazyImporter(this, "LineGraphWidget",
++  "resource:///modules/devtools/Graphs.jsm");
+ 
+ // Override DOM promises with Promise.jsm helpers
+ const { defer, all } = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ 
+ /* Events fired on `window` to indicate state or actions*/
+ const EVENTS = {
+   // Fired when the first AudioNode has been created, signifying
+   // that the AudioContext is being used and should be tracked via the editor.
+@@ -48,21 +51,27 @@ const EVENTS = {
+   UI_INSPECTOR_NODE_SET: "WebAudioEditor:UIInspectorNodeSet",
+ 
+   // When the inspector is finished rendering in or out of view.
+   UI_INSPECTOR_TOGGLED: "WebAudioEditor:UIInspectorToggled",
+ 
+   // When an audio node is finished loading in the Properties tab.
+   UI_PROPERTIES_TAB_RENDERED: "WebAudioEditor:UIPropertiesTabRendered",
+ 
++  // When an audio node is finished loading in the Automation tab.
++  UI_AUTOMATION_TAB_RENDERED: "WebAudioEditor:UIAutomationTabRendered",
++
+   // When the Audio Context graph finishes rendering.
+   // Is called with two arguments, first representing number of nodes
+   // rendered, second being the number of edge connections rendering (not counting
+   // param edges), followed by the count of the param edges rendered.
+-  UI_GRAPH_RENDERED: "WebAudioEditor:UIGraphRendered"
++  UI_GRAPH_RENDERED: "WebAudioEditor:UIGraphRendered",
++
++  // Called when the inspector splitter is moved and resized.
++  UI_INSPECTOR_RESIZE: "WebAudioEditor:UIInspectorResize"
+ };
+ 
+ /**
+  * The current target and the Web Audio Editor front, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+ 
+ /**
+diff --git a/browser/devtools/webaudioeditor/models.js b/browser/devtools/webaudioeditor/models.js
+index e9ce10c..142a338 100644
+--- a/browser/devtools/webaudioeditor/models.js
++++ b/browser/devtools/webaudioeditor/models.js
+@@ -81,16 +81,27 @@ const AudioNodeModel = Class({
+    *
+    * @return Promise->Object
+    */
+   getParams: function () {
+     return this.actor.getParams();
+   },
+ 
+   /**
++   * Returns a promise that resolves to an object containing an
++   * array of event information and an array of automation data.
++   *
++   * @param String paramName
++   * @return Promise->Array
++   */
++  getAutomationData: function (paramName) {
++    return this.actor.getAutomationData(paramName);
++  },
++
++  /**
+    * Takes a `dagreD3.Digraph` object and adds this node to
+    * the graph to be rendered.
+    *
+    * @param dagreD3.Digraph
+    */
+   addToGraph: function (graph) {
+     graph.addNode(this.id, {
+       type: this.type,
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 1adf13e..3012b7e 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -56,8 +56,11 @@ support-files =
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-edit-01.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-edit-02.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-media-nodes.js]
+ [browser_wa_properties-view-params.js]
+ [browser_wa_properties-view-params-objects.js]
++
++[browser_wa_automation-view-01.js]
++[browser_wa_automation-view-02.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js
+index cfa8cff..e91d5e5 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js
+@@ -33,16 +33,14 @@ add_task(function*() {
+       if (param === "buffer") {
+         is(flags.Buffer, true, "`buffer` params have Buffer flag");
+       }
+       else if (param === "bufferSize" || param === "frequencyBinCount") {
+         is(flags.readonly, true, param + " is readonly");
+       }
+       else if (param === "curve") {
+         is(flags["Float32Array"], true, "`curve` param has Float32Array flag");
+-      } else {
+-        is(Object.keys(flags), 0, type + "-" + param + " has no flags set")
+       }
+     }
+   }
+ 
+   yield removeTab(target.tab);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js
+index a4efc6d..8ffb08b 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js
+@@ -30,16 +30,14 @@ add_task(function*() {
+       if (param === "buffer") {
+         is(flags.Buffer, true, "`buffer` params have Buffer flag");
+       }
+       else if (param === "bufferSize" || param === "frequencyBinCount") {
+         is(flags.readonly, true, param + " is readonly");
+       }
+       else if (param === "curve") {
+         is(flags["Float32Array"], true, "`curve` param has Float32Array flag");
+-      } else {
+-        is(Object.keys(flags), 0, type + "-" + param + " has no flags set")
+       }
+     });
+   });
+ 
+   yield removeTab(target.tab);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js b/browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js
+new file mode 100644
+index 0000000..d211e1b
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js
+@@ -0,0 +1,55 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that automation view shows the correct view depending on if events
++ * or params exist.
++ */
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(AUTOMATION_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS } = panelWin;
++
++  let started = once(gFront, "start-context");
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++  let nodeIds = actors.map(actor => actor.actorID);
++
++  // Oscillator node
++  click(panelWin, findGraphNode(panelWin, nodeIds[1]));
++  yield waitForInspectorRender(panelWin, EVENTS);
++  click(panelWin, $("#automation-tab"));
++
++  ok(isVisible($("#automation-graph-container")), "graph container should be visible");
++  ok(isVisible($("#automation-content")), "automation content should be visible");
++  ok(!isVisible($("#automation-no-events")), "no-events panel should not be visible");
++  ok(!isVisible($("#automation-empty")), "empty panel should not be visible");
++
++  // Gain node
++  click(panelWin, findGraphNode(panelWin, nodeIds[2]));
++  yield waitForInspectorRender(panelWin, EVENTS);
++  click(panelWin, $("#automation-tab"));
++
++  ok(!isVisible($("#automation-graph-container")), "graph container should be visible");
++  ok(isVisible($("#automation-content")), "automation content should not be visible");
++  ok(isVisible($("#automation-no-events")), "no-events panel should be visible");
++  ok(!isVisible($("#automation-empty")), "empty panel should not be visible");
++
++  // destination node
++  click(panelWin, findGraphNode(panelWin, nodeIds[0]));
++  yield waitForInspectorRender(panelWin, EVENTS);
++  click(panelWin, $("#automation-tab"));
++
++  ok(!isVisible($("#automation-graph-container")), "graph container should not be visible");
++  ok(!isVisible($("#automation-content")), "automation content should not be visible");
++  ok(!isVisible($("#automation-no-events")), "no-events panel should not be visible");
++  ok(isVisible($("#automation-empty")), "empty panel should be visible");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_automation-view-02.js b/browser/devtools/webaudioeditor/test/browser_wa_automation-view-02.js
+new file mode 100644
+index 0000000..ecb9957
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_automation-view-02.js
+@@ -0,0 +1,56 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that automation view selects the first parameter by default and
++ * switching between AudioParam rerenders the graph.
++ */
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(AUTOMATION_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, AutomationView } = panelWin;
++
++  let started = once(gFront, "start-context");
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++  let nodeIds = actors.map(actor => actor.actorID);
++
++
++  // Oscillator node
++  click(panelWin, findGraphNode(panelWin, nodeIds[1]));
++  yield waitForInspectorRender(panelWin, EVENTS);
++  click(panelWin, $("#automation-tab"));
++
++  ok(AutomationView._selectedParamName, "frequency",
++    "AutomatioView is set on 'frequency'");
++  ok($(".automation-param-button[data-param='frequency']").getAttribute("selected"),
++    "frequency param should be selected on load");
++  ok(!$(".automation-param-button[data-param='detune']").getAttribute("selected"),
++    "detune param should not be selected on load");
++  ok(isVisible($("#automation-content")), "automation content should be visible");
++  ok(isVisible($("#automation-graph-container")), "graph container should be visible");
++  ok(!isVisible($("#automation-no-events")), "no-events panel should not be visible");
++
++  click(panelWin, $(".automation-param-button[data-param='detune']"));
++  yield once(panelWin, EVENTS.UI_AUTOMATION_TAB_RENDERED);
++
++  ok(true, "automation tab rerendered");
++
++  ok(AutomationView._selectedParamName, "detune",
++    "AutomatioView is set on 'detune'");
++  ok(!$(".automation-param-button[data-param='frequency']").getAttribute("selected"),
++    "frequency param should not be selected after clicking detune");
++  ok($(".automation-param-button[data-param='detune']").getAttribute("selected"),
++    "detune param should be selected after clicking detune");
++  ok(isVisible($("#automation-content")), "automation content should be visible");
++  ok(!isVisible($("#automation-graph-container")), "graph container should not be visible");
++  ok(isVisible($("#automation-no-events")), "no-events panel should be visible");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js b/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js
+index 606af9f..917d00f 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js
+@@ -46,18 +46,19 @@ add_task(function*() {
+   // Open again to test node loading while open
+   $("#inspector-pane-toggle").click();
+   yield once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED);
+ 
+   ok(InspectorView.isVisible(), "InspectorView being shown.");
+   ok(!isVisible($("#web-audio-editor-tabs")),
+     "InspectorView tabs are still hidden.");
+ 
++  let nodeSet = once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
+   click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield nodeSet;
+ 
+   ok(!isVisible($("#web-audio-editor-details-pane-empty")),
+     "Empty message hides even when loading node while open.");
+   ok(isVisible($("#web-audio-editor-tabs")),
+     "Switches to tab view when loading node while open.");
+   is($("#web-audio-inspector-title").value, "Oscillator",
+     "Inspector title updates when loading node while open.");
+ 
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_inspector.js b/browser/devtools/webaudioeditor/test/browser_wa_inspector.js
+index 616be40..ed845bc 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_inspector.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_inspector.js
+@@ -25,35 +25,37 @@ add_task(function*() {
+   ok(!InspectorView.isVisible(), "InspectorView hidden on start.");
+   ok(isVisible($("#web-audio-editor-details-pane-empty")),
+     "InspectorView empty message should show when no node's selected.");
+   ok(!isVisible($("#web-audio-editor-tabs")),
+     "InspectorView tabs view should be hidden when no node's selected.");
+   is($("#web-audio-inspector-title").value, "AudioNode Inspector",
+     "Inspector should have default title when empty.");
+ 
+-  click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+   // Wait for the node to be set as well as the inspector to come fully into the view
+-  yield Promise.all([
++  let nodeSet = Promise.all([
+     once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET),
+     once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED)
+   ]);
++  click(panelWin, findGraphNode(panelWin, nodeIds[1]));
++  yield nodeSet;
+ 
+   ok(InspectorView.isVisible(), "InspectorView shown once node selected.");
+   ok(!isVisible($("#web-audio-editor-details-pane-empty")),
+     "InspectorView empty message hidden when node selected.");
+   ok(isVisible($("#web-audio-editor-tabs")),
+     "InspectorView tabs view visible when node selected.");
+ 
+   is($("#web-audio-inspector-title").value, "Oscillator",
+     "Inspector should have the node title when a node is selected.");
+ 
+   is($("#web-audio-editor-tabs").selectedIndex, 0,
+     "default tab selected should be the parameters tab.");
+ 
++  nodeSet = once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
+   click(panelWin, findGraphNode(panelWin, nodeIds[2]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield nodeSet;
+ 
+   is($("#web-audio-inspector-title").value, "Gain",
+     "Inspector title updates when a new node is selected.");
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-01.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-01.js
+index 673eb76..bebcbc3 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-01.js
+@@ -3,56 +3,56 @@
+ 
+ /**
+  * Tests that properties are updated when modifying the VariablesView.
+  */
+ 
+ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
+   let { panelWin } = panel;
+-  let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
+-  let gVars = InspectorView._propsView;
++  let { gFront, $, $$, EVENTS, PropertiesView } = panelWin;
++  let gVars = PropertiesView._propsView;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     get3(gFront, "create-node"),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+   // Wait for the node to be set as well as the inspector to come fully into the view
+   yield Promise.all([
+-    once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET),
++    waitForInspectorRender(panelWin, EVENTS),
+     once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED)
+   ]);
+ 
+   let setAndCheck = setAndCheckVariable(panelWin, gVars);
+ 
+   checkVariableView(gVars, 0, {
+     "type": "sine",
+     "frequency": 440,
+     "detune": 0
+   }, "default loaded string");
+ 
+   click(panelWin, findGraphNode(panelWin, nodeIds[2]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield waitForInspectorRender(panelWin, EVENTS),
+   checkVariableView(gVars, 0, {
+     "gain": 0
+   }, "default loaded number");
+ 
+   click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield waitForInspectorRender(panelWin, EVENTS),
+   yield setAndCheck(0, "type", "square", "square", "sets string as string");
+ 
+   click(panelWin, findGraphNode(panelWin, nodeIds[2]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield waitForInspectorRender(panelWin, EVENTS),
+   yield setAndCheck(0, "gain", "0.005", 0.005, "sets number as number");
+   yield setAndCheck(0, "gain", "0.1", 0.1, "sets float as float");
+   yield setAndCheck(0, "gain", ".2", 0.2, "sets float without leading zero as float");
+ 
+   yield teardown(target);
+ });
+ 
+ function setAndCheckVariable (panelWin, gVars) {
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-02.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-02.js
+index 58f31fa..f7f43983 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-02.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-edit-02.js
+@@ -3,33 +3,33 @@
+ 
+ /**
+  * Tests that properties are not updated when modifying the VariablesView.
+  */
+ 
+ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(COMPLEX_CONTEXT_URL);
+   let { panelWin } = panel;
+-  let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
+-  let gVars = InspectorView._propsView;
++  let { gFront, $, $$, EVENTS, PropertiesView } = panelWin;
++  let gVars = PropertiesView._propsView;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     getN(gFront, "create-node", 8),
+     waitForGraphRendered(panelWin, 8, 8)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   click(panelWin, findGraphNode(panelWin, nodeIds[3]));
+   // Wait for the node to be set as well as the inspector to come fully into the view
+   yield Promise.all([
+-    once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET),
++    waitForInspectorRender(panelWin, EVENTS),
+     once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED),
+   ]);
+ 
+   let errorEvent = once(panelWin, EVENTS.UI_SET_PARAM_ERROR);
+ 
+   try {
+     yield modifyVariableView(panelWin, gVars, 0, "bufferSize", 2048);
+   } catch(e) {
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js
+index afbba4d..917ecc3 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-media-nodes.js
+@@ -32,18 +32,18 @@ function waitForDeviceClosed() {
+   });
+ 
+   return deferred.promise;
+ }
+ 
+ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(MEDIA_NODES_URL);
+   let { panelWin } = panel;
+-  let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
+-  let gVars = InspectorView._propsView;
++  let { gFront, $, $$, EVENTS, PropertiesView } = panelWin;
++  let gVars = PropertiesView._propsView;
+ 
+   // Auto enable getUserMedia
+   let mediaPermissionPref = Services.prefs.getBoolPref(MEDIA_PERMISSION);
+   Services.prefs.setBoolPref(MEDIA_PERMISSION, true);
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+@@ -54,17 +54,17 @@ add_task(function*() {
+   let nodeIds = actors.map(actor => actor.actorID);
+   let types = [
+     "AudioDestinationNode", "MediaElementAudioSourceNode",
+     "MediaStreamAudioSourceNode", "MediaStreamAudioDestinationNode"
+   ];
+ 
+   for (let i = 0; i < types.length; i++) {
+     click(panelWin, findGraphNode(panelWin, nodeIds[i]));
+-    yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++    yield waitForInspectorRender(panelWin, EVENTS);
+     checkVariableView(gVars, 0, NODE_DEFAULT_VALUES[types[i]], types[i]);
+   }
+ 
+   // Reset permissions on getUserMedia
+   Services.prefs.setBoolPref(MEDIA_PERMISSION, mediaPermissionPref);
+ 
+   yield teardown(target);
+ 
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params-objects.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params-objects.js
+index e13efe5..61fe539 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params-objects.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params-objects.js
+@@ -4,41 +4,41 @@
+ /**
+  * Tests that params view correctly displays non-primitive properties
+  * like AudioBuffer and Float32Array in properties of AudioNodes.
+  */
+ 
+ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(BUFFER_AND_ARRAY_URL);
+   let { panelWin } = panel;
+-  let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
+-  let gVars = InspectorView._propsView;
++  let { gFront, $, $$, EVENTS, PropertiesView } = panelWin;
++  let gVars = PropertiesView._propsView;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     getN(gFront, "create-node", 3),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   click(panelWin, findGraphNode(panelWin, nodeIds[2]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield waitForInspectorRender(panelWin, EVENTS);
+   checkVariableView(gVars, 0, {
+     "curve": "Float32Array"
+   }, "WaveShaper's `curve` is listed as an `Float32Array`.");
+ 
+   let aVar = gVars.getScopeAtIndex(0).get("curve")
+   let state = aVar.target.querySelector(".theme-twisty").hasAttribute("invisible");
+   ok(state, "Float32Array property should not have a dropdown.");
+ 
+   click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield waitForInspectorRender(panelWin, EVENTS);
+   checkVariableView(gVars, 0, {
+     "buffer": "AudioBuffer"
+   }, "AudioBufferSourceNode's `buffer` is listed as an `AudioBuffer`.");
+ 
+   aVar = gVars.getScopeAtIndex(0).get("buffer")
+   state = aVar.target.querySelector(".theme-twisty").hasAttribute("invisible");
+   ok(state, "AudioBuffer property should not have a dropdown.");
+ 
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js
+index 14605cb..4d47a86 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js
+@@ -4,18 +4,18 @@
+ /**
+  * Tests that params view correctly displays all properties for nodes
+  * correctly, with default values and correct types.
+  */
+ 
+ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(SIMPLE_NODES_URL);
+   let { panelWin } = panel;
+-  let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
+-  let gVars = InspectorView._propsView;
++  let { gFront, $, $$, EVENTS, PropertiesView } = panelWin;
++  let gVars = PropertiesView._propsView;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     getN(gFront, "create-node", 14),
+     waitForGraphRendered(panelWin, 14, 0)
+@@ -25,14 +25,14 @@ add_task(function*() {
+     "AudioDestinationNode", "AudioBufferSourceNode", "ScriptProcessorNode",
+     "AnalyserNode", "GainNode", "DelayNode", "BiquadFilterNode", "WaveShaperNode",
+     "PannerNode", "ConvolverNode", "ChannelSplitterNode", "ChannelMergerNode",
+     "DynamicsCompressorNode", "OscillatorNode"
+   ];
+ 
+   for (let i = 0; i < types.length; i++) {
+     click(panelWin, findGraphNode(panelWin, nodeIds[i]));
+-    yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++    yield waitForInspectorRender(panelWin, EVENTS);
+     checkVariableView(gVars, 0, NODE_DEFAULT_VALUES[types[i]], types[i]);
+   }
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view.js
+index b86bf54..702f116 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_properties-view.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view.js
+@@ -3,40 +3,40 @@
+ 
+ /**
+  * Tests that params view shows params when they exist, and are hidden otherwise.
+  */
+ 
+ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
+   let { panelWin } = panel;
+-  let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
+-  let gVars = InspectorView._propsView;
++  let { gFront, $, $$, EVENTS, PropertiesView } = panelWin;
++  let gVars = PropertiesView._propsView;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     get3(gFront, "create-node"),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   // Gain node
+   click(panelWin, findGraphNode(panelWin, nodeIds[2]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield waitForInspectorRender(panelWin, EVENTS);
+ 
+-  ok(isVisible($("#properties-tabpanel-content")), "Parameters shown when they exist.");
+-  ok(!isVisible($("#properties-tabpanel-content-empty")),
++  ok(isVisible($("#properties-content")), "Parameters shown when they exist.");
++  ok(!isVisible($("#properties-empty")),
+     "Empty message hidden when AudioParams exist.");
+ 
+   // Destination node
+   click(panelWin, findGraphNode(panelWin, nodeIds[0]));
+-  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++  yield waitForInspectorRender(panelWin, EVENTS);
+ 
+-  ok(!isVisible($("#properties-tabpanel-content")),
++  ok(!isVisible($("#properties-content")),
+     "Parameters hidden when they don't exist.");
+-  ok(isVisible($("#properties-tabpanel-content-empty")),
++  ok(isVisible($("#properties-empty")),
+     "Empty message shown when no AudioParams exist.");
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/doc_automation.html b/browser/devtools/webaudioeditor/test/doc_automation.html
+index 6f07420..8a932e0 100644
+--- a/browser/devtools/webaudioeditor/test/doc_automation.html
++++ b/browser/devtools/webaudioeditor/test/doc_automation.html
+@@ -15,16 +15,16 @@
+ 
+       let ctx = new AudioContext();
+       let osc = ctx.createOscillator();
+       let gain = ctx.createGain();
+       gain.gain.value = 0;
+       osc.frequency.setValueAtTime(0.2, 0);
+       osc.frequency.linearRampToValueAtTime(1, 0.3);
+       osc.frequency.exponentialRampToValueAtTime(0.75, 0.6);
+-      osc.frequency.setValueCurveAtTime(new Float32Array([-1, 0, 1]), 0.7, 0.3);
++      osc.frequency.setValueCurveAtTime(new Float32Array([-1, 0, 1]), 0.7, 1);
+       osc.connect(gain);
+       gain.connect(ctx.destination);
+       osc.start(0);
+     </script>
+   </body>
+ 
+ </html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index d9a0d2f..529a20f 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -226,17 +226,17 @@ function waitForGraphRendered (front, nodeCount, edgeCount, paramEdgeCount) {
+ function checkVariableView (view, index, hash, description = "") {
+   info("Checking Variable View");
+   let scope = view.getScopeAtIndex(index);
+   let variables = Object.keys(hash);
+ 
+   // If node shouldn't display any properties, ensure that the 'empty' message is
+   // visible
+   if (!variables.length) {
+-    ok(isVisible(scope.window.$("#properties-tabpanel-content-empty")),
++    ok(isVisible(scope.window.$("#properties-empty")),
+       description + " should show the empty properties tab.");
+     return;
+   }
+ 
+   // Otherwise, iterate over expected properties
+   variables.forEach(variable => {
+     let aVar = scope.get(variable);
+     is(aVar.target.querySelector(".name").getAttribute("value"), variable,
+@@ -408,28 +408,38 @@ function checkAutomationValue (values, time, expected) {
+ 
+   /**
+    * Entries are ordered in `values` according to time, so if we can't find an exact point
+    * on a time of interest, return the point in between the threshold. This should
+    * get us a very close value.
+    */
+   function getValueAt (values, time) {
+     for (let i = 0; i < values.length; i++) {
+-      if (values[i].t === time) {
++      if (values[i].delta === time) {
+         return values[i].value;
+       }
+-      if (values[i].t > time) {
++      if (values[i].delta > time) {
+         return (values[i - 1].value + values[i].value) / 2;
+       }
+     }
+     return values[values.length - 1].value;
+   }
+ }
+ 
+ /**
++ * Wait for all inspector tabs to complete rendering.
++ */
++function waitForInspectorRender (panelWin, EVENTS) {
++  return Promise.all([
++    once(panelWin, EVENTS.UI_PROPERTIES_TAB_RENDERED),
++    once(panelWin, EVENTS.UI_AUTOMATION_TAB_RENDERED)
++  ]);
++}
++
++/**
+  * List of audio node properties to test against expectations of the AudioNode actor
+  */
+ 
+ const NODE_DEFAULT_VALUES = {
+   "AudioDestinationNode": {},
+   "MediaElementAudioSourceNode": {},
+   "MediaStreamAudioSourceNode": {},
+   "MediaStreamAudioDestinationNode": {
+diff --git a/browser/devtools/webaudioeditor/views/automation.js b/browser/devtools/webaudioeditor/views/automation.js
+new file mode 100644
+index 0000000..6b2463c
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/views/automation.js
+@@ -0,0 +1,160 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * Functions handling the audio node inspector UI.
++ */
++
++let AutomationView = {
++
++  /**
++   * Initialization function called when the tool starts up.
++   */
++  initialize: function () {
++    this._buttons = $("#automation-param-toolbar-buttons");
++    this.graph = new LineGraphWidget($("#automation-graph"), { avg: false });
++    this.graph.selectionEnabled = false;
++
++    this._onButtonClick = this._onButtonClick.bind(this);
++    this._onNodeSet = this._onNodeSet.bind(this);
++    this._onResize = this._onResize.bind(this);
++
++    this._buttons.addEventListener("click", this._onButtonClick);
++    window.on(EVENTS.UI_INSPECTOR_RESIZE, this._onResize);
++    window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSet);
++  },
++
++  /**
++   * Destruction function called when the tool cleans up.
++   */
++  destroy: function () {
++    this._buttons.removeEventListener("click", this._onButtonClick);
++    window.off(EVENTS.UI_INSPECTOR_RESIZE, this._onResize);
++    window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSet);
++  },
++
++  /**
++   * Empties out the props view.
++   */
++  resetUI: function () {
++    this._currentNode = null;
++  },
++
++  /**
++   * On a new node selection, create the Automation panel for
++   * that specific node.
++   */
++  build: Task.async(function* () {
++    let node = this._currentNode;
++
++    let props = yield node.getParams();
++    let params = props.filter(({ flags }) => flags && flags.param);
++
++    this._createParamButtons(params);
++
++    this._selectedParamName = params[0] ? params[0].param : null;
++    this.render();
++  }),
++
++  /**
++   * Renders the graph for specified `paramName`. Called when
++   * the parameter view is changed, or when new param data events
++   * are fired for the currently specified param.
++   */
++  render: Task.async(function *() {
++    let node = this._currentNode;
++    let paramName = this._selectedParamName;
++    // Escape if either node or parameter name does not exist.
++    if (!node || !paramName) {
++      this._setState("no-params");
++      window.emit(EVENTS.UI_AUTOMATION_TAB_RENDERED, null);
++      return;
++    }
++
++    let { values, events } = yield node.getAutomationData(paramName);
++    this._setState(events.length ? "show" : "no-events");
++    yield this.graph.setDataWhenReady(values);
++    window.emit(EVENTS.UI_AUTOMATION_TAB_RENDERED, node.id);
++  }),
++
++  /**
++   * Create the buttons for each AudioParam, that when clicked,
++   * render the graph for that AudioParam.
++   */
++  _createParamButtons: function (params) {
++    this._buttons.innerHTML = "";
++    params.forEach((param, i) => {
++      let button = document.createElement("toolbarbutton");
++      button.setAttribute("class", "devtools-toolbarbutton automation-param-button");
++      button.setAttribute("data-param", param.param);
++      // Set label to the parameter name, should not be L10N'd
++      button.setAttribute("label", param.param);
++
++      // If first button, set to 'selected' for styling
++      if (i === 0) {
++        button.setAttribute("selected", true);
++      }
++
++      this._buttons.appendChild(button);
++    });
++  },
++
++  /**
++   * Internally sets the current audio node and rebuilds appropriate
++   * views.
++   */
++  _setAudioNode: function (node) {
++    this._currentNode = node;
++    if (this._currentNode) {
++      this.build();
++    }
++  },
++
++  /**
++   * Toggles the subviews to display messages whether or not
++   * the audio node has no AudioParams, no automation events, or
++   * shows the graph.
++   */
++  _setState: function (state) {
++    let contentView = $("#automation-content");
++    let emptyView = $("#automation-empty");
++
++    let graphView = $("#automation-graph-container");
++    let noEventsView = $("#automation-no-events");
++
++    contentView.hidden = state === "no-params";
++    emptyView.hidden = state !== "no-params";
++
++    graphView.hidden = state !== "show";
++    noEventsView.hidden = state !== "no-events";
++  },
++
++  /**
++   * Event handlers
++   */
++
++  _onButtonClick: function (e) {
++    Array.forEach($$(".automation-param-button"), $btn => $btn.removeAttribute("selected"));
++    let paramName = e.target.getAttribute("data-param");
++    e.target.setAttribute("selected", true);
++    this._selectedParamName = paramName;
++    this.render();
++  },
++
++  /**
++   * Called when the marker details view is resized.
++   */
++  _onResize: function () {
++    this.graph.refresh();
++    //this.render();
++  },
++
++  /**
++   * Called when the inspector view determines a node is selected.
++   */
++  _onNodeSet: function (_, id) {
++    this._setAudioNode(id != null ? gAudioNodes.get(id) : null);
++  }
++};
+diff --git a/browser/devtools/webaudioeditor/views/context.js b/browser/devtools/webaudioeditor/views/context.js
+index 139047c..bd3cbf6 100644
+--- a/browser/devtools/webaudioeditor/views/context.js
++++ b/browser/devtools/webaudioeditor/views/context.js
+@@ -33,41 +33,38 @@ const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove"];
+  */
+ let ContextView = {
+   /**
+    * Initialization function, called when the tool is started.
+    */
+   initialize: function() {
+     this._onGraphNodeClick = this._onGraphNodeClick.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
+-    this._onNodeSelect = this._onNodeSelect.bind(this);
+     this._onStartContext = this._onStartContext.bind(this);
+     this._onEvent = this._onEvent.bind(this);
+ 
+     this.draw = debounce(this.draw.bind(this), GRAPH_DEBOUNCE_TIMER);
+     $('#graph-target').addEventListener('click', this._onGraphNodeClick, false);
+ 
+     window.on(EVENTS.THEME_CHANGE, this._onThemeChange);
+-    window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
+     window.on(EVENTS.START_CONTEXT, this._onStartContext);
+     gAudioNodes.on("*", this._onEvent);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     // If the graph was rendered at all, then the handler
+     // for zooming in will be set. We must remove it to prevent leaks.
+     if (this._zoomBinding) {
+       this._zoomBinding.on("zoom", null);
+     }
+     $('#graph-target').removeEventListener('click', this._onGraphNodeClick, false);
+     window.off(EVENTS.THEME_CHANGE, this._onThemeChange);
+-    window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
+     window.off(EVENTS.START_CONTEXT, this._onStartContext);
+     gAudioNodes.off("*", this._onEvent);
+   },
+ 
+   /**
+    * Called when a page is reloaded and waiting for a "start-context" event
+    * and clears out old content
+    */
+@@ -107,17 +104,16 @@ let ContextView = {
+   getCurrentTranslation: function () {
+     return this._zoomBinding ? this._zoomBinding.translate() : null;
+   },
+ 
+   /**
+    * Makes the corresponding graph node appear "focused", removing
+    * focused styles from all other nodes. If no `actorID` specified,
+    * make all nodes appear unselected.
+-   * Called from UI_INSPECTOR_NODE_SELECT.
+    */
+   focusNode: function (actorID) {
+     // Remove class "selected" from all nodes
+     Array.forEach($$(".nodes > g"), $node => $node.classList.remove("selected"));
+     // Add to "selected"
+     if (actorID) {
+       this._getNodeByID(actorID).classList.add("selected");
+     }
+@@ -267,20 +263,16 @@ let ContextView = {
+    * in GRAPH_REDRAW_EVENTS) qualify as a redraw event.
+    */
+   _onEvent: function (eventName, ...args) {
+     if (~GRAPH_REDRAW_EVENTS.indexOf(eventName)) {
+       this.draw();
+     }
+   },
+ 
+-  _onNodeSelect: function (eventName, id) {
+-    this.focusNode(id);
+-  },
+-
+   /**
+    * Fired when the devtools theme changes.
+    */
+   _onThemeChange: function (eventName, theme) {
+     let markerColor = MARKER_STYLING[theme];
+     let marker = $("#arrowhead");
+     if (marker) {
+       marker.setAttribute("style", "fill: " + markerColor);
+@@ -295,11 +287,14 @@ let ContextView = {
+    */
+   _onGraphNodeClick: function (e) {
+     let node = findGraphNodeParent(e.target);
+     // If node not found (clicking outside of an audio node in the graph),
+     // then ignore this event
+     if (!node)
+       return;
+ 
+-    window.emit(EVENTS.UI_SELECT_NODE, node.getAttribute("data-id"));
++    let id = node.getAttribute("data-id");
++
++    this.focusNode(id);
++    window.emit(EVENTS.UI_SELECT_NODE, id);
+   }
+ };
+diff --git a/browser/devtools/webaudioeditor/views/inspector.js b/browser/devtools/webaudioeditor/views/inspector.js
+index 4997b52..5818f2f 100644
+--- a/browser/devtools/webaudioeditor/views/inspector.js
++++ b/browser/devtools/webaudioeditor/views/inspector.js
+@@ -1,32 +1,20 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-Cu.import("resource:///modules/devtools/VariablesView.jsm");
+-Cu.import("resource:///modules/devtools/VariablesViewController.jsm");
+-
+-// Strings for rendering
+-const EXPAND_INSPECTOR_STRING = L10N.getStr("expandInspector");
+-const COLLAPSE_INSPECTOR_STRING = L10N.getStr("collapseInspector");
+-
+ // Store width as a preference rather than hardcode
+ // TODO bug 1009056
+ const INSPECTOR_WIDTH = 300;
+ 
+-const GENERIC_VARIABLES_VIEW_SETTINGS = {
+-  searchEnabled: false,
+-  editableValueTooltip: "",
+-  editableNameTooltip: "",
+-  preventDisableOnChange: true,
+-  preventDescriptorModifiers: false,
+-  eval: () => {}
+-};
++// Strings for rendering
++const EXPAND_INSPECTOR_STRING = L10N.getStr("expandInspector");
++const COLLAPSE_INSPECTOR_STRING = L10N.getStr("collapseInspector");
+ 
+ /**
+  * Functions handling the audio node inspector UI.
+  */
+ 
+ let InspectorView = {
+   _currentNode: null,
+ 
+@@ -36,50 +24,48 @@ let InspectorView = {
+   _toggleEvent: EVENTS.UI_INSPECTOR_TOGGLED,
+   _animated: true,
+   _delayed: true,
+ 
+   /**
+    * Initialization function called when the tool starts up.
+    */
+   initialize: function () {
+-    this._tabsPane = $("#web-audio-editor-tabs");
+-
+     // Set up view controller
+     this.el = $("#web-audio-inspector");
++    this.splitter = $("#inspector-splitter");
+     this.el.setAttribute("width", INSPECTOR_WIDTH);
+     this.button = $("#inspector-pane-toggle");
+     mixin(this, ToggleMixin);
+     this.bindToggle();
+ 
+     // Hide inspector view on startup
+     this.hideImmediately();
+ 
+-    this._onEval = this._onEval.bind(this);
+     this._onNodeSelect = this._onNodeSelect.bind(this);
+     this._onDestroyNode = this._onDestroyNode.bind(this);
++    this._onResize = this._onResize.bind(this);
+ 
+-    this._propsView = new VariablesView($("#properties-tabpanel-content"), GENERIC_VARIABLES_VIEW_SETTINGS);
+-    this._propsView.eval = this._onEval;
+-
++    this.splitter.addEventListener("mouseup", this._onResize);
+     window.on(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
+     gAudioNodes.on("remove", this._onDestroyNode);
+   },
+ 
+   /**
+    * Destruction function called when the tool cleans up.
+    */
+   destroy: function () {
+     this.unbindToggle();
++    this.splitter.removeEventListener("mouseup", this._onResize);
+     window.off(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
+     gAudioNodes.off("remove", this._onDestroyNode);
+ 
+     this.el = null;
+     this.button = null;
+-    this._tabsPane = null;
++    this.splitter = null;
+   },
+ 
+   /**
+    * Takes a AudioNodeView `node` and sets it as the current
+    * node and scaffolds the inspector view based off of the new node.
+    */
+   setCurrentAudioNode: function (node) {
+     this._currentNode = node || null;
+@@ -91,33 +77,31 @@ let InspectorView = {
+       $("#web-audio-editor-tabs").setAttribute("hidden", "true");
+       window.emit(EVENTS.UI_INSPECTOR_NODE_SET, null);
+     }
+     // Otherwise load up the tabs view and hide the empty placeholder
+     else {
+       $("#web-audio-editor-details-pane-empty").setAttribute("hidden", "true");
+       $("#web-audio-editor-tabs").removeAttribute("hidden");
+       this._setTitle();
+-      this._buildPropertiesView()
+-        .then(() => window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id));
++      window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id);
+     }
+   },
+ 
+   /**
+    * Returns the current AudioNodeView.
+    */
+   getCurrentAudioNode: function () {
+     return this._currentNode;
+   },
+ 
+   /**
+    * Empties out the props view.
+    */
+   resetUI: function () {
+-    this._propsView.empty();
+     // Set current node to empty to load empty view
+     this.setCurrentAudioNode();
+ 
+     // Reset AudioNode inspector and hide
+     this.hideImmediately();
+   },
+ 
+   /**
+@@ -125,117 +109,34 @@ let InspectorView = {
+    */
+   _setTitle: function () {
+     let node = this._currentNode;
+     let title = node.type.replace(/Node$/, "");
+     $("#web-audio-inspector-title").setAttribute("value", title);
+   },
+ 
+   /**
+-   * Reconstructs the `Properties` tab in the inspector
+-   * with the `this._currentNode` as it's source.
+-   */
+-  _buildPropertiesView: Task.async(function* () {
+-    let propsView = this._propsView;
+-    let node = this._currentNode;
+-    propsView.empty();
+-
+-    let audioParamsScope = propsView.addScope("AudioParams");
+-    let props = yield node.getParams();
+-
+-    // Disable AudioParams VariableView expansion
+-    // when there are no props i.e. AudioDestinationNode
+-    this._togglePropertiesView(!!props.length);
+-
+-    props.forEach(({ param, value, flags }) => {
+-      let descriptor = {
+-        value: value,
+-        writable: !flags || !flags.readonly,
+-      };
+-      let item = audioParamsScope.addItem(param, descriptor);
+-
+-      // No items should currently display a dropdown
+-      item.twisty = false;
+-    });
+-
+-    audioParamsScope.expanded = true;
+-
+-    window.emit(EVENTS.UI_PROPERTIES_TAB_RENDERED, node.id);
+-  }),
+-
+-  _togglePropertiesView: function (show) {
+-    let propsView = $("#properties-tabpanel-content");
+-    let emptyView = $("#properties-tabpanel-content-empty");
+-    (show ? propsView : emptyView).removeAttribute("hidden");
+-    (show ? emptyView : propsView).setAttribute("hidden", "true");
+-  },
+-
+-  /**
+-   * Returns the scope for AudioParams in the
+-   * VariablesView.
+-   *
+-   * @return Scope
+-   */
+-  _getAudioPropertiesScope: function () {
+-    return this._propsView.getScopeAtIndex(0);
+-  },
+-
+-  /**
+    * Event handlers
+    */
+ 
+   /**
+-   * Executed when an audio prop is changed in the UI.
+-   */
+-  _onEval: Task.async(function* (variable, value) {
+-    let ownerScope = variable.ownerView;
+-    let node = this._currentNode;
+-    let propName = variable.name;
+-    let error;
+-
+-    if (!variable._initialDescriptor.writable) {
+-      error = new Error("Variable " + propName + " is not writable.");
+-    } else {
+-      // Cast value to proper type
+-      try {
+-        let number = parseFloat(value);
+-        if (!isNaN(number)) {
+-          value = number;
+-        } else {
+-          value = JSON.parse(value);
+-        }
+-        error = yield node.actor.setParam(propName, value);
+-      }
+-      catch (e) {
+-        error = e;
+-      }
+-    }
+-
+-    // TODO figure out how to handle and display set prop errors
+-    // and enable `test/brorwser_wa_properties-view-edit.js`
+-    // Bug 994258
+-    if (!error) {
+-      ownerScope.get(propName).setGrip(value);
+-      window.emit(EVENTS.UI_SET_PARAM, node.id, propName, value);
+-    } else {
+-      window.emit(EVENTS.UI_SET_PARAM_ERROR, node.id, propName, value);
+-    }
+-  }),
+-
+-  /**
+    * Called on EVENTS.UI_SELECT_NODE, and takes an actorID `id`
+    * and calls `setCurrentAudioNode` to scaffold the inspector view.
+    */
+   _onNodeSelect: function (_, id) {
+     this.setCurrentAudioNode(gAudioNodes.get(id));
+ 
+     // Ensure inspector is visible when selecting a new node
+     this.show();
+   },
+ 
++  _onResize: function () {
++    window.emit(EVENTS.UI_INSPECTOR_RESIZE);
++  },
++
+   /**
+    * Called when `DESTROY_NODE` is fired to remove the node from props view if
+    * it's currently selected.
+    */
+   _onDestroyNode: function (node) {
+     if (this._currentNode && this._currentNode.id === node.id) {
+       this.setCurrentAudioNode(null);
+     }
+diff --git a/browser/devtools/webaudioeditor/views/properties.js b/browser/devtools/webaudioeditor/views/properties.js
+new file mode 100644
+index 0000000..29ea0a4
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/views/properties.js
+@@ -0,0 +1,164 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++Cu.import("resource:///modules/devtools/VariablesView.jsm");
++Cu.import("resource:///modules/devtools/VariablesViewController.jsm");
++
++const GENERIC_VARIABLES_VIEW_SETTINGS = {
++  searchEnabled: false,
++  editableValueTooltip: "",
++  editableNameTooltip: "",
++  preventDisableOnChange: true,
++  preventDescriptorModifiers: false,
++  eval: () => {}
++};
++
++/**
++ * Functions handling the audio node inspector UI.
++ */
++
++let PropertiesView = {
++
++  /**
++   * Initialization function called when the tool starts up.
++   */
++  initialize: function () {
++    this._onEval = this._onEval.bind(this);
++    this._onNodeSet = this._onNodeSet.bind(this);
++
++    window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSet);
++    this._propsView = new VariablesView($("#properties-content"), GENERIC_VARIABLES_VIEW_SETTINGS);
++    this._propsView.eval = this._onEval;
++  },
++
++  /**
++   * Destruction function called when the tool cleans up.
++   */
++  destroy: function () {
++    window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSet);
++    this._propsView = null;
++  },
++
++  /**
++   * Empties out the props view.
++   */
++  resetUI: function () {
++    this._propsView.empty();
++    this._currentNode = null;
++  },
++
++  /**
++   * Internally sets the current audio node and rebuilds appropriate
++   * views.
++   */
++  _setAudioNode: function (node) {
++    this._currentNode = node;
++    if (this._currentNode) {
++      this._buildPropertiesView();
++    }
++  },
++
++  /**
++   * Reconstructs the `Properties` tab in the inspector
++   * with the `this._currentNode` as it's source.
++   */
++  _buildPropertiesView: Task.async(function* () {
++    let propsView = this._propsView;
++    let node = this._currentNode;
++    propsView.empty();
++
++    let audioParamsScope = propsView.addScope("AudioParams");
++    let props = yield node.getParams();
++
++    // Disable AudioParams VariableView expansion
++    // when there are no props i.e. AudioDestinationNode
++    this._togglePropertiesView(!!props.length);
++
++    props.forEach(({ param, value, flags }) => {
++      let descriptor = {
++        value: value,
++        writable: !flags || !flags.readonly,
++      };
++      let item = audioParamsScope.addItem(param, descriptor);
++
++      // No items should currently display a dropdown
++      item.twisty = false;
++    });
++
++    audioParamsScope.expanded = true;
++
++    window.emit(EVENTS.UI_PROPERTIES_TAB_RENDERED, node.id);
++  }),
++
++  /**
++   * Toggles the display of the "empty" properties view when
++   * node has no properties to display.
++   */
++  _togglePropertiesView: function (show) {
++    let propsView = $("#properties-content");
++    let emptyView = $("#properties-empty");
++    (show ? propsView : emptyView).removeAttribute("hidden");
++    (show ? emptyView : propsView).setAttribute("hidden", "true");
++  },
++
++  /**
++   * Returns the scope for AudioParams in the
++   * VariablesView.
++   *
++   * @return Scope
++   */
++  _getAudioPropertiesScope: function () {
++    return this._propsView.getScopeAtIndex(0);
++  },
++
++  /**
++   * Event handlers
++   */
++
++  /**
++   * Called when the inspector view determines a node is selected.
++   */
++  _onNodeSet: function (_, id) {
++    this._setAudioNode(gAudioNodes.get(id));
++  },
++
++  /**
++   * Executed when an audio prop is changed in the UI.
++   */
++  _onEval: Task.async(function* (variable, value) {
++    let ownerScope = variable.ownerView;
++    let node = this._currentNode;
++    let propName = variable.name;
++    let error;
++
++    if (!variable._initialDescriptor.writable) {
++      error = new Error("Variable " + propName + " is not writable.");
++    } else {
++      // Cast value to proper type
++      try {
++        let number = parseFloat(value);
++        if (!isNaN(number)) {
++          value = number;
++        } else {
++          value = JSON.parse(value);
++        }
++        error = yield node.actor.setParam(propName, value);
++      }
++      catch (e) {
++        error = e;
++      }
++    }
++
++    // TODO figure out how to handle and display set prop errors
++    // and enable `test/brorwser_wa_properties-view-edit.js`
++    // Bug 994258
++    if (!error) {
++      ownerScope.get(propName).setGrip(value);
++      window.emit(EVENTS.UI_SET_PARAM, node.id, propName, value);
++    } else {
++      window.emit(EVENTS.UI_SET_PARAM_ERROR, node.id, propName, value);
++    }
++  })
++};
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor.xul b/browser/devtools/webaudioeditor/webaudioeditor.xul
+index 9be6b2b..fba415f 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor.xul
++++ b/browser/devtools/webaudioeditor/webaudioeditor.xul
+@@ -20,16 +20,18 @@
+   <script type="application/javascript" src="chrome://browser/content/devtools/d3.js"/>
+   <script type="application/javascript" src="dagre-d3.js"/>
+   <script type="application/javascript" src="webaudioeditor/includes.js"/>
+   <script type="application/javascript" src="webaudioeditor/models.js"/>
+   <script type="application/javascript" src="webaudioeditor/controller.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/utils.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/context.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/inspector.js"/>
++  <script type="application/javascript" src="webaudioeditor/views/properties.js"/>
++  <script type="application/javascript" src="webaudioeditor/views/automation.js"/>
+ 
+   <vbox class="theme-body" flex="1">
+     <hbox id="reload-notice"
+           class="notice-container"
+           align="center"
+           pack="center"
+           flex="1">
+       <button id="requests-menu-reload-notice-button"
+@@ -70,41 +72,64 @@
+               <svg id="graph-svg"
+                   xmlns="http://www.w3.org/2000/svg"
+                   xmlns:xlink="http://www.w3.org/1999/xlink">
+                 <g id="graph-target" transform="translate(20,20)"/>
+               </svg>
+             </vbox>
+           </box>
+         </hbox>
+-        <splitter class="devtools-side-splitter"/>
++        <splitter id="inspector-splitter" class="devtools-side-splitter"/>
+         <vbox id="web-audio-inspector" hidden="true">
+           <hbox class="devtools-toolbar">
+             <label id="web-audio-inspector-title" value="&webAudioEditorUI.inspectorTitle;"></label>
+           </hbox>
+           <deck id="web-audio-editor-details-pane" flex="1">
+             <vbox id="web-audio-editor-details-pane-empty" flex="1">
+               <label value="&webAudioEditorUI.inspectorEmpty;"></label>
+             </vbox>
+             <tabbox id="web-audio-editor-tabs"
+                     class="devtools-sidebar-tabs"
+                     handleCtrlTab="false">
+               <tabs>
+                 <tab id="properties-tab"
+                      label="&webAudioEditorUI.tab.properties;"/>
++                <tab id="automation-tab"
++                     label="&webAudioEditorUI.tab.automation;"/>
+               </tabs>
+               <tabpanels flex="1">
++                <!-- Properties Panel -->
+                 <tabpanel id="properties-tabpanel"
+                           class="tabpanel-content">
+-                  <vbox id="properties-tabpanel-content" flex="1">
++                  <vbox id="properties-content" flex="1" hidden="true">
+                   </vbox>
+-                  <vbox id="properties-tabpanel-content-empty" flex="1" hidden="true">
++                  <vbox id="properties-empty" flex="1" hidden="true">
+                     <label value="&webAudioEditorUI.propertiesEmpty;"></label>
+                   </vbox>
+                 </tabpanel>
++
++                <!-- Automation Panel -->
++                <tabpanel id="automation-tabpanel"
++                          class="tabpanel-content">
++                  <vbox id="automation-content" flex="1" hidden="true">
++                    <toolbar id="automation-param-toolbar" class="devtools-toolbar">
++                      <hbox id="automation-param-toolbar-buttons" class="devtools-toolbarbutton-group">
++                      </hbox>
++                    </toolbar>
++                    <box id="automation-graph-container" flex="1">
++                      <canvas id="automation-graph"></canvas>
++                    </box>
++                    <vbox id="automation-no-events" flex="1" hidden="true">
++                      <label value="&webAudioEditorUI.automationNoEvents;"></label>
++                    </vbox>
++                  </vbox>
++                  <vbox id="automation-empty" flex="1" hidden="true">
++                    <label value="&webAudioEditorUI.automationEmpty;"></label>
++                  </vbox>
++                </tabpanel>
+               </tabpanels>
+             </tabbox>
+           </deck>
+         </vbox>
+       </box>
+     </vbox>
+   </vbox>
+ 
+diff --git a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd b/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd
+index 7c2d14f..5456443 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.dtd
+@@ -22,19 +22,32 @@
+ <!-- LOCALIZATION NOTE (webAudioEditorUI.emptyNotice): This is the label shown
+   -  while the page is refreshing and the tool waits for a audio context. -->
+ <!ENTITY webAudioEditorUI.emptyNotice     "Waiting for an audio context to be created…">
+ 
+ <!-- LOCALIZATION NOTE (webAudioEditorUI.tab.properties): This is the label shown
+   -  for the properties tab view. -->
+ <!ENTITY webAudioEditorUI.tab.properties  "Parameters">
+ 
++<!-- LOCALIZATION NOTE (webAudioEditorUI.tab.automation): This is the label shown
++  -  for the automation tab view. -->
++<!ENTITY webAudioEditorUI.tab.automation  "Automation">
++
+ <!-- LOCALIZATION NOTE (webAudioEditorUI.inspectorTitle): This is the title for the
+   -  AudioNode inspector view. -->
+ <!ENTITY webAudioEditorUI.inspectorTitle  "AudioNode Inspector">
+ 
+ <!-- LOCALIZATION NOTE (webAudioEditorUI.inspectorEmpty): This is the title for the
+   -  AudioNode inspector view empty message. -->
+ <!ENTITY webAudioEditorUI.inspectorEmpty  "No AudioNode selected.">
+ 
+ <!-- LOCALIZATION NOTE (webAudioEditorUI.propertiesEmpty): This is the title for the
+   -  AudioNode inspector view properties tab empty message. -->
+ <!ENTITY webAudioEditorUI.propertiesEmpty "Node does not have any properties.">
++
++<!-- LOCALIZATION NOTE (webAudioEditorUI.automationEmpty): This is the title for the
++  -  AudioNode inspector view automation tab empty message. -->
++<!ENTITY webAudioEditorUI.automationEmpty "Node does not have any AudioParams.">
++
++<!-- LOCALIZATION NOTE (webAudioEditorUI.automationNoEvents): This is the title for the
++  -  AudioNode inspector view automation tab message when there are no automation
++  -  events. -->
++<!ENTITY webAudioEditorUI.automationNoEvents "AudioParam does not have any automation events.">
+diff --git a/browser/themes/shared/devtools/webaudioeditor.inc.css b/browser/themes/shared/devtools/webaudioeditor.inc.css
+index 274c41d..6ad50d6 100644
+--- a/browser/themes/shared/devtools/webaudioeditor.inc.css
++++ b/browser/themes/shared/devtools/webaudioeditor.inc.css
+@@ -140,16 +140,30 @@ text {
+ #inspector-pane-toggle[pane-collapsed] {
+   list-style-image: url(debugger-expand.png);
+ }
+ 
+ #inspector-pane-toggle:active {
+   -moz-image-region: rect(0px,32px,16px,16px);
+ }
+ 
++/**
++ * Automation Styles
++ */
++
++#automation-param-toolbar .automation-param-button[selected] {
++  color: var(--theme-selection-color);
++  background-color: var(--theme-selection-background);
++}
++
++#automation-graph {
++  overflow: hidden;
++  -moz-box-flex: 1;
++}
++
+ @media (min-resolution: 2dppx) {
+   #inspector-pane-toggle {
+     list-style-image: url(debugger-collapse@2x.png);
+     -moz-image-region: rect(0px,32px,32px,0px);
+   }
+ 
+   #inspector-pane-toggle[pane-collapsed] {
+     list-style-image: url(debugger-expand@2x.png);
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 2988999..7a2928f 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -40,28 +40,42 @@ const AUTOMATION_METHODS = [
+ 
+ const NODE_ROUTING_METHODS = [
+   "connect", "disconnect"
+ ];
+ 
+ const NODE_PROPERTIES = {
+   "OscillatorNode": {
+     "type": {},
+-    "frequency": {},
+-    "detune": {}
++    "frequency": {
++      "param": true
++    },
++    "detune": {
++      "param": true
++    }
+   },
+   "GainNode": {
+-    "gain": {}
++    "gain": {
++      "param": true
++    }
+   },
+   "DelayNode": {
+-    "delayTime": {}
++    "delayTime": {
++      "param": true
++    }
+   },
++  // TODO deal with figuring out adding `detune` AudioParam
++  // for AudioBufferSourceNode, which is in the spec
++  // but not yet added in implementation
++  // bug 1116852
+   "AudioBufferSourceNode": {
+     "buffer": { "Buffer": true },
+-    "playbackRate": {},
++    "playbackRate": {
++      "param": true,
++    },
+     "loop": {},
+     "loopStart": {},
+     "loopEnd": {}
+   },
+   "ScriptProcessorNode": {
+     "bufferSize": { "readonly": true }
+   },
+   "PannerNode": {
+@@ -74,29 +88,47 @@ const NODE_PROPERTIES = {
+     "coneOuterAngle": {},
+     "coneOuterGain": {}
+   },
+   "ConvolverNode": {
+     "buffer": { "Buffer": true },
+     "normalize": {},
+   },
+   "DynamicsCompressorNode": {
+-    "threshold": {},
+-    "knee": {},
+-    "ratio": {},
++    "threshold": {
++      "param": true
++    },
++    "knee": {
++      "param": true
++    },
++    "ratio": {
++      "param": true
++    },
+     "reduction": {},
+-    "attack": {},
+-    "release": {}
++    "attack": {
++      "param": true
++    },
++    "release": {
++      "param": true
++    }
+   },
+   "BiquadFilterNode": {
+     "type": {},
+-    "frequency": {},
+-    "Q": {},
+-    "detune": {},
+-    "gain": {}
++    "frequency": {
++      "param": true
++    },
++    "Q": {
++      "param": true
++    },
++    "detune": {
++      "param": true
++    },
++    "gain": {
++      "param": true
++    }
+   },
+   "WaveShaperNode": {
+     "curve": { "Float32Array": true },
+     "oversample": {}
+   },
+   "AnalyserNode": {
+     "fftSize": {},
+     "minDecibels": {},
+@@ -393,50 +425,50 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+     }
+   }, {
+     request: { output: Arg(0, "nullable:number") },
+     response: { error: RetVal("nullable:json") }
+   }),
+ 
+   getAutomationData: method(function (paramName) {
+     let timeline = this.automation[paramName];
+-    let events = timeline.events;
+-    let values = [];
+-    let i = 0;
+-
+     if (!timeline) {
+       return null;
+     }
+ 
++    let events = timeline.events;
++    let values = [];
++    let i = 0;
++
+     if (!timeline.events.length) {
+       return { events, values };
+     }
+ 
+     let firstEvent = events[0];
+     let lastEvent = events[timeline.events.length - 1];
+     // `setValueCurveAtTime` will have a duration value -- other
+     // events will have duration of `0`.
+     let timeDelta = (lastEvent.time + lastEvent.duration) - firstEvent.time;
+     let scale = timeDelta / AUTOMATION_GRANULARITY;
+ 
+     for (; i < AUTOMATION_GRANULARITY; i++) {
+-      let t = firstEvent.time + (i * scale);
+-      let value = timeline.getValueAtTime(t);
+-      values.push({ t, value });
++      let delta = firstEvent.time + (i * scale);
++      let value = timeline.getValueAtTime(delta);
++      values.push({ delta, value });
+     }
+ 
+     // If the last event is setTargetAtTime, the automation
+     // doesn't actually begin until the event's time, and exponentially
+     // approaches the target value. In this case, we add more values
+     // until we're "close enough" to the target.
+     if (lastEvent.type === "setTargetAtTime") {
+       for (; i < AUTOMATION_GRANULARITY_MAX; i++) {
+-        let t = firstEvent.time + (++i * scale);
+-        let value = timeline.getValueAtTime(t);
+-        values.push({ t, value });
++        let delta = firstEvent.time + (++i * scale);
++        let value = timeline.getValueAtTime(delta);
++        values.push({ delta, value });
+       }
+     }
+ 
+     return { events, values };
+   }, {
+     request: { paramName: Arg(0, "string") },
+     response: { values: RetVal("nullable:json") }
+   }),
+-- 
+2.2.1
+

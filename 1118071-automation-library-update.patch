@@ -1,0 +1,230 @@
+From 3a70b66931bd1816e290b019e20ea6d9c6c69c85 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 5 Jan 2015 21:18:22 -0800
+Subject: Bug 1118071 - Update web-audio-automation-timeline library to
+ fix setTargetAtTime only calculating once for web audio editor's
+ getAutomationData. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js
+index b7bd141..0ace882 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-02.js
+@@ -8,31 +8,35 @@
+ 
+ add_task(function*() {
+   let { target, front } = yield initBackend(SIMPLE_CONTEXT_URL);
+   let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
+     front.setup({ reload: true }),
+     get3(front, "create-node")
+   ]);
+ 
+-  let t0 = 0, t1 = 0.1, t2 = 0.2, t3 = 0.3, t4 = 0.4, t5 = 0.6, t6 = 0.7, t7 = 1;
+-  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.2, t0]);
+-  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.3, t1]);
+-  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [0.4, t2]);
+-  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [1, t3]);
+-  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [0.15, t4]);
+-  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.75, t5]);
+-  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [0.05, t6]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [300, 0.1]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [500, 0.4]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [200, 0.6]);
+   // End with a setTargetAtTime event, as the target approaches infinity, which will
+   // give us more points to render than the default 2000
+-  yield oscNode.addAutomationEvent("frequency", "setTargetAtTime", [1, t7, 0.5]);
++  yield oscNode.addAutomationEvent("frequency", "setTargetAtTime", [1000, 2, 0.5]);
+ 
+-  let { events, values } = yield oscNode.getAutomationData("frequency");
++  var { events, values } = yield oscNode.getAutomationData("frequency");
+ 
+-  is(events.length, 8, "8 recorded events returned.");
+-  is(values.length, 4000, "6000 value points returned when ending with exponentiall approaching automator.");
++  is(events.length, 4, "4 recorded events returned.");
++  is(values.length, 4000, "4000 value points returned when ending with exponentiall approaching automator.");
+ 
+-  checkAutomationValue(values, 1, 0.05);
+-  checkAutomationValue(values, 2, 0.87);
+-  checkAutomationValue(values, 3, 0.98);
++  checkAutomationValue(values, 2.01, 215.055)
++  checkAutomationValue(values, 2.1, 345.930);
++  checkAutomationValue(values, 3, 891.601);
++  checkAutomationValue(values, 5, 998.01);
++
++  // Refetch the automation data to ensure it recalculates correctly (bug 1118071)
++  var { events, values } = yield oscNode.getAutomationData("frequency");
++
++  checkAutomationValue(values, 2.01, 215.055)
++  checkAutomationValue(values, 2.1, 345.930);
++  checkAutomationValue(values, 3, 891.601);
++  checkAutomationValue(values, 5, 998.01);
+ 
+   yield removeTab(target.tab);
+ });
+diff --git a/toolkit/devtools/server/actors/utils/automation-timeline.js b/toolkit/devtools/server/actors/utils/automation-timeline.js
+index b3f41f3..a086d90 100644
+--- a/toolkit/devtools/server/actors/utils/automation-timeline.js
++++ b/toolkit/devtools/server/actors/utils/automation-timeline.js
+@@ -1,10 +1,10 @@
+ /**
+- * web-audio-automation-timeline - 1.0.2
++ * web-audio-automation-timeline - 1.0.3
+  * https://github.com/jsantell/web-audio-automation-timeline
+  * MIT License, copyright (c) 2014 Jordan Santell
+  */
+ !function(e){if("object"==typeof exports&&"undefined"!=typeof module)module.exports=e();else if("function"==typeof define&&define.amd)define([],e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),f.Timeline=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+ module.exports = require("./lib/timeline").Timeline;
+ 
+ },{"./lib/timeline":4}],2:[function(require,module,exports){
+ var F = require("./formulas");
+@@ -63,81 +63,77 @@ exports.exponentialApproach = function (t0, v0, v1, timeConstant, t) {
+ };
+ 
+ // Since we are going to accumulate error by adding 0.01 multiple times
+ // in a loop, we want to fuzz the equality check in `getValueAtTime`
+ exports.fuzzyEqual = function (lhs, rhs) {
+   return Math.abs(lhs - rhs) < EPSILON;
+ };
+ 
++exports.EPSILON = EPSILON;
++
+ },{}],4:[function(require,module,exports){
+ var TimelineEvent = require("./event").TimelineEvent;
+ var F = require("./formulas");
+ 
+ exports.Timeline = Timeline;
+ 
+ function Timeline (defaultValue) {
+   this.events = [];
+ 
+   this._value = defaultValue || 0;
+-
+-  // This is the value of this AudioParam we computed at the last call.
+-  this._computedValue = defaultValue || 0;
+-  // This is the value of this AudioParam at the last tick of the previous event.
+-  this._lastComputedValue = defaultValue || 0;
+ }
+ 
+ Timeline.prototype.getEventCount = function () {
+   return this.events.length;
+ };
+ 
+ Timeline.prototype.value = function () {
+   return this._value;
+ };
+ 
+ Timeline.prototype.setValue = function (value) {
+   if (this.events.length === 0) {
+-    this._computedValue = this._lastComputedValue = this._value = value;
++    this._value = value;
+   }
+ };
+ 
+ Timeline.prototype.getValue = function () {
+   if (this.events.length) {
+     throw new Error("Can only call `getValue` when there are 0 events.");
+   }
+ 
+   return this._value;
+ };
+ 
+ Timeline.prototype.getValueAtTime = function (time) {
+-  this._computedValue = this._getValueAtTimeHelper(time);
+-  return this._computedValue;
++  return this._getValueAtTimeHelper(time);
+ };
+ 
+ Timeline.prototype._getValueAtTimeHelper = function (time) {
+   var bailOut = false;
+   var previous = null;
+   var next = null;
++  var lastComputedValue = null; // Used for `setTargetAtTime` nodes
+   var events = this.events;
+   var e;
+ 
+   for (var i = 0; !bailOut && i < events.length; i++) {
+     if (F.fuzzyEqual(time, events[i].time)) {
+-      this._lastComputedValue = this._computedValue;
+-
+       // Find the last event with the same time as `time`
+       do {
+         ++i;
+       } while (i < events.length && F.fuzzyEqual(time, events[i].time));
+ 
+       e = events[i - 1];
+ 
+       // `setTargetAtTime` can be handled no matter what their next event is (if they have one)
+       if (e.type === "setTargetAtTime") {
+-        return e.exponentialApproach(this._lastComputedValue, time);
++        lastComputedValue = this._lastComputedValue(e);
++        return e.exponentialApproach(lastComputedValue, time);
+       }
+ 
+       // `setValueCurveAtTime` events can be handled no matter what their next event node is
+       // (if they have one)
+       if (e.type === "setValueCurveAtTime") {
+         return e.extractValueFromCurve(time);
+       }
+ 
+@@ -165,17 +161,18 @@ Timeline.prototype._getValueAtTimeHelper = function (time) {
+ 
+   // If the requested time is before all of the existing events
+   if (!previous) {
+     return this._value;
+   }
+ 
+   // `setTargetAtTime` can be handled no matter what their next event is (if they have one)
+   if (previous.type === "setTargetAtTime") {
+-    return previous.exponentialApproach(this._lastComputedValue, time);
++    lastComputedValue = this._lastComputedValue(previous);
++    return previous.exponentialApproach(lastComputedValue, time);
+   }
+ 
+   // `setValueCurveAtTime` events can be handled no matter what their next event node is
+   // (if they have one)
+   if (previous.type === "setValueCurveAtTime") {
+     return previous.extractValueFromCurve(time);
+   }
+ 
+@@ -311,16 +308,39 @@ Timeline.prototype._getPreviousEvent = function (time) {
+   // Handle the case where the time is past all the events
+   if (!bailOut) {
+     previous = next;
+   }
+ 
+   return previous;
+ };
+ 
++/**
++ * Calculates the previous value of the timeline, used for
++ * `setTargetAtTime` nodes. Takes an event, and returns
++ * the previous computed value for any sample taken during that
++ * exponential approach node.
++ */
++Timeline.prototype._lastComputedValue = function (event) {
++  // If equal times, return the value for the previous event, before
++  // the `setTargetAtTime` node.
++  var lastEvent = this._getPreviousEvent(event.time - F.EPSILON);
++
++  // If no event before the setTargetAtTime event, then return the
++  // intrinsic value.
++  if (!lastEvent) {
++    return this._value;
++  }
++  // Otherwise, return the value for the previous event, which should
++  // always be the last computed value (? I think?)
++  else {
++    return lastEvent.value;
++  }
++};
++
+ Timeline.prototype.setValueAtTime = function (value, startTime) {
+   this._insertEvent(new TimelineEvent("setValueAtTime", value, startTime));
+ };
+ 
+ Timeline.prototype.linearRampToValueAtTime = function (value, endTime) {
+   this._insertEvent(new TimelineEvent("linearRampToValueAtTime", value, endTime));
+ };
+ 
+-- 
+2.2.1
+
