@@ -1,0 +1,248 @@
+From a02576547329743265961cd4d5f10ee6c0872b15 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 6 Jan 2015 11:19:13 -0800
+Subject: Bug 1116847 - Add support for StereoPannerNodes in web audio
+ editor. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js
+index cfa8cff..d7f77f1 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-param-flags.js
+@@ -4,25 +4,26 @@
+ /**
+  * Test AudioNode#getParamFlags()
+  */
+ 
+ add_task(function*() {
+   let { target, front } = yield initBackend(SIMPLE_NODES_URL);
+   let [_, nodes] = yield Promise.all([
+     front.setup({ reload: true }),
+-    getN(front, "create-node", 14)
++    getN(front, "create-node", 15)
+   ]);
+ 
+   let allNodeParams = yield Promise.all(nodes.map(node => node.getParams()));
+   let nodeTypes = [
+     "AudioDestinationNode",
+     "AudioBufferSourceNode", "ScriptProcessorNode", "AnalyserNode", "GainNode",
+     "DelayNode", "BiquadFilterNode", "WaveShaperNode", "PannerNode", "ConvolverNode",
+-    "ChannelSplitterNode", "ChannelMergerNode", "DynamicsCompressorNode", "OscillatorNode"
++    "ChannelSplitterNode", "ChannelMergerNode", "DynamicsCompressorNode", "OscillatorNode",
++    "StereoPannerNode"
+   ];
+ 
+   // For some reason nodeTypes.forEach and params.forEach fail here so we use
+   // simple for loops.
+   for (let i = 0; i < nodeTypes.length; i++) {
+     let type = nodeTypes[i];
+     let params = allNodeParams[i];
+ 
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js
+index a4efc6d..24e0232 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-01.js
+@@ -4,25 +4,26 @@
+ /**
+  * Test AudioNode#getParams()
+  */
+ 
+ add_task(function*() {
+   let { target, front } = yield initBackend(SIMPLE_NODES_URL);
+   let [_, nodes] = yield Promise.all([
+     front.setup({ reload: true }),
+-    getN(front, "create-node", 14)
++    getN(front, "create-node", 15)
+   ]);
+ 
+   let allNodeParams = yield Promise.all(nodes.map(node => node.getParams()));
+   let nodeTypes = [
+     "AudioDestinationNode",
+     "AudioBufferSourceNode", "ScriptProcessorNode", "AnalyserNode", "GainNode",
+     "DelayNode", "BiquadFilterNode", "WaveShaperNode", "PannerNode", "ConvolverNode",
+-    "ChannelSplitterNode", "ChannelMergerNode", "DynamicsCompressorNode", "OscillatorNode"
++    "ChannelSplitterNode", "ChannelMergerNode", "DynamicsCompressorNode", "OscillatorNode",
++    "StereoPannerNode"
+   ];
+ 
+   nodeTypes.forEach((type, i) => {
+     let params = allNodeParams[i];
+     params.forEach(({param, value, flags}) => {
+       ok(param in NODE_DEFAULT_VALUES[type], "expected parameter for " + type);
+ 
+       ok(typeof flags === "object", type + " has a flags object");
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-02.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-02.js
+index 2afb718..ce2eca6 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-02.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-params-02.js
+@@ -5,25 +5,25 @@
+  * Tests that default properties are returned with the correct type
+  * from the AudioNode actors.
+  */
+ 
+ add_task(function*() {
+   let { target, front } = yield initBackend(SIMPLE_NODES_URL);
+   let [_, nodes] = yield Promise.all([
+     front.setup({ reload: true }),
+-    getN(front, "create-node", 14)
++    getN(front, "create-node", 15)
+   ]);
+ 
+   let allParams = yield Promise.all(nodes.map(node => node.getParams()));
+   let types = [
+     "AudioDestinationNode", "AudioBufferSourceNode", "ScriptProcessorNode",
+     "AnalyserNode", "GainNode", "DelayNode", "BiquadFilterNode", "WaveShaperNode",
+     "PannerNode", "ConvolverNode", "ChannelSplitterNode", "ChannelMergerNode",
+-    "DynamicsCompressorNode", "OscillatorNode"
++    "DynamicsCompressorNode", "OscillatorNode", "StereoPannerNode"
+   ];
+ 
+   allParams.forEach((params, i) => {
+     compare(params, NODE_DEFAULT_VALUES[types[i]], types[i]);
+   });
+ 
+   yield removeTab(target.tab);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_navigate.js b/browser/devtools/webaudioeditor/test/browser_wa_navigate.js
+index d913ff1..598deab 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_navigate.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_navigate.js
+@@ -20,25 +20,25 @@ add_task(function*() {
+ 
+   var { nodes, edges } = countGraphObjects(panelWin);
+   ise(nodes, 3, "should only be 3 nodes.");
+   ise(edges, 2, "should only be 2 edges.");
+ 
+   navigate(target, SIMPLE_NODES_URL);
+ 
+   var [actors] = yield Promise.all([
+-    getN(gFront, "create-node", 14),
+-    waitForGraphRendered(panelWin, 14, 0)
++    getN(gFront, "create-node", 15),
++    waitForGraphRendered(panelWin, 15, 0)
+   ]);
+ 
+   is($("#reload-notice").hidden, true,
+     "The 'reload this page' notice should be hidden after context found after navigation.");
+   is($("#waiting-notice").hidden, true,
+     "The 'waiting for an audio context' notice should be hidden after context found after navigation.");
+   is($("#content").hidden, false,
+     "The tool's content should reappear without closing and reopening the toolbox.");
+ 
+   var { nodes, edges } = countGraphObjects(panelWin);
+-  ise(nodes, 14, "after navigation, should have 14 nodes");
++  ise(nodes, 15, "after navigation, should have 15 nodes");
+   ise(edges, 0, "after navigation, should have 0 edges.");
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js
+index 14605cb..9ce5726 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_properties-view-params.js
+@@ -12,18 +12,18 @@ add_task(function*() {
+   let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
+   let gVars = InspectorView._propsView;
+ 
+   let started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+-    getN(gFront, "create-node", 14),
+-    waitForGraphRendered(panelWin, 14, 0)
++    getN(gFront, "create-node", 15),
++    waitForGraphRendered(panelWin, 15, 0)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+   let types = [
+     "AudioDestinationNode", "AudioBufferSourceNode", "ScriptProcessorNode",
+     "AnalyserNode", "GainNode", "DelayNode", "BiquadFilterNode", "WaveShaperNode",
+     "PannerNode", "ConvolverNode", "ChannelSplitterNode", "ChannelMergerNode",
+     "DynamicsCompressorNode", "OscillatorNode"
+   ];
+diff --git a/browser/devtools/webaudioeditor/test/doc_simple-node-creation.html b/browser/devtools/webaudioeditor/test/doc_simple-node-creation.html
+index 9599166..e6dcf7b 100644
+--- a/browser/devtools/webaudioeditor/test/doc_simple-node-creation.html
++++ b/browser/devtools/webaudioeditor/test/doc_simple-node-creation.html
+@@ -13,16 +13,16 @@
+     <script type="text/javascript;version=1.8">
+       "use strict";
+ 
+       let ctx = new AudioContext();
+       let NODE_CREATION_METHODS = [
+           "createBufferSource", "createScriptProcessor", "createAnalyser",
+           "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
+           "createPanner", "createConvolver", "createChannelSplitter", "createChannelMerger",
+-          "createDynamicsCompressor", "createOscillator"
++          "createDynamicsCompressor", "createOscillator", "createStereoPanner"
+       ];
+       let nodes = NODE_CREATION_METHODS.map(method => ctx[method]());
+ 
+     </script>
+   </body>
+ 
+ </html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index d9a0d2f..1b10e28 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -492,10 +492,13 @@ const NODE_DEFAULT_VALUES = {
+     "reduction": 0,
+     "attack": 0.003000000026077032,
+     "release": 0.25
+   },
+   "OscillatorNode": {
+     "type": "sine",
+     "frequency": 440,
+     "detune": 0
++  },
++  "StereoPannerNode": {
++    "pan": 0
+   }
+ };
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 2988999..6151a08 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -25,17 +25,17 @@ const AUDIO_GLOBALS = [
+   "AudioContext", "AudioNode", "AudioParam"
+ ];
+ 
+ const NODE_CREATION_METHODS = [
+   "createBufferSource", "createMediaElementSource", "createMediaStreamSource",
+   "createMediaStreamDestination", "createScriptProcessor", "createAnalyser",
+   "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
+   "createPanner", "createConvolver", "createChannelSplitter", "createChannelMerger",
+-  "createDynamicsCompressor", "createOscillator"
++  "createDynamicsCompressor", "createOscillator", "createStereoPanner"
+ ];
+ 
+ const AUTOMATION_METHODS = [
+   "setValueAtTime", "linearRampToValueAtTime", "exponentialRampToValueAtTime",
+   "setTargetAtTime", "setValueCurveAtTime"
+ ];
+ 
+ const NODE_ROUTING_METHODS = [
+@@ -106,16 +106,19 @@ const NODE_PROPERTIES = {
+   },
+   "AudioDestinationNode": {},
+   "ChannelSplitterNode": {},
+   "ChannelMergerNode": {},
+   "MediaElementAudioSourceNode": {},
+   "MediaStreamAudioSourceNode": {},
+   "MediaStreamAudioDestinationNode": {
+     "stream": { "MediaStream": true }
++  },
++  "StereoPannerNode": {
++    "pan": {}
+   }
+ };
+ 
+ /**
+  * An Audio Node actor allowing communication to a specific audio node in the
+  * Audio Context graph.
+  */
+ types.addActorType("audionode");
+-- 
+2.2.1
+
