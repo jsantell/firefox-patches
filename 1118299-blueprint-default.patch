@@ -1,104 +1,83 @@
-From 347ee095c617af59d46b144b535e58f3d6bd4518 Mon Sep 17 00:00:00 2001
+From b4b49852197bebdcefd424acee7257be42f7b432 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
 Date: Wed, 7 Jan 2015 13:36:51 -0800
-Subject: Bug 1118299 - Allow waterfall and markers-overview graphs to
- work without explicitly defining a blueprint. r=vp
+Subject: Bug 1118299 - Performance tool now provides default blueprint
+ for its waterfall and markers-overview graphs to work. r=vp
 
-diff --git a/browser/devtools/timeline/widgets/markers-overview.js b/browser/devtools/timeline/widgets/markers-overview.js
-index 6d7e857..4394b3e 100644
---- a/browser/devtools/timeline/widgets/markers-overview.js
-+++ b/browser/devtools/timeline/widgets/markers-overview.js
-@@ -14,16 +14,18 @@ const {Cc, Ci, Cu, Cr} = require("chrome");
- Cu.import("resource:///modules/devtools/Graphs.jsm");
- Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
- 
- const { colorUtils: { setAlpha }} = require("devtools/css-color");
- const { getColor } = require("devtools/shared/theme");
- 
- loader.lazyRequireGetter(this, "L10N",
-   "devtools/timeline/global", true);
-+loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index ef0f0cd..d3d63c9 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -28,16 +28,18 @@ devtools.lazyRequireGetter(this, "MemoryOverview",
+ devtools.lazyRequireGetter(this, "Waterfall",
+   "devtools/timeline/waterfall", true);
+ devtools.lazyRequireGetter(this, "MarkerDetails",
+   "devtools/timeline/marker-details", true);
+ devtools.lazyRequireGetter(this, "CallView",
+   "devtools/profiler/tree-view", true);
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/profiler/tree-model", true);
++devtools.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
 +  "devtools/timeline/global", true);
  
- const OVERVIEW_HEADER_HEIGHT = 14; // px
- const OVERVIEW_ROW_HEIGHT = 11; // row height
+ devtools.lazyImporter(this, "CanvasGraphUtils",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
  
- const OVERVIEW_BODY_HEIGHT = 55; // 11px * 5 groups
- const OVERVIEW_SELECTION_LINE_COLOR = "#666";
- const OVERVIEW_CLIPHEAD_LINE_COLOR = "#555";
+ // Events emitted by various objects in the panel.
+ const EVENTS = {
+diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
+index 77e0e18..377738d 100644
+--- a/browser/devtools/performance/views/details-waterfall.js
++++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -11,17 +11,17 @@ let WaterfallView = {
+    * Sets up the view with event binding.
+    */
+   initialize: Task.async(function *() {
+     this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
+     this._onMarkerSelected = this._onMarkerSelected.bind(this);
+     this._onResize = this._onResize.bind(this);
  
-@@ -38,26 +40,26 @@ const OVERVIEW_MARKERS_COLOR_STOPS = [0, 0.1, 0.75, 1];
- const OVERVIEW_MARKER_DURATION_MIN = 4; // ms
- const OVERVIEW_GROUP_VERTICAL_PADDING = 5; // px
+-    this.graph = new Waterfall($("#waterfall-graph"), $("#details-pane"));
++    this.graph = new Waterfall($("#waterfall-graph"), $("#details-pane"), TIMELINE_BLUEPRINT);
+     this.markerDetails = new MarkerDetails($("#waterfall-details"), $("#waterfall-view > splitter"));
  
- /**
-  * An overview for the markers data.
-  *
-  * @param nsIDOMNode parent
-  *        The parent node holding the overview.
-- * @param Object blueprint
-+ * @param Object blueprint [optional]
-  *        List of names and colors defining markers.
-  */
- function MarkersOverview(parent, blueprint, ...args) {
-   AbstractCanvasGraph.apply(this, [parent, "markers-overview", ...args]);
+     this.graph.on("selected", this._onMarkerSelected);
+     this.graph.on("unselected", this._onMarkerSelected);
+     this.markerDetails.on("resize", this._onResize);
  
-   this.setTheme();
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 4013dac..451a96a 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -75,17 +75,17 @@ let OverviewView = {
+     this.framerateGraph.fixedHeight = FRAMERATE_GRAPH_HEIGHT;
+     yield this.framerateGraph.ready();
+   }),
  
-   // Set the list of names, properties and colors used to paint this overview.
--  this.setBlueprint(blueprint);
-+  this.setBlueprint(blueprint || TIMELINE_BLUEPRINT);
+   /**
+    * Sets up the markers overivew graph.
+    */
+   _showMarkersGraph: Task.async(function *() {
+-    this.markersOverview = new MarkersOverview($("#markers-overview"));
++    this.markersOverview = new MarkersOverview($("#markers-overview"), TIMELINE_BLUEPRINT);
+     this.markersOverview.headerHeight = MARKERS_GRAPH_HEADER_HEIGHT;
+     this.markersOverview.bodyHeight = MARKERS_GRAPH_BODY_HEIGHT;
+     this.markersOverview.groupPadding = MARKERS_GROUP_VERTICAL_PADDING;
+     yield this.markersOverview.ready();
  
-   this.once("ready", () => {
-     // Populate this overview with some dummy initial data.
-     this.setData({ interval: { startTime: 0, endTime: 1000 }, markers: [] });
-   });
- }
- 
- MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     CanvasGraphUtils.linkAnimation(this.framerateGraph, this.markersOverview);
+     CanvasGraphUtils.linkSelection(this.framerateGraph, this.markersOverview);
+   }),
 diff --git a/browser/devtools/timeline/widgets/waterfall.js b/browser/devtools/timeline/widgets/waterfall.js
-index afdf080..ceb201d 100644
+index afdf080..b1812e3 100644
 --- a/browser/devtools/timeline/widgets/waterfall.js
 +++ b/browser/devtools/timeline/widgets/waterfall.js
-@@ -14,16 +14,18 @@ loader.lazyRequireGetter(this, "L10N",
-   "devtools/timeline/global", true);
- 
- loader.lazyImporter(this, "setNamedTimeout",
-   "resource:///modules/devtools/ViewHelpers.jsm");
- loader.lazyImporter(this, "clearNamedTimeout",
-   "resource:///modules/devtools/ViewHelpers.jsm");
- loader.lazyRequireGetter(this, "EventEmitter",
-   "devtools/toolkit/event-emitter");
-+loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
-+  "devtools/timeline/global", true);
- 
- const HTML_NS = "http://www.w3.org/1999/xhtml";
- 
- const WATERFALL_SIDEBAR_WIDTH = 150; // px
- 
- const WATERFALL_IMMEDIATE_DRAW_MARKERS_COUNT = 30;
- const WATERFALL_FLUSH_OUTSTANDING_MARKERS_DELAY = 75; // ms
- 
-@@ -43,17 +45,17 @@ const WATERFALL_ROWCOUNT_ONPAGEUPDOWN = 10;
- 
- /**
-  * A detailed waterfall view for the timeline data.
-  *
-  * @param nsIDOMNode parent
-  *        The parent node holding the waterfall.
-  * @param nsIDOMNode container
-  *        The container node that key events should be bound to.
-- * @param Object blueprint
-+ * @param Object blueprint [optional]
-  *        List of names and colors defining markers.
-  */
- function Waterfall(parent, container, blueprint) {
-   EventEmitter.decorate(this);
- 
-   this._parent = parent;
-   this._document = parent.ownerDocument;
-   this._container = container;
-@@ -70,17 +72,17 @@ function Waterfall(parent, container, blueprint) {
+@@ -70,17 +70,17 @@ function Waterfall(parent, container, blueprint) {
    this._parent.appendChild(this._listContents);
  
    this.setupKeys();
@@ -108,7 +87,7 @@ index afdf080..ceb201d 100644
    // Lazy require is a bit slow, and these are hot objects.
    this._l10n = L10N;
 -  this._blueprint = blueprint
-+  this._blueprint = blueprint || TIMELINE_BLUEPRINT;
++  this._blueprint = blueprint;
    this._setNamedTimeout = setNamedTimeout;
    this._clearNamedTimeout = clearNamedTimeout;
  
