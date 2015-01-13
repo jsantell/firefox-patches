@@ -1,0 +1,1697 @@
+From f6a68fce993359c62797cc4bb7d85de9288d7ea5 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 12 Jan 2015 13:40:47 -0800
+Subject: Bug 1111004 - New performance tool now manages multiple
+ recordings, and can switch between recordings while profiling. r=vp
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 43f64f8..33e6d27 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -93,16 +93,17 @@ browser.jar:
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/performance-controller.js     (performance/performance-controller.js)
+     content/browser/devtools/performance/performance-view.js           (performance/performance-view.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/details-call-tree.js    (performance/views/details-call-tree.js)
+     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
+     content/browser/devtools/performance/views/details-flamegraph.js   (performance/views/details-flamegraph.js)
++    content/browser/devtools/performance/views/recordings.js           (performance/views/recordings.js)
+ #endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+new file mode 100644
+index 0000000..4277cc7
+--- /dev/null
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -0,0 +1,248 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { PerformanceIO } = require("devtools/performance/io");
++
++const RECORDING_IN_PROGRESS = exports.RECORDING_IN_PROGRESS = -1;
++const RECORDING_UNAVAILABLE = exports.RECORDING_UNAVAILABLE = null;
++/**
++ * Model for a wholistic profile, containing start/stop times, profiling data, frames data,
++ * timeline (marker, tick, memory) data, and methods to start/stop recording.
++ */
++
++const RecordingModel = function (options={}) {
++  this._front = options.front;
++  this._performance = options.performance;
++  this._label = options.label || "";
++};
++
++RecordingModel.prototype = {
++  _localStartTime: RECORDING_UNAVAILABLE,
++  _startTime: RECORDING_UNAVAILABLE,
++  _endTime: RECORDING_UNAVAILABLE,
++  _markers: [],
++  _frames: [],
++  _ticks: [],
++  _memory: [],
++  _profilerData: {},
++  _label: "",
++  _imported: false,
++  _isRecording: false,
++
++  /**
++   * Loads a recording from a file.
++   *
++   * @param nsILocalFile file
++   *        The file to import the data form.
++   */
++  importRecording: Task.async(function *(file) {
++    let recordingData = yield PerformanceIO.loadRecordingFromFile(file);
++
++    this._imported = true;
++    this._label = recordingData.profilerData.profilerLabel || "";
++    this._startTime = recordingData.interval.startTime;
++    this._endTime = recordingData.interval.endTime;
++    this._markers = recordingData.markers;
++    this._frames = recordingData.frames;
++    this._memory = recordingData.memory;
++    this._ticks = recordingData.ticks;
++    this._profilerData = recordingData.profilerData;
++
++    return recordingData;
++  }),
++
++  /**
++   * Saves the current recording to a file.
++   *
++   * @param nsILocalFile file
++   *        The file to stream the data into.
++   */
++  exportRecording: Task.async(function *(file) {
++    let recordingData = this.getAllData();
++    yield PerformanceIO.saveRecordingToFile(recordingData, file);
++  }),
++
++  /**
++   * Starts recording with the PerformanceFront, storing the start times
++   * on the model.
++   */
++  startRecording: Task.async(function *() {
++    // Times must come from the actor in order to be self-consistent.
++    // However, we also want to update the view with the elapsed time
++    // even when the actor is not generating data. To do this we get
++    // the local time and use it to compute a reasonable elapsed time.
++    this._localStartTime = this._performance.now();
++
++    let { startTime } = yield this._front.startRecording({
++      withTicks: true,
++      withMemory: true
++    });
++    this._isRecording = true;
++
++    this._startTime = startTime;
++    this._endTime = RECORDING_IN_PROGRESS;
++    this._markers = [];
++    this._frames = [];
++    this._memory = [];
++    this._ticks = [];
++  }),
++
++  /**
++   * Stops recording with the PerformanceFront, storing the end times
++   * on the model.
++   */
++  stopRecording: Task.async(function *() {
++    let results = yield this._front.stopRecording();
++    this._isRecording = false;
++
++    // If `endTime` is not yielded from timeline actor (< Fx36), fake it.
++    if (!results.endTime) {
++      results.endTime = this._startTime + this.getLocalElapsedTime();
++    }
++
++    this._endTime = results.endTime;
++    this._profilerData = results.profilerData;
++    this._markers = this._markers.sort((a,b) => (a.start > b.start));
++
++    return results;
++  }),
++
++  /**
++   * Returns the profile's label, from `console.profile(LABEL)`.
++   */
++  getLabel: function () {
++    return this._label;
++  },
++
++  /**
++   * Gets the amount of time elapsed locally after starting a recording.
++   */
++  getLocalElapsedTime: function () {
++    return this._performance.now() - this._localStartTime;
++  },
++
++  /**
++   * Returns duration of this recording, in milliseconds.
++   */
++  getDuration: function () {
++    let { startTime, endTime } = this.getInterval();
++    return endTime - startTime;
++  },
++
++  /**
++   * Gets the time interval for the current recording.
++   * @return object
++   */
++  getInterval: function() {
++    let startTime = this._startTime;
++    let endTime = this._endTime;
++
++    // Compute an approximate ending time for the current recording. This is
++    // needed to ensure that the view updates even when new data is
++    // not being generated.
++    if (endTime == RECORDING_IN_PROGRESS) {
++      endTime = startTime + this.getLocalElapsedTime();
++    }
++
++    return { startTime, endTime };
++  },
++
++  /**
++   * Gets the accumulated markers in the current recording.
++   * @return array
++   */
++  getMarkers: function() {
++    return this._markers;
++  },
++
++  /**
++   * Gets the accumulated stack frames in the current recording.
++   * @return array
++   */
++  getFrames: function() {
++    return this._frames;
++  },
++
++  /**
++   * Gets the accumulated memory measurements in this recording.
++   * @return array
++   */
++  getMemory: function() {
++    return this._memory;
++  },
++
++  /**
++   * Gets the accumulated refresh driver ticks in this recording.
++   * @return array
++   */
++  getTicks: function() {
++    return this._ticks;
++  },
++
++  /**
++   * Gets the profiler data in this recording.
++   * @return array
++   */
++  getProfilerData: function() {
++    return this._profilerData;
++  },
++
++  /**
++   * Gets all the data in this recording.
++   */
++  getAllData: function() {
++    let interval = this.getInterval();
++    let markers = this.getMarkers();
++    let frames = this.getFrames();
++    let memory = this.getMemory();
++    let ticks = this.getTicks();
++    let profilerData = this.getProfilerData();
++    return { interval, markers, frames, memory, ticks, profilerData };
++  },
++
++  /**
++   * Returns a boolean indicating whether or not this recording model
++   * is recording.
++   */
++  isRecording: function () {
++    return this._isRecording;
++  },
++
++  /**
++   * Fired whenever the PerformanceFront emits markers, memory or ticks.
++   */
++  addTimelineData: function (eventName, ...data) {
++    // If this model isn't currently recording,
++    // ignore the timeline data.
++    if (!this.isRecording()) {
++      return;
++    }
++
++    switch (eventName) {
++      // Accumulate markers into an array.
++      case "markers":
++        let [markers] = data;
++        Array.prototype.push.apply(this._markers, markers);
++        break;
++      // Accumulate stack frames into an array.
++      case "frames":
++        let [, frames] = data;
++        Array.prototype.push.apply(this._frames, frames);
++        break;
++      // Accumulate memory measurements into an array.
++      case "memory":
++        let [delta, measurement] = data;
++        this._memory.push({ delta, value: measurement.total / 1024 / 1024 });
++        break;
++      // Save the accumulated refresh driver ticks.
++      case "ticks":
++        let [, timestamps] = data;
++        this._ticks = timestamps;
++        break;
++    }
++  }
++};
++
++exports.RecordingModel = RecordingModel;
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index e133978..666a07a 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -1,12 +1,13 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
+     'modules/front.js',
+     'modules/io.js',
++    'modules/recording-model.js',
+     'panel.js'
+ ]
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index f260af3..1bfe2866 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -36,30 +36,40 @@ devtools.lazyRequireGetter(this, "CallView",
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/profiler/tree-model", true);
+ 
+ 
+ devtools.lazyImporter(this, "CanvasGraphUtils",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
++devtools.lazyImporter(this, "SideMenuWidget",
++  "resource:///modules/devtools/SideMenuWidget.jsm");
++
++const { RecordingModel, RECORDING_IN_PROGRESS, RECORDING_UNAVAILABLE } =
++  devtools.require("devtools/performance/recording-model");
+ 
+ devtools.lazyImporter(this, "FlameGraphUtils",
+   "resource:///modules/devtools/FlameGraph.jsm");
+ devtools.lazyImporter(this, "FlameGraph",
+   "resource:///modules/devtools/FlameGraph.jsm");
+ 
+ // Events emitted by various objects in the panel.
+ const EVENTS = {
++  // Emitted by the PerformanceController or RecordingView
++  // when a recording model is selected
++  RECORDING_SELECTED: "Performance:RecordingSelected",
++
+   // Emitted by the PerformanceView on record button click
+   UI_START_RECORDING: "Performance:UI:StartRecording",
+   UI_STOP_RECORDING: "Performance:UI:StopRecording",
+ 
+-  // Emitted by the PerformanceView on import or export button click
++  // Emitted by the PerformanceView on import button click
+   UI_IMPORT_RECORDING: "Performance:UI:ImportRecording",
++  // Emitted by the RecordingsView on export button click
+   UI_EXPORT_RECORDING: "Performance:UI:ExportRecording",
+ 
+   // When a recording is started or stopped via the PerformanceController
+   RECORDING_STARTED: "Performance:RecordingStarted",
+   RECORDING_STOPPED: "Performance:RecordingStopped",
+ 
+   // When a recording is imported or exported via the PerformanceController
+   RECORDING_IMPORTED: "Performance:RecordingImported",
+@@ -91,21 +101,16 @@ const EVENTS = {
+ 
+   // Emitted by the WaterfallView when it has been rendered
+   WATERFALL_RENDERED: "Performance:UI:WaterfallRendered",
+ 
+   // Emitted by the FlameGraphView when it has been rendered
+   FLAMEGRAPH_RENDERED: "Performance:UI:FlameGraphRendered"
+ };
+ 
+-// Constant defining the end time for a recording that hasn't finished
+-// or is not yet available.
+-const RECORDING_IN_PROGRESS = -1;
+-const RECORDING_UNAVAILABLE = null;
+-
+ /**
+  * The current target and the profiler connection, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+ 
+ /**
+  * Initializes the profiler controller and views.
+  */
+@@ -145,253 +150,228 @@ let PrefObserver = {
+   }
+ };
+ 
+ /**
+  * Functions handling target-related lifetime events and
+  * UI interaction.
+  */
+ let PerformanceController = {
+-  /**
+-   * Permanent storage for the markers and the memory measurements streamed by
+-   * the backend, along with the start and end timestamps.
+-   */
+-  _localStartTime: RECORDING_UNAVAILABLE,
+-  _startTime: RECORDING_UNAVAILABLE,
+-  _endTime: RECORDING_UNAVAILABLE,
+-  _markers: [],
+-  _frames: [],
+-  _memory: [],
+-  _ticks: [],
+-  _profilerData: {},
++  _recordings: [],
++  _currentRecording: null,
+ 
+   /**
+    * Listen for events emitted by the current tab target and
+    * main UI events.
+    */
+   initialize: function() {
+     this.startRecording = this.startRecording.bind(this);
+     this.stopRecording = this.stopRecording.bind(this);
+     this.importRecording = this.importRecording.bind(this);
+     this.exportRecording = this.exportRecording.bind(this);
+     this._onTimelineData = this._onTimelineData.bind(this);
++    this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
+ 
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+-    PerformanceView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     PerformanceView.on(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
++    RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
++    RecordingsView.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+     gFront.on("ticks", this._onTimelineData); // framerate
+     gFront.on("markers", this._onTimelineData); // timeline markers
+     gFront.on("frames", this._onTimelineData); // stack frames
+     gFront.on("memory", this._onTimelineData); // timeline memory
+   },
+ 
+   /**
+    * Remove events handled by the PerformanceController
+    */
+   destroy: function() {
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+-    PerformanceView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     PerformanceView.off(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
++    RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
++    RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+     gFront.off("ticks", this._onTimelineData);
+     gFront.off("markers", this._onTimelineData);
+     gFront.off("frames", this._onTimelineData);
+     gFront.off("memory", this._onTimelineData);
+   },
+ 
+   /**
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+-    // Times must come from the actor in order to be self-consistent.
+-    // However, we also want to update the view with the elapsed time
+-    // even when the actor is not generating data. To do this we get
+-    // the local time and use it to compute a reasonable elapsed time.
+-    this._localStartTime = performance.now();
+-
+-    let { startTime } = yield gFront.startRecording({
+-      withTicks: true,
+-      withMemory: true
+-    });
+-
+-    this._startTime = startTime;
+-    this._endTime = RECORDING_IN_PROGRESS;
+-    this._markers = [];
+-    this._frames = [];
+-    this._memory = [];
+-    this._ticks = [];
++    let model = this.createNewRecording();
++    this.setCurrentRecording(model);
++    yield model.startRecording();
+ 
+-    this.emit(EVENTS.RECORDING_STARTED);
++    this.emit(EVENTS.RECORDING_STARTED, model);
+   }),
+ 
+   /**
+    * Stops recording with the PerformanceFront. Emits `EVENTS.RECORDING_STOPPED`
+    * when the front has stopped recording.
+    */
+   stopRecording: Task.async(function *() {
+-    let results = yield gFront.stopRecording();
+-
+-    // If `endTime` is not yielded from timeline actor (< Fx36), fake it.
+-    if (!results.endTime) {
+-      results.endTime = this._startTime + this.getLocalElapsedTime();
+-    }
+-
+-    this._endTime = results.endTime;
+-    this._profilerData = results.profilerData;
+-    this._markers = this._markers.sort((a,b) => (a.start > b.start));
++    let recording = this._getLatest();
++    yield recording.stopRecording();
+ 
+-    this.emit(EVENTS.RECORDING_STOPPED);
++    this.emit(EVENTS.RECORDING_STOPPED, recording);
+   }),
+ 
+   /**
+    * Saves the current recording to a file.
+    *
++   * @param RecordingModel recording
++   *        The model that holds the recording data.
+    * @param nsILocalFile file
+    *        The file to stream the data into.
+    */
+-  exportRecording: Task.async(function*(_, file) {
+-    let recordingData = this.getAllData();
++  exportRecording: Task.async(function*(_, recording, file) {
++    let recordingData = recording.getAllData();
+     yield PerformanceIO.saveRecordingToFile(recordingData, file);
+ 
+     this.emit(EVENTS.RECORDING_EXPORTED, recordingData);
+   }),
+ 
+   /**
+-   * Loads a recording from a file, replacing the current one.
+-   * XXX: Handle multiple recordings, bug 1111004.
++   * Loads a recording from a file, adding it to the recordings list.
+    *
+    * @param nsILocalFile file
+    *        The file to import the data from.
+    */
+   importRecording: Task.async(function*(_, file) {
+-    let recordingData = yield PerformanceIO.loadRecordingFromFile(file);
++    let model = this.createNewRecording();
++    yield model.importRecording(file);
+ 
+-    this._startTime = recordingData.interval.startTime;
+-    this._endTime = recordingData.interval.endTime;
+-    this._markers = recordingData.markers;
+-    this._frames = recordingData.frames;
+-    this._memory = recordingData.memory;
+-    this._ticks = recordingData.ticks;
+-    this._profilerData = recordingData.profilerData;
++    this.emit(EVENTS.RECORDING_IMPORTED, model.getAllData(), model);
++  }),
+ 
+-    this.emit(EVENTS.RECORDING_IMPORTED, recordingData);
++  /**
++   * Creates a new RecordingModel, fires events and stores it
++   * internally in the controller.
++   */
++  createNewRecording: function () {
++    let model = new RecordingModel({
++      front: gFront,
++      performance: performance
++    });
++    this._recordings.push(model);
++    this.emit(EVENTS.RECORDING_CREATED, model);
++    return model;
++  },
+ 
+-    // Flush the current recording.
+-    this.emit(EVENTS.RECORDING_STARTED);
+-    this.emit(EVENTS.RECORDING_STOPPED);
+-  }),
++  /**
++   * Sets the active RecordingModel to `recording`.
++   */
++  setCurrentRecording: function (recording) {
++    if (this._currentRecording !== recording) {
++      this._currentRecording = recording;
++      this.emit(EVENTS.RECORDING_SELECTED, recording);
++    }
++  },
++
++  /**
++   * Return the current active RecordingModel.
++   */
++  getCurrentRecording: function () {
++    return this._currentRecording;
++  },
+ 
+   /**
+    * Gets the amount of time elapsed locally after starting a recording.
+    */
+-  getLocalElapsedTime: function() {
+-    return performance.now() - this._localStartTime;
++  getLocalElapsedTime: function () {
++    return this.getCurrentRecording().getLocalElapsedTime;
+   },
+ 
+   /**
+    * Gets the time interval for the current recording.
+    * @return object
+    */
+   getInterval: function() {
+-    let startTime = this._startTime;
+-    let endTime = this._endTime;
+-
+-    // Compute an approximate ending time for the current recording. This is
+-    // needed to ensure that the view updates even when new data is
+-    // not being generated.
+-    if (endTime == RECORDING_IN_PROGRESS) {
+-      endTime = startTime + this.getLocalElapsedTime();
+-    }
+-
+-    return { startTime, endTime };
++    return this.getCurrentRecording().getInterval();
+   },
+ 
+   /**
+    * Gets the accumulated markers in the current recording.
+    * @return array
+    */
+   getMarkers: function() {
+-    return this._markers;
++    return this.getCurrentRecording().getMarkers();
+   },
+ 
+   /**
+    * Gets the accumulated stack frames in the current recording.
+    * @return array
+    */
+   getFrames: function() {
+-    return this._frames;
++    return this.getCurrentRecording().getFrames();
+   },
+ 
+   /**
+    * Gets the accumulated memory measurements in this recording.
+    * @return array
+    */
+   getMemory: function() {
+-    return this._memory;
++    return this.getCurrentRecording().getMemory();
+   },
+ 
+   /**
+    * Gets the accumulated refresh driver ticks in this recording.
+    * @return array
+    */
+   getTicks: function() {
+-    return this._ticks;
++    return this.getCurrentRecording().getTicks();
+   },
+ 
+   /**
+    * Gets the profiler data in this recording.
+    * @return array
+    */
+   getProfilerData: function() {
+-    return this._profilerData;
++    return this.getCurrentRecording().getProfilerData();
+   },
+ 
+   /**
+    * Gets all the data in this recording.
+    */
+   getAllData: function() {
+-    let interval = this.getInterval();
+-    let markers = this.getMarkers();
+-    let frames = this.getFrames();
+-    let memory = this.getMemory();
+-    let ticks = this.getTicks();
+-    let profilerData = this.getProfilerData();
+-    return { interval, markers, frames, memory, ticks, profilerData };
++    return this.getCurrentRecording().getAllData();
+   },
+ 
+   /**
+-   * Fired whenever the PerformanceFront emits markers, memory or ticks.
++  /**
++   * Get most recently added profile that was triggered manually (via UI)
+    */
+-  _onTimelineData: function (eventName, ...data) {
+-    // Accumulate markers into an array.
+-    if (eventName == "markers") {
+-      let [markers] = data;
+-      Array.prototype.push.apply(this._markers, markers);
+-    }
+-    // Accumulate stack frames into an array.
+-    else if (eventName == "frames") {
+-      let [delta, frames] = data;
+-      Array.prototype.push.apply(this._frames, frames);
+-    }
+-    // Accumulate memory measurements into an array.
+-    else if (eventName == "memory") {
+-      let [delta, measurement] = data;
+-      this._memory.push({ delta, value: measurement.total / 1024 / 1024 });
+-    }
+-    // Save the accumulated refresh driver ticks.
+-    else if (eventName == "ticks") {
+-      let [delta, timestamps] = data;
+-      this._ticks = timestamps;
++  _getLatest: function () {
++    for (let i = this._recordings.length - 1; i >= 0; i--) {
++      return this._recordings[i];
+     }
++    return null;
++  },
+ 
+-    this.emit(EVENTS.TIMELINE_DATA, eventName, ...data);
++  /**
++   * Fired whenever the PerformanceFront emits markers, memory or ticks.
++   */
++  _onTimelineData: function (...data) {
++    this._recordings.forEach(profile => profile.addTimelineData.apply(profile, data));
++    this.emit(EVENTS.TIMELINE_DATA, ...data);
++  },
++
++  /**
++   * Fired from RecordingsView, we listen on the PerformanceController
++   * so we can set it here and re-emit on the controller, where all views can listen.
++   */
++  _onRecordingSelectFromView: function (_, recording) {
++    this.setCurrentRecording(recording);
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
+index 7a1d5cc..900c31e 100644
+--- a/browser/devtools/performance/performance-view.js
++++ b/browser/devtools/performance/performance-view.js
+@@ -8,50 +8,48 @@
+  */
+ let PerformanceView = {
+   /**
+    * Sets up the view with event binding and main subviews.
+    */
+   initialize: function () {
+     this._recordButton = $("#record-button");
+     this._importButton = $("#import-button");
+-    this._exportButton = $("#export-button");
+ 
+     this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
+     this._onImportButtonClick = this._onImportButtonClick.bind(this);
+-    this._onExportButtonClick = this._onExportButtonClick.bind(this);
+     this._lockRecordButton = this._lockRecordButton.bind(this);
+     this._unlockRecordButton = this._unlockRecordButton.bind(this);
+ 
+     this._recordButton.addEventListener("click", this._onRecordButtonClick);
+     this._importButton.addEventListener("click", this._onImportButtonClick);
+-    this._exportButton.addEventListener("click", this._onExportButtonClick);
+ 
+     // Bind to controller events to unlock the record button
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
+ 
+     return promise.all([
++      RecordingsView.initialize(),
+       OverviewView.initialize(),
+       DetailsView.initialize()
+     ]);
+   },
+ 
+   /**
+    * Unbinds events and destroys subviews.
+    */
+   destroy: function () {
+     this._recordButton.removeEventListener("click", this._onRecordButtonClick);
+     this._importButton.removeEventListener("click", this._onImportButtonClick);
+-    this._exportButton.removeEventListener("click", this._onExportButtonClick);
+ 
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
+ 
+     return promise.all([
++      RecordingsView.destroy(),
+       OverviewView.destroy(),
+       DetailsView.destroy()
+     ]);
+   },
+ 
+   /**
+    * Adds the `locked` attribute on the record button. This prevents it
+    * from being clicked while recording is started or stopped.
+@@ -89,32 +87,15 @@ let PerformanceView = {
+     let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+     fp.init(window, L10N.getStr("recordingsList.saveDialogTitle"), Ci.nsIFilePicker.modeOpen);
+     fp.appendFilter(L10N.getStr("recordingsList.saveDialogJSONFilter"), "*.json");
+     fp.appendFilter(L10N.getStr("recordingsList.saveDialogAllFilter"), "*.*");
+ 
+     if (fp.show() == Ci.nsIFilePicker.returnOK) {
+       this.emit(EVENTS.UI_IMPORT_RECORDING, fp.file);
+     }
+-  },
+-
+-  /**
+-   * Handler for clicking the export button.
+-   */
+-  _onExportButtonClick: function(e) {
+-    let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+-    fp.init(window, L10N.getStr("recordingsList.saveDialogTitle"), Ci.nsIFilePicker.modeSave);
+-    fp.appendFilter(L10N.getStr("recordingsList.saveDialogJSONFilter"), "*.json");
+-    fp.appendFilter(L10N.getStr("recordingsList.saveDialogAllFilter"), "*.*");
+-    fp.defaultString = "profile.json";
+-
+-    fp.open({ done: result => {
+-      if (result != Ci.nsIFilePicker.returnCancel) {
+-        this.emit(EVENTS.UI_EXPORT_RECORDING, fp.file);
+-      }
+-    }});
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the view.
+  */
+ EventEmitter.decorate(PerformanceView);
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 0b1f505..39fc2fe 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -11,98 +11,101 @@
+   <!ENTITY % profilerDTD SYSTEM "chrome://browser/locale/devtools/profiler.dtd">
+   %profilerDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+   <script type="application/javascript" src="performance/performance-controller.js"/>
+   <script type="application/javascript" src="performance/performance-view.js"/>
++  <script type="application/javascript" src="performance/recording-model.js"/>
+   <script type="application/javascript" src="performance/views/overview.js"/>
+   <script type="application/javascript" src="performance/views/details.js"/>
+   <script type="application/javascript" src="performance/views/details-call-tree.js"/>
+   <script type="application/javascript" src="performance/views/details-waterfall.js"/>
+   <script type="application/javascript" src="performance/views/details-flamegraph.js"/>
++  <script type="application/javascript" src="performance/views/recordings.js"/>
+ 
+-  <vbox class="theme-body" flex="1">
+-    <toolbar id="performance-toolbar" class="devtools-toolbar">
+-      <hbox id="performance-toolbar-controls-recordings" class="devtools-toolbarbutton-group">
+-        <toolbarbutton id="record-button"
+-                       class="devtools-toolbarbutton"
+-                       tooltiptext="&profilerUI.recordButton.tooltip;"/>
+-      </hbox>
+-      <hbox id="performance-toolbar-controls-detail-views" class="devtools-toolbarbutton-group">
+-        <toolbarbutton id="select-waterfall-view"
+-                       class="devtools-toolbarbutton"
+-                       data-view="waterfall" />
+-        <toolbarbutton id="select-calltree-view"
+-                       class="devtools-toolbarbutton"
+-                       data-view="calltree" />
+-        <toolbarbutton id="select-flamegraph-view"
+-                       class="devtools-toolbarbutton"
+-                       data-view="flamegraph" />
+-      </hbox>
+-      <spacer flex="1"></spacer>
+-      <hbox id="performance-toolbar-controls-storage" class="devtools-toolbarbutton-group">
+-        <toolbarbutton id="import-button"
+-                       class="devtools-toolbarbutton"
+-                       label="&profilerUI.importButton;"/>
+-        <toolbarbutton id="export-button"
+-                       class="devtools-toolbarbutton"
+-                       label="&profilerUI.exportButton;"/>
+-        <toolbarbutton id="clear-button"
+-                       class="devtools-toolbarbutton"
+-                       label="&profilerUI.clearButton;"/>
+-      </hbox>
+-    </toolbar>
+-
+-    <vbox id="overview-pane">
+-      <hbox id="markers-overview"/>
+-      <hbox id="memory-overview"/>
+-      <hbox id="time-framerate"/>
++  <hbox class="theme-body" flex="1">
++    <vbox id="recordings-pane">
++      <toolbar id="recordings-toolbar"
++               class="devtools-toolbar">
++        <hbox id="recordings-controls"
++              class="devtools-toolbarbutton-group">
++          <toolbarbutton id="record-button"
++                         class="devtools-toolbarbutton"
++                         tooltiptext="&profilerUI.recordButton.tooltip;"/>
++          <toolbarbutton id="import-button"
++                         class="devtools-toolbarbutton"
++                         label="&profilerUI.importButton;"/>
++          <toolbarbutton id="clear-button"
++                         class="devtools-toolbarbutton"
++                         label="&profilerUI.clearButton;"/>
++        </hbox>
++      </toolbar>
++      <vbox id="recordings-list" flex="1"/>
+     </vbox>
+-
+-    <deck id="details-pane" flex="1">
+-
+-      <hbox id="waterfall-view" flex="1">
+-        <vbox id="waterfall-breakdown" flex="1" />
+-        <splitter class="devtools-side-splitter"/>
+-        <vbox id="waterfall-details"
+-              class="theme-sidebar"
+-              width="150"
+-              height="150"/>
+-      </hbox>
+-
+-      <vbox id="calltree-view" flex="1">
+-        <hbox class="call-tree-headers-container">
+-          <label class="plain call-tree-header"
+-                 type="duration"
+-                 crop="end"
+-                 value="&profilerUI.table.totalDuration;"/>
+-          <label class="plain call-tree-header"
+-                 type="percentage"
+-                 crop="end"
+-                 value="&profilerUI.table.totalPercentage;"/>
+-          <label class="plain call-tree-header"
+-                 type="self-duration"
+-                 crop="end"
+-                 value="&profilerUI.table.selfDuration;"/>
+-          <label class="plain call-tree-header"
+-                 type="self-percentage"
+-                 crop="end"
+-                 value="&profilerUI.table.selfPercentage;"/>
+-          <label class="plain call-tree-header"
+-                 type="samples"
+-                 crop="end"
+-                 value="&profilerUI.table.samples;"/>
+-          <label class="plain call-tree-header"
+-                 type="function"
+-                 crop="end"
+-                 value="&profilerUI.table.function;"/>
++    <vbox flex="1">
++      <toolbar id="performance-toolbar" class="devtools-toolbar">
++        <hbox id="performance-toolbar-controls-detail-views" class="devtools-toolbarbutton-group">
++          <toolbarbutton id="select-waterfall-view"
++                         class="devtools-toolbarbutton"
++                         data-view="waterfall" />
++          <toolbarbutton id="select-calltree-view"
++                         class="devtools-toolbarbutton"
++                         data-view="calltree" />
++          <toolbarbutton id="select-flamegraph-view"
++                         class="devtools-toolbarbutton"
++                         data-view="flamegraph" />
+         </hbox>
+-        <vbox class="call-tree-cells-container" flex="1"/>
++        <spacer flex="1"></spacer>
++      </toolbar>
++
++      <vbox id="overview-pane">
++        <hbox id="markers-overview"/>
++        <hbox id="memory-overview"/>
++        <hbox id="time-framerate"/>
+       </vbox>
++      <deck id="details-pane" flex="1">
++        <hbox id="waterfall-view" flex="1">
++          <vbox id="waterfall-breakdown" flex="1" />
++          <splitter class="devtools-side-splitter"/>
++          <vbox id="waterfall-details"
++                class="theme-sidebar"
++                width="150"
++                height="150"/>
++        </hbox>
+ 
+-      <hbox id="flamegraph-view" flex="1">
+-      </hbox>
+-    </deck>
+-  </vbox>
++        <vbox id="calltree-view" flex="1">
++          <hbox class="call-tree-headers-container">
++            <label class="plain call-tree-header"
++                   type="duration"
++                   crop="end"
++                   value="&profilerUI.table.totalDuration;"/>
++            <label class="plain call-tree-header"
++                   type="percentage"
++                   crop="end"
++                   value="&profilerUI.table.totalPercentage;"/>
++            <label class="plain call-tree-header"
++                   type="self-duration"
++                   crop="end"
++                   value="&profilerUI.table.selfDuration;"/>
++            <label class="plain call-tree-header"
++                   type="self-percentage"
++                   crop="end"
++                   value="&profilerUI.table.selfPercentage;"/>
++            <label class="plain call-tree-header"
++                   type="samples"
++                   crop="end"
++                   value="&profilerUI.table.samples;"/>
++            <label class="plain call-tree-header"
++                   type="function"
++                   crop="end"
++                   value="&profilerUI.table.function;"/>
++          </hbox>
++          <vbox class="call-tree-cells-container" flex="1"/>
++        </vbox>
++        <hbox id="flamegraph-view" flex="1">
++        </hbox>
++      </deck>
++    </vbox>
++  </hbox>
+ </window>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 430a4a3..24f957d 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -34,8 +34,11 @@ support-files =
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-shared-connection-02.js]
+ [browser_perf-shared-connection-03.js]
+ # [browser_perf-shared-connection-04.js] bug 1077464
+ [browser_perf-ui-recording.js]
+ [browser_perf_recordings-io-01.js]
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
++[browser_perf-recording-selected-01.js]
++[browser_perf-recording-selected-02.js]
++[browser_perf-recording-selected-03.js]
+diff --git a/browser/devtools/performance/test/browser_perf-recording-selected-01.js b/browser/devtools/performance/test/browser_perf-recording-selected-01.js
+new file mode 100644
+index 0000000..166b228
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-recording-selected-01.js
+@@ -0,0 +1,35 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler correctly handles multiple recordings and can
++ * successfully switch between them.
++ */
++
++let test = Task.async(function*() {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController, RecordingsView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  is(RecordingsView.itemCount, 2,
++    "There should be two recordings visible.");
++  is(RecordingsView.selectedIndex, 1,
++    "The second recording item should be selected.");
++
++  let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  RecordingsView.selectedIndex = 0;
++  yield select;
++
++  is(RecordingsView.itemCount, 2,
++    "There should still be two recordings visible.");
++  is(RecordingsView.selectedIndex, 0,
++    "The first recording item should be selected.");
++
++  yield teardown(panel);
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf-recording-selected-02.js b/browser/devtools/performance/test/browser_perf-recording-selected-02.js
+new file mode 100644
+index 0000000..9f02ac8
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-recording-selected-02.js
+@@ -0,0 +1,45 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler correctly handles multiple recordings and can
++ * successfully switch between them, even when one of them is in progress.
++ */
++
++let test = Task.async(function*() {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController, RecordingsView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield startRecording(panel);
++
++  is(RecordingsView.itemCount, 2,
++    "There should be two recordings visible.");
++  is(RecordingsView.selectedIndex, 1,
++    "The new recording item should be selected.");
++
++  let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  RecordingsView.selectedIndex = 0;
++  yield select;
++
++  is(RecordingsView.itemCount, 2,
++    "There should still be two recordings visible.");
++  is(RecordingsView.selectedIndex, 0,
++    "The first recording item should be selected now.");
++
++  select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  RecordingsView.selectedIndex = 1;
++  yield select;
++
++  is(RecordingsView.itemCount, 2,
++    "There should still be two recordings visible.");
++  is(RecordingsView.selectedIndex, 1,
++    "The second recording item should be selected again.");
++
++  yield stopRecording(panel);
++
++  yield teardown(panel);
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf-recording-selected-03.js b/browser/devtools/performance/test/browser_perf-recording-selected-03.js
+new file mode 100644
+index 0000000..5bf1be2
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-recording-selected-03.js
+@@ -0,0 +1,33 @@
++/* vim: set ft=javascript ts=2 et sw=2 tw=80: */
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler UI does not forget that recording is active when
++ * selected recording changes. Bug 1060885.
++ */
++
++let test = Task.async(function*() {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, PerformanceController, RecordingsView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield startRecording(panel);
++
++  info("Selecting recording #0 and waiting for it to be displayed.");
++  let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  RecordingsView.selectedIndex = 0;
++  yield select;
++
++  ok($("#record-button").hasAttribute("checked"),
++    "Button is still checked after selecting another item.");
++
++  ok(!$("#record-button").hasAttribute("locked"),
++    "Button is not locked after selecting another item.");
++
++  yield stopRecording(panel);
++  yield teardown(panel);
++  finish();
++});
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-01.js b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+index c9ccff0..8676edd 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-01.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+@@ -18,17 +18,17 @@ let test = Task.async(function*() {
+   ok(originalData, "The original recording is not empty.");
+ 
+   // Save recording.
+ 
+   let file = FileUtils.getFile("TmpD", ["tmpprofile.json"]);
+   file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("666", 8));
+ 
+   let exported = once(PerformanceController, EVENTS.RECORDING_EXPORTED);
+-  yield PerformanceController.exportRecording("", file);
++  yield PerformanceController.exportRecording("", PerformanceController.getCurrentRecording(), file);
+ 
+   yield exported;
+   ok(true, "The recording data appears to have been successfully saved.");
+ 
+   // Import recording.
+ 
+   let rerendered = waitForWidgetsRendered(panel);
+   let imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
+diff --git a/browser/devtools/performance/views/details-call-tree.js b/browser/devtools/performance/views/details-call-tree.js
+index 0b75f16..dd84fb0 100644
+--- a/browser/devtools/performance/views/details-call-tree.js
++++ b/browser/devtools/performance/views/details-call-tree.js
+@@ -8,29 +8,32 @@
+  */
+ let CallTreeView = {
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     this._callTree = $(".call-tree-cells-container");
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
++    this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onRangeChange = this._onRangeChange.bind(this);
+     this._onLink = this._onLink.bind(this);
+ 
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_SELECTED, this._onRangeChange);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_CLEARED, this._onRangeChange);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_SELECTED, this._onRangeChange);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_CLEARED, this._onRangeChange);
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering a new call tree.
+    */
+   render: function (profilerData, beginAt, endAt, options={}) {
+@@ -47,16 +50,29 @@ let CallTreeView = {
+    * Called when recording is stopped.
+    */
+   _onRecordingStopped: function () {
+     let profilerData = PerformanceController.getProfilerData();
+     this.render(profilerData);
+   },
+ 
+   /**
++   * Called when a recording has been selected.
++   */
++  _onRecordingSelected: function (_, recording) {
++    // If not recording, then this recording is done and we can render all of it
++    // Otherwise, TODO in bug 1120699 will hide the details view altogether if
++    // this is still recording.
++    if (!recording.isRecording()) {
++      let profilerData = recording.getProfilerData();
++      this.render(profilerData);
++    }
++  },
++
++  /**
+    * Fired when a range is selected or cleared in the OverviewView.
+    */
+   _onRangeChange: function (_, params) {
+     // When a range is cleared, we'll have no beginAt/endAt data,
+     // so the rebuild will just render all the data again.
+     let profilerData = PerformanceController.getProfilerData();
+     let { beginAt, endAt } = params || {};
+     this.render(profilerData, beginAt, endAt);
+diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
+index 203cf78..2d80edc 100644
+--- a/browser/devtools/performance/views/details-waterfall.js
++++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -8,42 +8,45 @@
+  */
+ let WaterfallView = {
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: Task.async(function *() {
+     this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
++    this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onMarkerSelected = this._onMarkerSelected.bind(this);
+     this._onResize = this._onResize.bind(this);
+ 
+     this.waterfall = new Waterfall($("#waterfall-breakdown"), $("#details-pane"), TIMELINE_BLUEPRINT);
+     this.details = new MarkerDetails($("#waterfall-details"), $("#waterfall-view > splitter"));
+ 
+     this.waterfall.on("selected", this._onMarkerSelected);
+     this.waterfall.on("unselected", this._onMarkerSelected);
+     this.details.on("resize", this._onResize);
+ 
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+ 
+     this.waterfall.recalculateBounds();
+   }),
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     this.waterfall.off("selected", this._onMarkerSelected);
+     this.waterfall.off("unselected", this._onMarkerSelected);
+     this.details.off("resize", this._onResize);
+ 
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering a new waterfall.
+    */
+   render: function() {
+     let { startTime, endTime } = PerformanceController.getInterval();
+     let markers = PerformanceController.getMarkers();
+@@ -63,16 +66,25 @@ let WaterfallView = {
+   /**
+    * Called when recording stops.
+    */
+   _onRecordingStopped: function () {
+     this.render();
+   },
+ 
+   /**
++   * Called when a recording is selected.
++   */
++  _onRecordingSelected: function (_, recording) {
++    if (!recording.isRecording()) {
++      this.render();
++    }
++  },
++
++  /**
+    * Called when a marker is selected in the waterfall view,
+    * updating the markers detail view.
+    */
+   _onMarkerSelected: function (event, marker) {
+     if (event === "selected") {
+       this.details.render({
+         toolbox: gToolbox,
+         marker: marker,
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 204e9a6..00dfc9c 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -25,16 +25,17 @@ const GRAPH_SCROLL_EVENTS_DRAIN = 50; // ms
+  */
+ let OverviewView = {
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: Task.async(function *() {
+     this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
++    this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onRecordingTick = this._onRecordingTick.bind(this);
+     this._onGraphMouseUp = this._onGraphMouseUp.bind(this);
+     this._onGraphScroll = this._onGraphScroll.bind(this);
+ 
+     yield this._showFramerateGraph();
+     yield this._showMarkersGraph();
+     yield this._showMemoryGraph();
+ 
+@@ -42,32 +43,34 @@ let OverviewView = {
+     this.framerateGraph.on("scroll", this._onGraphScroll);
+     this.markersOverview.on("mouseup", this._onGraphMouseUp);
+     this.markersOverview.on("scroll", this._onGraphScroll);
+     this.memoryOverview.on("mouseup", this._onGraphMouseUp);
+     this.memoryOverview.on("scroll", this._onGraphScroll);
+ 
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+   }),
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     this.framerateGraph.off("mouseup", this._onGraphMouseUp);
+     this.framerateGraph.off("scroll", this._onGraphScroll);
+     this.markersOverview.off("mouseup", this._onGraphMouseUp);
+     this.markersOverview.off("scroll", this._onGraphScroll);
+     this.memoryOverview.off("mouseup", this._onGraphMouseUp);
+     this.memoryOverview.off("scroll", this._onGraphScroll);
+ 
+     clearNamedTimeout("graph-scroll");
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+   },
+ 
+   /**
+    * Sets up the framerate graph.
+    */
+   _showFramerateGraph: Task.async(function *() {
+     this.framerateGraph = new LineGraphWidget($("#time-framerate"), {
+       metric: L10N.getStr("graphs.fps")
+@@ -180,34 +183,49 @@ let OverviewView = {
+     if (this._timeoutId) {
+       this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
+     }
+   },
+ 
+   /**
+    * Called when recording starts.
+    */
+-  _onRecordingStarted: function () {
++  _onRecordingStarted: function (_, recording) {
++    this._checkSelection(recording);
+     this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
+-
+     this.framerateGraph.dropSelection();
+-    this.framerateGraph.selectionEnabled = false;
+-    this.markersOverview.selectionEnabled = false;
+-    this.memoryOverview.selectionEnabled = false;
+   },
+ 
+   /**
+    * Called when recording stops.
+    */
+-  _onRecordingStopped: function () {
++  _onRecordingStopped: function (_, recording) {
++    this._checkSelection(recording);
+     clearTimeout(this._timeoutId);
+     this._timeoutId = null;
+ 
+     this.render(FRAMERATE_GRAPH_HIGH_RES_INTERVAL);
++  },
++
++  /**
++   * Called when a new recording is selected.
++   */
++  _onRecordingSelected: function (_, recording) {
++    this.framerateGraph.dropSelection();
++    this._checkSelection(recording);
++
++    // If timeout exists, we have something recording, so
++    // this will still tick away at rendering. Otherwise, force a render.
++    if (!this._timeoutId) {
++      this.render(FRAMERATE_GRAPH_HIGH_RES_INTERVAL);
++    }
++  },
+ 
+-    this.framerateGraph.selectionEnabled = true;
+-    this.markersOverview.selectionEnabled = true;
+-    this.memoryOverview.selectionEnabled = true;
++  _checkSelection: function (recording) {
++    let selectionEnabled = !recording.isRecording();
++    this.framerateGraph.selectionEnabled = selectionEnabled;
++    this.markersOverview.selectionEnabled = selectionEnabled;
++    this.memoryOverview.selectionEnabled = selectionEnabled;
+   }
+ };
+ 
+ // Decorates the OverviewView as an EventEmitter
+ EventEmitter.decorate(OverviewView);
+diff --git a/browser/devtools/performance/views/recordings.js b/browser/devtools/performance/views/recordings.js
+new file mode 100644
+index 0000000..f7064a7
+--- /dev/null
++++ b/browser/devtools/performance/views/recordings.js
+@@ -0,0 +1,237 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * Functions handling the recordings UI.
++ */
++let RecordingsView = Heritage.extend(WidgetMethods, {
++  /**
++   * Initialization function, called when the tool is started.
++   */
++  initialize: function() {
++    this.widget = new SideMenuWidget($("#recordings-list"));
++
++    this._onSelect = this._onSelect.bind(this);
++    this._onRecordingStarted = this._onRecordingStarted.bind(this);
++    this._onRecordingStopped = this._onRecordingStopped.bind(this);
++    this._onRecordingImported = this._onRecordingImported.bind(this);
++    this._onSaveButtonClick = this._onSaveButtonClick.bind(this);
++
++    this.emptyText = L10N.getStr("noRecordingsText");
++
++    PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
++    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.RECORDING_IMPORTED, this._onRecordingImported);
++    this.widget.addEventListener("select", this._onSelect, false);
++  },
++
++  /**
++   * Destruction function, called when the tool is closed.
++   */
++  destroy: function() {
++    PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
++    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.RECORDING_IMPORTED, this._onRecordingImported);
++    this.widget.removeEventListener("select", this._onSelect, false);
++  },
++
++  /**
++   * Adds an empty recording to this container.
++   *
++   * @param RecordingModel recording
++   *        A model for the new recording item created.
++   */
++  addEmptyRecording: function (recording) {
++    let titleNode = document.createElement("label");
++    titleNode.className = "plain recording-item-title";
++    titleNode.setAttribute("value", recording.getLabel() ||
++      L10N.getFormatStr("recordingsList.itemLabel", this.itemCount + 1));
++
++    let durationNode = document.createElement("label");
++    durationNode.className = "plain recording-item-duration";
++    durationNode.setAttribute("value",
++      L10N.getStr("recordingsList.recordingLabel"));
++
++    let saveNode = document.createElement("label");
++    saveNode.className = "plain recording-item-save";
++    saveNode.addEventListener("click", this._onSaveButtonClick);
++
++    let hspacer = document.createElement("spacer");
++    hspacer.setAttribute("flex", "1");
++
++    let footerNode = document.createElement("hbox");
++    footerNode.className = "recording-item-footer";
++    footerNode.appendChild(durationNode);
++    footerNode.appendChild(hspacer);
++    footerNode.appendChild(saveNode);
++
++    let vspacer = document.createElement("spacer");
++    vspacer.setAttribute("flex", "1");
++
++    let contentsNode = document.createElement("vbox");
++    contentsNode.className = "recording-item";
++    contentsNode.setAttribute("flex", "1");
++    contentsNode.appendChild(titleNode);
++    contentsNode.appendChild(vspacer);
++    contentsNode.appendChild(footerNode);
++
++    // Append a recording item to this container.
++    return this.push([contentsNode], {
++      // Store the recording model that contains all the data to be
++      // rendered in the item.
++      attachment: recording
++    });
++  },
++
++  /**
++   * Signals that a recording session has started.
++   *
++   * @param RecordingModel recording
++   *        Model of the recording that was started.
++   */
++  _onRecordingStarted: function (_, recording) {
++    // Insert a "dummy" recording item, to hint that recording has now started.
++    let recordingItem;
++
++    // If a label is specified (e.g due to a call to `console.profile`),
++    // then try reusing a pre-existing recording item, if there is one.
++    // This is symmetrical to how `this.handleRecordingEnded` works.
++    if (recording.getLabel()) {
++      recordingItem = this.getItemForAttachment(e =>
++        e.getLabel() === recording.getLabel());
++    }
++    // Otherwise, create a new empty recording item.
++    if (!recordingItem) {
++      recordingItem = this.addEmptyRecording(recording);
++    }
++
++    // Mark the corresponding item as being a "record in progress".
++    recordingItem.isRecording = true;
++
++    // If this is a manual recording, immediately select it.
++    if (!recording.getLabel()) {
++      this.selectedItem = recordingItem;
++    }
++
++    this.emit(EVENTS.RECORDING_SELECTED, recording);
++  },
++
++  /**
++   * Signals that a recording session has ended.
++   *
++   * @param RecordingModel recording
++   *        The model of the recording that just stopped.
++   */
++  _onRecordingStopped: function (_, recording) {
++    let profileLabel = recording.getLabel();
++    let recordingItem;
++
++    // If a label is specified (e.g due to a call to `console.profileEnd`),
++    // then try reusing a pre-existing recording item, if there is one.
++    // This is symmetrical to how `this.handleRecordingStarted` works.
++    if (profileLabel) {
++      recordingItem = this.getItemForAttachment(e =>
++        e.profilerData.profileLabel == profileLabel);
++    }
++    // Otherwise, just use the first available recording item.
++    if (!recordingItem) {
++      recordingItem = this.getItemForPredicate(e => e.isRecording);
++    }
++
++    // Mark the corresponding item as being a "finished recording".
++    recordingItem.isRecording = false;
++
++    // Render the recording item with finalized information (timing, etc)
++    this.finalizeRecording(recordingItem);
++    this.forceSelect(recordingItem);
++  },
++
++  /**
++   * Signals that a recording has been imported.
++   *
++   * @param object recordingData
++   *        The profiler and refresh driver ticks data received from the front.
++   * @param RecordingModel model
++   *        The recording model containing data on the recording session.
++   */
++  _onRecordingImported: function (_, recordingData, model) {
++    let recordingItem = this.addEmptyRecording(model);
++    recordingItem.isRecording = false;
++
++    // Immediately select the imported recording
++    this.selectedItem = recordingItem;
++
++    // Render the recording item with finalized information (timing, etc)
++    this.finalizeRecording(recordingItem);
++
++    // Fire the selection and allow to propogate.
++    this.emit(EVENTS.RECORDING_SELECTED, model);
++  },
++
++  /**
++   * Adds recording data to a recording item in this container.
++   *
++   * @param Item recordingItem
++   *        An item inserted via `RecordingsView.addEmptyRecording`.
++   */
++  finalizeRecording: function (recordingItem) {
++    let model = recordingItem.attachment;
++
++    let saveNode = $(".recording-item-save", recordingItem.target);
++    saveNode.setAttribute("value",
++      L10N.getStr("recordingsList.saveLabel"));
++
++    let durationMillis = model.getDuration().toFixed(0);
++    let durationNode = $(".recording-item-duration", recordingItem.target);
++    durationNode.setAttribute("value",
++      L10N.getFormatStr("recordingsList.durationLabel", durationMillis));
++  },
++
++  /**
++   * The select listener for this container.
++   */
++  _onSelect: Task.async(function*({ detail: recordingItem }) {
++    // TODO 1120699
++    // show appropriate empty/recording panels for several scenarios below
++    if (!recordingItem) {
++      return;
++    }
++
++    let model = recordingItem.attachment;
++
++    // If recording, don't abort completely, as we still want to fire an event
++    // for selection so we can continue repainting the overview graphs.
++    if (recordingItem.isRecording) {
++      this.emit(EVENTS.RECORDING_SELECTED, model);
++      return;
++    }
++
++    this.emit(EVENTS.RECORDING_SELECTED, model);
++  }),
++
++  /**
++   * The click listener for the "save" button of each item in this container.
++   */
++  _onSaveButtonClick: function (e) {
++    let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
++    fp.init(window, L10N.getStr("recordingsList.saveDialogTitle"), Ci.nsIFilePicker.modeSave);
++    fp.appendFilter(L10N.getStr("recordingsList.saveDialogJSONFilter"), "*.json");
++    fp.appendFilter(L10N.getStr("recordingsList.saveDialogAllFilter"), "*.*");
++    fp.defaultString = "profile.json";
++
++    fp.open({ done: result => {
++      if (result == Ci.nsIFilePicker.returnCancel) {
++        return;
++      }
++      let recordingItem = this.getItemForElement(e.target);
++      this.emit(EVENTS.UI_EXPORT_RECORDING, recordingItem.attachment, fp.file);
++    }});
++  }
++});
++
++/**
++ * Convenient way of emitting events from the RecordingsView.
++ */
++EventEmitter.decorate(RecordingsView);
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 92f2c5b..7c0e362 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -357,8 +357,38 @@
+ .marker-details-type {
+   font-size: 1.2em;
+   font-weight: bold;
+ }
+ 
+ .marker-details-duration {
+   font-weight: bold;
+ }
++
++/* Recording items */
++
++.recording-item {
++  padding: 4px;
++}
++
++.recording-item-title {
++  font-size: 110%;
++}
++
++.recording-item-footer {
++  padding-top: 4px;
++  font-size: 90%;
++}
++
++.recording-item-save {
++  text-decoration: underline;
++  cursor: pointer;
++}
++
++.recording-item-duration,
++.recording-item-save {
++  color: var(--theme-body-color-alt);
++}
++
++#recordings-list .selected label {
++  /* Text inside a selected item should not be custom colored. */
++  color: inherit !important;
++}
+-- 
+2.2.1
+
