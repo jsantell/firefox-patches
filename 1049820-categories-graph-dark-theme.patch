@@ -1,8 +1,7 @@
-From fe5854d2860177d01d97a62696244f1c9709af71 Mon Sep 17 00:00:00 2001
+From 9b6c0b242a0a5bacd0af36df37259d27764e91d6 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 5 Jan 2015 15:42:39 -0800
-Subject: Bug 1049820 Add a dark theme style for the profiler's
- category graphs. r=vp
+Date: Tue, 13 Jan 2015 11:43:11 -0800
+Subject: Bug 1049820 - Enable dark themes for profiler graphs. r=vp
 
 diff --git a/browser/devtools/profiler/profiler.js b/browser/devtools/profiler/profiler.js
 index c261c55..ae2354e 100644
@@ -42,10 +41,10 @@ index 8d96926..ab4a089 100644
 +[browser_profiler_theme.js]
 diff --git a/browser/devtools/profiler/test/browser_profiler_theme.js b/browser/devtools/profiler/test/browser_profiler_theme.js
 new file mode 100644
-index 0000000..d56ef41
+index 0000000..e3cea6b
 --- /dev/null
 +++ b/browser/devtools/profiler/test/browser_profiler_theme.js
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,61 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -53,31 +52,37 @@ index 0000000..d56ef41
 + * Tests if the graphs rerender with the correct theme once the theme changes.
 + */
 +
++const WAIT_TIME = 10; // ms
 +const LIGHT_BG = "#fcfcfc";
 +const DARK_BG = "#14171a";
++const ORIGINAL_THEME = Services.prefs.getCharPref("devtools.theme");
 +
 +let test = Task.async(function*() {
 +  let [target, debuggee, panel] = yield initFrontend(SIMPLE_URL);
 +  let { $, EVENTS, ProfileView } = panel.panelWin;
 +
 +  yield startRecording(panel);
++  busyWait(WAIT_TIME); // allow the profiler module to sample more cpu activity
 +  yield stopRecording(panel, { waitForDisplay: true });
 +
 +  let graph = ProfileView._getCategoriesGraph();
-+  let refreshed = once(graph, "refresh");
++  ok(graph, "There's a categories graph available on the profile view.");
++
++  let refreshed = graph.once("refresh");
 +  setTheme("dark");
 +
 +  yield refreshed;
 +  is(graph.backgroundColor, DARK_BG,
 +    "correct theme (dark) after toggle.");
 +
-+  refreshed = once(graph, "refresh");
++  refreshed = graph.once("refresh");
 +  setTheme("light");
 +
 +  yield refreshed;
 +  is(graph.backgroundColor, LIGHT_BG,
 +    "correct theme (light) after toggle.");
 +
++  graph = null;
 +  yield teardown(panel);
 +  finish();
 +});
@@ -89,7 +94,7 @@ index 0000000..d56ef41
 + */
 +function setTheme (newTheme) {
 +  let oldTheme = Services.prefs.getCharPref("devtools.theme");
-+  info("Setting `devtools.theme` to \"" + newTheme + "\"");
++  info(`Setting "devtools.theme" to ${newTheme}`);
 +  Services.prefs.setCharPref("devtools.theme", newTheme);
 +  gDevTools.emit("pref-changed", {
 +    pref: "devtools.theme",
@@ -97,52 +102,12 @@ index 0000000..d56ef41
 +    oldValue: oldTheme
 +  });
 +}
-diff --git a/browser/devtools/profiler/test/head.js b/browser/devtools/profiler/test/head.js
-index 5e4dd0b..0facc47 100644
---- a/browser/devtools/profiler/test/head.js
-+++ b/browser/devtools/profiler/test/head.js
-@@ -158,8 +158,39 @@ function* stopRecording(panel, { waitForDisplay }) {
-       "The record button should not be locked anymore.");
-   }
- }
- 
- function getSourceActor(aSources, aURL) {
-   let item = aSources.getItemForAttachment(a => a.source.url === aURL);
-   return item && item.value;
- }
 +
-+/**
-+ * Wait for eventName on target.
-+ * @param {Object} target An observable object that either supports on/off or
-+ * addEventListener/removeEventListener
-+ * @param {String} eventName
-+ * @param {Boolean} useCapture Optional, for addEventListener/removeEventListener
-+ * @return A promise that resolves when the event has been handled
-+ */
-+function once(target, eventName, useCapture=false) {
-+  info("Waiting for event: '" + eventName + "' on " + target + ".");
-+
-+  let deferred = promise.defer();
-+
-+  for (let [add, remove] of [
-+    ["addEventListener", "removeEventListener"],
-+    ["addListener", "removeListener"],
-+    ["on", "off"]
-+  ]) {
-+    if ((add in target) && (remove in target)) {
-+      target[add](eventName, function onEvent(...aArgs) {
-+        info("Got event: '" + eventName + "' on " + target + ".");
-+        target[remove](eventName, onEvent, useCapture);
-+        deferred.resolve.apply(deferred, aArgs);
-+      }, useCapture);
-+      break;
-+    }
-+  }
-+
-+  return deferred.promise;
-+}
++registerCleanupFunction(() => {
++  Services.prefs.setCharPref("devtools.theme", ORIGINAL_THEME);
++});
 diff --git a/browser/devtools/profiler/ui-profile.js b/browser/devtools/profiler/ui-profile.js
-index 5ef4411..79d2f96 100644
+index c94c3b7..47a03de 100644
 --- a/browser/devtools/profiler/ui-profile.js
 +++ b/browser/devtools/profiler/ui-profile.js
 @@ -31,31 +31,35 @@ let ProfileView = {
@@ -181,7 +146,7 @@ index 5ef4411..79d2f96 100644
     */
    showEmptyNotice: function() {
      $("#profile-pane").selectedPanel = $("#empty-notice");
-@@ -422,16 +426,18 @@ let ProfileView = {
+@@ -424,16 +428,18 @@ let ProfileView = {
        oldGraph.destroy();
      }
      // Don't create a graph if there's not enough data to show.
@@ -200,7 +165,7 @@ index 5ef4411..79d2f96 100644
      yield graph.setDataWhenReady(categoriesData);
  
      graph.on("legend-selection", this._onGraphLegendSelection);
-@@ -602,16 +608,28 @@ let ProfileView = {
+@@ -604,16 +610,28 @@ let ProfileView = {
      viewSourceInDebugger(url, line);
    },
  
@@ -230,7 +195,7 @@ index 5ef4411..79d2f96 100644
  let RecordingUtils = {
    _frameratePlotsCache: new WeakMap(),
 diff --git a/browser/devtools/shared/widgets/Graphs.jsm b/browser/devtools/shared/widgets/Graphs.jsm
-index 826ab55..199b0e6 100644
+index f7cf01f..f390752 100644
 --- a/browser/devtools/shared/widgets/Graphs.jsm
 +++ b/browser/devtools/shared/widgets/Graphs.jsm
 @@ -1,20 +1,23 @@
@@ -244,20 +209,20 @@ index 826ab55..199b0e6 100644
 +const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
  Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
  const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
- const {EventEmitter} = Cu.import("resource://gre/modules/devtools/event-emitter.js", {});
  const {Task} = Cu.import("resource://gre/modules/Task.jsm", {});
+ const {EventEmitter} = Cu.import("resource://gre/modules/devtools/event-emitter.js", {});
  
 +const {getColor} = require("devtools/shared/theme");
 +
  this.EXPORTED_SYMBOLS = [
+   "GraphCursor",
+   "GraphSelection",
+   "GraphSelectionDragger",
+   "GraphSelectionResizer",
    "AbstractCanvasGraph",
    "LineGraphWidget",
    "BarGraphWidget",
-   "CanvasGraphUtils"
- ];
- 
- const HTML_NS = "http://www.w3.org/1999/xhtml";
-@@ -71,17 +74,17 @@ const LINE_GRAPH_REGION_STRIPES_COLOR = "rgba(237,38,85,0.2)";
+@@ -75,17 +78,17 @@ const LINE_GRAPH_REGION_STRIPES_COLOR = "rgba(237,38,85,0.2)";
  
  const BAR_GRAPH_DAMPEN_VALUES = 0.75;
  const BAR_GRAPH_BARS_MARGIN_TOP = 1; // px
@@ -276,7 +241,7 @@ index 826ab55..199b0e6 100644
  const BAR_GRAPH_REGION_BACKGROUND_COLOR = "transparent";
  const BAR_GRAPH_REGION_STRIPES_COLOR = "rgba(237,38,85,0.2)";
  
-@@ -1531,16 +1534,17 @@ LineGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -1557,16 +1560,17 @@ LineGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
   */
  this.BarGraphWidget = function(parent, ...args) {
    AbstractCanvasGraph.apply(this, [parent, "bar-graph", ...args]);
@@ -294,7 +259,7 @@ index 826ab55..199b0e6 100644
      this._createLegend();
    });
  
-@@ -1548,16 +1552,18 @@ this.BarGraphWidget = function(parent, ...args) {
+@@ -1574,16 +1578,18 @@ this.BarGraphWidget = function(parent, ...args) {
      for (let [node, event, listener] of this.outstandingEventListeners) {
        node.removeEventListener(event, listener);
      }
@@ -313,7 +278,7 @@ index 826ab55..199b0e6 100644
    regionStripesColor: BAR_GRAPH_REGION_STRIPES_COLOR,
  
    /**
-@@ -1593,19 +1599,23 @@ BarGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -1619,19 +1625,23 @@ BarGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
     * Renders the graph's background.
     * @see AbstractCanvasGraph.prototype.buildBackgroundImage
     */
@@ -339,7 +304,7 @@ index 826ab55..199b0e6 100644
  
    /**
     * Renders the graph's data source.
-@@ -1912,16 +1922,26 @@ BarGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -1938,16 +1948,26 @@ BarGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
    },
  
    /**
@@ -367,10 +332,10 @@ index 826ab55..199b0e6 100644
   * Creates an iframe element with the provided source URL, appends it to
   * the specified node and invokes the callback once the content is loaded.
 diff --git a/browser/themes/shared/devtools/widgets.inc.css b/browser/themes/shared/devtools/widgets.inc.css
-index 7994046..0818419 100644
+index 7e4e770..8129192 100644
 --- a/browser/themes/shared/devtools/widgets.inc.css
 +++ b/browser/themes/shared/devtools/widgets.inc.css
-@@ -988,20 +988,16 @@
+@@ -976,20 +976,16 @@
  }
  
  .line-graph-widget-tooltip[type=average] > [text=value] {
@@ -391,7 +356,7 @@ index 7994046..0818419 100644
    font-size: 80%;
    pointer-events: none;
  }
-@@ -1022,23 +1018,32 @@
+@@ -1010,23 +1006,32 @@
    height: 8px;
    border: 1px solid #fff;
    border-radius: 1px;
