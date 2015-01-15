@@ -1,0 +1,396 @@
+From 4b21b1825cb4b1f1e359767c9055f3797121909c Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 14 Jan 2015 14:22:24 -0800
+Subject: Bug 1121700 - create OptionsView helper for devtools
+ preference toggling. r=vp
+
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index 363aca7..619a7aa 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -34,16 +34,17 @@ EXTRA_JS_MODULES.devtools += [
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+     'autocomplete-popup.js',
+     'd3.js',
+     'doorhanger.js',
+     'frame-script-utils.js',
+     'inplace-editor.js',
+     'observable-object.js',
++    'options-view.js',
+     'telemetry.js',
+     'theme-switching.js',
+     'theme.js',
+     'undo.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared.widgets += [
+     'widgets/CubicBezierWidget.js',
+diff --git a/browser/devtools/shared/options-view.js b/browser/devtools/shared/options-view.js
+new file mode 100644
+index 0000000..bb6ceeb
+--- /dev/null
++++ b/browser/devtools/shared/options-view.js
+@@ -0,0 +1,165 @@
++const EventEmitter = require("devtools/toolkit/event-emitter");
++const { Services } = require("resource://gre/modules/Services.jsm");
++
++const OPTIONS_SHOWN_EVENT = "options-shown";
++const OPTIONS_HIDDEN_EVENT = "options-hidden";
++const PREF_CHANGE_EVENT = "pref-changed";
++
++/**
++ * OptionsView constructor. Takes several options, all required:
++ * - branchName: The name of the prefs branch, like "devtools.debugger."
++ * - window: The window the XUL elements live in.
++ * - menupopup: The XUL `menupopup` item that contains the pref buttons.
++ * 
++ * Fires an event, PREF_CHANGE_EVENT, with the preference name that changed as the second
++ * argument. Fires events on opening/closing the XUL panel (OPTIONS_SHOW_EVENT, OPTIONS_HIDDEN_EVENT)
++ * as the second argument in the listener, used for tests mostly.
++ */
++const OptionsView = function (options={}) {
++  this.branchName = options.branchName;
++  this.window = options.window;
++  this.menupopup = options.menupopup;
++  let { document } = this.window;
++  this.$ = document.querySelector.bind(document);
++  this.$$ = document.querySelectorAll.bind(document);
++
++  this.prefObserver = new PrefObserver(this.branchName);
++
++  EventEmitter.decorate(this);
++};
++exports.OptionsView = OptionsView;
++
++OptionsView.prototype = {
++  /**
++   * Binds the events and observers for the OptionsView.
++   */
++  initialize: function () {
++    let { MutationObserver } = this.window;
++    this._onPrefChange = this._onPrefChange.bind(this);
++    this._onOptionChange = this._onOptionChange.bind(this);
++    this._onPopupShown = this._onPopupShown.bind(this);
++    this._onPopupHidden = this._onPopupHidden.bind(this);
++
++    // We use a mutation observer instead of a click handler
++    // because the click handler is fired before the XUL menuitem updates
++    // it's checked status, which cascades incorrectly with the Preference observer.
++    this.mutationObserver = new MutationObserver(this._onOptionChange);
++    let observerConfig = { attributes: true, attributeFilter: ["checked"]};
++
++    // Sets observers and default options for all options
++    Array.forEach(this.$$("menuitem", this.menupopup), $el => {
++      let prefName = $el.getAttribute("data-pref");
++
++      if (this.prefObserver.get(prefName)) {
++        $el.setAttribute("checked", "true");
++      } else {
++        $el.removeAttribute("checked");
++      }
++      this.mutationObserver.observe($el, observerConfig);
++    });
++
++    // Listen to any preference change in the specified branch
++    this.prefObserver.register();
++    this.prefObserver.on(PREF_CHANGE_EVENT, this._onPrefChange);
++
++    // Bind to menupopup's open and close event
++    this.menupopup.addEventListener("popupshown", this._onPopupShown);
++    this.menupopup.addEventListener("popuphidden", this._onPopupHidden);
++  },
++
++  /**
++   * Removes event handlers for all of the option buttons and
++   * preference observer.
++   */
++  destroy: function () {
++    this.mutationObserver.disconnect();
++    this.prefObserver.off(PREF_CHANGE_EVENT, this._onPrefChange);
++    this.menupopup.removeEventListener("popupshown", this._onPopupShown);
++    this.menupopup.removeEventListener("popuphidden", this._onPopupHidden);
++  },
++
++  /**
++   * Called when a preference is changed (either via clicking an option
++   * button or by changing it in about:config). Updates the checked status
++   * of the corresponding button.
++   */
++  _onPrefChange: function (_, prefName) {
++    let $el = this.$(`menuitem[data-pref="${prefName}"]`, this.menupopup);
++    let value = this.prefObserver.get(prefName);
++
++    if (value) {
++      $el.setAttribute("checked", value);
++    } else {
++      $el.removeAttribute("checked");
++    }
++
++    this.emit(PREF_CHANGE_EVENT, prefName);
++  },
++
++  /**
++   * Mutation handler for handling a change on an options button.
++   * Sets the preference accordingly.
++   */
++  _onOptionChange: function (mutations) {
++    let { target } = mutations[0];
++    let prefName = target.getAttribute("data-pref");
++    let value = target.getAttribute("checked") === "true";
++
++    this.prefObserver.set(prefName, value);
++  },
++
++  /**
++   * Fired when the `menupopup` is opened, bound via XUL.
++   * Fires an event used in tests.
++   */
++  _onPopupShown: function () {
++    this.emit(OPTIONS_SHOWN_EVENT);
++  },
++
++  /**
++   * Fired when the `menupopup` is closed, bound via XUL.
++   * Fires an event used in tests.
++   */
++  _onPopupHidden: function () {
++    this.emit(OPTIONS_HIDDEN_EVENT);
++  }
++};
++
++/**
++ * Constructor for PrefObserver. Small helper for observing changes
++ * on a preference branch. Takes a `branchName`, like "devtools.debugger."
++ *
++ * Fires an event of PREF_CHANGE_EVENT with the preference name that changed
++ * as the second argument in the listener.
++ */
++const PrefObserver = function (branchName) {
++  this.branchName = branchName;
++  this.branch = Services.prefs.getBranch(branchName);
++  EventEmitter.decorate(this);
++};
++
++PrefObserver.prototype = {
++  /**
++   * Returns `prefName`'s value. Does not require the branch name.
++   */
++  get: function (prefName) {
++    let fullName = this.branchName + prefName;
++    return Services.prefs.getBoolPref(fullName);
++  },
++  /**
++   * Sets `prefName`'s `value`. Does not require the branch name.
++   */
++  set: function (prefName, value) {
++    let fullName = this.branchName + prefName;
++    Services.prefs.setBoolPref(fullName, value);
++  },
++  register: function () {
++    this.branch.addObserver("", this, false);
++  },
++  unregister: function () {
++    this.branch.removeObserver("", this);
++  },
++  observe: function (subject, topic, prefName) {
++    this.emit(PREF_CHANGE_EVENT, prefName);
++  }
++};
+diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
+index 287cf374..dd46c90 100644
+--- a/browser/devtools/shared/test/browser.ini
++++ b/browser/devtools/shared/test/browser.ini
+@@ -3,16 +3,17 @@ skip-if = e10s # Bug ?????? - devtools tests disabled with e10s
+ subsuite = devtools
+ support-files =
+   browser_layoutHelpers.html
+   browser_layoutHelpers-getBoxQuads.html
+   browser_layoutHelpers_iframe.html
+   browser_templater_basic.html
+   browser_toolbar_basic.html
+   browser_toolbar_webconsole_errors_count.html
++  doc_options-view.xul
+   head.js
+   leakhunt.js
+ 
+ [browser_css_color.js]
+ [browser_cubic-bezier-01.js]
+ [browser_cubic-bezier-02.js]
+ [browser_cubic-bezier-03.js]
+ [browser_flame-graph-01.js]
+@@ -80,8 +81,9 @@ skip-if = e10s # Bug 1086492 - Disable tilt for e10s
+ [browser_templater_basic.js]
+ [browser_toolbar_basic.js]
+ [browser_toolbar_tooltip.js]
+ [browser_toolbar_webconsole_errors_count.js]
+ skip-if = buildapp == 'mulet'
+ [browser_treeWidget_basic.js]
+ [browser_treeWidget_keyboard_interaction.js]
+ [browser_treeWidget_mouse_interaction.js]
++[browser_options-view-01.js]
+diff --git a/browser/devtools/shared/test/browser_options-view-01.js b/browser/devtools/shared/test/browser_options-view-01.js
+new file mode 100644
+index 0000000..1276005
+--- /dev/null
++++ b/browser/devtools/shared/test/browser_options-view-01.js
+@@ -0,0 +1,101 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Tests that options-view OptionsView responds to events correctly.
++
++let { OptionsView } = devtools.require("devtools/shared/options-view");
++let { Services } = devtools.require("resource://gre/modules/Services.jsm");
++
++const BRANCH = "devtools.debugger.";
++const BLACK_BOX_PREF = "auto-black-box";
++const PRETTY_PRINT_PREF = "auto-pretty-print";
++
++let originalBlackBox = Services.prefs.getBoolPref(BRANCH + BLACK_BOX_PREF);
++let originalPrettyPrint = Services.prefs.getBoolPref(BRANCH + PRETTY_PRINT_PREF);
++
++let test = Task.async(function*() {
++  Services.prefs.setBoolPref(BRANCH + BLACK_BOX_PREF, false);
++  Services.prefs.setBoolPref(BRANCH + PRETTY_PRINT_PREF, true);
++  let tab = yield promiseTab(OPTIONS_VIEW_URL);
++
++  yield testOptionsView(tab);
++  gBrowser.removeCurrentTab();
++  cleanup();
++  finish();
++});
++
++function* testOptionsView(tab) {
++  let events = [];
++  let options = createOptionsView(tab);
++  yield options.initialize();
++
++  let window = tab._contentWindow;
++  let $ = window.document.querySelector.bind(window.document);
++
++  options.on("pref-changed", (_, pref) => events.push(pref));
++
++  let ppEl = $("menuitem[data-pref='auto-pretty-print']");
++  let bbEl = $("menuitem[data-pref='auto-black-box']");
++
++  // Test default config
++  is(ppEl.getAttribute("checked"), "true", "`true` prefs are checked on start");
++  is(bbEl.getAttribute("checked"), "", "`false` prefs are unchecked on start");
++
++  // Test buttons update when preferences update outside of the menu
++  Services.prefs.setBoolPref(BRANCH + PRETTY_PRINT_PREF, false);
++  Services.prefs.setBoolPref(BRANCH + BLACK_BOX_PREF, true);
++  is(ppEl.getAttribute("checked"), "", "menuitems update when preferences change");
++  is(bbEl.getAttribute("checked"), "true", "menuitems update when preferences change");
++
++  // Tests events are fired when preferences update outside of the menu
++  is(events.length, 2, "two 'pref-changed' events fired");
++  is(events[0], "auto-pretty-print", "correct pref passed in 'pref-changed' event (auto-pretty-print)");
++  is(events[1], "auto-black-box", "correct pref passed in 'pref-changed' event (auto-black-box)");
++
++  // Test buttons update when clicked and preferences are updated
++  yield click(options, window, ppEl);
++  is(ppEl.getAttribute("checked"), "true", "menuitems update when clicked");
++  is(Services.prefs.getBoolPref(BRANCH + PRETTY_PRINT_PREF), true, "preference updated via click");
++
++  yield click(options, window, bbEl);
++  is(bbEl.getAttribute("checked"), "", "menuitems update when clicked");
++  is(Services.prefs.getBoolPref(BRANCH + BLACK_BOX_PREF), false, "preference updated via click");
++
++  // Tests events are fired when preferences updated via click
++  is(events.length, 4, "two 'pref-changed' events fired");
++  is(events[2], "auto-pretty-print", "correct pref passed in 'pref-changed' event (auto-pretty-print)");
++  is(events[3], "auto-black-box", "correct pref passed in 'pref-changed' event (auto-black-box)");
++}
++
++function wait(window) {
++  return new Promise(function (resolve, reject) {
++  window.setTimeout(() => resolve, 60000);
++  });
++}
++function createOptionsView (tab) {
++  return new OptionsView({
++    branchName: BRANCH,
++    window: tab._contentWindow,
++    menupopup: tab._contentWindow.document.querySelector("#options-menupopup")
++  });
++}
++
++function cleanup () {
++  Services.prefs.setBoolPref(BRANCH + BLACK_BOX_PREF, originalBlackBox);
++  Services.prefs.setBoolPref(BRANCH + PRETTY_PRINT_PREF, originalPrettyPrint);
++}
++
++function* click (view, win, menuitem) {
++  let opened = view.once("options-shown");
++  let closed = view.once("options-hidden");
++
++  let button = win.document.querySelector("#options-button");
++  EventUtils.synthesizeMouseAtCenter(button, {}, win);
++  yield opened;
++
++  EventUtils.synthesizeMouseAtCenter(menuitem, {}, win);
++  yield closed;
++}
++
++function* openMenu (view, win) {
++}
+diff --git a/browser/devtools/shared/test/doc_options-view.xul b/browser/devtools/shared/test/doc_options-view.xul
+new file mode 100644
+index 0000000..78d9956
+--- /dev/null
++++ b/browser/devtools/shared/test/doc_options-view.xul
+@@ -0,0 +1,27 @@
++<?xml version="1.0"?>
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<?xml-stylesheet href="chrome://browser/skin/" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/skin/devtools/common.css" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/skin/devtools/widgets.css" type="text/css"?>
++<?xml-stylesheet href="chrome://browser/content/devtools/widgets.css" type="text/css"?>
++<!DOCTYPE window []>
++
++<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
++
++    <popupset id="options-popupset">
++        <menupopup id="options-menupopup" position="before_end">
++            <menuitem id="option-autoprettyprint"
++                      type="checkbox"
++                      data-pref="auto-pretty-print"
++                      label="pretty print"/>
++            <menuitem id="option-autoblackbox"
++                      type="checkbox"
++                      data-pref="auto-black-box"
++                      label="black box"/>
++        </menupopup>
++    </popupset>
++    <button id="options-button"
++            popup="options-menupopup"/>
++</window>
+diff --git a/browser/devtools/shared/test/head.js b/browser/devtools/shared/test/head.js
+index 5e5236d..b9f2658 100644
+--- a/browser/devtools/shared/test/head.js
++++ b/browser/devtools/shared/test/head.js
+@@ -7,16 +7,17 @@ let {console} = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ let TargetFactory = devtools.TargetFactory;
+ 
+ gDevTools.testing = true;
+ SimpleTest.registerCleanupFunction(() => {
+   gDevTools.testing = false;
+ });
+ 
+ const TEST_URI_ROOT = "http://example.com/browser/browser/devtools/shared/test/";
++const OPTIONS_VIEW_URL = TEST_URI_ROOT + "doc_options-view.xul";
+ 
+ /**
+  * Open a new tab at a URL and call a callback on load
+  */
+ function addTab(aURL, aCallback)
+ {
+   waitForExplicitFinish();
+ 
+-- 
+2.2.1
+
