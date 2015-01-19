@@ -1,31 +1,14 @@
-From 290a9e177b93198935891aa812168cef47964561 Mon Sep 17 00:00:00 2001
+From 6c9561e0c9b784fb1cd1d4a0431ce23e7f6d0c52 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
-Date: Thu, 4 Dec 2014 13:22:13 -0800
-Subject: Bug 1055217 - Implement UI for bypassing audio nodes in the
- web audio editor, r=vp
-
----
- browser/devtools/webaudioeditor/controller.js      |   7 +-
- browser/devtools/webaudioeditor/includes.js        |   5 +
- browser/devtools/webaudioeditor/models.js          |  32 ++++-
- browser/devtools/webaudioeditor/views/context.js   |  71 ++++++-----
- browser/devtools/webaudioeditor/views/inspector.js |  61 ++++++++--
- browser/devtools/webaudioeditor/webaudioeditor.xul |  12 +-
- .../browser/devtools/webaudioeditor.properties     |   4 +
- browser/themes/linux/jar.mn                        |   1 +
- browser/themes/osx/jar.mn                          |   1 +
- browser/themes/shared/devtools/images/power.svg    |  14 +++
- .../themes/shared/devtools/webaudioeditor.inc.css  |  28 +++++
- browser/themes/windows/jar.mn                      |   2 +
- toolkit/devtools/server/actors/webaudio.js         | 131 +++++++++++++--------
- 13 files changed, 268 insertions(+), 101 deletions(-)
- create mode 100644 browser/themes/shared/devtools/images/power.svg
+Date: Thu, 15 Jan 2015 18:30:42 -0800
+Subject: Bug 1055217 - Add front end for bypassing audio nodes in the
+ web audio editor. r=vp
 
 diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
-index ee8dc45..fdb05d5 100644
+index 79d2105..4232c18 100644
 --- a/browser/devtools/webaudioeditor/controller.js
 +++ b/browser/devtools/webaudioeditor/controller.js
-@@ -32,17 +32,17 @@ function shutdownWebAudioEditor() {
+@@ -36,17 +36,17 @@ function shutdownWebAudioEditor() {
  
  /**
   * Functions handling target-related lifetime events.
@@ -44,7 +27,7 @@ index ee8dc45..fdb05d5 100644
      gTarget.on("navigate", this._onTabNavigated);
      gFront.on("start-context", this._onStartContext);
      gFront.on("create-node", this._onCreateNode);
-@@ -51,17 +51,20 @@ let WebAudioEditorController = {
+@@ -55,17 +55,20 @@ let WebAudioEditorController = {
      gFront.on("disconnect-node", this._onDisconnectNode);
      gFront.on("change-param", this._onChangeParam);
      gFront.on("destroy-node", this._onDestroyNode);
@@ -56,7 +39,7 @@ index ee8dc45..fdb05d5 100644
 -  },
 +
 +    // Store the AudioNode definitions from the WebAudioFront
-+    DEFINITION = yield gFront.getDefinition();
++    AUDIO_NODE_DEFINITION = yield gFront.getDefinition();
 +  }),
  
    /**
@@ -67,15 +50,15 @@ index ee8dc45..fdb05d5 100644
      gTarget.off("will-navigate", this._onTabNavigated);
      gTarget.off("navigate", this._onTabNavigated);
 diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
-index ddac056..38c0d5f 100644
+index db84a68..2e6b8ec 100644
 --- a/browser/devtools/webaudioeditor/includes.js
 +++ b/browser/devtools/webaudioeditor/includes.js
-@@ -9,24 +9,29 @@ Cu.import("resource://gre/modules/Services.jsm");
- Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+@@ -10,26 +10,31 @@ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
  Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
  Cu.import("resource:///modules/devtools/gDevTools.jsm");
  
- const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ const devtools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
+ const { require } = devtools;
  
  let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
  let { EventTarget } = require("sdk/event/target");
@@ -87,10 +70,12 @@ index ddac056..38c0d5f 100644
  const L10N = new ViewHelpers.L10N(STRINGS_URI);
  const Telemetry = require("devtools/shared/telemetry");
  const telemetry = new Telemetry();
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
  
-+// `DEFINITION` defined in the controller's initialization,
++// `AUDIO_NODE_DEFINITION` defined in the controller's initialization,
 +// which describes all the properties of an AudioNode
-+let DEFINITION;
++let AUDIO_NODE_DEFINITION;
 +
  // Override DOM promises with Promise.jsm helpers
  const { defer, all } = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
@@ -101,7 +86,7 @@ index ddac056..38c0d5f 100644
    // that the AudioContext is being used and should be tracked via the editor.
    START_CONTEXT: "WebAudioEditor:StartContext",
 diff --git a/browser/devtools/webaudioeditor/models.js b/browser/devtools/webaudioeditor/models.js
-index e9ce10c..e46117e 100644
+index 142a338..aa1975f 100644
 --- a/browser/devtools/webaudioeditor/models.js
 +++ b/browser/devtools/webaudioeditor/models.js
 @@ -30,16 +30,22 @@ const AudioNodeModel = Class({
@@ -118,7 +103,7 @@ index e9ce10c..e46117e 100644
 +    this._bypassed = yield this.isBypassed();
 +
 +    // Store whether or not this node is bypassable in the first place
-+    this.bypassable = !DEFINITION[this.type].unbypassable;
++    this.bypassable = !AUDIO_NODE_DEFINITION[this.type].unbypassable;
    }),
  
    /**
@@ -127,7 +112,7 @@ index e9ce10c..e46117e 100644
     *
     * @return Promise->String
     */
-@@ -71,16 +77,37 @@ const AudioNodeModel = Class({
+@@ -71,16 +77,36 @@ const AudioNodeModel = Class({
     * Clears out all internal connection data. Emits "disconnect" event.
     */
    disconnect: function () {
@@ -152,8 +137,7 @@ index e9ce10c..e46117e 100644
 +   */
 +  bypass: function (enable) {
 +    this._bypassed = enable;
-+    coreEmit(this, "bypass", this, enable);
-+    return this.actor.bypass(enable);
++    return this.actor.bypass(enable).then(() => coreEmit(this, "bypass", this, enable));
 +  },
 +
 +  /**
@@ -165,7 +149,7 @@ index e9ce10c..e46117e 100644
    getParams: function () {
      return this.actor.getParams();
    },
-@@ -90,17 +117,18 @@ const AudioNodeModel = Class({
+@@ -101,17 +127,18 @@ const AudioNodeModel = Class({
     * the graph to be rendered.
     *
     * @param dagreD3.Digraph
@@ -185,7 +169,7 @@ index e9ce10c..e46117e 100644
     * the graph to be rendered. Separate from `addToGraph`,
     * as while we depend on D3/Dagre's constraints, we cannot
     * add edges for nodes that have not yet been added to the graph.
-@@ -263,12 +291,12 @@ const AudioNodesCollection = Class({
+@@ -274,12 +301,12 @@ const AudioNodesCollection = Class({
    _onModelEvent: function (eventName, node, ...args) {
      if (eventName === "remove") {
        // If a `remove` event from the model, remove it
@@ -199,11 +183,301 @@ index e9ce10c..e46117e 100644
      }
    }
  });
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 3012b7e..1b959d8 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -47,16 +47,17 @@ support-files =
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-render-05.js]
+ [browser_wa_graph-selected.js]
+ [browser_wa_graph-zoom.js]
+ 
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
++[browser_wa_inspector-bypass-01.js]
+ 
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-edit-01.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-edit-02.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-media-nodes.js]
+ [browser_wa_properties-view-params.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js
+index 6b1606b..57ce888 100644
+--- a/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypass.js
+@@ -10,19 +10,27 @@ add_task(function*() {
+   let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
+     front.setup({ reload: true }),
+     get3(front, "create-node")
+   ]);
+ 
+   is((yield gainNode.isBypassed()), false, "Nodes start off unbypassed.");
+ 
+   info("Calling node#bypass(true)");
+-  yield gainNode.bypass(true);
++  let isBypassed = yield gainNode.bypass(true);
+ 
++  is(isBypassed, true, "node.bypass(true) resolves to true");
+   is((yield gainNode.isBypassed()), true, "Node is now bypassed.");
+ 
+   info("Calling node#bypass(false)");
+-  yield gainNode.bypass(false);
++  isBypassed = yield gainNode.bypass(false);
+ 
++  is(isBypassed, false, "node.bypass(false) resolves to false");
+   is((yield gainNode.isBypassed()), false, "Node back to being unbypassed.");
+ 
++  info("Calling node#bypass(true) on unbypassable node");
++  isBypassed = yield destNode.bypass(true);
++
++  is(isBypassed, false, "node.bypass(true) resolves to false for unbypassable node");
++  is((yield gainNode.isBypassed()), false, "Unbypassable node is unaffect");
++
+   yield removeTab(target.tab);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js b/browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js
+index d211e1b..59aaf27 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_automation-view-01.js
+@@ -15,41 +15,42 @@ add_task(function*() {
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     get3(gFront, "create-node"),
+     waitForGraphRendered(panelWin, 3, 2)
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
++  let $tabbox = $("#web-audio-editor-tabs");
+ 
+   // Oscillator node
+   click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+   yield waitForInspectorRender(panelWin, EVENTS);
+-  click(panelWin, $("#automation-tab"));
++  $tabbox.selectedIndex = 1;
+ 
+   ok(isVisible($("#automation-graph-container")), "graph container should be visible");
+   ok(isVisible($("#automation-content")), "automation content should be visible");
+   ok(!isVisible($("#automation-no-events")), "no-events panel should not be visible");
+   ok(!isVisible($("#automation-empty")), "empty panel should not be visible");
+ 
+   // Gain node
+   click(panelWin, findGraphNode(panelWin, nodeIds[2]));
+   yield waitForInspectorRender(panelWin, EVENTS);
+-  click(panelWin, $("#automation-tab"));
++  $tabbox.selectedIndex = 1;
+ 
+-  ok(!isVisible($("#automation-graph-container")), "graph container should be visible");
+-  ok(isVisible($("#automation-content")), "automation content should not be visible");
++  ok(!isVisible($("#automation-graph-container")), "graph container should not be visible");
++  ok(isVisible($("#automation-content")), "automation content should be visible");
+   ok(isVisible($("#automation-no-events")), "no-events panel should be visible");
+   ok(!isVisible($("#automation-empty")), "empty panel should not be visible");
+ 
+   // destination node
+   click(panelWin, findGraphNode(panelWin, nodeIds[0]));
+   yield waitForInspectorRender(panelWin, EVENTS);
+-  click(panelWin, $("#automation-tab"));
++  $tabbox.selectedIndex = 1;
+ 
+   ok(!isVisible($("#automation-graph-container")), "graph container should not be visible");
+   ok(!isVisible($("#automation-content")), "automation content should not be visible");
+   ok(!isVisible($("#automation-no-events")), "no-events panel should not be visible");
+   ok(isVisible($("#automation-empty")), "empty panel should be visible");
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_inspector-bypass-01.js b/browser/devtools/webaudioeditor/test/browser_wa_inspector-bypass-01.js
+new file mode 100644
+index 0000000..b6c2a06
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_inspector-bypass-01.js
+@@ -0,0 +1,67 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that nodes are correctly bypassed when bypassing.
++ */
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++  let nodeIds = actors.map(actor => actor.actorID);
++
++  click(panelWin, findGraphNode(panelWin, nodeIds[1]));
++  // Wait for the node to be set as well as the inspector to come fully into the view
++  yield Promise.all([
++    waitForInspectorRender(panelWin, EVENTS),
++    once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED)
++  ]);
++
++  let $bypass = $("toolbarbutton.bypass");
++
++  is((yield actors[1].isBypassed()), false, "AudioNodeActor is not bypassed by default.")
++  is($bypass.checked, true, "Button is 'on' for normal nodes");
++  is($bypass.disabled, false, "Bypass button is not disabled for normal nodes");
++
++  command($bypass);
++  yield gAudioNodes.once("bypass");
++
++  is((yield actors[1].isBypassed()), true, "AudioNodeActor is bypassed.")
++  is($bypass.checked, false, "Button is 'off' when clicked");
++  is($bypass.disabled, false, "Bypass button is not disabled after click");
++  ok(findGraphNode(panelWin, nodeIds[1]).classList.contains("bypassed"),
++    "AudioNode has 'bypassed' class.");
++
++  command($bypass);
++  yield gAudioNodes.once("bypass");
++
++  is((yield actors[1].isBypassed()), false, "AudioNodeActor is no longer bypassed.")
++  is($bypass.checked, true, "Button is back on when clicked");
++  is($bypass.disabled, false, "Bypass button is not disabled after click");
++  ok(!findGraphNode(panelWin, nodeIds[1]).classList.contains("bypassed"),
++    "AudioNode no longer has 'bypassed' class.");
++
++  click(panelWin, findGraphNode(panelWin, nodeIds[0]));
++
++  yield once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
++
++  is((yield actors[0].isBypassed()), false, "Unbypassable AudioNodeActor is not bypassed.");
++  is($bypass.checked, false, "Button is 'off' for unbypassable nodes");
++  is($bypass.disabled, true, "Bypass button is disabled for unbypassable nodes");
++
++  command($bypass);
++  is((yield actors[0].isBypassed()), false,
++    "Clicking button on unbypassable node does not change bypass state on actor.");
++  is($bypass.checked, false, "Button is still 'off' for unbypassable nodes");
++  is($bypass.disabled, true, "Bypass button is still disabled for unbypassable nodes");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js b/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js
+index 917d00f..95d737e 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_inspector-toggle.js
+@@ -29,18 +29,16 @@ add_task(function*() {
+   yield once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED);
+ 
+   ok(InspectorView.isVisible(), "InspectorView shown after toggling.");
+ 
+   ok(isVisible($("#web-audio-editor-details-pane-empty")),
+     "InspectorView empty message should still be visible.");
+   ok(!isVisible($("#web-audio-editor-tabs")),
+     "InspectorView tabs view should still be hidden.");
+-  is($("#web-audio-inspector-title").value, "AudioNode Inspector",
+-    "Inspector should still have default title.");
+ 
+   // Close inspector pane
+   $("#inspector-pane-toggle").click();
+   yield once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED);
+ 
+   ok(!InspectorView.isVisible(), "InspectorView back to being hidden.");
+ 
+   // Open again to test node loading while open
+@@ -54,13 +52,11 @@ add_task(function*() {
+   let nodeSet = once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
+   click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+   yield nodeSet;
+ 
+   ok(!isVisible($("#web-audio-editor-details-pane-empty")),
+     "Empty message hides even when loading node while open.");
+   ok(isVisible($("#web-audio-editor-tabs")),
+     "Switches to tab view when loading node while open.");
+-  is($("#web-audio-inspector-title").value, "Oscillator",
+-    "Inspector title updates when loading node while open.");
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_inspector.js b/browser/devtools/webaudioeditor/test/browser_wa_inspector.js
+index ed845bc..8804e0a 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_inspector.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_inspector.js
+@@ -22,40 +22,32 @@ add_task(function*() {
+   ]);
+   let nodeIds = actors.map(actor => actor.actorID);
+ 
+   ok(!InspectorView.isVisible(), "InspectorView hidden on start.");
+   ok(isVisible($("#web-audio-editor-details-pane-empty")),
+     "InspectorView empty message should show when no node's selected.");
+   ok(!isVisible($("#web-audio-editor-tabs")),
+     "InspectorView tabs view should be hidden when no node's selected.");
+-  is($("#web-audio-inspector-title").value, "AudioNode Inspector",
+-    "Inspector should have default title when empty.");
+ 
+   // Wait for the node to be set as well as the inspector to come fully into the view
+   let nodeSet = Promise.all([
+     once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET),
+     once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED)
+   ]);
+   click(panelWin, findGraphNode(panelWin, nodeIds[1]));
+   yield nodeSet;
+ 
+   ok(InspectorView.isVisible(), "InspectorView shown once node selected.");
+   ok(!isVisible($("#web-audio-editor-details-pane-empty")),
+     "InspectorView empty message hidden when node selected.");
+   ok(isVisible($("#web-audio-editor-tabs")),
+     "InspectorView tabs view visible when node selected.");
+ 
+-  is($("#web-audio-inspector-title").value, "Oscillator",
+-    "Inspector should have the node title when a node is selected.");
+-
+   is($("#web-audio-editor-tabs").selectedIndex, 0,
+     "default tab selected should be the parameters tab.");
+ 
+   nodeSet = once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET);
+   click(panelWin, findGraphNode(panelWin, nodeIds[2]));
+   yield nodeSet;
+ 
+-  is($("#web-audio-inspector-title").value, "Gain",
+-    "Inspector title updates when a new node is selected.");
+-
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index fc9ea9f..9e3c7c0 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -313,16 +313,22 @@ function findGraphNode (win, node) {
+ function click (win, element) {
+   EventUtils.sendMouseEvent({ type: "click" }, element, win);
+ }
+ 
+ function mouseOver (win, element) {
+   EventUtils.sendMouseEvent({ type: "mouseover" }, element, win);
+ }
+ 
++function command (button) {
++  let ev = button.ownerDocument.createEvent("XULCommandEvent");
++  ev.initCommandEvent("command", true, true, button.ownerDocument.defaultView, 0, false, false, false, false, null);
++  button.dispatchEvent(ev);
++}
++
+ function isVisible (element) {
+   return !element.getAttribute("hidden");
+ }
+ 
+ /**
+  * Used in debugging, returns a promise that resolves in `n` milliseconds.
+  */
+ function wait (n) {
 diff --git a/browser/devtools/webaudioeditor/views/context.js b/browser/devtools/webaudioeditor/views/context.js
-index 139047c..75acae4 100644
+index bd3cbf6..f2160ac 100644
 --- a/browser/devtools/webaudioeditor/views/context.js
 +++ b/browser/devtools/webaudioeditor/views/context.js
-@@ -31,41 +31,42 @@ const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove"];
+@@ -31,39 +31,40 @@ const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove"];
  /**
   * Functions handling the graph UI.
   */
@@ -215,7 +489,6 @@ index 139047c..75acae4 100644
 -    this._onGraphNodeClick = this._onGraphNodeClick.bind(this);
 +    this._onGraphClick = this._onGraphClick.bind(this);
      this._onThemeChange = this._onThemeChange.bind(this);
-     this._onNodeSelect = this._onNodeSelect.bind(this);
      this._onStartContext = this._onStartContext.bind(this);
      this._onEvent = this._onEvent.bind(this);
  
@@ -224,7 +497,6 @@ index 139047c..75acae4 100644
 +    $("#graph-target").addEventListener("click", this._onGraphClick, false);
  
      window.on(EVENTS.THEME_CHANGE, this._onThemeChange);
-     window.on(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
      window.on(EVENTS.START_CONTEXT, this._onStartContext);
      gAudioNodes.on("*", this._onEvent);
    },
@@ -242,14 +514,14 @@ index 139047c..75acae4 100644
 +    $("#graph-target").removeEventListener("click", this._onGraphClick, false);
 +
      window.off(EVENTS.THEME_CHANGE, this._onThemeChange);
-     window.off(EVENTS.UI_INSPECTOR_NODE_SET, this._onNodeSelect);
      window.off(EVENTS.START_CONTEXT, this._onStartContext);
      gAudioNodes.off("*", this._onEvent);
    },
  
    /**
     * Called when a page is reloaded and waiting for a "start-context" event
-@@ -126,68 +127,68 @@ let ContextView = {
+    * and clears out old content
+@@ -122,68 +123,68 @@ let ContextView = {
    /**
     * Takes an actorID and returns the corresponding DOM SVG element in the graph
     */
@@ -345,7 +617,7 @@ index 139047c..75acae4 100644
      // Override Dagre-d3's post render function by passing in our own.
      // This way we can leave styles out of it.
      renderer.postRender((graph, root) => {
-@@ -262,16 +263,21 @@ let ContextView = {
+@@ -258,16 +259,21 @@ let ContextView = {
      this.draw();
    },
  
@@ -364,10 +636,10 @@ index 139047c..75acae4 100644
      }
    },
  
-   _onNodeSelect: function (eventName, id) {
-     this.focusNode(id);
-   },
-@@ -283,22 +289,23 @@ let ContextView = {
+   /**
+    * Fired when the devtools theme changes.
+    */
+@@ -275,22 +281,22 @@ let ContextView = {
      let markerColor = MARKER_STYLING[theme];
      let marker = $("#arrowhead");
      if (marker) {
@@ -377,8 +649,7 @@ index 139047c..75acae4 100644
  
    /**
 -   * Fired when a node in the svg graph is clicked. Used to handle triggering the AudioNodePane.
-+   * Fired when a click occurs in the graph. Forks to handling a direct node click
-+   * for inspector selection, and individual node controls.
++   * Fired when a click occurs in the graph.
     *
     * @param Event e
     *        Click event.
@@ -391,27 +662,27 @@ index 139047c..75acae4 100644
      if (!node)
        return;
  
-     window.emit(EVENTS.UI_SELECT_NODE, node.getAttribute("data-id"));
-   }
+     let id = node.getAttribute("data-id");
+ 
 diff --git a/browser/devtools/webaudioeditor/views/inspector.js b/browser/devtools/webaudioeditor/views/inspector.js
-index 0a80755..ce55a04 100644
+index 5818f2f..d5d1087 100644
 --- a/browser/devtools/webaudioeditor/views/inspector.js
 +++ b/browser/devtools/webaudioeditor/views/inspector.js
-@@ -51,60 +51,63 @@ let InspectorView = {
+@@ -38,58 +38,67 @@ let InspectorView = {
      this.bindToggle();
  
      // Hide inspector view on startup
      this.hideImmediately();
  
-     this._onEval = this._onEval.bind(this);
      this._onNodeSelect = this._onNodeSelect.bind(this);
      this._onDestroyNode = this._onDestroyNode.bind(this);
+     this._onResize = this._onResize.bind(this);
 +    this._onCommandClick = this._onCommandClick.bind(this);
  
-     this._propsView = new VariablesView($("#properties-tabpanel-content"), GENERIC_VARIABLES_VIEW_SETTINGS);
-     this._propsView.eval = this._onEval;
- 
-+    $("#audio-node-toolbar toolbarbutton").addEventListener("command", this._onCommandClick);
+     this.splitter.addEventListener("mouseup", this._onResize);
++    for (let $el of $$("#audio-node-toolbar toolbarbutton")) {
++      $el.addEventListener("command", this._onCommandClick);
++    }
      window.on(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
      gAudioNodes.on("remove", this._onDestroyNode);
    },
@@ -421,13 +692,18 @@ index 0a80755..ce55a04 100644
     */
    destroy: function () {
      this.unbindToggle();
+     this.splitter.removeEventListener("mouseup", this._onResize);
++
 +    $("#audio-node-toolbar toolbarbutton").removeEventListener("command", this._onCommandClick);
++    for (let $el of $$("#audio-node-toolbar toolbarbutton")) {
++      $el.removeEventListener("command", this._onCommandClick);
++    }
      window.off(EVENTS.UI_SELECT_NODE, this._onNodeSelect);
      gAudioNodes.off("remove", this._onDestroyNode);
  
      this.el = null;
      this.button = null;
-     this._tabsPane = null;
+     this.splitter = null;
    },
  
    /**
@@ -450,11 +726,8 @@ index 0a80755..ce55a04 100644
        $("#web-audio-editor-details-pane-empty").setAttribute("hidden", "true");
        $("#web-audio-editor-tabs").removeAttribute("hidden");
 -      this._setTitle();
--      this._buildPropertiesView()
--        .then(() => window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id));
 +      yield this._buildToolbar();
-+      yield this._buildPropertiesView();
-+      window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id);
+       window.emit(EVENTS.UI_INSPECTOR_NODE_SET, this._currentNode.id);
      }
 -  },
 +  }),
@@ -466,8 +739,8 @@ index 0a80755..ce55a04 100644
      return this._currentNode;
    },
  
-@@ -115,24 +118,35 @@ let InspectorView = {
-     this._propsView.empty();
+@@ -99,24 +108,35 @@ let InspectorView = {
+   resetUI: function () {
      // Set current node to empty to load empty view
      this.setCurrentAudioNode();
  
@@ -504,13 +777,13 @@ index 0a80755..ce55a04 100644
 +  }),
  
    /**
-    * Reconstructs the `Properties` tab in the inspector
-    * with the `this._currentNode` as it's source.
+    * Event handlers
     */
-   _buildPropertiesView: Task.async(function* () {
-     let propsView = this._propsView;
-     let node = this._currentNode;
-@@ -231,10 +245,31 @@ let InspectorView = {
+ 
+   /**
+    * Called on EVENTS.UI_SELECT_NODE, and takes an actorID `id`
+    * and calls `setCurrentAudioNode` to scaffold the inspector view.
+@@ -135,10 +155,31 @@ let InspectorView = {
    /**
     * Called when `DESTROY_NODE` is fired to remove the node from props view if
     * it's currently selected.
@@ -543,7 +816,7 @@ index 0a80755..ce55a04 100644
    }
  };
 diff --git a/browser/devtools/webaudioeditor/webaudioeditor.xul b/browser/devtools/webaudioeditor/webaudioeditor.xul
-index 9be6b2b..f2b665c 100644
+index fba415f..68052ec 100644
 --- a/browser/devtools/webaudioeditor/webaudioeditor.xul
 +++ b/browser/devtools/webaudioeditor/webaudioeditor.xul
 @@ -1,17 +1,17 @@
@@ -565,14 +838,14 @@ index 9be6b2b..f2b665c 100644
  <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
  
    <script type="application/javascript;version=1.8"
-@@ -72,26 +72,30 @@
+@@ -74,26 +74,30 @@
                    xmlns:xlink="http://www.w3.org/1999/xlink">
                  <g id="graph-target" transform="translate(20,20)"/>
                </svg>
              </vbox>
            </box>
          </hbox>
-         <splitter class="devtools-side-splitter"/>
+         <splitter id="inspector-splitter" class="devtools-side-splitter"/>
          <vbox id="web-audio-inspector" hidden="true">
 -          <hbox class="devtools-toolbar">
 -            <label id="web-audio-inspector-title" value="&webAudioEditorUI.inspectorTitle;"></label>
@@ -594,11 +867,11 @@ index 9be6b2b..f2b665c 100644
                <tabs>
                  <tab id="properties-tab"
                       label="&webAudioEditorUI.tab.properties;"/>
+                 <tab id="automation-tab"
+                      label="&webAudioEditorUI.tab.automation;"/>
                </tabs>
                <tabpanels flex="1">
-                 <tabpanel id="properties-tabpanel"
-                           class="tabpanel-content">
-                   <vbox id="properties-tabpanel-content" flex="1">
+                 <!-- Properties Panel -->
 diff --git a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.properties b/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.properties
 index 8018ec7..0f682e3 100644
 --- a/browser/locales/en-US/chrome/browser/devtools/webaudioeditor.properties
@@ -617,10 +890,10 @@ index 8018ec7..0f682e3 100644
 +webAudioEditorTooltipBypass=Bypass AudioNode
 +
 diff --git a/browser/themes/linux/jar.mn b/browser/themes/linux/jar.mn
-index 5c2ebcc..3ac5c11 100644
+index ae94bcc..02294bc 100644
 --- a/browser/themes/linux/jar.mn
 +++ b/browser/themes/linux/jar.mn
-@@ -217,16 +217,17 @@ browser.jar:
+@@ -223,16 +223,17 @@ browser.jar:
    skin/classic/browser/devtools/controls.png          (../shared/devtools/images/controls.png)
    skin/classic/browser/devtools/controls@2x.png       (../shared/devtools/images/controls@2x.png)
    skin/classic/browser/devtools/performance-icons.svg  (../shared/devtools/images/performance-icons.svg)
@@ -639,10 +912,10 @@ index 5c2ebcc..3ac5c11 100644
    skin/classic/browser/devtools/command-paintflashing.png     (../shared/devtools/images/command-paintflashing.png)
    skin/classic/browser/devtools/command-paintflashing@2x.png  (../shared/devtools/images/command-paintflashing@2x.png)
 diff --git a/browser/themes/osx/jar.mn b/browser/themes/osx/jar.mn
-index a4f6956..18ca933 100644
+index 5b188b5..fad0af2 100644
 --- a/browser/themes/osx/jar.mn
 +++ b/browser/themes/osx/jar.mn
-@@ -343,16 +343,17 @@ browser.jar:
+@@ -353,16 +353,17 @@ browser.jar:
    skin/classic/browser/devtools/controls.png                (../shared/devtools/images/controls.png)
    skin/classic/browser/devtools/controls@2x.png             (../shared/devtools/images/controls@2x.png)
    skin/classic/browser/devtools/performance-icons.svg       (../shared/devtools/images/performance-icons.svg)
@@ -660,6 +933,31 @@ index a4f6956..18ca933 100644
    skin/classic/browser/devtools/commandline-icon@2x.png     (../shared/devtools/images/commandline-icon@2x.png)
    skin/classic/browser/devtools/command-paintflashing.png     (../shared/devtools/images/command-paintflashing.png)
    skin/classic/browser/devtools/command-paintflashing@2x.png  (../shared/devtools/images/command-paintflashing@2x.png)
+diff --git a/browser/themes/shared/devtools/filters.svg b/browser/themes/shared/devtools/filters.svg
+index 69c6bc3..916028b 100644
+--- a/browser/themes/shared/devtools/filters.svg
++++ b/browser/themes/shared/devtools/filters.svg
+@@ -8,9 +8,20 @@
+ </filter>
+ <filter id="invert-white" x="0%" y="0%" width="100%" height="100%" >
+   <feComponentTransfer>
+     <feFuncR type="table" tableValues=".6 0"/>
+     <feFuncG type="table" tableValues=".6 0"/>
+     <feFuncB type="table" tableValues=".6 0"/>
+   </feComponentTransfer>
+  </filter>
++
++  <!-- Web Audio Gradients -->
++  <linearGradient id="bypass-light" x1="6%" y1="8%" x2="12%" y2="12%" spreadMethod="repeat">
++    <stop offset="0%" stop-color="#f0f1f2"/> <!-- theme-toolbar-background -->
++    <stop offset="50%" stop-color="#fff"/>
++  </linearGradient>
++
++  <linearGradient id="bypass-dark" x1="6%" y1="8%" x2="12%" y2="12%" spreadMethod="repeat">
++    <stop offset="0%" stop-color="#343c45"/> <!-- theme-toolbar-background -->
++    <stop offset="50%" stop-color="transparent"/>
++  </linearGradient>
+ </svg>
 diff --git a/browser/themes/shared/devtools/images/power.svg b/browser/themes/shared/devtools/images/power.svg
 new file mode 100644
 index 0000000..2888951
@@ -681,35 +979,83 @@ index 0000000..2888951
 +  <path stroke="#edf0f1" d="m10.89891,2.50043c-0.49827,-0.24134 -1.09841,-0.03411 -1.34129,0.46514c-0.24185,0.49928 -0.03311,1.09942 0.46517,1.34128c1.56306,0.76071 2.64193,2.36094 2.64092,4.21555c-0.00501,2.58626 -2.09749,4.6787 -4.68322,4.68321c-2.58623,-0.005 -4.67869,-2.09746 -4.68371,-4.68321c-0.001,-1.85561 1.07834,-3.45731 2.64294,-4.21654c0.49928,-0.24185 0.7065,-0.84201 0.46514,-1.34129c-0.24185,-0.49825 -0.84098,-0.70697 -1.34029,-0.46513c-2.23396,1.08135 -3.77446,3.37351 -3.77545,6.02296c0.00099,3.69518 2.99518,6.68989 6.69138,6.69088c3.6957,-0.00099 6.69037,-2.9957 6.69089,-6.69088c-0.00102,-2.64846 -1.53948,-4.9391 -3.77247,-6.02197zm-2.91842,4.9346c0.55398,0 1.00309,-0.44861 1.00309,-1.00357l0,-4.68373c0,-0.55446 -0.44911,-1.00309 -1.00309,-1.00309c-0.555,0 -1.00358,0.44911 -1.00358,1.00309l0,4.68321c0,0.55499 0.44858,1.00409 1.00358,1.00409z" stroke-width="0" fill="#edf0f1"/>
 +</svg>
 diff --git a/browser/themes/shared/devtools/webaudioeditor.inc.css b/browser/themes/shared/devtools/webaudioeditor.inc.css
-index 274c41d..8625d0b 100644
+index 6ad50d6..763afe0 100644
 --- a/browser/themes/shared/devtools/webaudioeditor.inc.css
 +++ b/browser/themes/shared/devtools/webaudioeditor.inc.css
-@@ -79,16 +79,24 @@ g.edgePath.param-connection {
+@@ -76,38 +76,69 @@ g.edgePath.param-connection {
+ /* Audio Nodes */
+ .nodes rect {
+   stroke-width: 1px;
    cursor: pointer;
  }
  
  .nodes rect {
    stroke: var(--theme-tab-toolbar-background);
++}
++.theme-light rect {
++  fill: var(--theme-tab-toolbar-background);
++}
++.theme-dark rect {
    fill: var(--theme-toolbar-background);
  }
  
-+.nodes g.bypassed rect {
-+  opacity: 0.5;
++/**
++ * Bypassed Nodes
++ */
++
++.theme-light .nodes g.bypassed rect {
++  fill: url(chrome://browser/skin/devtools/filters.svg#bypass-light);
++}
++.theme-dark .nodes g.bypassed rect {
++  fill: url(chrome://browser/skin/devtools/filters.svg#bypass-dark);
++}
++.nodes g.bypassed.selected rect {
++  stroke: var(--theme-selection-background);
 +}
 +
++/*
 +.nodes g.bypassed text {
 +  opacity: 0.8;
 +}
++*/
 +
++/**
++ * Selected Nodes
++ */
  .nodes g.selected rect {
    fill: var(--theme-selection-background);
  }
  
++/* Don't style bypassed nodes text different because it'd be illegible in light-theme */
++.theme-light g.selected:not(.bypassed) text {
++  fill: var(--theme-toolbar-background);
++}
++
++
  /* Text in nodes and edges */
  text {
    cursor: default; /* override the "text" cursor */
    font-weight: 300;
-@@ -160,16 +168,36 @@ text {
+   font-family: "Helvetica Neue", Helvetica, Arial, sans-serf;
+   font-size: 14px;
+ }
+ 
+ text {
+   fill: var(--theme-body-color-alt);
+ }
+ 
+-.theme-light g.selected text {
+-  fill: var(--theme-toolbar-background);
+-}
+ 
+ .nodes text {
+   cursor: pointer;
+ }
+ 
+ /**
+  * Inspector Styles
+  */
+@@ -174,16 +205,42 @@ text {
    }
  
    .web-audio-inspector .error {
@@ -737,6 +1083,12 @@ index 274c41d..8625d0b 100644
 +  background-color: #4c9ed9; /* Select Highlight Blue */
 +}
 +
++/* don't invert checked buttons so we can have white icons on light theme */
++#audio-node-toolbar toolbarbutton[checked] > .toolbarbutton-icon {
++  filter: none;
++}
++
++
 +/**
   * Responsive Styles
   * `.devtools-responsive-container` takes care of most of
@@ -747,10 +1099,10 @@ index 274c41d..8625d0b 100644
     * Override the inspector toggle so it's always open
     * in the portrait view, with the toggle button hidden.
 diff --git a/browser/themes/windows/jar.mn b/browser/themes/windows/jar.mn
-index 9f06d41..c5a13f3 100644
+index 1e4e689..da9bf2c 100644
 --- a/browser/themes/windows/jar.mn
 +++ b/browser/themes/windows/jar.mn
-@@ -252,16 +252,17 @@ browser.jar:
+@@ -260,16 +260,17 @@ browser.jar:
          skin/classic/browser/devtools/controls.png                  (../shared/devtools/images/controls.png)
          skin/classic/browser/devtools/controls@2x.png               (../shared/devtools/images/controls@2x.png)
          skin/classic/browser/devtools/performance-icons.svg         (../shared/devtools/images/performance-icons.svg)
@@ -768,7 +1120,7 @@ index 9f06d41..c5a13f3 100644
          skin/classic/browser/devtools/commandline-icon@2x.png          (../shared/devtools/images/commandline-icon@2x.png)
          skin/classic/browser/devtools/alerticon-warning.png         (../shared/devtools/images/alerticon-warning.png)
          skin/classic/browser/devtools/alerticon-warning@2x.png      (../shared/devtools/images/alerticon-warning@2x.png)
-@@ -698,16 +699,17 @@ browser.jar:
+@@ -722,16 +723,17 @@ browser.jar:
          skin/classic/aero/browser/devtools/controls.png              (../shared/devtools/images/controls.png)
          skin/classic/aero/browser/devtools/controls@2x.png           (../shared/devtools/images/controls@2x.png)
          skin/classic/aero/browser/devtools/performance-icons.svg     (../shared/devtools/images/performance-icons.svg)
@@ -787,10 +1139,10 @@ index 9f06d41..c5a13f3 100644
          skin/classic/aero/browser/devtools/command-paintflashing.png    (../shared/devtools/images/command-paintflashing.png)
          skin/classic/aero/browser/devtools/command-paintflashing@2x.png (../shared/devtools/images/command-paintflashing@2x.png)
 diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
-index 09aebd6..6301f81 100644
+index c610176..8aa610f 100644
 --- a/toolkit/devtools/server/actors/webaudio.js
 +++ b/toolkit/devtools/server/actors/webaudio.js
-@@ -30,83 +30,106 @@ const NODE_CREATION_METHODS = [
+@@ -39,118 +39,123 @@ const AUTOMATION_METHODS = [
  ];
  
  const NODE_ROUTING_METHODS = [
@@ -800,31 +1152,50 @@ index 09aebd6..6301f81 100644
  const NODE_PROPERTIES = {
    "OscillatorNode": {
 -    "type": {},
--    "frequency": {},
--    "detune": {}
+-    "frequency": {
+-      "param": true
+-    },
+-    "detune": {
+-      "param": true
 +    "properties": {
 +      "type": {},
-+      "frequency": {},
-+      "detune": {}
-+    }
++      "frequency": {
++        "param": true
++      },
++      "detune": {
++        "param": true
++      }
+     }
    },
    "GainNode": {
--    "gain": {}
-+    "properties": { "gain": {}}
+-    "gain": {
+-      "param": true
+-    }
++    "properties": { "gain": { "param": true }}
    },
    "DelayNode": {
--    "delayTime": {}
-+    "properties": { "delayTime": {}}
+-    "delayTime": {
+-      "param": true
+-    }
++    "properties": { "delayTime": { "param": true }}
    },
+   // TODO deal with figuring out adding `detune` AudioParam
+   // for AudioBufferSourceNode, which is in the spec
+   // but not yet added in implementation
+   // bug 1116852
    "AudioBufferSourceNode": {
 -    "buffer": { "Buffer": true },
--    "playbackRate": {},
+-    "playbackRate": {
+-      "param": true,
+-    },
 -    "loop": {},
 -    "loopStart": {},
 -    "loopEnd": {}
 +    "properties": {
 +      "buffer": { "Buffer": true },
-+      "playbackRate": {},
++      "playbackRate": {
++        "param": true
++      },
 +      "loop": {},
 +      "loopStart": {},
 +      "loopEnd": {}
@@ -863,34 +1234,50 @@ index 09aebd6..6301f81 100644
 +    }
    },
    "DynamicsCompressorNode": {
--    "threshold": {},
--    "knee": {},
--    "ratio": {},
+-    "threshold": {
+-      "param": true
+-    },
+-    "knee": {
+-      "param": true
+-    },
+-    "ratio": {
+-      "param": true
+-    },
 -    "reduction": {},
--    "attack": {},
--    "release": {}
+-    "attack": {
+-      "param": true
+-    },
+-    "release": {
+-      "param": true
 +    "properties": {
-+      "threshold": {},
-+      "knee": {},
-+      "ratio": {},
++      "threshold": { "param": true },
++      "knee": { "param": true },
++      "ratio": { "param": true },
 +      "reduction": {},
-+      "attack": {},
-+      "release": {}
-+    }
++      "attack": { "param": true },
++      "release": { "param": true }
+     }
    },
    "BiquadFilterNode": {
 -    "type": {},
--    "frequency": {},
--    "Q": {},
--    "detune": {},
--    "gain": {}
+-    "frequency": {
+-      "param": true
+-    },
+-    "Q": {
+-      "param": true
+-    },
+-    "detune": {
+-      "param": true
+-    },
+-    "gain": {
+-      "param": true
 +    "properties": {
 +      "type": {},
-+      "frequency": {},
-+      "Q": {},
-+      "detune": {},
-+      "gain": {}
-+    }
++      "frequency": { "param": true },
++      "Q": { "param": true },
++      "detune": { "param": true },
++      "gain": { "param": true }
+     }
    },
    "WaveShaperNode": {
 -    "curve": { "Float32Array": true },
@@ -906,10 +1293,6 @@ index 09aebd6..6301f81 100644
 -    "maxDecibels": {},
 -    "smoothingTimeConstant": {},
 -    "frequencyBinCount": { "readonly": true },
--  },
--  "AudioDestinationNode": {},
--  "ChannelSplitterNode": {},
--  "ChannelMergerNode": {},
 +    "properties": {
 +      "fftSize": {},
 +      "minDecibels": {},
@@ -926,13 +1309,24 @@ index 09aebd6..6301f81 100644
 +  },
 +  "ChannelMergerNode": {
 +    "unbypassable": true
-+  },
+   },
+-  "AudioDestinationNode": {},
+-  "ChannelSplitterNode": {},
+-  "ChannelMergerNode": {},
    "MediaElementAudioSourceNode": {},
    "MediaStreamAudioSourceNode": {},
    "MediaStreamAudioDestinationNode": {
 -    "stream": { "MediaStream": true }
 +    "unbypassable": true,
-+    "properties": { "stream": { "MediaStream": true }}
++    "properties": {
++      "stream": { "MediaStream": true }
++    }
+   },
+   "StereoPannerNode": {
+-    "pan": {}
++    "properties": {
++      "pan": {}
++    }
    }
  };
  
@@ -941,7 +1335,26 @@ index 09aebd6..6301f81 100644
   * Audio Context graph.
   */
  types.addActorType("audionode");
-@@ -164,17 +187,19 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+@@ -179,17 +184,17 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+ 
+     try {
+       this.type = getConstructorName(node);
+     } catch (e) {
+       this.type = "";
+     }
+ 
+     // Create automation timelines for all AudioParams
+-    Object.keys(NODE_PROPERTIES[this.type])
++    Object.keys(NODE_PROPERTIES[this.type].properties || {})
+       .filter(isAudioParam.bind(null, node))
+       .forEach(paramName => {
+         this.automation[paramName] = new AutomationTimeline(node[paramName].defaultValue);
+       });
+   },
+ 
+   /**
+    * Returns the name of the audio type.
+@@ -218,40 +223,49 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
     * @return Boolean
     */
    isBypassed: method(function () {
@@ -961,8 +1374,41 @@ index 09aebd6..6301f81 100644
    /**
     * Takes a boolean, either enabling or disabling the "passThrough" option
     * on an AudioNode. If a node is bypassed, an effects processing node (like gain, biquad),
-    * will allow the audio stream to pass through the node, unaffected.
-@@ -269,28 +294,28 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+-   * will allow the audio stream to pass through the node, unaffected.
++   * will allow the audio stream to pass through the node, unaffected. Returns
++   * the bypass state of the node.
+    *
+    * @param Boolean enable
+    *        Whether the bypass value should be set on or off.
++   * @return Boolean
+    */
+   bypass: method(function (enable) {
+     let node = this.node.get();
+ 
+     if (node === null) {
+       return;
+     }
+ 
+-    node.passThrough = enable;
++    let bypassable = !NODE_PROPERTIES[this.type].unbypassable;
++    if (bypassable) {
++      node.passThrough = enable;
++    }
++
++    return this.isBypassed();
+   }, {
+     request: { enable: Arg(0, "boolean") },
+-    oneway: true
++    response: { bypassed: RetVal("boolean") }
+   }),
+ 
+   /**
+    * Changes a param on the audio node. Responds with either `undefined`
+    * on success, or a description of the error upon param set failure.
+    *
+    * @param String param
+    *        Name of the AudioParam to change.
+@@ -326,28 +340,28 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
     * Get an object containing key-value pairs of additional attributes
     * to be consumed by a front end, like if a property should be read only,
     * or is a special type (Float32Array, Buffer, etc.)
@@ -982,8 +1428,9 @@ index 09aebd6..6301f81 100644
     * Get an array of objects each containing a `param` and `value` property,
     * corresponding to a property name and current value of the audio node.
     */
-   getParams: method(function (param) {
+-  getParams: method(function () {
 -    let props = Object.keys(NODE_PROPERTIES[this.type]);
++  getParams: method(function (param) {
 +    let props = Object.keys(NODE_PROPERTIES[this.type].properties || {});
      return props.map(prop =>
        ({ param: prop, value: this.getParam(prop), flags: this.getParamFlags(prop) }));
@@ -993,7 +1440,7 @@ index 09aebd6..6301f81 100644
  
    /**
     * Connects this audionode to an AudioParam via `node.connect(param)`.
-@@ -414,16 +439,26 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -596,16 +610,26 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
    },
  
    destroy: function(conn) {
@@ -1020,7 +1467,7 @@ index 09aebd6..6301f81 100644
     */
    setup: method(function({ reload }) {
      // Used to track when something is happening with the web audio API
-@@ -593,17 +628,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+@@ -805,17 +829,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
  
    /**
     * Takes an XrayWrapper node, and attaches the node's `nativeID`
@@ -1040,5 +1487,5 @@ index 09aebd6..6301f81 100644
    },
  
 -- 
-1.8.4.2
+2.2.1
 
