@@ -1,0 +1,807 @@
+From 278cafe0c07a1702c7fa73eae69ebd21c0d3f7f0 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 16 Jan 2015 11:29:21 -0800
+Subject: Bug 1102350 - Implement invert-call-tree option in new
+ performance tool, backed by a pref, set on by default. r=vp
+
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1429,16 +1429,19 @@ pref("devtools.timeline.hiddenMarkers", "[]");
+ 
+ pref("devtools.performance.ui.show-timeline-memory", false);
+ 
+ // The default Profiler UI settings
+ pref("devtools.profiler.ui.flatten-tree-recursion", true);
+ pref("devtools.profiler.ui.show-platform-data", false);
+ pref("devtools.profiler.ui.show-idle-blocks", true);
+ 
++// The default Performance UI settings
++pref("devtools.performance.ui.invert-call-tree", true);
++
+ // The default cache UI setting
+ pref("devtools.cache.disabled", false);
+ 
+ // Enable the Network Monitor
+ pref("devtools.netmonitor.enabled", true);
+ 
+ // The default Network Monitor UI settings
+ pref("devtools.netmonitor.panes-network-details-width", 550);
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 133a0e6..7bf0d2e 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -91,16 +91,17 @@ browser.jar:
+     content/browser/devtools/profiler.js                               (profiler/profiler.js)
+     content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+     content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+ #ifdef MOZ_DEVTOOLS_PERFTOOLS
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/performance-controller.js     (performance/performance-controller.js)
+     content/browser/devtools/performance/performance-view.js           (performance/performance-view.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
++    content/browser/devtools/performance/views/toolbar.js              (performance/views/toolbar.js)
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/details-call-tree.js    (performance/views/details-call-tree.js)
+     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
+     content/browser/devtools/performance/views/details-flamegraph.js   (performance/views/details-flamegraph.js)
+     content/browser/devtools/performance/views/recordings.js           (performance/views/recordings.js)
+ #endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index e986d6d..22b35a9 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -39,30 +39,37 @@ devtools.lazyRequireGetter(this, "Waterfall",
+ devtools.lazyRequireGetter(this, "MarkerDetails",
+   "devtools/timeline/marker-details", true);
+ devtools.lazyRequireGetter(this, "CallView",
+   "devtools/profiler/tree-view", true);
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/profiler/tree-model", true);
+ devtools.lazyRequireGetter(this, "FrameNode",
+   "devtools/profiler/tree-model", true);
++devtools.lazyRequireGetter(this, "OptionsView",
++  "devtools/shared/options-view", true);
+ 
+ devtools.lazyImporter(this, "CanvasGraphUtils",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "FlameGraphUtils",
+   "resource:///modules/devtools/FlameGraph.jsm");
+ devtools.lazyImporter(this, "FlameGraph",
+   "resource:///modules/devtools/FlameGraph.jsm");
+ devtools.lazyImporter(this, "SideMenuWidget",
+   "resource:///modules/devtools/SideMenuWidget.jsm");
+ 
++const BRANCH_NAME = "devtools.performance.ui.";
++
+ // Events emitted by various objects in the panel.
+ const EVENTS = {
++  // Fired by the OptionsView when a preference changes.
++  PREF_CHANGED: "Preformance:PrefChanged",
++
+   // Emitted by the PerformanceController or RecordingView
+   // when a recording model is selected
+   RECORDING_SELECTED: "Performance:RecordingSelected",
+ 
+   // Emitted by the PerformanceView on record button click
+   UI_START_RECORDING: "Performance:UI:StartRecording",
+   UI_STOP_RECORDING: "Performance:UI:StopRecording",
+ 
+@@ -161,53 +168,64 @@ let PrefObserver = {
+ let PerformanceController = {
+   _recordings: [],
+   _currentRecording: null,
+ 
+   /**
+    * Listen for events emitted by the current tab target and
+    * main UI events.
+    */
+-  initialize: function() {
++  initialize: Task.async(function* () {
+     this.startRecording = this.startRecording.bind(this);
+     this.stopRecording = this.stopRecording.bind(this);
+     this.importRecording = this.importRecording.bind(this);
+     this.exportRecording = this.exportRecording.bind(this);
+     this._onTimelineData = this._onTimelineData.bind(this);
+     this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
++    this._onPrefChanged = this._onPrefChanged.bind(this);
+ 
++    ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.on(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+     gFront.on("ticks", this._onTimelineData); // framerate
+     gFront.on("markers", this._onTimelineData); // timeline markers
+     gFront.on("frames", this._onTimelineData); // stack frames
+     gFront.on("memory", this._onTimelineData); // timeline memory
+-  },
++  }),
+ 
+   /**
+    * Remove events handled by the PerformanceController
+    */
+   destroy: function() {
++    ToolbarView.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.off(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+     gFront.off("ticks", this._onTimelineData);
+     gFront.off("markers", this._onTimelineData);
+     gFront.off("frames", this._onTimelineData);
+     gFront.off("memory", this._onTimelineData);
+   },
+ 
+   /**
++   * Get a preference setting from `prefName` via the underlying
++   * OptionsView in the ToolbarView.
++   */
++  getPref: function (prefName) {
++    return ToolbarView.optionsView.getPref(prefName);
++  },
++
++  /**
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+     let recording = this.createNewRecording();
+     this.setCurrentRecording(recording);
+     yield recording.startRecording();
+ 
+@@ -310,16 +328,24 @@ let PerformanceController = {
+   },
+ 
+   /**
+    * Fired from RecordingsView, we listen on the PerformanceController so we can
+    * set it here and re-emit on the controller, where all views can listen.
+    */
+   _onRecordingSelectFromView: function (_, recording) {
+     this.setCurrentRecording(recording);
++  },
++
++  /**
++   * Fired when the ToolbarView fires a PREF_CHANGED event.
++   * with the value.
++   */
++  _onPrefChanged: function (_, prefName, value) {
++    this.emit(EVENTS.PREF_CHANGED, prefName, value);
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
+index 900c31e..5a45da1 100644
+--- a/browser/devtools/performance/performance-view.js
++++ b/browser/devtools/performance/performance-view.js
+@@ -24,16 +24,17 @@ let PerformanceView = {
+ 
+     // Bind to controller events to unlock the record button
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
+ 
+     return promise.all([
+       RecordingsView.initialize(),
+       OverviewView.initialize(),
++      ToolbarView.initialize(),
+       DetailsView.initialize()
+     ]);
+   },
+ 
+   /**
+    * Unbinds events and destroys subviews.
+    */
+   destroy: function () {
+@@ -41,16 +42,17 @@ let PerformanceView = {
+     this._importButton.removeEventListener("click", this._onImportButtonClick);
+ 
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
+ 
+     return promise.all([
+       RecordingsView.destroy(),
+       OverviewView.destroy(),
++      ToolbarView.destroy(),
+       DetailsView.destroy()
+     ]);
+   },
+ 
+   /**
+    * Adds the `locked` attribute on the record button. This prevents it
+    * from being clicked while recording is started or stopped.
+    */
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 39fc2fe..65b9b5c 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -13,22 +13,32 @@
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+   <script type="application/javascript" src="performance/performance-controller.js"/>
+   <script type="application/javascript" src="performance/performance-view.js"/>
+   <script type="application/javascript" src="performance/recording-model.js"/>
+   <script type="application/javascript" src="performance/views/overview.js"/>
++  <script type="application/javascript" src="performance/views/toolbar.js"/>
+   <script type="application/javascript" src="performance/views/details.js"/>
+   <script type="application/javascript" src="performance/views/details-call-tree.js"/>
+   <script type="application/javascript" src="performance/views/details-waterfall.js"/>
+   <script type="application/javascript" src="performance/views/details-flamegraph.js"/>
+   <script type="application/javascript" src="performance/views/recordings.js"/>
+ 
++  <popupset id="performance-options-popupset">
++    <menupopup id="performance-options-menupopup">
++      <menuitem id="option-invert-call-tree"
++                type="checkbox"
++                data-pref="invert-call-tree"
++                label="&profilerUI.invertTree;"
++                tooltiptext="&profilerUI.invertTree.tooltiptext;"/>
++    </menupopup>
++  </popupset>
+   <hbox class="theme-body" flex="1">
+     <vbox id="recordings-pane">
+       <toolbar id="recordings-toolbar"
+                class="devtools-toolbar">
+         <hbox id="recordings-controls"
+               class="devtools-toolbarbutton-group">
+           <toolbarbutton id="record-button"
+                          class="devtools-toolbarbutton"
+@@ -52,16 +62,22 @@
+           <toolbarbutton id="select-calltree-view"
+                          class="devtools-toolbarbutton"
+                          data-view="calltree" />
+           <toolbarbutton id="select-flamegraph-view"
+                          class="devtools-toolbarbutton"
+                          data-view="flamegraph" />
+         </hbox>
+         <spacer flex="1"></spacer>
++        <hbox id="performance-toolbar-control-options" class="devtools-toolbarbutton-group">
++          <toolbarbutton id="performance-options-button"
++                         class="devtools-toolbarbutton devtools-option-toolbarbutton"
++                         popup="performance-options-menupopup"
++                         tooltiptext="&profilerUI.options.tooltiptext;"/>
++        </hbox>
+       </toolbar>
+ 
+       <vbox id="overview-pane">
+         <hbox id="markers-overview"/>
+         <hbox id="memory-overview"/>
+         <hbox id="time-framerate"/>
+       </vbox>
+       <deck id="details-pane" flex="1">
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index b0a6765..211e130 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -22,16 +22,17 @@ support-files =
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+ #[browser_perf-front-profiler-06.js]
+ [browser_perf-front.js]
+ [browser_perf-jump-to-debugger-01.js]
+ [browser_perf-jump-to-debugger-02.js]
++[browser_perf-options-invert-call-tree.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
+ [browser_perf-overview-selection-01.js]
+ [browser_perf-overview-selection-02.js]
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-shared-connection-02.js]
+ [browser_perf-shared-connection-03.js]
+ # [browser_perf-shared-connection-04.js] bug 1077464
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-call-tree.js b/browser/devtools/performance/test/browser_perf-options-invert-call-tree.js
+new file mode 100644
+index 0000000..7eeb32b
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-options-invert-call-tree.js
+@@ -0,0 +1,36 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++const INVERT_PREF = "devtools.performance.ui.invert-call-tree";
++
++/**
++ * Tests that the call tree view renders after recording.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, CallTreeView } = panel.panelWin;
++
++  Services.prefs.setBoolPref(INVERT_PREF, true);
++
++  yield startRecording(panel);
++  yield busyWait(100);
++
++  let rendered = once(CallTreeView, EVENTS.CALL_TREE_RENDERED);
++  yield stopRecording(panel);
++  yield rendered;
++
++  rendered = once(CallTreeView, EVENTS.CALL_TREE_RENDERED);
++  Services.prefs.setBoolPref(INVERT_PREF, false);
++  yield rendered;
++
++  ok(true, "CallTreeView rerendered when toggling invert-call-tree.");
++
++  rendered = once(CallTreeView, EVENTS.CALL_TREE_RENDERED);
++  Services.prefs.setBoolPref(INVERT_PREF, true);
++  yield rendered;
++
++  ok(true, "CallTreeView rerendered when toggling back invert-call-tree.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 95507c0..4e9d932 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -1,25 +1,16 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ 
+-// Enable logging for all the tests. Both the debugger server and frontend will
+-// be affected by this pref.
+-let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
+-Services.prefs.setBoolPref("devtools.debugger.log", false);
+-
+-// Enable the new performance panel for all tests. Remove this after
+-// bug 1075567 is resolved.
+-let gToolEnabled = Services.prefs.getBoolPref("devtools.performance_dev.enabled");
+-
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
+ let { getPerformanceActorsConnection, PerformanceFront } = devtools.require("devtools/performance/front");
+ let nsIProfilerModule = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+@@ -30,33 +21,52 @@ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-u
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
+ const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ gDevTools.testing = true;
+ 
++let DEFAULT_PREFS = [
++  "devtools.debugger.log",
++  "devtools.performance.ui.invert-call-tree",
++  // remove after bug 1075567 is resolved.
++  "devtools.performance_dev.enabled"
++].reduce((prefs, pref) => {
++  prefs[pref] = Services.prefs.getBoolPref(pref);
++  return prefs;
++}, {});
++
++// Enable the new performance panel for all tests. Remove this after
++// bug 1075567 is resolved.
++Services.prefs.setBoolPref("devtools.performance_dev.enabled", true);
++// Enable logging for all the tests. Both the debugger server and frontend will
++// be affected by this pref.
++Services.prefs.setBoolPref("devtools.debugger.log", false);
++
+ /**
+  * Call manually in tests that use frame script utils after initializing
+  * the tool. Must be called after initializing so we can detect
+  * whether or not `content` is a CPOW or not. Call after init but before navigating
+  * to different pages.
+  */
+ function loadFrameScripts () {
+   mm = gBrowser.selectedBrowser.messageManager;
+   mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
+ }
+ 
+ registerCleanupFunction(() => {
+   gDevTools.testing = false;
+   info("finish() was called, cleaning up...");
+ 
+-  Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
+-  Services.prefs.setBoolPref("devtools.performance_dev.enabled", gToolEnabled);
++  // Rollback any pref changes
++  Object.keys(DEFAULT_PREFS).forEach(pref => {
++    Services.prefs.setBoolPref(pref, DEFAULT_PREFS[pref]);
++  });
+ 
+   // Make sure the profiler module is stopped when the test finishes.
+   nsIProfilerModule.StopProfiler();
+ 
+   Cu.forceGC();
+ });
+ 
+ function addTab(aUrl, aWindow) {
+@@ -163,17 +173,16 @@ function initPerformance(aUrl, selectedTool="performance") {
+   info("Initializing a performance pane.");
+ 
+   return Task.spawn(function*() {
+     let tab = yield addTab(aUrl);
+     let target = TargetFactory.forTab(tab);
+ 
+     yield target.makeRemote();
+ 
+-    Services.prefs.setBoolPref("devtools.performance_dev.enabled", true);
+     let toolbox = yield gDevTools.showToolbox(target, selectedTool);
+     let panel = toolbox.getCurrentPanel();
+     return { target, panel, toolbox };
+   });
+ }
+ 
+ function* teardown(panel) {
+   info("Destroying the performance tool.");
+diff --git a/browser/devtools/performance/views/details-call-tree.js b/browser/devtools/performance/views/details-call-tree.js
+index a69a4cc..5a80c49 100644
+--- a/browser/devtools/performance/views/details-call-tree.js
++++ b/browser/devtools/performance/views/details-call-tree.js
+@@ -9,30 +9,33 @@
+ let CallTreeView = {
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     this._callTree = $(".call-tree-cells-container");
+     this._onRecordingStoppedOrSelected = this._onRecordingStoppedOrSelected.bind(this);
+     this._onRangeChange = this._onRangeChange.bind(this);
++    this._onPrefChanged = this._onPrefChanged.bind(this);
+     this._onLink = this._onLink.bind(this);
+ 
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
++    PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_SELECTED, this._onRangeChange);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_CLEARED, this._onRangeChange);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
++    PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_SELECTED, this._onRangeChange);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_CLEARED, this._onRangeChange);
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering a new call tree.
+    */
+   render: function (profilerData, beginAt, endAt, options={}) {
+@@ -80,18 +83,17 @@ let CallTreeView = {
+ 
+   /**
+    * Called when the recording is stopped and prepares data to
+    * populate the call tree.
+    */
+   _prepareCallTree: function (profilerData, beginAt, endAt, options) {
+     let threadSamples = profilerData.profile.threads[0].samples;
+     let contentOnly = !Prefs.showPlatformData;
+-    // TODO handle inverted tree bug 1102347
+-    let invertTree = false;
++    let invertTree = PerformanceController.getPref("invert-call-tree");
+ 
+     let threadNode = new ThreadNode(threadSamples, contentOnly, beginAt, endAt, invertTree);
+     options.inverted = invertTree && threadNode.samples > 0;
+ 
+     return threadNode;
+   },
+ 
+   /**
+@@ -109,16 +111,27 @@ let CallTreeView = {
+     root.on("link", this._onLink);
+ 
+     // Clear out other call trees.
+     this._callTree.innerHTML = "";
+     root.attachTo(this._callTree);
+ 
+     let contentOnly = !Prefs.showPlatformData;
+     root.toggleCategories(!contentOnly);
++  },
++
++  /**
++   * Called when a preference under "devtools.performance.ui." is changed.
++   */
++  _onPrefChanged: function (_, prefName, value) {
++    if (prefName === "invert-call-tree") {
++      let { beginAt, endAt } = OverviewView.getRange();
++      let profilerData = PerformanceController.getCurrentRecording().getProfilerData();
++      this.render(profilerData, beginAt || void 0, endAt || void 0);
++    }
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the view.
+  */
+ EventEmitter.decorate(CallTreeView);
+ 
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 43db019..2bdd2ae 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -19,16 +19,19 @@ const MEMORY_GRAPH_HEIGHT = 30; // px
+ 
+ const GRAPH_SCROLL_EVENTS_DRAIN = 50; // ms
+ 
+ /**
+  * View handler for the overview panel's time view, displaying
+  * framerate, markers and memory over time.
+  */
+ let OverviewView = {
++  _beginAt: null,
++  _endAt: null,
++
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: Task.async(function *() {
+     this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
+     this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onRecordingTick = this._onRecordingTick.bind(this);
+@@ -64,16 +67,23 @@ let OverviewView = {
+ 
+     clearNamedTimeout("graph-scroll");
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+   },
+ 
+   /**
++   * Gets currently selected range's beginAt and endAt values.
++   */
++  getRange: function () {
++    return { beginAt: this._beginAt, endAt: this._endAt };
++  },
++
++  /**
+    * Sets up the framerate graph.
+    */
+   _showFramerateGraph: Task.async(function *() {
+     this.framerateGraph = new LineGraphWidget($("#time-framerate"), {
+       metric: L10N.getStr("graphs.fps")
+     });
+     this.framerateGraph.fixedHeight = FRAMERATE_GRAPH_HEIGHT;
+     yield this.framerateGraph.ready();
+@@ -143,18 +153,22 @@ let OverviewView = {
+ 
+   /**
+    * Fired when the graph selection has changed. Called by
+    * mouseup and scroll events.
+    */
+   _onSelectionChange: function () {
+     if (this.framerateGraph.hasSelection()) {
+       let { min: beginAt, max: endAt } = this.framerateGraph.getMappedSelection();
++      this._beginAt = beginAt;
++      this._endAt = endAt;
+       this.emit(EVENTS.OVERVIEW_RANGE_SELECTED, { beginAt, endAt });
+     } else {
++      this._beginAt = null;
++      this._endAt = null;
+       this.emit(EVENTS.OVERVIEW_RANGE_CLEARED);
+     }
+   },
+ 
+   /**
+    * Listener handling the "mouseup" event for the framerate graph.
+    * Fires an event to be handled elsewhere.
+    */
+diff --git a/browser/devtools/performance/views/toolbar.js b/browser/devtools/performance/views/toolbar.js
+new file mode 100644
+index 0000000..673cc120
+--- /dev/null
++++ b/browser/devtools/performance/views/toolbar.js
+@@ -0,0 +1,43 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * View handler for toolbar events (mostly option toggling and triggering)
++ */
++let ToolbarView = {
++  /**
++   * Sets up the view with event binding.
++   */
++  initialize: Task.async(function *() {
++    this._onPrefChanged = this._onPrefChanged.bind(this);
++
++    this.optionsView = new OptionsView({
++      branchName: BRANCH_NAME,
++      menupopup: $("#performance-options-menupopup")
++    });
++
++    yield this.optionsView.initialize();
++    this.optionsView.on("pref-changed", this._onPrefChanged);
++  }),
++
++  /**
++   * Unbinds events and cleans up view.
++   */
++  destroy: function () {
++    this.optionsView.off("pref-changed", this._onPrefChanged);
++    this.optionsView.destroy();
++  },
++
++  /**
++   * Fired when a preference changes in the underlying OptionsView.
++   * Propogated by the PerformanceController.
++   */
++  _onPrefChanged: function (_, prefName) {
++    let value = Services.prefs.getBoolPref(BRANCH_NAME + prefName);
++    this.emit(EVENTS.PREF_CHANGED, prefName, value);
++  }
++};
++
++EventEmitter.decorate(ToolbarView);
+diff --git a/browser/devtools/shared/options-view.js b/browser/devtools/shared/options-view.js
+index 8c2949e..2f8b7b1 100644
+--- a/browser/devtools/shared/options-view.js
++++ b/browser/devtools/shared/options-view.js
+@@ -3,27 +3,26 @@ const { Services } = require("resource://gre/modules/Services.jsm");
+ 
+ const OPTIONS_SHOWN_EVENT = "options-shown";
+ const OPTIONS_HIDDEN_EVENT = "options-hidden";
+ const PREF_CHANGE_EVENT = "pref-changed";
+ 
+ /**
+  * OptionsView constructor. Takes several options, all required:
+  * - branchName: The name of the prefs branch, like "devtools.debugger."
+- * - window: The window the XUL elements live in.
+  * - menupopup: The XUL `menupopup` item that contains the pref buttons.
+  *
+  * Fires an event, PREF_CHANGE_EVENT, with the preference name that changed as the second
+  * argument. Fires events on opening/closing the XUL panel (OPTIONS_SHOW_EVENT, OPTIONS_HIDDEN_EVENT)
+  * as the second argument in the listener, used for tests mostly.
+  */
+ const OptionsView = function (options={}) {
+   this.branchName = options.branchName;
+-  this.window = options.window;
+   this.menupopup = options.menupopup;
++  this.window = this.menupopup.ownerDocument.defaultView;
+   let { document } = this.window;
+   this.$ = document.querySelector.bind(document);
+   this.$$ = document.querySelectorAll.bind(document);
+ 
+   this.prefObserver = new PrefObserver(this.branchName);
+ 
+   EventEmitter.decorate(this);
+ };
+@@ -74,16 +73,23 @@ OptionsView.prototype = {
+   destroy: function () {
+     this.mutationObserver.disconnect();
+     this.prefObserver.off(PREF_CHANGE_EVENT, this._onPrefChange);
+     this.menupopup.removeEventListener("popupshown", this._onPopupShown);
+     this.menupopup.removeEventListener("popuphidden", this._onPopupHidden);
+   },
+ 
+   /**
++   * Returns the value for the specified `prefName`
++   */
++  getPref: function (prefName) {
++    return this.prefObserver.get(prefName);
++  },
++
++  /**
+    * Called when a preference is changed (either via clicking an option
+    * button or by changing it in about:config). Updates the checked status
+    * of the corresponding button.
+    */
+   _onPrefChange: function (_, prefName) {
+     let $el = this.$(`menuitem[data-pref="${prefName}"]`, this.menupopup);
+     let value = this.prefObserver.get(prefName);
+ 
+diff --git a/browser/devtools/shared/test/browser_options-view-01.js b/browser/devtools/shared/test/browser_options-view-01.js
+index 1276005..c1b5f4b 100644
+--- a/browser/devtools/shared/test/browser_options-view-01.js
++++ b/browser/devtools/shared/test/browser_options-view-01.js
+@@ -39,16 +39,20 @@ function* testOptionsView(tab) {
+ 
+   // Test default config
+   is(ppEl.getAttribute("checked"), "true", "`true` prefs are checked on start");
+   is(bbEl.getAttribute("checked"), "", "`false` prefs are unchecked on start");
+ 
+   // Test buttons update when preferences update outside of the menu
+   Services.prefs.setBoolPref(BRANCH + PRETTY_PRINT_PREF, false);
+   Services.prefs.setBoolPref(BRANCH + BLACK_BOX_PREF, true);
++
++  is(options.getPref(PRETTY_PRINT_PREF), false, "getPref returns correct value");
++  is(options.getPref(BLACK_BOX_PREF), true, "getPref returns correct value");
++
+   is(ppEl.getAttribute("checked"), "", "menuitems update when preferences change");
+   is(bbEl.getAttribute("checked"), "true", "menuitems update when preferences change");
+ 
+   // Tests events are fired when preferences update outside of the menu
+   is(events.length, 2, "two 'pref-changed' events fired");
+   is(events[0], "auto-pretty-print", "correct pref passed in 'pref-changed' event (auto-pretty-print)");
+   is(events[1], "auto-black-box", "correct pref passed in 'pref-changed' event (auto-black-box)");
+ 
+@@ -60,16 +64,18 @@ function* testOptionsView(tab) {
+   yield click(options, window, bbEl);
+   is(bbEl.getAttribute("checked"), "", "menuitems update when clicked");
+   is(Services.prefs.getBoolPref(BRANCH + BLACK_BOX_PREF), false, "preference updated via click");
+ 
+   // Tests events are fired when preferences updated via click
+   is(events.length, 4, "two 'pref-changed' events fired");
+   is(events[2], "auto-pretty-print", "correct pref passed in 'pref-changed' event (auto-pretty-print)");
+   is(events[3], "auto-black-box", "correct pref passed in 'pref-changed' event (auto-black-box)");
++
++  yield options.destroy();
+ }
+ 
+ function wait(window) {
+   return new Promise(function (resolve, reject) {
+   window.setTimeout(() => resolve, 60000);
+   });
+ }
+ function createOptionsView (tab) {
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+index 4cab312..3fa9cd1 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+@@ -36,28 +36,33 @@
+ <!-- LOCALIZATION NOTE (profilerUI.exportButton): This string is displayed
+   -  on a button that opens a dialog to export a saved profile data file. -->
+ <!ENTITY profilerUI.exportButton "Save">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.clearButton): This string is displayed
+   -  on a button that remvoes all the recordings. -->
+ <!ENTITY profilerUI.clearButton "Clear">
+ 
+-<!-- LOCALIZATION NOTE (profilerUI.invertTree): This is the label shown next to
+-  -  a checkbox that inverts and un-inverts the profiler's call tree. -->
+-<!ENTITY profilerUI.invertTree "Invert Call Tree">
+-
+-<!-- LOCALIZATION NOTE (profilerUI.invertTree.tooltiptext): This is the tooltip
+-  -  for the tree-inverting checkbox's label.  -->
+-<!ENTITY profilerUI.invertTree.tooltiptext "Inverting the call tree displays the profiled call paths starting from the youngest frames and expanding out to the older frames.">
+-
+ <!-- LOCALIZATION NOTE (profilerUI.table.*): These strings are displayed
+   -  in the call tree headers for a recording. -->
+ <!ENTITY profilerUI.table.totalDuration   "Total Time (ms)">
+ <!ENTITY profilerUI.table.selfDuration    "Self Time (ms)">
+ <!ENTITY profilerUI.table.totalPercentage "Total Cost">
+ <!ENTITY profilerUI.table.selfPercentage  "Self Cost">
+ <!ENTITY profilerUI.table.samples         "Samples">
+ <!ENTITY profilerUI.table.function        "Function">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.newtab.tooltiptext): The tooltiptext shown
+   -  on the "+" (new tab) button for a profile when a selection is available. -->
+ <!ENTITY profilerUI.newtab.tooltiptext "Add new tab from selection">
++
++<!-- LOCALIZATION NOTE (profilerUI.options.tooltiptext): This is the tooltip
++  -  for the options button. -->
++<!ENTITY profilerUI.options.tooltiptext "Configure performance preferences.">
++
++<!-- LOCALIZATION NOTE (profilerUI.invertTree): This is the label shown next to
++  -  a checkbox that inverts and un-inverts the profiler's call tree. -->
++<!ENTITY profilerUI.invertTree "Invert Call Tree">
++
++<!-- LOCALIZATION NOTE (profilerUI.invertTree.tooltiptext): This is the tooltip
++  -  for the tree-inverting checkbox's label.  -->
++<!ENTITY profilerUI.invertTree.tooltiptext "Inverting the call tree displays the profiled call paths starting from the youngest frames and expanding out to the older frames.">
++
+-- 
+2.2.1
+
