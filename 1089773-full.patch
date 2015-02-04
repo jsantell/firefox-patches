@@ -1,0 +1,766 @@
+From 5ada10f5173c607f938443e0d79209949a5e8725 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 20 Jan 2015 17:18:12 -0800
+Subject: [PATCH 1/2] Bug 1089773 - Expose memory allocations for audio nodes
+ via WebAudioActor.getReport(). r=vp
+
+---
+ browser/devtools/webaudioeditor/test/browser.ini   |  1 +
+ .../test/browser_webaudio-actor-get-memory.js      | 26 ++++++++++
+ toolkit/devtools/server/actors/webaudio.js         | 55 ++++++++++++++++------
+ 3 files changed, 68 insertions(+), 14 deletions(-)
+ create mode 100644 browser/devtools/webaudioeditor/test/browser_webaudio-actor-get-memory.js
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 3012b7e..c0152fc 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -25,16 +25,17 @@ support-files =
+ [browser_audionode-actor-connectparam.js]
+ [browser_audionode-actor-add-automation-event.js]
+ [browser_audionode-actor-get-automation-data-01.js]
+ [browser_audionode-actor-get-automation-data-02.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
+ [browser_webaudio-actor-connect-param.js]
+ [browser_webaudio-actor-automation-event.js]
++[browser_webaudio-actor-get-memory.js]
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ [browser_wa_reset-04.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_webaudio-actor-get-memory.js b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-get-memory.js
+new file mode 100644
+index 0000000..d51dbaf
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_webaudio-actor-get-memory.js
+@@ -0,0 +1,26 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test that the WebAudioActor.getMemory() returns a hash of memory in bytes.
++ */
++
++add_task(function*() {
++  let { target, front } = yield initBackend(SIMPLE_CONTEXT_URL);
++
++  let [_, [destNode, oscNode, gainNode], [connect1, connect2]] = yield Promise.all([
++    front.setup({ reload: true }),
++    get3(front, "create-node"),
++    get2(front, "connect-node")
++  ]);
++
++  let mem = null;
++  while (!(mem = yield front.getMemory())) {}
++
++  is(Object.keys(mem).length, 3, "getMemory() only returns memory information for current nodes");
++  is(typeof mem[destNode.actorID], "number", "getMemory() returns memory for DestinationNode");
++  is(typeof mem[gainNode.actorID], "number", "getMemory() returns memory for GainNode");
++  is(typeof mem[oscNode.actorID], "number", "getMemory() returns memory for OscillatorNode");
++
++  yield removeTab(target.tab);
++});
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index c610176..d7bac69 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -2,26 +2,27 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ 
+ const Services = require("Services");
+ 
+-const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+-const events = require("sdk/event/core");
++const { Task } = require("resource://gre/modules/Task.jsm");
++const { Promise: promise } = require("resource://gre/modules/Promise.jsm");
++const { on, once, off, emit } = require("sdk/event/core");
+ const { on: systemOn, off: systemOff } = require("sdk/system/events");
+-const protocol = require("devtools/server/protocol");
+ const { CallWatcherActor, CallWatcherFront } = require("devtools/server/actors/call-watcher");
+ const { ThreadActor } = require("devtools/server/actors/script");
+ const AutomationTimeline = require("./utils/automation-timeline");
++const {
++  types, method, Arg, Option, RetVal, Actor, ActorClass, Front, FrontClass
++} = require("devtools/server/protocol");
+ 
+-const { on, once, off, emit } = events;
+-const { types, method, Arg, Option, RetVal } = protocol;
+ 
+ const AUTOMATION_GRANULARITY = 2000;
+ const AUTOMATION_GRANULARITY_MAX = 6000;
+ 
+ const AUDIO_GLOBALS = [
+   "AudioContext", "AudioNode", "AudioParam"
+ ];
+ 
+@@ -149,29 +150,29 @@ const NODE_PROPERTIES = {
+   }
+ };
+ 
+ /**
+  * An Audio Node actor allowing communication to a specific audio node in the
+  * Audio Context graph.
+  */
+ types.addActorType("audionode");
+-let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
++let AudioNodeActor = exports.AudioNodeActor = ActorClass({
+   typeName: "audionode",
+ 
+   /**
+    * Create the Audio Node actor.
+    *
+    * @param DebuggerServerConnection conn
+    *        The server connection.
+    * @param AudioNode node
+    *        The AudioNode that was created.
+    */
+   initialize: function (conn, node) {
+-    protocol.Actor.prototype.initialize.call(this, conn);
++    Actor.prototype.initialize.call(this, conn);
+ 
+     // Store ChromeOnly property `id` to identify AudioNode,
+     // rather than storing a strong reference, and store a weak
+     // ref to underlying node for controlling.
+     this.nativeID = node.id;
+     this.node = Cu.getWeakReference(node);
+ 
+     // Stores the AutomationTimelines for this node's AudioParams.
+@@ -556,52 +557,52 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+     let timeline = this.automation[paramName];
+     timeline[eventName].apply(timeline, args);
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the AudioNodeActor.
+  */
+-let AudioNodeFront = protocol.FrontClass(AudioNodeActor, {
++let AudioNodeFront = FrontClass(AudioNodeActor, {
+   initialize: function (client, form) {
+-    protocol.Front.prototype.initialize.call(this, client, form);
++    Front.prototype.initialize.call(this, client, form);
+     // if we were manually passed a form, this was created manually and
+     // needs to own itself for now.
+     if (form) {
+       this.manage(this);
+     }
+   }
+ });
+ 
+ /**
+  * The Web Audio Actor handles simple interaction with an AudioContext
+  * high-level methods. After instantiating this actor, you'll need to set it
+  * up by calling setup().
+  */
+-let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
++let WebAudioActor = exports.WebAudioActor = ActorClass({
+   typeName: "webaudio",
+   initialize: function(conn, tabActor) {
+-    protocol.Actor.prototype.initialize.call(this, conn);
++    Actor.prototype.initialize.call(this, conn);
+     this.tabActor = tabActor;
+ 
+     this._onContentFunctionCall = this._onContentFunctionCall.bind(this);
+ 
+     // Store ChromeOnly ID (`nativeID` property on AudioNodeActor) mapped
+     // to the associated actorID, so we don't have to expose `nativeID`
+     // to the client in any way.
+     this._nativeToActorID = new Map();
+ 
+     this._onDestroyNode = this._onDestroyNode.bind(this);
+     this._onGlobalDestroyed = this._onGlobalDestroyed.bind(this);
+     this._onGlobalCreated = this._onGlobalCreated.bind(this);
+   },
+ 
+   destroy: function(conn) {
+-    protocol.Actor.prototype.destroy.call(this, conn);
++    Actor.prototype.destroy.call(this, conn);
+     this.finalize();
+   },
+ 
+   /**
+    * Starts waiting for the current tab actor's document global to be
+    * created, in order to instrument the Canvas context and become
+    * aware of everything the content does with Web Audio.
+    *
+@@ -638,16 +639,39 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     // the global destruction and the `finalize` cleanup method on the actor.
+     on(this.tabActor, "window-destroyed", this._onGlobalDestroyed);
+   }, {
+     request: { reload: Option(0, "boolean") },
+     oneway: true
+   }),
+ 
+   /**
++   * Returns a hash of AudioNodeActor IDs with their memory consumption in bytes.
++   */
++  getMemory: method(Task.async(function *() {
++    let mem = yield this.context.getMemoryReport();
++
++    // Reduce memory down to a hash of only nodes that
++    // are currently on this document and context, and
++    // use actorIDs as the key instead of nativeIDs (as the front
++    // end does not currently have access to nativeIDs)
++    return Object.keys(mem).reduce((ret, nativeID) => {
++      let actor = this._getActorByNativeID(nativeID);
++      // If no actor found, probably a remenant from previous page that has
++      // not yet been collected
++      if (actor) {
++        ret[actor.actorID] = mem[nativeID];
++      }
++      return ret;
++    }, {});
++  }), {
++    response: { memory: RetVal("nullable:json") }
++  }),
++
++  /**
+    * Invoked whenever an instrumented function is called, like an AudioContext
+    * method or an AudioNode method.
+    */
+   _onContentFunctionCall: function(functionCall) {
+     let { name } = functionCall.details;
+ 
+     // All Web Audio nodes inherit from AudioNode's prototype, so
+     // hook into the `connect` and `disconnect` methods
+@@ -684,16 +708,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+ 
+   _handleCreationCall: function (functionCall) {
+     let { caller, result } = functionCall.details;
+     // Keep track of the first node created, so we can alert
+     // the front end that an audio context is being used since
+     // we're not hooking into the constructor itself, just its
+     // instance's methods.
+     if (!this._firstNodeCreated) {
++      this.context = caller;
+       // Fire the start-up event if this is the first node created
+       // and trigger a `create-node` event for the context destination
+       this._onStartContext();
+       this._onCreateNode(caller.destination);
+       this._firstNodeCreated = true;
+     }
+     this._onCreateNode(result);
+   },
+@@ -727,16 +752,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     if (!this._initialized) {
+       return;
+     }
+     this._initialized = false;
+     systemOff("webaudio-node-demise", this._onDestroyNode);
+ 
+     off(this.tabActor, "window-destroyed", this._onGlobalDestroyed);
+     off(this.tabActor, "window-ready", this._onGlobalCreated);
++    this.context = null;
+     this.tabActor = null;
+     this._nativeToActorID = null;
+     this._callWatcher.eraseRecording();
+     this._callWatcher.finalize();
+     this._callWatcher = null;
+   }, {
+    oneway: true
+   }),
+@@ -943,26 +969,27 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+   _onGlobalDestroyed: function ({id}) {
+     if (this._callWatcher._tracedWindowId !== id) {
+       return;
+     }
+ 
+     if (this._nativeToActorID) {
+       this._nativeToActorID.clear();
+     }
++    this.context = null;
+     systemOff("webaudio-node-demise", this._onDestroyNode);
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the WebAudioActor.
+  */
+-let WebAudioFront = exports.WebAudioFront = protocol.FrontClass(WebAudioActor, {
++let WebAudioFront = exports.WebAudioFront = FrontClass(WebAudioActor, {
+   initialize: function(client, { webaudioActor }) {
+-    protocol.Front.prototype.initialize.call(this, client, { actor: webaudioActor });
++    Front.prototype.initialize.call(this, client, { actor: webaudioActor });
+     this.manage(this);
+   }
+ });
+ 
+ WebAudioFront.AUTOMATION_METHODS = new Set(AUTOMATION_METHODS);
+ WebAudioFront.NODE_CREATION_METHODS = new Set(NODE_CREATION_METHODS);
+ WebAudioFront.NODE_ROUTING_METHODS = new Set(NODE_ROUTING_METHODS);
+ 
+-- 
+2.2.1
+
+
+From 9d7afaaf443b99369de44770cfac4a88cbc30a0c Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 20 Jan 2015 17:21:05 -0800
+Subject: [PATCH 2/2] Add platform for bug 1089193
+
+---
+ dom/media/MediaStreamGraph.cpp       | 52 +++++++++++++++++++++++++++++++++++-
+ dom/media/MediaStreamGraph.h         |  7 +++++
+ dom/media/MediaStreamGraphImpl.h     |  8 ++++++
+ dom/media/webaudio/AudioContext.cpp  | 45 +++++++++++++++++++++++++++++++
+ dom/media/webaudio/AudioContext.h    |  5 ++++
+ dom/media/webaudio/AudioNodeEngine.h |  1 +
+ dom/webidl/AudioContext.webidl       |  5 ++++
+ 7 files changed, 122 insertions(+), 1 deletion(-)
+
+diff --git a/dom/media/MediaStreamGraph.cpp b/dom/media/MediaStreamGraph.cpp
+index f905074..2ab985e 100644
+--- a/dom/media/MediaStreamGraph.cpp
++++ b/dom/media/MediaStreamGraph.cpp
+@@ -26,16 +26,17 @@
+ #include "AudioNodeExternalInputStream.h"
+ #include <algorithm>
+ #include "DOMMediaStream.h"
+ #include "GeckoProfiler.h"
+ #include "mozilla/unused.h"
+ #ifdef MOZ_WEBRTC
+ #include "AudioOutputObserver.h"
+ #endif
++#include "AudioContext.h"
+ 
+ #include "webaudio/blink/HRTFDatabaseLoader.h"
+ 
+ using namespace mozilla::layers;
+ using namespace mozilla::dom;
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+@@ -1397,16 +1398,21 @@ MediaStreamGraphImpl::OneIteration(GraphTime aFrom, GraphTime aTo,
+         if (stream) {
+           AudioNodeSizes usage;
+           stream->SizeOfAudioNodesIncludingThis(MallocSizeOf, usage);
+           mAudioStreamSizes.AppendElement(usage);
+         }
+       }
+ 
+       lock.Notify();
++      if (mAudioContextForMemoryReporting) {
++        nsCOMPtr<nsIRunnable> event =
++          NS_NewRunnableMethod(this, &MediaStreamGraphImpl::MemoryReportComplete);
++        NS_DispatchToMainThread(event);
++      }
+     }
+   }
+ 
+   UpdateCurrentTimeForStreams(aFrom, aTo);
+ 
+   UpdateGraph(aStateEnd);
+ 
+   Process(aStateFrom, aStateEnd);
+@@ -2740,16 +2746,17 @@ MediaStreamGraphImpl::MediaStreamGraphImpl(bool aRealtime,
+   , mLatencyLog(AsyncLatencyLogger::Get())
+ #ifdef MOZ_WEBRTC
+   , mFarendObserverRef(nullptr)
+ #endif
+   , mMemoryReportMonitor("MSGIMemory")
+   , mSelfRef(this)
+   , mAudioStreamSizes()
+   , mNeedsMemoryReport(false)
++  , mAudioContextForMemoryReporting(nullptr)
+ #ifdef DEBUG
+   , mCanRunMessagesSynchronously(false)
+ #endif
+   , mAudioChannel(static_cast<uint32_t>(aChannel))
+ {
+ #ifdef PR_LOGGING
+   if (!gMediaStreamGraphLog) {
+     gMediaStreamGraphLog = PR_NewLogModule("MediaStreamGraph");
+@@ -2871,16 +2878,60 @@ NS_IMPL_ISUPPORTS(MediaStreamGraphImpl, nsIMemoryReporter)
+ 
+ struct ArrayClearer
+ {
+   explicit ArrayClearer(nsTArray<AudioNodeSizes>& aArray) : mArray(aArray) {}
+   ~ArrayClearer() { mArray.Clear(); }
+   nsTArray<AudioNodeSizes>& mArray;
+ };
+ 
++
++void MediaStreamGraph::RequestMemoryUsage(AudioContext* aContext)
++{
++  MediaStreamGraphImpl* graph = static_cast<MediaStreamGraphImpl*>(this);
++  graph->RequestMemoryUsage(aContext);
++}
++
++void
++MediaStreamGraphImpl::RequestMemoryUsage(AudioContext* aContext)
++{
++  if (mAudioContextForMemoryReporting) {
++    return;
++  }
++
++  if (mLifecycleState >= LIFECYCLE_WAITING_FOR_THREAD_SHUTDOWN) {
++    // Shutting down, nothing to report.
++    return;
++  }
++
++  MonitorAutoLock memoryReportLock(mMemoryReportMonitor);
++  mAudioContextForMemoryReporting = aContext;
++  mNeedsMemoryReport = true;
++  {
++    // Wake up the MSG thread if it's real time (Offline graphs can't be
++    // sleeping).
++    MonitorAutoLock monitorLock(mMonitor);
++    if (!CurrentDriver()->AsOfflineClockDriver()) {
++      CurrentDriver()->WakeUp();
++    }
++  }
++}
++
++void
++MediaStreamGraphImpl::MemoryReportComplete()
++{
++  // Clears out the report array after we're done with it.
++  ArrayClearer reportCleanup(mAudioStreamSizes);
++
++  MOZ_ASSERT(mAudioContextForMemoryReporting);
++
++  mAudioContextForMemoryReporting->MemoryReportComplete(mAudioStreamSizes);
++  mAudioContextForMemoryReporting = nullptr;
++}
++
+ NS_IMETHODIMP
+ MediaStreamGraphImpl::CollectReports(nsIHandleReportCallback* aHandleReport,
+                                      nsISupports* aData, bool aAnonymize)
+ {
+   // Clears out the report array after we're done with it.
+   ArrayClearer reportCleanup(mAudioStreamSizes);
+ 
+   {
+@@ -2934,17 +2985,16 @@ MediaStreamGraphImpl::CollectReports(nsIHandleReportCallback* aHandleReport,
+                                nodeType);
+     REPORT(enginePath, usage.mEngine,
+            "Memory used by AudioNode engine objects (Web Audio).");
+ 
+     nsPrintfCString streamPath("explicit/webaudio/audio-node/%s/stream-objects",
+                                nodeType);
+     REPORT(streamPath, usage.mStream,
+            "Memory used by AudioNode stream objects (Web Audio).");
+-
+   }
+ 
+   size_t hrtfLoaders = WebCore::HRTFDatabaseLoader::sizeOfLoaders(MallocSizeOf);
+   if (hrtfLoaders) {
+ 
+     REPORT(NS_LITERAL_CSTRING(
+               "explicit/webaudio/audio-node/PannerNode/hrtf-databases"),
+            hrtfLoaders,
+diff --git a/dom/media/MediaStreamGraph.h b/dom/media/MediaStreamGraph.h
+index 958dd3e..be713ab 100644
+--- a/dom/media/MediaStreamGraph.h
++++ b/dom/media/MediaStreamGraph.h
+@@ -28,16 +28,20 @@ template <>
+ class nsAutoRefTraits<SpeexResamplerState> : public nsPointerRefTraits<SpeexResamplerState>
+ {
+   public:
+   static void Release(SpeexResamplerState* aState) { speex_resampler_destroy(aState); }
+ };
+ 
+ namespace mozilla {
+ 
++  namespace dom {
++    class AudioContext;
++  }
++
+ #ifdef PR_LOGGING
+ extern PRLogModuleInfo* gMediaStreamGraphLog;
+ #endif
+ 
+ /*
+  * MediaStreamGraph is a framework for synchronized audio/video processing
+  * and playback. It is designed to be used by other browser components such as
+  * HTML media elements, media capture APIs, real-time media streaming APIs,
+@@ -224,16 +228,17 @@ public:
+  * Helper struct used to keep track of memory usage by AudioNodes.
+  */
+ struct AudioNodeSizes
+ {
+   AudioNodeSizes() : mDomNode(0), mStream(0), mEngine(0), mNodeType() {}
+   size_t mDomNode;
+   size_t mStream;
+   size_t mEngine;
++  uint32_t mNodeId;
+   nsCString mNodeType;
+ };
+ 
+ class MediaStreamGraphImpl;
+ class SourceMediaStream;
+ class ProcessedMediaStream;
+ class MediaInputPort;
+ class AudioNodeEngine;
+@@ -1223,16 +1228,18 @@ public:
+     *mPendingUpdateRunnables.AppendElement() = aRunnable;
+   }
+ 
+   /**
+    * Returns graph sample rate in Hz.
+    */
+   TrackRate GraphRate() const { return mSampleRate; }
+ 
++  void RequestMemoryUsage(dom::AudioContext* aContext);
++
+ protected:
+   explicit MediaStreamGraph(TrackRate aSampleRate)
+     : mNextGraphUpdateIndex(1)
+     , mSampleRate(aSampleRate)
+   {
+     MOZ_COUNT_CTOR(MediaStreamGraph);
+   }
+   virtual ~MediaStreamGraph()
+diff --git a/dom/media/MediaStreamGraphImpl.h b/dom/media/MediaStreamGraphImpl.h
+index 743a3c0..4b8b87b 100644
+--- a/dom/media/MediaStreamGraphImpl.h
++++ b/dom/media/MediaStreamGraphImpl.h
+@@ -15,16 +15,20 @@
+ #include "nsIRunnable.h"
+ #include "Latency.h"
+ #include "mozilla/WeakPtr.h"
+ #include "GraphDriver.h"
+ #include "AudioMixer.h"
+ 
+ namespace mozilla {
+ 
++namespace dom {
++  class AudioContext;
++}
++
+ template <typename T>
+ class LinkedList;
+ #ifdef MOZ_WEBRTC
+ class AudioOutputObserver;
+ #endif
+ 
+ /**
+  * A per-stream update message passed from the media graph thread to the
+@@ -457,16 +461,19 @@ public:
+ 
+   void EnsureNextIterationLocked() {
+     mNeedAnotherIteration = true; // atomic
+     if (mGraphDriverAsleep) { // atomic
+       CurrentDriver()->WakeUp(); // Might not be the same driver; might have woken already
+     }
+   }
+ 
++  void RequestMemoryUsage(dom::AudioContext* aPromise);
++  void MemoryReportComplete();
++
+   // Data members
+   //
+   /**
+    * Graphs own owning references to their driver, until shutdown. When a driver
+    * switch occur, previous driver is either deleted, or it's ownership is
+    * passed to a event that will take care of the asynchronous cleanup, as
+    * audio stream can take some time to shut down.
+    */
+@@ -671,16 +678,17 @@ private:
+   /**
+    * Used to pass memory report information across threads.
+    */
+   nsTArray<AudioNodeSizes> mAudioStreamSizes;
+   /**
+    * Indicates that the MSG thread should gather data for a memory report.
+    */
+   bool mNeedsMemoryReport;
++  nsRefPtr<dom::AudioContext> mAudioContextForMemoryReporting;
+ 
+ #ifdef DEBUG
+   /**
+    * Used to assert when AppendMessage() runs ControlMessages synchronously.
+    */
+   bool mCanRunMessagesSynchronously;
+ #endif
+ 
+diff --git a/dom/media/webaudio/AudioContext.cpp b/dom/media/webaudio/AudioContext.cpp
+index b23cefb..bffc524 100644
+--- a/dom/media/webaudio/AudioContext.cpp
++++ b/dom/media/webaudio/AudioContext.cpp
+@@ -33,16 +33,17 @@
+ #include "MediaStreamAudioDestinationNode.h"
+ #include "WaveShaperNode.h"
+ #include "PeriodicWave.h"
+ #include "ConvolverNode.h"
+ #include "OscillatorNode.h"
+ #include "nsNetUtil.h"
+ #include "AudioStream.h"
+ #include "mozilla/dom/Promise.h"
++#include "nsPrintfCString.h"
+ 
+ namespace mozilla {
+ namespace dom {
+ 
+ NS_IMPL_CYCLE_COLLECTION_CLASS(AudioContext)
+ 
+ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(AudioContext)
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDestination)
+@@ -718,10 +719,54 @@ AudioContext::CollectReports(nsIHandleReportCallback* aHandleReport,
+ }
+ 
+ double
+ AudioContext::ExtraCurrentTime() const
+ {
+   return mDestination->ExtraCurrentTime();
+ }
+ 
++already_AddRefed<Promise>
++AudioContext::GetMemoryReport()
++{
++  ErrorResult rv;
++  nsCOMPtr<nsIGlobalObject> parentObject = do_QueryInterface(GetParentObject());
++  nsRefPtr<Promise> promise;
++  promise = Promise::Create(parentObject, rv);
++  if (rv.Failed()) {
++    return nullptr;
++  }
++  Destination()->Stream()->Graph()->RequestMemoryUsage(this);
++
++  mMemoryReportingPromise = promise;
++  return promise.forget();
++}
++
++void AudioContext::MemoryReportComplete(nsTArray<AudioNodeSizes>& aSizes)
++{
++  AutoJSAPI jsapi;
++
++  jsapi.Init();
++  JSContext* cx = jsapi.cx();
++  JSAutoCompartment ac(cx, GetGlobalJSObject());
++  JS::Rooted<JSObject*> obj(cx);
++  obj = JS_NewObject(cx, nullptr, JS::NullPtr(), JS::NullPtr());
++
++  for (size_t i = 0; i < aSizes.Length(); i++) {
++    const AudioNodeSizes& usage = aSizes[i];
++    uint32_t totalMemoryUsage = usage.mStream + usage.mEngine + usage.mDomNode;
++    nsPrintfCString idStr("%u", usage.mNodeId);
++    JS::Rooted<JS::Value> memoryUsage(cx, JS_NumberValue(totalMemoryUsage));
++
++    bool rv = JS_SetProperty(cx, obj, idStr.get(), memoryUsage);
++    if (!rv) {
++      NS_WARNING("Could not set property on memory reporting object");
++    }
++  }
++
++  JS::Rooted<JS::Value> val(cx);
++  val.setObject(*obj);
++  mMemoryReportingPromise->MaybeResolve(val);
++  mMemoryReportingPromise = nullptr;
++}
++
+ }
+ }
+diff --git a/dom/media/webaudio/AudioContext.h b/dom/media/webaudio/AudioContext.h
+index 039b46a..1ed1544 100644
+--- a/dom/media/webaudio/AudioContext.h
++++ b/dom/media/webaudio/AudioContext.h
+@@ -15,16 +15,17 @@
+ #include "mozilla/dom/TypedArray.h"
+ #include "nsAutoPtr.h"
+ #include "nsCOMPtr.h"
+ #include "nsCycleCollectionParticipant.h"
+ #include "nsHashKeys.h"
+ #include "nsTHashtable.h"
+ #include "js/TypeDecls.h"
+ #include "nsIMemoryReporter.h"
++#include "MediaStreamGraph.h"
+ 
+ // X11 has a #define for CurrentTime. Unbelievable :-(.
+ // See dom/media/DOMMediaStream.h for more fun!
+ #ifdef CurrentTime
+ #undef CurrentTime
+ #endif
+ 
+ class nsPIDOMWindow;
+@@ -242,16 +243,19 @@ public:
+   double StreamTimeToDOMTime(double aTime) const
+   {
+     return aTime + ExtraCurrentTime();
+   }
+ 
+   IMPL_EVENT_HANDLER(mozinterruptbegin)
+   IMPL_EVENT_HANDLER(mozinterruptend)
+ 
++  already_AddRefed<Promise> GetMemoryReport();
++  void MemoryReportComplete(nsTArray<AudioNodeSizes>& aSizes);
++
+ private:
+   /**
+    * Returns the amount of extra time added to the current time of the
+    * AudioDestinationNode's MediaStream to get this AudioContext's currentTime.
+    * Must be subtracted from all DOM API parameter times that are on the same
+    * timeline as AudioContext's currentTime to get times we can pass to the
+    * MediaStreamGraph.
+    */
+@@ -274,16 +278,17 @@ private:
+   nsRefPtr<AudioListener> mListener;
+   nsTArray<nsRefPtr<WebAudioDecodeJob> > mDecodeJobs;
+   // See RegisterActiveNode.  These will keep the AudioContext alive while it
+   // is rendering and the window remains alive.
+   nsTHashtable<nsRefPtrHashKey<AudioNode> > mActiveNodes;
+   // Hashsets containing all the PannerNodes, to compute the doppler shift.
+   // These are weak pointers.
+   nsTHashtable<nsPtrHashKey<PannerNode> > mPannerNodes;
++  nsRefPtr<Promise> mMemoryReportingPromise;
+   // Number of channels passed in the OfflineAudioContext ctor.
+   uint32_t mNumberOfChannels;
+   // Number of nodes that currently exist for this AudioContext
+   int32_t mNodeCount;
+   bool mIsOffline;
+   bool mIsStarted;
+   bool mIsShutDown;
+ };
+diff --git a/dom/media/webaudio/AudioNodeEngine.h b/dom/media/webaudio/AudioNodeEngine.h
+index 925ed96..336cb55 100644
+--- a/dom/media/webaudio/AudioNodeEngine.h
++++ b/dom/media/webaudio/AudioNodeEngine.h
+@@ -384,16 +384,17 @@ public:
+ 
+   void SizeOfIncludingThis(MallocSizeOf aMallocSizeOf,
+                            AudioNodeSizes& aUsage) const
+   {
+     aUsage.mEngine = SizeOfIncludingThis(aMallocSizeOf);
+     if (HasNode()) {
+       aUsage.mDomNode = mNode->SizeOfIncludingThis(aMallocSizeOf);
+       aUsage.mNodeType = mNode->NodeType();
++      aUsage.mNodeId = mNode->Id();
+     }
+   }
+ 
+ private:
+   dom::AudioNode* mNode;
+   Mutex mNodeMutex;
+   const uint16_t mInputCount;
+   const uint16_t mOutputCount;
+diff --git a/dom/webidl/AudioContext.webidl b/dom/webidl/AudioContext.webidl
+index 94e1ac1..21f115f 100644
+--- a/dom/webidl/AudioContext.webidl
++++ b/dom/webidl/AudioContext.webidl
+@@ -90,9 +90,14 @@ partial interface AudioContext {
+   [Pref="media.useAudioChannelService"]
+   attribute EventHandler onmozinterruptbegin;
+ 
+   [Pref="media.useAudioChannelService"]
+   attribute EventHandler onmozinterruptend;
+ 
+   // This method is for test only.
+   [ChromeOnly] AudioChannel testAudioChannelInAudioNodeStream();
++
++  // This method returns a Promise that resolves with an object containing node
++  // id as the key, and memory usage in bytes as values.
++  [ChromeOnly]
++  Promise<object> getMemoryReport();
+ };
+-- 
+2.2.1
+

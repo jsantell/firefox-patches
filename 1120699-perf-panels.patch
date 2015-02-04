@@ -1,0 +1,638 @@
+From f35d8e97b0b87d938c7bd37eb64ec5f5c32d8352 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 3 Feb 2015 15:35:48 -0800
+Subject: Bug 1120699 - Implement panel state toggling in performance tool. r=vp
+
+diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
+index 5a45da1..618040c 100644
+--- a/browser/devtools/performance/performance-view.js
++++ b/browser/devtools/performance/performance-view.js
+@@ -2,77 +2,143 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * Master view handler for the performance tool.
+  */
+ let PerformanceView = {
++
++  _state: null,
++
++  // Mapping of state to selectors for different panes
++  // of the main profiler view. Used in `PerformanceView.setState()`
++  states: {
++    empty: [
++      { deck: "#performance-view", pane: "#empty-notice" }
++    ],
++    recording: [
++      { deck: "#performance-view", pane: "#performance-view-content" },
++      { deck: "#details-pane-container", pane: "#recording-notice" }
++    ],
++    recorded: [
++      { deck: "#performance-view", pane: "#performance-view-content" },
++      { deck: "#details-pane-container", pane: "#details-pane" }
++    ]
++  },
++
+   /**
+    * Sets up the view with event binding and main subviews.
+    */
+   initialize: function () {
+     this._recordButton = $("#record-button");
+     this._importButton = $("#import-button");
+ 
+     this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
+     this._onImportButtonClick = this._onImportButtonClick.bind(this);
+     this._lockRecordButton = this._lockRecordButton.bind(this);
+     this._unlockRecordButton = this._unlockRecordButton.bind(this);
++    this._onRecordingSelected = this._onRecordingSelected.bind(this);
++    this._onRecordingStopped = this._onRecordingStopped.bind(this);
+ 
+-    this._recordButton.addEventListener("click", this._onRecordButtonClick);
++    for (let button of $$(".record-button")) {
++      button.addEventListener("click", this._onRecordButtonClick);
++    }
+     this._importButton.addEventListener("click", this._onImportButtonClick);
+ 
+     // Bind to controller events to unlock the record button
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+-    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
++    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
++
++    this.setState("empty");
+ 
+     return promise.all([
+       RecordingsView.initialize(),
+       OverviewView.initialize(),
+       ToolbarView.initialize(),
+       DetailsView.initialize()
+     ]);
+   },
+ 
+   /**
+    * Unbinds events and destroys subviews.
+    */
+   destroy: function () {
+-    this._recordButton.removeEventListener("click", this._onRecordButtonClick);
++    for (let button of $$(".record-button")) {
++      button.removeEventListener("click", this._onRecordButtonClick);
++    }
+     this._importButton.removeEventListener("click", this._onImportButtonClick);
+ 
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+-    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._unlockRecordButton);
++    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+ 
+     return promise.all([
+       RecordingsView.destroy(),
+       OverviewView.destroy(),
+       ToolbarView.destroy(),
+       DetailsView.destroy()
+     ]);
+   },
+ 
+   /**
++   * Sets the state of the profiler view. Possible options are "empty",
++   * "recording", "recorded".
++   */
++  setState: function (state) {
++    let viewConfig = this.states[state];
++    if (!viewConfig) {
++      throw new Error(`Invalid state for PerformanceView: ${state}`);
++    }
++    for (let { deck, pane } of viewConfig) {
++      $(deck).selectedPanel = $(pane);
++    }
++
++    this._state = state;
++  },
++
++  /**
++   * Returns the state of the PerformanceView.
++   */
++  getState: function () {
++    return this._state;
++  },
++
++  /**
+    * Adds the `locked` attribute on the record button. This prevents it
+    * from being clicked while recording is started or stopped.
+    */
+   _lockRecordButton: function () {
+     this._recordButton.setAttribute("locked", "true");
+   },
+ 
+   /**
+    * Removes the `locked` attribute on the record button.
+    */
+   _unlockRecordButton: function () {
+     this._recordButton.removeAttribute("locked");
+   },
+ 
+   /**
++   * When a recording is complete.
++   */
++  _onRecordingStopped: function (_, recording) {
++    this._unlockRecordButton();
++
++    // If this recording stopped is the current recording, set the
++    // state to "recorded". A stopped recording doesn't necessarily
++    // have to be the current recording (console.profileEnd, for example)
++    if (recording === PerformanceController.getCurrentRecording()) {
++      this.setState("recorded");
++    }
++  },
++
++  /**
+    * Handler for clicking the record button.
+    */
+   _onRecordButtonClick: function (e) {
+     if (this._recordButton.hasAttribute("checked")) {
+       this._recordButton.removeAttribute("checked");
+       this._lockRecordButton();
+       this.emit(EVENTS.UI_STOP_RECORDING);
+     } else {
+@@ -89,15 +155,26 @@ let PerformanceView = {
+     let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+     fp.init(window, L10N.getStr("recordingsList.saveDialogTitle"), Ci.nsIFilePicker.modeOpen);
+     fp.appendFilter(L10N.getStr("recordingsList.saveDialogJSONFilter"), "*.json");
+     fp.appendFilter(L10N.getStr("recordingsList.saveDialogAllFilter"), "*.*");
+ 
+     if (fp.show() == Ci.nsIFilePicker.returnOK) {
+       this.emit(EVENTS.UI_IMPORT_RECORDING, fp.file);
+     }
++  },
++
++  /**
++   * Fired when a recording is selected. Used to toggle the profiler view state.
++   */
++  _onRecordingSelected: function (_, recording) {
++    if (recording.isRecording()) {
++      this.setState("recording");
++    } else {
++      this.setState("recorded");
++    }
+   }
+ };
+ 
+ /**
+  * Convenient way of emitting events from the view.
+  */
+ EventEmitter.decorate(PerformanceView);
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index fe9b376..ff89bc0 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -60,17 +60,17 @@
+ 
+   <hbox class="theme-body" flex="1">
+     <vbox id="recordings-pane">
+       <toolbar id="recordings-toolbar"
+                class="devtools-toolbar">
+         <hbox id="recordings-controls"
+               class="devtools-toolbarbutton-group">
+           <toolbarbutton id="record-button"
+-                         class="devtools-toolbarbutton"
++                         class="devtools-toolbarbutton record-button"
+                          tooltiptext="&profilerUI.recordButton.tooltip;"/>
+           <toolbarbutton id="import-button"
+                          class="devtools-toolbarbutton"
+                          label="&profilerUI.importButton;"/>
+           <toolbarbutton id="clear-button"
+                          class="devtools-toolbarbutton"
+                          label="&profilerUI.clearButton;"/>
+         </hbox>
+@@ -106,103 +106,127 @@
+         <hbox id="performance-toolbar-control-options" class="devtools-toolbarbutton-group">
+           <toolbarbutton id="performance-options-button"
+                          class="devtools-toolbarbutton devtools-option-toolbarbutton"
+                          popup="performance-options-menupopup"
+                          tooltiptext="&profilerUI.options.tooltiptext;"/>
+         </hbox>
+       </toolbar>
+ 
+-      <vbox id="overview-pane">
+-        <hbox id="markers-overview"/>
+-        <hbox id="memory-overview"/>
+-        <hbox id="time-framerate"/>
+-      </vbox>
+-
+-      <deck id="details-pane" flex="1">
+-        <hbox id="waterfall-view" flex="1">
+-          <vbox id="waterfall-breakdown" flex="1" />
+-          <splitter class="devtools-side-splitter"/>
+-          <vbox id="waterfall-details"
+-                class="theme-sidebar"
+-                width="150"
+-                height="150"/>
++      <deck id="performance-view" flex="1">
++        <hbox id="empty-notice"
++              class="notice-container"
++              align="center"
++              pack="center"
++              flex="1">
++          <label value="&profilerUI.emptyNotice1;"/>
++          <button class="devtools-toolbarbutton record-button"
++                  standalone="true" />
++          <label value="&profilerUI.emptyNotice2;"/>
+         </hbox>
++        <vbox id="performance-view-content" flex="1">
++          <vbox id="overview-pane">
++            <hbox id="markers-overview"/>
++            <hbox id="memory-overview"/>
++            <hbox id="time-framerate"/>
++          </vbox>
++          <deck id="details-pane-container" flex="1">
++            <hbox id="recording-notice"
++                  class="notice-container"
++                  align="center"
++                  pack="center"
++                  flex="1">
++              <label value="&profilerUI.stopNotice1;"/>
++              <button class="devtools-toolbarbutton record-button"
++                      standalone="true"
++                      checked="true" />
++              <label value="&profilerUI.stopNotice2;"/>
++            </hbox>
++            <deck id="details-pane" flex="1">
++              <hbox id="waterfall-view" flex="1">
++                <vbox id="waterfall-breakdown" flex="1" />
++                <splitter class="devtools-side-splitter"/>
++                <vbox id="waterfall-details"
++                      class="theme-sidebar"
++                      width="150"
++                      height="150"/>
++              </hbox>
+ 
+-        <vbox id="js-calltree-view" flex="1">
+-          <hbox class="call-tree-headers-container">
+-            <label class="plain call-tree-header"
+-                   type="duration"
+-                   crop="end"
+-                   value="&profilerUI.table.totalDuration2;"/>
+-            <label class="plain call-tree-header"
+-                   type="percentage"
+-                   crop="end"
+-                   value="&profilerUI.table.totalPercentage;"/>
+-            <label class="plain call-tree-header"
+-                   type="self-duration"
+-                   crop="end"
+-                   value="&profilerUI.table.selfDuration2;"/>
+-            <label class="plain call-tree-header"
+-                   type="self-percentage"
+-                   crop="end"
+-                   value="&profilerUI.table.selfPercentage;"/>
+-            <label class="plain call-tree-header"
+-                   type="samples"
+-                   crop="end"
+-                   value="&profilerUI.table.samples;"/>
+-            <label class="plain call-tree-header"
+-                   type="function"
+-                   crop="end"
+-                   value="&profilerUI.table.function;"/>
+-          </hbox>
+-          <vbox class="call-tree-cells-container" flex="1"/>
+-        </vbox>
++              <vbox id="js-calltree-view" flex="1">
++                <hbox class="call-tree-headers-container">
++                  <label class="plain call-tree-header"
++                         type="duration"
++                         crop="end"
++                         value="&profilerUI.table.totalDuration2;"/>
++                  <label class="plain call-tree-header"
++                         type="percentage"
++                         crop="end"
++                         value="&profilerUI.table.totalPercentage;"/>
++                  <label class="plain call-tree-header"
++                         type="self-duration"
++                         crop="end"
++                         value="&profilerUI.table.selfDuration2;"/>
++                  <label class="plain call-tree-header"
++                         type="self-percentage"
++                         crop="end"
++                         value="&profilerUI.table.selfPercentage;"/>
++                  <label class="plain call-tree-header"
++                         type="samples"
++                         crop="end"
++                         value="&profilerUI.table.samples;"/>
++                  <label class="plain call-tree-header"
++                         type="function"
++                         crop="end"
++                         value="&profilerUI.table.function;"/>
++                </hbox>
++                <vbox class="call-tree-cells-container" flex="1"/>
++              </vbox>
+ 
+-        <hbox id="js-flamegraph-view" flex="1">
+-        </hbox>
++              <hbox id="js-flamegraph-view" flex="1">
++              </hbox>
+ 
+-        <vbox id="memory-calltree-view" flex="1">
+-          <hbox class="call-tree-headers-container">
+-            <label class="plain call-tree-header"
+-                   type="duration"
+-                   crop="end"
+-                   value="&profilerUI.table.totalDuration2;"/>
+-            <label class="plain call-tree-header"
+-                   type="percentage"
+-                   crop="end"
+-                   value="&profilerUI.table.totalPercentage;"/>
+-            <label class="plain call-tree-header"
+-                   type="allocations"
+-                   crop="end"
+-                   value="&profilerUI.table.totalAlloc;"/>
+-            <label class="plain call-tree-header"
+-                   type="self-duration"
+-                   crop="end"
+-                   value="&profilerUI.table.selfDuration2;"/>
+-            <label class="plain call-tree-header"
+-                   type="self-percentage"
+-                   crop="end"
+-                   value="&profilerUI.table.selfPercentage;"/>
+-            <label class="plain call-tree-header"
+-                   type="self-allocations"
+-                   crop="end"
+-                   value="&profilerUI.table.selfAlloc;"/>
+-            <label class="plain call-tree-header"
+-                   type="samples"
+-                   crop="end"
+-                   value="&profilerUI.table.samples;"/>
+-            <label class="plain call-tree-header"
+-                   type="function"
+-                   crop="end"
+-                   value="&profilerUI.table.function;"/>
+-          </hbox>
+-          <vbox class="call-tree-cells-container" flex="1"/>
+-        </vbox>
++              <vbox id="memory-calltree-view" flex="1">
++                <hbox class="call-tree-headers-container">
++                  <label class="plain call-tree-header"
++                         type="duration"
++                         crop="end"
++                         value="&profilerUI.table.totalDuration2;"/>
++                  <label class="plain call-tree-header"
++                         type="percentage"
++                         crop="end"
++                         value="&profilerUI.table.totalPercentage;"/>
++                  <label class="plain call-tree-header"
++                         type="allocations"
++                         crop="end"
++                         value="&profilerUI.table.totalAlloc;"/>
++                  <label class="plain call-tree-header"
++                         type="self-duration"
++                         crop="end"
++                         value="&profilerUI.table.selfDuration2;"/>
++                  <label class="plain call-tree-header"
++                         type="self-percentage"
++                         crop="end"
++                         value="&profilerUI.table.selfPercentage;"/>
++                  <label class="plain call-tree-header"
++                         type="self-allocations"
++                         crop="end"
++                         value="&profilerUI.table.selfAlloc;"/>
++                  <label class="plain call-tree-header"
++                         type="samples"
++                         crop="end"
++                         value="&profilerUI.table.samples;"/>
++                  <label class="plain call-tree-header"
++                         type="function"
++                         crop="end"
++                         value="&profilerUI.table.function;"/>
++                </hbox>
++                <vbox class="call-tree-cells-container" flex="1"/>
++              </vbox>
+ 
+-        <hbox id="memory-flamegraph-view" flex="1">
+-          <!-- TODO: bug 1077461 -->
+-        </hbox>
++              <hbox id="memory-flamegraph-view" flex="1">
++              </hbox>
++            </deck>
++          </deck>
++        </vbox>
+       </deck>
+-
+     </vbox>
+   </hbox>
+ </window>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 58441a4..8f3c87e6 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -47,16 +47,18 @@ support-files =
+ [browser_perf-overview-render-03.js]
+ [browser_perf-overview-selection-01.js]
+ [browser_perf-overview-selection-02.js]
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-overview-time-interval.js]
+ [browser_perf-shared-connection-02.js]
+ [browser_perf-shared-connection-03.js]
+ [browser_perf-ui-recording.js]
++[browser_perf-recording-notices-01.js]
++[browser_perf-recording-notices-02.js]
+ [browser_perf_recordings-io-01.js]
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
+ [browser_perf-range-changed-render.js]
+ [browser_perf-recording-selected-01.js]
+ [browser_perf-recording-selected-02.js]
+ [browser_perf-recording-selected-03.js]
+diff --git a/browser/devtools/performance/test/browser_perf-recording-notices-01.js b/browser/devtools/performance/test/browser_perf-recording-notices-01.js
+new file mode 100644
+index 0000000..2cd5ac6
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-recording-notices-01.js
+@@ -0,0 +1,36 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the recording notice panes are toggled in correct scenarios
++ * for initialization and a single recording.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, $, PerformanceView, RecordingsView } = panel.panelWin;
++
++  let MAIN_CONTAINER = $("#performance-view");
++  let EMPTY = $("#empty-notice");
++  let CONTENT = $("#performance-view-content");
++  let CONTENT_CONTAINER = $("#details-pane-container");
++  let RECORDING = $("#recording-notice");
++  let DETAILS = $("#details-pane");
++
++  is(PerformanceView.getState(), "empty", "correct default state");
++  is(MAIN_CONTAINER.selectedPanel, EMPTY, "showing empty panel on load");
++
++  yield startRecording(panel);
++
++  is(PerformanceView.getState(), "recording", "correct state during recording");
++  is(MAIN_CONTAINER.selectedPanel, CONTENT, "showing main view with timeline");
++  is(CONTENT_CONTAINER.selectedPanel, RECORDING, "showing recording panel");
++
++  yield stopRecording(panel);
++
++  is(PerformanceView.getState(), "recorded", "correct state after recording");
++  is(MAIN_CONTAINER.selectedPanel, CONTENT, "showing main view with timeline");
++  is(CONTENT_CONTAINER.selectedPanel, DETAILS, "showing rendered graphs");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-recording-notices-02.js b/browser/devtools/performance/test/browser_perf-recording-notices-02.js
+new file mode 100644
+index 0000000..63edeb2
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-recording-notices-02.js
+@@ -0,0 +1,47 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the recording notice panes are toggled when going between
++ * a completed recording and an in-progress recording.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, $, PerformanceController, PerformanceView, RecordingsView } = panel.panelWin;
++
++  let MAIN_CONTAINER = $("#performance-view");
++  let CONTENT = $("#performance-view-content");
++  let CONTENT_CONTAINER = $("#details-pane-container");
++  let RECORDING = $("#recording-notice");
++  let DETAILS = $("#details-pane");
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield startRecording(panel);
++
++  is(PerformanceView.getState(), "recording", "correct state during recording");
++  is(MAIN_CONTAINER.selectedPanel, CONTENT, "showing main view with timeline");
++  is(CONTENT_CONTAINER.selectedPanel, RECORDING, "showing recording panel");
++
++  let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  RecordingsView.selectedIndex = 0;
++  yield select;
++
++  is(PerformanceView.getState(), "recorded", "correct state during recording but selecting a completed recording");
++  is(MAIN_CONTAINER.selectedPanel, CONTENT, "showing main view with timeline");
++  is(CONTENT_CONTAINER.selectedPanel, DETAILS, "showing recorded panel");
++
++  select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  RecordingsView.selectedIndex = 1;
++  yield select;
++
++  is(PerformanceView.getState(), "recording", "correct state when switching back to recording in progress");
++  is(MAIN_CONTAINER.selectedPanel, CONTENT, "showing main view with timeline");
++  is(CONTENT_CONTAINER.selectedPanel, RECORDING, "showing recording panel");
++
++  yield stopRecording(panel);
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index e3c619c..91ac494 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -29,20 +29,39 @@
+   min-width: 0;
+ }
+ 
+ #performance-toolbar-controls-detail-views .toolbarbutton-text {
+   -moz-padding-start: 4px;
+   -moz-padding-end: 8px;
+ }
+ 
++/* Recording Notice */
++
++#performance-view .notice-container {
++  font-size: 120%;
++  background-color: var(--theme-toolbar-background);
++  color: var(--theme-body-color);
++  padding-bottom: 20vh;
++}
++
++#performance-view .notice-container button {
++  min-width: 30px;
++  min-height: 28px;
++  margin: 0;
++}
++
++/* Overview Panel */
++
++.notice-container button,
+ #record-button {
+   list-style-image: url(profiler-stopwatch.svg);
+ }
+ 
++.notice-container button[checked],
+ #record-button[checked] {
+   list-style-image: url(profiler-stopwatch-checked.svg);
+ }
+ 
+ #record-button[locked] {
+   pointer-events: none;
+ }
+ 
+diff --git a/browser/themes/shared/devtools/toolbars.inc.css b/browser/themes/shared/devtools/toolbars.inc.css
+index e3236f4..9abd079 100644
+--- a/browser/themes/shared/devtools/toolbars.inc.css
++++ b/browser/themes/shared/devtools/toolbars.inc.css
+@@ -886,32 +886,32 @@
+ .theme-light .command-button-invertable:active > image,
+ .theme-light .devtools-closebutton > image,
+ .theme-light .devtools-toolbarbutton > image,
+ .theme-light .devtools-option-toolbarbutton > image,
+ .theme-light #breadcrumb-separator-normal,
+ .theme-light .scrollbutton-up > .toolbarbutton-icon,
+ .theme-light .scrollbutton-down > .toolbarbutton-icon,
+ .theme-light #black-boxed-message-button .button-icon,
+-.theme-light #profiling-notice-button .button-icon,
+-.theme-light #canvas-debugging-empty-notice-button .button-icon,
++.theme-light .notice-container button .button-icon,
+ .theme-light #requests-menu-perf-notice-button .button-icon,
+ .theme-light #requests-menu-network-summary-button .button-icon,
+ .theme-light .event-tooltip-debugger-icon,
+ .theme-light .devtools-button::before {
+   filter: url(filters.svg#invert);
+ }
+ 
+ /* Since selected backgrounds are blue, we want to use the normal
+  * (light) icons. */
+ .theme-light .command-button-invertable[checked=true]:not(:active) > image,
+ .theme-light .devtools-tab[icon-invertable][selected] > image,
+ .theme-light .devtools-tab[icon-invertable][highlighted] > image,
+ .theme-light #record-snapshot[checked] > image,
+-.theme-light #profiler-start[checked] > image {
++.theme-light #profiler-start[checked] > image,
++.theme-light .notice-container button[checked] .button-icon {
+   filter: none !important;
+ }
+ 
+ .theme-light .command-button:hover {
+   background-color: inherit;
+ }
+ 
+ .theme-light .command-button:hover:active,
+@@ -953,9 +953,9 @@
+ 
+ @keyframes throbber-spin {
+   from {
+     transform: none;
+   }
+   to {
+     transform: rotate(360deg);
+   }
+-}
+\ No newline at end of file
++}
+-- 
+2.2.1
+

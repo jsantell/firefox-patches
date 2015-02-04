@@ -1,0 +1,94 @@
+From 2d40c6b34083d3634c6a9b4243f7ffa2f199bc67 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 27 Jan 2015 13:24:10 +0100
+Subject: Bug 1125819 - Add cancelScheduledValues for automation
+ tracking in web audio editor. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 366b066..4f2105d 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -22,16 +22,17 @@ support-files =
+ [browser_audionode-actor-get-type.js]
+ [browser_audionode-actor-is-source.js]
+ [browser_audionode-actor-bypass.js]
+ [browser_audionode-actor-connectnode-disconnect.js]
+ [browser_audionode-actor-connectparam.js]
+ [browser_audionode-actor-add-automation-event.js]
+ [browser_audionode-actor-get-automation-data-01.js]
+ [browser_audionode-actor-get-automation-data-02.js]
++[browser_audionode-actor-get-automation-data-03.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
+ [browser_webaudio-actor-connect-param.js]
+ [browser_webaudio-actor-automation-event.js]
+ 
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-03.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-03.js
+new file mode 100644
+index 0000000..13fb287
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-get-automation-data-03.js
+@@ -0,0 +1,34 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test that `cancelScheduledEvents` clears out events on and after
++ * its argument.
++ */
++
++add_task(function*() {
++  let { target, front } = yield initBackend(SIMPLE_CONTEXT_URL);
++  let [_, [destNode, oscNode, gainNode]] = yield Promise.all([
++    front.setup({ reload: true }),
++    get3(front, "create-node")
++  ]);
++
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [300, 0]);
++  yield oscNode.addAutomationEvent("frequency", "linearRampToValueAtTime", [500, 0.9]);
++  yield oscNode.addAutomationEvent("frequency", "setValueAtTime", [700, 1]);
++  yield oscNode.addAutomationEvent("frequency", "exponentialRampToValueAtTime", [1000, 2]);
++  yield oscNode.addAutomationEvent("frequency", "cancelScheduledValues", [1]);
++
++  var { events, values } = yield oscNode.getAutomationData("frequency");
++
++  is(events.length, 2, "2 recorded events returned.");
++  is(values.length, 2000, "2000 value points returned");
++
++  checkAutomationValue(values, 0, 300);
++  checkAutomationValue(values, 0.5, 411.15);
++  checkAutomationValue(values, 0.9, 499.9);
++  checkAutomationValue(values, 1, 499.9);
++  checkAutomationValue(values, 2, 499.9);
++
++  yield removeTab(target.tab);
++});
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 8aa610f..b17db9e 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -30,17 +30,17 @@ const NODE_CREATION_METHODS = [
+   "createMediaStreamDestination", "createScriptProcessor", "createAnalyser",
+   "createGain", "createDelay", "createBiquadFilter", "createWaveShaper",
+   "createPanner", "createConvolver", "createChannelSplitter", "createChannelMerger",
+   "createDynamicsCompressor", "createOscillator", "createStereoPanner"
+ ];
+ 
+ const AUTOMATION_METHODS = [
+   "setValueAtTime", "linearRampToValueAtTime", "exponentialRampToValueAtTime",
+-  "setTargetAtTime", "setValueCurveAtTime"
++  "setTargetAtTime", "setValueCurveAtTime", "cancelScheduledValues"
+ ];
+ 
+ const NODE_ROUTING_METHODS = [
+   "connect", "disconnect"
+ ];
+ 
+ const NODE_PROPERTIES = {
+   "OscillatorNode": {
+-- 
+2.2.1
+

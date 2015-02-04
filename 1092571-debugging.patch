@@ -1,0 +1,81 @@
+From 7bc0618951bb5ee9bb0fd3523de99ad85741eba0 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 27 Jan 2015 11:57:04 +0100
+Subject: [PATCH] Bug 1092571 - debugging for try
+
+---
+ toolkit/devtools/server/actors/webaudio.js | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 8aa610f..074364a 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -369,16 +369,23 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+   connectParam: method(function (destActor, paramName, output) {
+     let srcNode = this.node.get();
+     let destNode = destActor.node.get();
+ 
+     if (srcNode === null || destNode === null) {
+       return CollectedAudioNodeError();
+     }
+ 
++    console.log("Actor::connectParam", destNode, getConstructorName(destNode));
++    console.log("Actor::connectParam");
++    let param = destNode[paramName];
++    console.log("provided, parentID:", param._parentID);
++    console.log("extra wrapped param, parentID:", (new XPCNativeWrapper(param))._parentID);
++    console.log("unwrapped param, parentID:", (XPCNativeWrapper.unwrap(param))._parentID);
++
+     try {
+       // Connect via the unwrapped node, so we can call the
+       // patched method that fires the webaudio actor's `connect-param` event.
+       // Connect directly to the wrapped `destNode`, otherwise
+       // the patched method thinks this is a new node and won't be
+       // able to find it in `_nativeToActorID`.
+       XPCNativeWrapper.unwrap(srcNode).connect(destNode[paramName], output);
+     } catch (e) {
+@@ -879,16 +886,20 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+       dest: destActor
+     });
+   },
+ 
+   /**
+    * Called when an audio node is connected to an audio param.
+    */
+   _onConnectParam: function (source, param) {
++    console.log("WebAudioActor::_onConnectParam", getConstructorName(param));
++    console.log("provided, parentID:", param._parentID);
++    console.log("extra wrapped param, parentID:", (new XPCNativeWrapper(param))._parentID);
++    console.log("unwrapped param, parentID:", (XPCNativeWrapper.unwrap(param))._parentID);
+     let sourceActor = this._getActorByNativeID(source.id);
+     let destActor = this._getActorByNativeID(param._parentID);
+     emit(this, "connect-param", {
+       source: sourceActor,
+       dest: destActor,
+       param: param._paramName
+     });
+   },
+@@ -1040,17 +1051,18 @@ function InvalidCommandError () {
+ /**
+  * Takes an object and converts it's `toString()` form, like
+  * "[object OscillatorNode]" or "[object Float32Array]",
+  * or XrayWrapper objects like "[object XrayWrapper [object Array]]"
+  * to a string of just the constructor name, like "OscillatorNode",
+  * or "Float32Array".
+  */
+ function getConstructorName (obj) {
+-  return obj.toString().match(/\[object ([^\[\]]*)\]\]?$/)[1];
++  let match = obj.toString().match(/\[object ([^\[\]]*)\]\]?$/);
++  return match ? match[1] : null;
+ }
+ 
+ /**
+  * Create a grip-like object to pass in renderable information
+  * to the front-end for things like Float32Arrays, AudioBuffers,
+  * without tracking them in an actor pool.
+  */
+ function createObjectGrip (value) {
+-- 
+2.2.1
+

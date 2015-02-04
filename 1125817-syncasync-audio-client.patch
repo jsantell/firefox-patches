@@ -1,0 +1,218 @@
+From 0637464e71ab075e15731c8f2e5aa8668c34f68b Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 26 Jan 2015 15:36:00 +0100
+Subject: Bug 1125817 - Fix async/sync consistencies with web audio
+ tool client node events. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
+index 4232c18..2f51b69 100644
+--- a/browser/devtools/webaudioeditor/controller.js
++++ b/browser/devtools/webaudioeditor/controller.js
+@@ -88,42 +88,34 @@ let WebAudioEditorController = {
+    */
+   reset: function () {
+     $("#content").hidden = true;
+     ContextView.resetUI();
+     InspectorView.resetUI();
+     PropertiesView.resetUI();
+   },
+ 
+-  // Since node create and connect are probably executed back to back,
+-  // and the controller's `_onCreateNode` needs to look up type,
+-  // the edge creation could be called before the graph node is actually
+-  // created. This way, we can check and listen for the event before
+-  // adding an edge.
+-  _waitForNodeCreation: function (sourceActor, destActor) {
+-    let deferred = defer();
+-    let source = gAudioNodes.get(sourceActor.actorID);
+-    let dest = gAudioNodes.get(destActor.actorID);
+-
+-    if (!source || !dest) {
++  // Since node events (create, disconnect, connect) are all async,
++  // we have to make sure to wait that the node has finished creating
++  // before performing an operation on it.
++  getNode: function* (nodeActor) {
++    let id = nodeActor.actorID;
++    let node = gAudioNodes.get(id);
++
++    if (!node) {
++      let { resolve, promise } = defer();
+       gAudioNodes.on("add", function createNodeListener (createdNode) {
+-        if (sourceActor.actorID === createdNode.id)
+-          source = createdNode;
+-        if (destActor.actorID === createdNode.id)
+-          dest = createdNode;
+-        if (source && dest) {
++        if (createdNode.id === id) {
+           gAudioNodes.off("add", createNodeListener);
+-          deferred.resolve([source, dest]);
++          resolve(createdNode);
+         }
+       });
++      node = yield promise;
+     }
+-    else {
+-      deferred.resolve([source, dest]);
+-    }
+-    return deferred.promise;
++    return node;
+   },
+ 
+   /**
+    * Fired when the devtools theme changes (light, dark, etc.)
+    * so that the graph can update marker styling, as that
+    * cannot currently be done with CSS.
+    */
+   _onThemeChange: function (event, data) {
+@@ -197,35 +189,38 @@ let WebAudioEditorController = {
+   _onDestroyNode: function (nodeActor) {
+     gAudioNodes.remove(gAudioNodes.get(nodeActor.actorID));
+   },
+ 
+   /**
+    * Called when a node is connected to another node.
+    */
+   _onConnectNode: Task.async(function* ({ source: sourceActor, dest: destActor }) {
+-    let [source, dest] = yield WebAudioEditorController._waitForNodeCreation(sourceActor, destActor);
++    let source = yield WebAudioEditorController.getNode(sourceActor);
++    let dest = yield WebAudioEditorController.getNode(destActor);
+     source.connect(dest);
+   }),
+ 
+   /**
+    * Called when a node is conneceted to another node's AudioParam.
+    */
+   _onConnectParam: Task.async(function* ({ source: sourceActor, dest: destActor, param }) {
+-    let [source, dest] = yield WebAudioEditorController._waitForNodeCreation(sourceActor, destActor);
++    let source = yield WebAudioEditorController.getNode(sourceActor);
++    let dest = yield WebAudioEditorController.getNode(destActor);
+     source.connect(dest, param);
+   }),
+ 
+   /**
+    * Called when a node is disconnected.
+    */
+-  _onDisconnectNode: function(nodeActor) {
+-    let node = gAudioNodes.get(nodeActor.actorID);
++  _onDisconnectNode: Task.async(function* (nodeActor) {
++    let node = yield WebAudioEditorController.getNode(nodeActor);
+     node.disconnect();
+-  },
++  }),
+ 
+   /**
+    * Called when a node param is changed.
+    */
+-  _onChangeParam: function({ actor, param, value }) {
+-    window.emit(EVENTS.CHANGE_PARAM, gAudioNodes.get(actor.actorID), param, value);
+-  }
++  _onChangeParam: Task.async(function* ({ actor, param, value }) {
++    let node = yield WebAudioEditorController.getNode(actor);
++    window.emit(EVENTS.CHANGE_PARAM, node, param, value);
++  })
+ };
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 1b959d8..366b066 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -6,16 +6,17 @@ support-files =
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-param.html
+   doc_connect-multi-param.html
+   doc_iframe-context.html
+   doc_automation.html
++  doc_bug_1125817.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+@@ -34,16 +35,17 @@ support-files =
+ [browser_wa_destroy-node-01.js]
+ 
+ [browser_wa_first-run.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ [browser_wa_reset-04.js]
+ [browser_wa_navigate.js]
++[browser_wa_controller-01.js]
+ 
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-render-05.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js b/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
+new file mode 100644
+index 0000000..3fb70b1
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
+@@ -0,0 +1,27 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Bug 1125817
++ * Tests to ensure that disconnecting a node immediately
++ * after creating it does not fail.
++ */
++
++const BUG_1125817_URL = EXAMPLE_URL + "doc_bug_1125817.html";
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(BUG_1125817_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    once(gAudioNodes, "add", 2),
++    once(gAudioNodes, "disconnect")
++  ]);
++
++  ok(true, "Successfully disconnected a just-created node.");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/doc_bug_1125817.html b/browser/devtools/webaudioeditor/test/doc_bug_1125817.html
+new file mode 100644
+index 0000000..49a2be1
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_bug_1125817.html
+@@ -0,0 +1,23 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++      osc.frequency.value = 200;
++      osc.disconnect();
++    </script>
++  </body>
++
++</html>
+-- 
+2.2.1
+
