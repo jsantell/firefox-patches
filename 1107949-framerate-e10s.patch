@@ -1,0 +1,243 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 9 Feb 2015 17:17:43 -0800
+Subject: Bug 1107949 - framerate actor now continues recording in e10s after a page refresh. r=vp
+
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 5bcc986..ecda57a 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -53,16 +53,17 @@ support-files =
+ [browser_perf-overview-render-03.js]
+ [browser_perf-overview-selection-01.js]
+ [browser_perf-overview-selection-02.js]
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-overview-time-interval.js]
+ [browser_perf-shared-connection-02.js]
+ [browser_perf-shared-connection-03.js]
+ [browser_perf-states.js]
++[browser_perf-refresh.js]
+ [browser_perf-ui-recording.js]
+ [browser_perf-recording-notices-01.js]
+ [browser_perf-recording-notices-02.js]
+ [browser_perf_recordings-io-01.js]
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
+ # [browser_perf-range-changed-render.js] bug 1130669 crash
+diff --git a/browser/devtools/performance/test/browser_perf-refresh.js b/browser/devtools/performance/test/browser_perf-refresh.js
+new file mode 100644
+index 0000000..ee4cdcb
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-refresh.js
+@@ -0,0 +1,42 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Rough test that the recording still continues after a refresh.
++ */
++function spawnTest () {
++  let { panel, target } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController } = panel.panelWin;
++
++  // Enable memory to test all the overview graphs.
++  Services.prefs.setBoolPref(MEMORY_PREF, true);
++
++  yield startRecording(panel);
++
++  yield reload(target)
++
++  let rec = PerformanceController.getCurrentRecording();
++  let { markers, memory, ticks } = rec.getAllData();
++  // Store current length of items
++  let markersLength = markers.length;
++  let memoryLength = memory.length;
++  let ticksLength = ticks.length;
++
++  ok(rec.isRecording(), "RecordingModel should still be recording after reload");
++
++  yield busyWait(100);
++  yield waitUntil(() => rec.getMarkers().length > markersLength);
++  yield waitUntil(() => rec.getMemory().length > memoryLength);
++  yield waitUntil(() => rec.getTicks().length > ticksLength);
++  ok("Markers, memory and ticks continue after reload");
++
++  yield stopRecording(panel);
++
++  let { allocations, profile, frames } = rec.getAllData();
++  ok(allocations, "allocations exist after refresh");
++  ok(profile, "profile exists after refresh");
++  ok(frames, "frames exist after refresh");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 760b6bd..b060679 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -386,8 +386,13 @@ function dropSelection(graph) {
+   graph.dropSelection();
+   graph.emit("selecting");
+ }
+ 
+ function getSourceActor(aSources, aURL) {
+   let item = aSources.getItemForAttachment(a => a.source.url === aURL);
+   return item && item.value;
+ }
++
++function reload (aTarget, aEvent = "navigate") {
++  aTarget.activeTab.reload();
++  return once(aTarget, aEvent);
++}
+diff --git a/toolkit/devtools/server/actors/framerate.js b/toolkit/devtools/server/actors/framerate.js
+index 1726f5c..b766f5d 100644
+--- a/toolkit/devtools/server/actors/framerate.js
++++ b/toolkit/devtools/server/actors/framerate.js
+@@ -3,48 +3,58 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ const Services = require("Services");
+ const events = require("sdk/event/core");
+ const protocol = require("devtools/server/protocol");
+ const DevToolsUtils = require("devtools/toolkit/DevToolsUtils.js");
++const {ContentObserver} = require("devtools/content-observer");
+ 
+ const {on, once, off, emit} = events;
+ const {method, custom, Arg, Option, RetVal} = protocol;
+ 
+ /**
+  * A very simple utility for monitoring framerate.
+  */
+ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
++  // Used to offset differences between windows' performance.now()
++  // timing after refresh.
++  _delta: 0,
++
+   typeName: "framerate",
+   initialize: function(conn, tabActor) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+     this.tabActor = tabActor;
+-    this._chromeWin = getChromeWin(tabActor.window);
++    this._observer = new ContentObserver(this.tabActor);
++    this._win = tabActor.window;
+     this._onRefreshDriverTick = this._onRefreshDriverTick.bind(this);
++    this._onGlobalCreated = this._onGlobalCreated.bind(this);
++    on(this._observer, "global-created", this._onGlobalCreated);
+   },
+   destroy: function(conn) {
++    off(this._observer, "global-created", this._onGlobalCreated);
+     protocol.Actor.prototype.destroy.call(this, conn);
+     this.stopRecording();
+   },
+ 
+   /**
+    * Starts monitoring framerate, storing the frames per second.
+    */
+   startRecording: method(function() {
+     if (this._recording) {
+       return;
+     }
+     this._recording = true;
+     this._ticks = [];
+ 
+-    this._startTime = this._chromeWin.performance.now();
+-    this._rafID = this._chromeWin.requestAnimationFrame(this._onRefreshDriverTick);
++    this._delta = 0;
++    this._startTime = this._win.performance.now();
++    this._rafID = this._win.requestAnimationFrame(this._onRefreshDriverTick);
+   }, {
+   }),
+ 
+   /**
+    * Stops monitoring framerate, returning the recorded values.
+    */
+   stopRecording: method(function(beginAt = 0, endAt = Number.MAX_SAFE_INTEGER) {
+     if (!this._recording) {
+@@ -60,17 +70,17 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
+     },
+     response: { ticks: RetVal("array:number") }
+   }),
+ 
+   /**
+    * Stops monitoring framerate, without returning the recorded values.
+    */
+   cancelRecording: method(function() {
+-    this._chromeWin.cancelAnimationFrame(this._rafID);
++    this._win.cancelAnimationFrame(this._rafID);
+     this._recording = false;
+     this._ticks = null;
+     this._rafID = -1;
+   }, {
+   }),
+ 
+   /**
+    * Returns whether this actor is currently active.
+@@ -99,22 +109,36 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
+ 
+   /**
+    * Function invoked along with the refresh driver.
+    */
+   _onRefreshDriverTick: function() {
+     if (!this._recording) {
+       return;
+     }
+-    this._rafID = this._chromeWin.requestAnimationFrame(this._onRefreshDriverTick);
++    this._rafID = this._win.requestAnimationFrame(this._onRefreshDriverTick);
+ 
+     // Store the amount of time passed since the recording started.
+-    let currentTime = this._chromeWin.performance.now();
++    let currentTime = this._win.performance.now() + this._delta;
++    // Store _lastTickTime so we can use this as a delta on a page refresh
++    // to normalize times
++    this._lastTickTime = currentTime;
++
+     let elapsedTime = currentTime - this._startTime;
+     this._ticks.push(elapsedTime);
++  },
++
++  /**
++   * When the content window for the tab actor is created.
++   */
++  _onGlobalCreated: function (win) {
++    if (this._recording) {
++      this._delta = this._lastTickTime;
++      this._rafID = this._win.requestAnimationFrame(this._onRefreshDriverTick);
++    }
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the FramerateActor.
+  */
+ let FramerateFront = exports.FramerateFront = protocol.FrontClass(FramerateActor, {
+   initialize: function(client, { framerateActor }) {
+@@ -166,23 +190,8 @@ FramerateFront.plotFPS = function(ticks, interval = 100, clamp = 60) {
+     timeline.push({ delta: currTime, value: framerate });
+ 
+     frameCount = 0;
+     prevTime = currTime;
+   }
+ 
+   return timeline;
+ };
+-
+-/**
+- * Gets the top level browser window from a content window.
+- *
+- * @param nsIDOMWindow innerWin
+- *        The content window to query.
+- * @return nsIDOMWindow
+- *         The top level browser window.
+- */
+-function getChromeWin(innerWin) {
+-  return innerWin
+-    .QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIWebNavigation)
+-    .QueryInterface(Ci.nsIDocShellTreeItem).rootTreeItem
+-    .QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindow);
+-}
+-- 
+2.2.1
+

@@ -1,0 +1,502 @@
+From 88da44a4dfe3593dad339dc043986108e012f32c Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 6 Feb 2015 17:45:32 -0800
+Subject: Bug 1130671 - clean up some test regressions in perf++ tool. Add toString methods for views for help rendering in tests. r=vp
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 820705b..fb2c5b4 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -359,17 +359,19 @@ let PerformanceController = {
+   },
+ 
+   /**
+    * Fired when the ToolbarView fires a PREF_CHANGED event.
+    * with the value.
+    */
+   _onPrefChanged: function (_, prefName, value) {
+     this.emit(EVENTS.PREF_CHANGED, prefName, value);
+-  }
++  },
++
++  toString: () => "[object PerformanceController]"
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+ /**
+diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
+index 45c4bbe..3959d6c 100644
+--- a/browser/devtools/performance/performance-view.js
++++ b/browser/devtools/performance/performance-view.js
+@@ -196,15 +196,17 @@ let PerformanceView = {
+   _onRecordingSelected: function (_, recording) {
+     if (!recording) {
+       this.setState("empty");
+     } else if (recording.isRecording()) {
+       this.setState("recording");
+     } else {
+       this.setState("recorded");
+     }
+-  }
++  },
++
++  toString: () => "[object PerformanceView]"
+ };
+ 
+ /**
+  * Convenient way of emitting events from the view.
+  */
+ EventEmitter.decorate(PerformanceView);
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 923c474..5bcc986 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -60,13 +60,13 @@ support-files =
+ [browser_perf-states.js]
+ [browser_perf-ui-recording.js]
+ [browser_perf-recording-notices-01.js]
+ [browser_perf-recording-notices-02.js]
+ [browser_perf_recordings-io-01.js]
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
+-[browser_perf-range-changed-render.js]
++# [browser_perf-range-changed-render.js] bug 1130669 crash
+ [browser_perf-recording-selected-01.js]
+ [browser_perf-recording-selected-02.js]
+ [browser_perf-recording-selected-03.js]
+ [browser_perf-recording-selected-04.js]
+diff --git a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js
+index 709f1d9..769c594 100644
+--- a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js
+@@ -1,17 +1,17 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that the js flamegraphs get rerendered when toggling `flatten-tree-recursion`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, PerformanceController, DetailsView, JsFlameGraphView } = panel.panelWin;
++  let { EVENTS, PerformanceController, DetailsView, JsFlameGraphView, FlameGraphUtils } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(FLATTEN_PREF, true);
+ 
+   yield DetailsView.selectView("js-flamegraph");
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
+index b49dd22..4f88f5c 100644
+--- a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
+@@ -1,17 +1,17 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that the memory flamegraphs get rerendered when toggling `flatten-tree-recursion`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, PerformanceController, DetailsView, MemoryFlameGraphView } = panel.panelWin;
++  let { EVENTS, PerformanceController, DetailsView, MemoryFlameGraphView, RecordingUtils, FlameGraphUtils } = panel.panelWin;
+ 
+   // Enable memory to test
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(FLATTEN_PREF, true);
+ 
+   yield DetailsView.selectView("memory-flamegraph");
+ 
+   yield startRecording(panel);
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js
+index 287c584..9a7b2fd 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js
+@@ -1,38 +1,36 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-const INVERT_PREF = "devtools.performance.ui.invert-flame-graph";
+-
+ /**
+  * Tests that the js Flamegraphs gets rerendered when toggling `invert-flame-graph`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsFlameGraphView } = panel.panelWin;
+ 
+   yield DetailsView.selectView("js-flamegraph");
+ 
+-  Services.prefs.setBoolPref(INVERT_PREF, true);
++  Services.prefs.setBoolPref(INVERT_FLAME_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   let rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+   yield stopRecording(panel);
+   yield rendered;
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+-  Services.prefs.setBoolPref(INVERT_PREF, false);
++  Services.prefs.setBoolPref(INVERT_FLAME_PREF, false);
+   yield rendered;
+ 
+   ok(true, "JsFlameGraphView rerendered when toggling invert-flame-graph.");
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+-  Services.prefs.setBoolPref(INVERT_PREF, true);
++  Services.prefs.setBoolPref(INVERT_FLAME_PREF, true);
+   yield rendered;
+ 
+   ok(true, "JsFlameGraphView rerendered when toggling back invert-flame-graph.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
+index 0c407e9..2bc92ea 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
+@@ -1,38 +1,37 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-const INVERT_PREF = "devtools.performance.ui.invert-flame-graph";
+-
+ /**
+  * Tests that the memory Flamegraphs gets rerendered when toggling `invert-flame-graph`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryFlameGraphView } = panel.panelWin;
+ 
+-  yield DetailsView.selectView("memory-flamegraph");
++  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(INVERT_FLAME_PREF, true);
+ 
+-  Services.prefs.setBoolPref(INVERT_PREF, true);
++  yield DetailsView.selectView("memory-flamegraph");
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   yield stopRecording(panel);
+   yield rendered;
+ 
+   rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+-  Services.prefs.setBoolPref(INVERT_PREF, false);
++  Services.prefs.setBoolPref(INVERT_FLAME_PREF, false);
+   yield rendered;
+ 
+   ok(true, "MemoryFlameGraphView rerendered when toggling invert-flame-graph.");
+ 
+   rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+-  Services.prefs.setBoolPref(INVERT_PREF, true);
++  Services.prefs.setBoolPref(INVERT_FLAME_PREF, true);
+   yield rendered;
+ 
+   ok(true, "MemoryFlameGraphView rerendered when toggling back invert-flame-graph.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-range-changed-render.js b/browser/devtools/performance/test/browser_perf-range-changed-render.js
+index 5d5a227..1b57dfd 100644
+--- a/browser/devtools/performance/test/browser_perf-range-changed-render.js
++++ b/browser/devtools/performance/test/browser_perf-range-changed-render.js
+@@ -4,22 +4,25 @@
+ /**
+  * Tests that the detail views are rerendered after the range changes.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, OverviewView, DetailsView } = panel.panelWin;
+   let { WaterfallView, JsCallTreeView, JsFlameGraphView } = panel.panelWin;
+ 
++  let updateWaterfall = () => updatedWaterfall++;
++  let updateCallTree = () => updatedCallTree++;
++  let updateFlameGraph = () => updatedFlameGraph++;
+   let updatedWaterfall = 0;
+   let updatedCallTree = 0;
+   let updatedFlameGraph = 0;
+-  WaterfallView.on(EVENTS.WATERFALL_RENDERED, () => updatedWaterfall++);
+-  JsCallTreeView.on(EVENTS.JS_CALL_TREE_RENDERED, () => updatedCallTree++);
+-  JsFlameGraphView.on(EVENTS.JS_FLAMEGRAPH_RENDERED, () => updatedFlameGraph++);
++  WaterfallView.on(EVENTS.WATERFALL_RENDERED, updateWaterfall);
++  JsCallTreeView.on(EVENTS.JS_CALL_TREE_RENDERED, updateCallTree);
++  JsFlameGraphView.on(EVENTS.JS_FLAMEGRAPH_RENDERED, updateFlameGraph);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length);
+   yield stopRecording(panel);
+ 
+   let rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   OverviewView.emit(EVENTS.OVERVIEW_RANGE_SELECTED, { startTime: 0, endTime: 10 });
+@@ -50,11 +53,15 @@ function spawnTest () {
+   yield DetailsView.selectView("waterfall");
+   yield rendered;
+   ok(true, "Waterfall rerenders after its corresponding pane is shown.");
+ 
+   is(updatedWaterfall, 3, "WaterfallView rerendered 3 times.");
+   is(updatedCallTree, 2, "JsCallTreeView rerendered 2 times.");
+   is(updatedFlameGraph, 2, "JsFlameGraphView rerendered 2 times.");
+ 
++  WaterfallView.off(EVENTS.WATERFALL_RENDERED, updateWaterfall);
++  JsCallTreeView.off(EVENTS.JS_CALL_TREE_RENDERED, updateCallTree);
++  JsFlameGraphView.off(EVENTS.JS_FLAMEGRAPH_RENDERED, updateFlameGraph);
++
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-04.js b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+index 176ff2b..0d8a91d 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-04.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+@@ -62,25 +62,25 @@ let test = Task.async(function*() {
+   // Verify imported recording.
+ 
+   let importedData = PerformanceController.getCurrentRecording().getAllData();
+ 
+   is(importedData.label, data.label,
+     "The imported legacy data was successfully converted for the current tool (1).");
+   is(importedData.duration, data.duration,
+     "The imported legacy data was successfully converted for the current tool (2).");
+-  is(importedData.markers.toSource(), data.markers.toSource(),
++  is(importedData.markers.toSource(), [].toSource(),
+     "The imported legacy data was successfully converted for the current tool (3).");
+-  is(importedData.frames.toSource(), data.frames.toSource(),
++  is(importedData.frames.toSource(), [].toSource(),
+     "The imported legacy data was successfully converted for the current tool (4).");
+-  is(importedData.memory.toSource(), data.memory.toSource(),
++  is(importedData.memory.toSource(), [].toSource(),
+     "The imported legacy data was successfully converted for the current tool (5).");
+   is(importedData.ticks.toSource(), data.ticks.toSource(),
+     "The imported legacy data was successfully converted for the current tool (6).");
+-  is(importedData.allocations.toSource(), data.allocations.toSource(),
++  is(importedData.allocations.toSource(), ({sites:[], timestamps:[], frames:[], counts:[]}).toSource(),
+     "The imported legacy data was successfully converted for the current tool (7).");
+   is(importedData.profile.toSource(), data.profile.toSource(),
+     "The imported legacy data was successfully converted for the current tool (8).");
+ 
+   yield teardown(panel);
+   finish();
+ });
+ 
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 634527c..760b6bd 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -22,16 +22,17 @@ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-u
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
+ const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
+ 
+ const FRAMERATE_PREF = "devtools.performance.ui.enable-framerate";
+ const MEMORY_PREF = "devtools.performance.ui.enable-memory";
+ const PLATFORM_DATA_PREF = "devtools.performance.ui.show-platform-data";
+ const IDLE_PREF = "devtools.performance.ui.show-idle-blocks";
+ const INVERT_PREF = "devtools.performance.ui.invert-call-tree";
++const INVERT_FLAME_PREF = "devtools.performance.ui.invert-flame-graph";
+ const FLATTEN_PREF = "devtools.performance.ui.flatten-tree-recursion";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ gDevTools.testing = true;
+ 
+ let DEFAULT_PREFS = [
+diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
+index 18ee5e1..0d7a176 100644
+--- a/browser/devtools/performance/views/details-js-call-tree.js
++++ b/browser/devtools/performance/views/details-js-call-tree.js
+@@ -103,16 +103,18 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+     // Profiler data does not contain memory allocations information.
+     root.toggleAllocations(false);
+ 
+     // When platform data isn't shown, hide the cateogry labels, since they're
+     // only available for C++ frames.
+     let contentOnly = !PerformanceController.getPref("show-platform-data");
+     root.toggleCategories(!contentOnly);
+   },
++
++  toString: () => "[object JsCallTreeView]"
+ });
+ 
+ /**
+  * Opens/selects the debugger in this toolbox and jumps to the specified
+  * file name and line number.
+  * @param string url
+  * @param number line
+  */
+diff --git a/browser/devtools/performance/views/details-js-flamegraph.js b/browser/devtools/performance/views/details-js-flamegraph.js
+index e949f12..6667cdc 100644
+--- a/browser/devtools/performance/views/details-js-flamegraph.js
++++ b/browser/devtools/performance/views/details-js-flamegraph.js
+@@ -84,10 +84,12 @@ let JsFlameGraphView = Heritage.extend(DetailsSubview, {
+   /**
+    * Called whenever a pref is changed and this view needs to be rerendered.
+    */
+   _onRerenderPrefChanged: function() {
+     let recording = PerformanceController.getCurrentRecording();
+     let profile = recording.getProfile();
+     let samples = profile.threads[0].samples;
+     FlameGraphUtils.removeFromCache(samples);
+-  }
++  },
++
++  toString: () => "[object JsFlameGraphView]"
+ });
+diff --git a/browser/devtools/performance/views/details-memory-call-tree.js b/browser/devtools/performance/views/details-memory-call-tree.js
+index ac2a17f..802a746 100644
+--- a/browser/devtools/performance/views/details-memory-call-tree.js
++++ b/browser/devtools/performance/views/details-memory-call-tree.js
+@@ -96,10 +96,12 @@ let MemoryCallTreeView = Heritage.extend(DetailsSubview, {
+ 
+     // Clear out other call trees.
+     let container = $("#memory-calltree-view > .call-tree-cells-container");
+     container.innerHTML = "";
+     root.attachTo(container);
+ 
+     // Memory allocation samples don't contain cateogry labels.
+     root.toggleCategories(false);
+-  }
++  },
++
++  toString: () => "[object MemoryCallTreeView]"
+ });
+diff --git a/browser/devtools/performance/views/details-memory-flamegraph.js b/browser/devtools/performance/views/details-memory-flamegraph.js
+index d377601..09711e0 100644
+--- a/browser/devtools/performance/views/details-memory-flamegraph.js
++++ b/browser/devtools/performance/views/details-memory-flamegraph.js
+@@ -82,10 +82,12 @@ let MemoryFlameGraphView = Heritage.extend(DetailsSubview, {
+   /**
+    * Called whenever a pref is changed and this view needs to be rerendered.
+    */
+   _onRerenderPrefChanged: function() {
+     let recording = PerformanceController.getCurrentRecording();
+     let allocations = recording.getAllocations();
+     let samples = RecordingUtils.getSamplesFromAllocations(allocations);
+     FlameGraphUtils.removeFromCache(samples);
+-  }
++  },
++
++  toString: () => "[object MemoryFlameGraphView]"
+ });
+diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
+index 3d88308..7836e00 100644
+--- a/browser/devtools/performance/views/details-waterfall.js
++++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -72,10 +72,12 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+   },
+ 
+   /**
+    * Called when the marker details view is resized.
+    */
+   _onResize: function () {
+     this.waterfall.recalculateBounds();
+     this.render();
+-  }
++  },
++
++  toString: () => "[object WaterfallView]"
+ });
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+index 67559a4..fdb53d1 100644
+--- a/browser/devtools/performance/views/details.js
++++ b/browser/devtools/performance/views/details.js
+@@ -159,15 +159,17 @@ let DetailsView = {
+     }
+   }),
+ 
+   /**
+    * Called when a view button is clicked.
+    */
+   _onViewToggle: function (e) {
+     this.selectView(e.target.getAttribute("data-view"));
+-  }
++  },
++
++  toString: () => "[object DetailsView]"
+ };
+ 
+ /**
+  * Convenient way of emitting events from the view.
+  */
+ EventEmitter.decorate(DetailsView);
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 3faeb19..a3f499f 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -308,13 +308,15 @@ let OverviewView = {
+    */
+   _onPrefChanged: function (_, prefName) {
+     if (prefName === "enable-memory") {
+       $("#memory-overview").hidden = !PerformanceController.getPref("enable-memory");
+     }
+     if (prefName === "enable-framerate") {
+       $("#time-framerate").hidden = !PerformanceController.getPref("enable-framerate");
+     }
+-  }
++  },
++
++  toString: () => "[object OverviewView]"
+ };
+ 
+ // Decorates the OverviewView as an EventEmitter
+ EventEmitter.decorate(OverviewView);
+diff --git a/browser/devtools/performance/views/recordings.js b/browser/devtools/performance/views/recordings.js
+index 53c82e0..6ef079b 100644
+--- a/browser/devtools/performance/views/recordings.js
++++ b/browser/devtools/performance/views/recordings.js
+@@ -225,15 +225,17 @@ let RecordingsView = Heritage.extend(WidgetMethods, {
+ 
+     fp.open({ done: result => {
+       if (result == Ci.nsIFilePicker.returnCancel) {
+         return;
+       }
+       let recordingItem = this.getItemForElement(e.target);
+       this.emit(EVENTS.UI_EXPORT_RECORDING, recordingItem.attachment, fp.file);
+     }});
+-  }
++  },
++
++  toString: () => "[object RecordingsView]"
+ });
+ 
+ /**
+  * Convenient way of emitting events from the RecordingsView.
+  */
+ EventEmitter.decorate(RecordingsView);
+diff --git a/browser/devtools/performance/views/toolbar.js b/browser/devtools/performance/views/toolbar.js
+index 673cc120..b45f765 100644
+--- a/browser/devtools/performance/views/toolbar.js
++++ b/browser/devtools/performance/views/toolbar.js
+@@ -32,12 +32,14 @@ let ToolbarView = {
+ 
+   /**
+    * Fired when a preference changes in the underlying OptionsView.
+    * Propogated by the PerformanceController.
+    */
+   _onPrefChanged: function (_, prefName) {
+     let value = Services.prefs.getBoolPref(BRANCH_NAME + prefName);
+     this.emit(EVENTS.PREF_CHANGED, prefName, value);
+-  }
++  },
++
++  toString: () => "[object ToolbarView]"
+ };
+ 
+ EventEmitter.decorate(ToolbarView);
+-- 
+2.2.1
+

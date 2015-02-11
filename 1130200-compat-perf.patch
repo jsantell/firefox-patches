@@ -1,0 +1,594 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 5 Feb 2015 16:29:28 -0800
+Subject: Bug 1130200 - Fix the mocked memory and timeline actors for older gecko targets (fx2.0, fx2.1). r=vp
+
+diff --git a/browser/devtools/performance/modules/compatibility.js b/browser/devtools/performance/modules/compatibility.js
+new file mode 100644
+index 0000000..ed327c94
+--- /dev/null
++++ b/browser/devtools/performance/modules/compatibility.js
+@@ -0,0 +1,109 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Task } = require("resource://gre/modules/Task.jsm");
++loader.lazyRequireGetter(this, "EventEmitter",
++  "devtools/toolkit/event-emitter");
++
++const REQUIRED_MEMORY_ACTOR_METHODS = [
++  "attach", "detach", "startRecordingAllocations", "stopRecordingAllocations", "getAllocations"
++];
++
++/**
++ * A dummy front decorated with the provided methods.
++ *
++ * @param array blueprint
++ *        A list of [funcName, retVal] describing the class.
++ */
++function MockFront (blueprint) {
++  EventEmitter.decorate(this);
++
++  for (let [funcName, retVal] of blueprint) {
++    this[funcName] = (x => typeof x === "function" ? x() : x).bind(this, retVal);
++  }
++}
++
++function MockMemoryFront () {
++  MockFront.call(this, [
++    ["attach"],
++    ["detach"],
++    ["initialize"],
++    ["destroy"],
++    ["startRecordingAllocations", 0],
++    ["stopRecordingAllocations", 0],
++    ["getAllocations", createMockAllocations],
++  ]);
++}
++exports.MockMemoryFront = MockMemoryFront;
++
++function MockTimelineFront () {
++  MockFront.call(this, [
++    ["start", 0],
++    ["stop", 0],
++    ["initialize"],
++    ["destroy"],
++  ]);
++}
++exports.MockTimelineFront = MockTimelineFront;
++
++/**
++ * Create a fake allocations object, to be used with the MockMemoryFront
++ * so we create a fresh object each time.
++ *
++ * @return {Object}
++ */
++function createMockAllocations () {
++  return {
++    allocations: [],
++    allocationsTimestamps: [],
++    frames: [],
++    counts: []
++  };
++}
++
++/**
++ * Takes a TabTarget, and checks through all methods that are needed
++ * on the server's memory actor to determine if a mock or real MemoryActor
++ * should be used. The last of the methods added to MemoryActor
++ * landed in Gecko 35, so previous versions will fail this. Setting the `target`'s
++ * TEST_MOCK_MEMORY_ACTOR property to true will cause this function to indicate that
++ * the memory actor is not supported.
++ *
++ * @param {TabTarget} target
++ * @return {Boolean}
++ */
++function* memoryActorSupported (target) {
++  // This `target` property is used only in tests to test
++  // instances where the memory actor is not available.
++  if (target.TEST_MOCK_MEMORY_ACTOR) {
++    return false;
++  }
++
++  for (let method of REQUIRED_MEMORY_ACTOR_METHODS) {
++    if (!(yield target.actorHasMethod("memory", method))) {
++      return false;
++    }
++  }
++  return true;
++}
++exports.memoryActorSupported = Task.async(memoryActorSupported);
++
++/**
++ * Takes a TabTarget, and checks existence of a TimelineActor on
++ * the server, or if TEST_MOCK_TIMELINE_ACTOR is to be used.
++ *
++ * @param {TabTarget} target
++ * @return {Boolean}
++ */
++function* timelineActorSupported(target) {
++  // This `target` property is used only in tests to test
++  // instances where the timeline actor is not available.
++  if (target.TEST_MOCK_TIMELINE_ACTOR) {
++    return false;
++  }
++
++  return yield target.hasActor("timeline");
++}
++exports.timelineActorSupported = Task.async(timelineActorSupported);
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index bd7e9b9..03be458 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -10,23 +10,23 @@ const { extend } = require("sdk/util/object");
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ loader.lazyRequireGetter(this, "TimelineFront",
+   "devtools/server/actors/timeline", true);
+ loader.lazyRequireGetter(this, "MemoryFront",
+   "devtools/server/actors/memory", true);
+-
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
++loader.lazyRequireGetter(this, "compatibility",
++  "devtools/performance/compatibility");
+ 
+ loader.lazyImporter(this, "gDevTools",
+   "resource:///modules/devtools/gDevTools.jsm");
+-
+ loader.lazyImporter(this, "setTimeout",
+   "resource://gre/modules/Timer.jsm");
+ loader.lazyImporter(this, "clearTimeout",
+   "resource://gre/modules/Timer.jsm");
+ 
+ // How often do we pull allocation sites from the memory actor.
+ const DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT = 200; // ms
+ 
+@@ -51,35 +51,16 @@ SharedPerformanceActors.forTarget = function(target) {
+   }
+ 
+   let instance = new PerformanceActorsConnection(target);
+   this.set(target, instance);
+   return instance;
+ };
+ 
+ /**
+- * A dummy front decorated with the provided methods.
+- *
+- * @param array blueprint
+- *        A list of [funcName, retVal] describing the class.
+- */
+-function MockedFront(blueprint) {
+-  EventEmitter.decorate(this);
+-
+-  for (let [funcName, retVal] of blueprint) {
+-    this[funcName] = (x => x).bind(this, retVal);
+-  }
+-}
+-
+-MockedFront.prototype = {
+-  initialize: function() {},
+-  destroy: function() {}
+-};
+-
+-/**
+  * A connection to underlying actors (profiler, memory, framerate, etc.)
+  * shared by all tools in a target.
+  *
+  * Use `SharedPerformanceActors.forTarget` to make sure you get the same
+  * instance every time, and the `PerformanceFront` to start/stop recordings.
+  *
+  * @param Target target
+  *        The target owning this connection.
+@@ -90,16 +71,21 @@ function PerformanceActorsConnection(target) {
+   this._target = target;
+   this._client = this._target.client;
+   this._request = this._request.bind(this);
+ 
+   Services.obs.notifyObservers(null, "performance-actors-connection-created", null);
+ }
+ 
+ PerformanceActorsConnection.prototype = {
++
++  // Properties set when mocks are being used
++  _usingMockMemory: false,
++  _usingMockTimeline: false,
++
+   /**
+    * Initializes a connection to the profiler and other miscellaneous actors.
+    * If in the process of opening, or already open, nothing happens.
+    *
+    * @return object
+    *         A promise that is resolved once the connection is established.
+    */
+   open: Task.async(function*() {
+@@ -153,46 +139,39 @@ PerformanceActorsConnection.prototype = {
+     // Otherwise, call `listTabs`.
+     else {
+       this._profiler = (yield listTabs(this._client)).profilerActor;
+     }
+   }),
+ 
+   /**
+    * Initializes a connection to a timeline actor.
+-   * TODO: use framework level feature detection from bug 1069673
+    */
+   _connectTimelineActor: function() {
+-    if (this._target.form && this._target.form.timelineActor) {
++    let supported = yield compatibility.timelineActorSupported(this._target);
++    if (supported) {
+       this._timeline = new TimelineFront(this._target.client, this._target.form);
+     } else {
+-      this._timeline = new MockedFront([
+-        ["start", 0],
+-        ["stop", 0]
+-      ]);
++      this._usingMockTimeline = true;
++      this._timeline = new compatibility.MockTimelineFront();
+     }
+   },
+ 
+   /**
+    * Initializes a connection to a memory actor.
+-   * TODO: use framework level feature detection from bug 1069673
+    */
+-  _connectMemoryActor: function() {
+-    if (this._target.form && this._target.form.memoryActor) {
++  _connectMemoryActor: Task.async(function* () {
++    let supported = yield compatibility.memoryActorSupported(this._target);
++    if (supported) {
+       this._memory = new MemoryFront(this._target.client, this._target.form);
+     } else {
+-      this._memory = new MockedFront([
+-        ["attach"],
+-        ["detach"],
+-        ["startRecordingAllocations", 0],
+-        ["stopRecordingAllocations", 0],
+-        ["getAllocations"]
+-      ]);
++      this._usingMockMemory = true;
++      this._memory = new compatibility.MockMemoryFront();
+     }
+-  },
++  }),
+ 
+   /**
+    * Closes the connections to non-profiler actors.
+    */
+   _disconnectActors: Task.async(function* () {
+     yield this._timeline.destroy();
+     yield this._memory.destroy();
+   }),
+@@ -246,21 +225,26 @@ function PerformanceFront(connection) {
+   this._request = connection._request;
+ 
+   // Pipe events from TimelineActor to the PerformanceFront
+   connection._timeline.on("markers", markers => this.emit("markers", markers));
+   connection._timeline.on("frames", (delta, frames) => this.emit("frames", delta, frames));
+   connection._timeline.on("memory", (delta, measurement) => this.emit("memory", delta, measurement));
+   connection._timeline.on("ticks", (delta, timestamps) => this.emit("ticks", delta, timestamps));
+ 
++  // Set when mocks are being used
++  this._usingMockMemory = connection._usingMockMemory;
++  this._usingMockTimeline = connection._usingMockTimeline;
++
+   this._pullAllocationSites = this._pullAllocationSites.bind(this);
+   this._sitesPullTimeout = 0;
+ }
+ 
+ PerformanceFront.prototype = {
++
+   /**
+    * Manually begins a recording session.
+    *
+    * @param object options
+    *        An options object to pass to the actors. Supported properties are
+    *        `withTicks`, `withMemory` and `withAllocations`.
+    * @return object
+    *         A promise that is resolved once recording has started.
+@@ -391,16 +375,26 @@ PerformanceFront.prototype = {
+    * such as the maximum entries count, the sampling interval etc.
+    *
+    * Used in tests and for older backend implementations.
+    */
+   _customProfilerOptions: {
+     entries: 1000000,
+     interval: 1,
+     features: ["js"]
++  },
++
++  /**
++   * Returns an object indicating if mock actors are being used or not.
++   */
++  getMocksInUse: function () {
++    return {
++      memory: this._usingMockMemory,
++      timeline: this._usingMockTimeline
++    };
+   }
+ };
+ 
+ /**
+  * Returns a promise resolved with a listing of all the tabs in the
+  * provided thread client.
+  */
+ function listTabs(client) {
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index 9d6f6dc..54091e1 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -1,14 +1,15 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
++    'modules/compatibility.js',
+     'modules/front.js',
+     'modules/io.js',
+     'modules/recording-model.js',
+     'modules/recording-utils.js',
+     'panel.js'
+ ]
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 5bcc986..69d4e5b 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -5,16 +5,18 @@ support-files =
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
+ # that need to be moved over to performance tool
+ 
+ [browser_perf-aaa-run-first-leaktest.js]
+ [browser_perf-allocations-to-samples.js]
++[browser_perf-compatibility-01.js]
++[browser_perf-compatibility-02.js]
+ [browser_perf-clear-01.js]
+ [browser_perf-clear-02.js]
+ [browser_perf-data-massaging-01.js]
+ [browser_perf-data-samples.js]
+ [browser_perf-details-calltree-render.js]
+ [browser_perf-details-flamegraph-render.js]
+ [browser_perf-details-memory-calltree-render.js]
+ [browser_perf-details-memory-flamegraph-render.js]
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-01.js b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+new file mode 100644
+index 0000000..1c5083f
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+@@ -0,0 +1,63 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test basic functionality of PerformanceFront with mock memory and timeline actors.
++ */
++
++let WAIT_TIME = 100;
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_URL, {
++    TEST_MOCK_MEMORY_ACTOR: true,
++    TEST_MOCK_TIMELINE_ACTOR: true
++  });
++
++  let { memory, timeline } = front.getMocksInUse();
++  ok(memory, "memory should be mocked.");
++  ok(timeline, "timeline should be mocked.");
++
++  let {
++    profilerStartTime,
++    timelineStartTime,
++    memoryStartTime
++  } = yield front.startRecording({
++    withTicks: true,
++    withMemory: true,
++    withAllocations: true
++  });
++
++  ok(typeof profilerStartTime === "number",
++    "The front.startRecording() emits a profiler start time.");
++  ok(typeof timelineStartTime === "number",
++    "The front.startRecording() emits a timeline start time.");
++  ok(typeof memoryStartTime === "number",
++    "The front.startRecording() emits a memory start time.");
++
++  yield busyWait(WAIT_TIME);
++
++  let {
++    profilerEndTime,
++    timelineEndTime,
++    memoryEndTime
++  } = yield front.stopRecording({
++    withAllocations: true
++  });
++
++  ok(typeof profilerEndTime === "number",
++    "The front.stopRecording() emits a profiler end time.");
++  ok(typeof timelineEndTime === "number",
++    "The front.stopRecording() emits a timeline end time.");
++  ok(typeof memoryEndTime === "number",
++    "The front.stopRecording() emits a memory end time.");
++
++  ok(profilerEndTime > profilerStartTime,
++    "The profilerEndTime is after profilerStartTime.");
++  is(timelineEndTime, timelineStartTime,
++    "The timelineEndTime is the same as timelineStartTime.");
++  is(memoryEndTime, memoryStartTime,
++    "The memoryEndTime is the same as memoryStartTime.");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-02.js b/browser/devtools/performance/test/browser_perf-compatibility-02.js
+new file mode 100644
+index 0000000..628777f
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-compatibility-02.js
+@@ -0,0 +1,67 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the recording model is populated correctly when using timeline
++ * and memory actor mocks.
++ */
++
++const WAIT_TIME = 1000;
++
++let test = Task.async(function*() {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL, "performance", {
++    TEST_MOCK_MEMORY_ACTOR: true,
++    TEST_MOCK_TIMELINE_ACTOR: true
++  });
++  let { EVENTS, gFront, PerformanceController, PerformanceView } = panel.panelWin;
++
++  let { memory: memoryMock, timeline: timelineMock } = gFront.getMocksInUse();
++  ok(memoryMock, "memory should be mocked.");
++  ok(timelineMock, "timeline should be mocked.");
++
++  yield startRecording(panel);
++  busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
++  yield stopRecording(panel);
++
++  let {
++    label, duration, markers, frames, memory, ticks, allocations, profile
++  } = PerformanceController.getCurrentRecording().getAllData();
++
++  is(label, "", "Empty label for mock.");
++  is(typeof duration, "number", "duration is a number");
++  ok(duration > 0, "duration is not 0");
++
++  isEmptyArray(markers, "markers");
++  isEmptyArray(frames, "frames");
++  isEmptyArray(memory, "memory");
++  isEmptyArray(ticks, "ticks");
++  isEmptyArray(allocations.sites, "allocations.sites");
++  isEmptyArray(allocations.timestamps, "allocations.timestamps");
++  isEmptyArray(allocations.frames, "allocations.frames");
++  isEmptyArray(allocations.counts, "allocations.counts");
++
++  let sampleCount = 0;
++
++  for (let thread of profile.threads) {
++    info("Checking thread: " + thread.name);
++
++    for (let sample of thread.samples) {
++      sampleCount++;
++
++      if (sample.frames[0].location != "(root)") {
++        ok(false, "The sample " + sample.toSource() + " doesn't have a root node.");
++      }
++    }
++  }
++
++  ok(sampleCount > 0,
++    "At least some samples have been iterated over, checking for root nodes.");
++
++  yield teardown(panel);
++  finish();
++});
++
++function isEmptyArray (array, name) {
++  ok(Array.isArray(array), `${name} is an array`);
++  is(array.length, 0, `${name} is empty`);
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 760b6bd..ea44a9f 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -7,16 +7,17 @@ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ 
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
++let { merge } = devtools.require("sdk/util/object");
+ let { getPerformanceActorsConnection, PerformanceFront } = devtools.require("devtools/performance/front");
+ 
+ let nsIProfilerModule = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+ let TargetFactory = devtools.TargetFactory;
+ let mm = null;
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
+@@ -156,49 +157,63 @@ function once(aTarget, aEventName, aUseCapture = false, spread = false) {
+ function onceSpread(aTarget, aEventName, aUseCapture) {
+   return once(aTarget, aEventName, aUseCapture, true);
+ }
+ 
+ function test () {
+   Task.spawn(spawnTest).then(finish, handleError);
+ }
+ 
+-function initBackend(aUrl) {
++function initBackend(aUrl, targetOps={}) {
+   info("Initializing a performance front.");
+ 
+   if (!DebuggerServer.initialized) {
+     DebuggerServer.init();
+     DebuggerServer.addBrowserActors();
+   }
+ 
+   return Task.spawn(function*() {
+     let tab = yield addTab(aUrl);
+     let target = TargetFactory.forTab(tab);
+ 
+     yield target.makeRemote();
+ 
++    // Attach addition options to `target`. This is used to force mock fronts
++    // to smokescreen test different servers where memory or timeline actors
++    // may not exist. Possible options that will actually work:
++    // TEST_MOCK_MEMORY_ACTOR = true
++    // TEST_MOCK_TIMELINE_ACTOR = true
++    merge(target, targetOps);
++
+     yield gDevTools.showToolbox(target, "performance");
+ 
+     let connection = getPerformanceActorsConnection(target);
+     yield connection.open();
+ 
+     let front = new PerformanceFront(connection);
+     return { target, front };
+   });
+ }
+ 
+-function initPerformance(aUrl, selectedTool="performance") {
++function initPerformance(aUrl, selectedTool="performance", targetOps={}) {
+   info("Initializing a performance pane.");
+ 
+   return Task.spawn(function*() {
+     let tab = yield addTab(aUrl);
+     let target = TargetFactory.forTab(tab);
+ 
+     yield target.makeRemote();
+ 
++    // Attach addition options to `target`. This is used to force mock fronts
++    // to smokescreen test different servers where memory or timeline actors
++    // may not exist. Possible options that will actually work:
++    // TEST_MOCK_MEMORY_ACTOR = true
++    // TEST_MOCK_TIMELINE_ACTOR = true
++    merge(target, targetOps);
++
+     let toolbox = yield gDevTools.showToolbox(target, selectedTool);
+     let panel = toolbox.getCurrentPanel();
+     return { target, panel, toolbox };
+   });
+ }
+ 
+ function* teardown(panel) {
+   info("Destroying the performance tool.");
+-- 
+2.2.1
+
