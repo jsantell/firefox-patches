@@ -3,10 +3,10 @@ Date: Mon, 9 Feb 2015 17:17:43 -0800
 Subject: Bug 1107949 - framerate actor now continues recording in e10s after a page refresh. r=vp
 
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 5bcc986..ecda57a 100644
+index 0688697..50c3262 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -53,16 +53,17 @@ support-files =
+@@ -56,16 +56,17 @@ support-files =
  [browser_perf-overview-render-03.js]
  [browser_perf-overview-selection-01.js]
  [browser_perf-overview-selection-02.js]
@@ -73,17 +73,17 @@ index 0000000..ee4cdcb
 +  finish();
 +}
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 760b6bd..b060679 100644
+index 272be3f..9619e41 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
-@@ -386,8 +386,13 @@ function dropSelection(graph) {
-   graph.dropSelection();
-   graph.emit("selecting");
+@@ -408,8 +408,13 @@ function getSourceActor(aSources, aURL) {
  }
  
- function getSourceActor(aSources, aURL) {
-   let item = aSources.getItemForAttachment(a => a.source.url === aURL);
-   return item && item.value;
+ /**
+  * Fires a key event, like "VK_UP", "VK_DOWN", etc.
+  */
+ function fireKey (e) {
+   EventUtils.synthesizeKey(e, {});
  }
 +
 +function reload (aTarget, aEvent = "navigate") {
@@ -91,44 +91,26 @@ index 760b6bd..b060679 100644
 +  return once(aTarget, aEvent);
 +}
 diff --git a/toolkit/devtools/server/actors/framerate.js b/toolkit/devtools/server/actors/framerate.js
-index 1726f5c..b766f5d 100644
+index 1726f5c..fe69a89 100644
 --- a/toolkit/devtools/server/actors/framerate.js
 +++ b/toolkit/devtools/server/actors/framerate.js
-@@ -3,48 +3,58 @@
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- "use strict";
- 
- const {Cc, Ci, Cu, Cr} = require("chrome");
- const Services = require("Services");
- const events = require("sdk/event/core");
- const protocol = require("devtools/server/protocol");
- const DevToolsUtils = require("devtools/toolkit/DevToolsUtils.js");
-+const {ContentObserver} = require("devtools/content-observer");
- 
- const {on, once, off, emit} = events;
- const {method, custom, Arg, Option, RetVal} = protocol;
- 
+@@ -15,36 +15,39 @@ const {method, custom, Arg, Option, RetVal} = protocol;
  /**
   * A very simple utility for monitoring framerate.
   */
  let FramerateActor = exports.FramerateActor = protocol.ActorClass({
-+  // Used to offset differences between windows' performance.now()
-+  // timing after refresh.
-+  _delta: 0,
-+
    typeName: "framerate",
    initialize: function(conn, tabActor) {
      protocol.Actor.prototype.initialize.call(this, conn);
      this.tabActor = tabActor;
 -    this._chromeWin = getChromeWin(tabActor.window);
-+    this._observer = new ContentObserver(this.tabActor);
-+    this._win = tabActor.window;
++    this._contentWin = tabActor.window;
      this._onRefreshDriverTick = this._onRefreshDriverTick.bind(this);
 +    this._onGlobalCreated = this._onGlobalCreated.bind(this);
-+    on(this._observer, "global-created", this._onGlobalCreated);
++    on(this.tabActor, "window-ready", this._onGlobalCreated);
    },
    destroy: function(conn) {
-+    off(this._observer, "global-created", this._onGlobalCreated);
++    off(this.tabActor, "window-ready", this._onGlobalCreated);
      protocol.Actor.prototype.destroy.call(this, conn);
      this.stopRecording();
    },
@@ -145,9 +127,8 @@ index 1726f5c..b766f5d 100644
  
 -    this._startTime = this._chromeWin.performance.now();
 -    this._rafID = this._chromeWin.requestAnimationFrame(this._onRefreshDriverTick);
-+    this._delta = 0;
-+    this._startTime = this._win.performance.now();
-+    this._rafID = this._win.requestAnimationFrame(this._onRefreshDriverTick);
++    this._startTime = this._contentWin.performance.now();
++    this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
    }, {
    }),
  
@@ -156,7 +137,7 @@ index 1726f5c..b766f5d 100644
     */
    stopRecording: method(function(beginAt = 0, endAt = Number.MAX_SAFE_INTEGER) {
      if (!this._recording) {
-@@ -60,17 +70,17 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
+@@ -60,17 +63,17 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
      },
      response: { ticks: RetVal("array:number") }
    }),
@@ -166,7 +147,7 @@ index 1726f5c..b766f5d 100644
     */
    cancelRecording: method(function() {
 -    this._chromeWin.cancelAnimationFrame(this._rafID);
-+    this._win.cancelAnimationFrame(this._rafID);
++    this._contentWin.cancelAnimationFrame(this._rafID);
      this._recording = false;
      this._ticks = null;
      this._rafID = -1;
@@ -175,7 +156,7 @@ index 1726f5c..b766f5d 100644
  
    /**
     * Returns whether this actor is currently active.
-@@ -99,22 +109,36 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
+@@ -99,22 +102,37 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
  
    /**
     * Function invoked along with the refresh driver.
@@ -185,17 +166,18 @@ index 1726f5c..b766f5d 100644
        return;
      }
 -    this._rafID = this._chromeWin.requestAnimationFrame(this._onRefreshDriverTick);
-+    this._rafID = this._win.requestAnimationFrame(this._onRefreshDriverTick);
++    this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
  
      // Store the amount of time passed since the recording started.
 -    let currentTime = this._chromeWin.performance.now();
-+    let currentTime = this._win.performance.now() + this._delta;
-+    // Store _lastTickTime so we can use this as a delta on a page refresh
-+    // to normalize times
-+    this._lastTickTime = currentTime;
+-    let elapsedTime = currentTime - this._startTime;
+-    this._ticks.push(elapsedTime);
++    let currentTime = this._contentWin.performance.now();
 +
-     let elapsedTime = currentTime - this._startTime;
-     this._ticks.push(elapsedTime);
++    // Store _elapsedTime so we can use this as a new starting time on a page refresh
++    // to normalize times.
++    this._elapsedTime = currentTime - this._startTime;
++    this._ticks.push(this._elapsedTime);
 +  },
 +
 +  /**
@@ -203,8 +185,10 @@ index 1726f5c..b766f5d 100644
 +   */
 +  _onGlobalCreated: function (win) {
 +    if (this._recording) {
-+      this._delta = this._lastTickTime;
-+      this._rafID = this._win.requestAnimationFrame(this._onRefreshDriverTick);
++      // Set _startTime to the currently elapsed time so we can get a wholistic
++      // elapsed time in _onRefreshDriverTick.
++      this._startTime = -this._elapsedTime;
++      this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
 +    }
    }
  });
@@ -214,7 +198,7 @@ index 1726f5c..b766f5d 100644
   */
  let FramerateFront = exports.FramerateFront = protocol.FrontClass(FramerateActor, {
    initialize: function(client, { framerateActor }) {
-@@ -166,23 +190,8 @@ FramerateFront.plotFPS = function(ticks, interval = 100, clamp = 60) {
+@@ -166,23 +184,8 @@ FramerateFront.plotFPS = function(ticks, interval = 100, clamp = 60) {
      timeline.push({ delta: currTime, value: framerate });
  
      frameCount = 0;
