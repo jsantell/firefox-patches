@@ -1,0 +1,356 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 13 Feb 2015 19:06:18 -0800
+Subject: Bug 1112378 - Rewrite errors from call watcher to hide information of the error originating from call watcher, rather than content. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 69afc93..f264e5a 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -8,16 +8,17 @@ support-files =
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-param.html
+   doc_connect-multi-param.html
+   doc_iframe-context.html
+   doc_automation.html
+   doc_bug_1125817.html
+   doc_bug_1130901.html
++  doc_bug_1112378.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+@@ -26,16 +27,17 @@ support-files =
+ [browser_audionode-actor-connectnode-disconnect.js]
+ [browser_audionode-actor-connectparam.js]
+ skip-if = true # bug 1092571
+ [browser_audionode-actor-add-automation-event.js]
+ [browser_audionode-actor-get-automation-data-01.js]
+ [browser_audionode-actor-get-automation-data-02.js]
+ [browser_audionode-actor-get-automation-data-03.js]
+ [browser_callwatcher-01.js]
++[browser_callwatcher-02.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
+ [browser_webaudio-actor-connect-param.js]
+ [browser_webaudio-actor-automation-event.js]
+ 
+ [browser_wa_automation-view-01.js]
+ [browser_wa_automation-view-02.js]
+ [browser_wa_controller-01.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_callwatcher-02.js b/browser/devtools/webaudioeditor/test/browser_callwatcher-02.js
+new file mode 100644
+index 0000000..8dc95e0
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_callwatcher-02.js
+@@ -0,0 +1,44 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Bug 1112378
++ * Tests to ensure that errors called on wrapped functions via call-watcher
++ * correctly looks like the error comes from the content, not from within the devtools.
++ */
++
++const BUG_1112378_URL = EXAMPLE_URL + "doc_bug_1112378.html";
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(BUG_1112378_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  loadFrameScripts();
++
++  reload(target);
++
++  yield waitForGraphRendered(panelWin, 2, 0);
++
++  let error = yield evalInDebuggee("throwError()");
++  is(error.lineNumber, 21, "error has correct lineNumber");
++  is(error.columnNumber, 11, "error has correct columnNumber");
++  is(error.name, "TypeError", "error has correct name");
++  is(error.message, "Argument 1 is not valid for any of the 2-argument overloads of AudioNode.connect.", "error has correct message");
++  is(error.stringified, "TypeError: Argument 1 is not valid for any of the 2-argument overloads of AudioNode.connect.", "error is stringified correctly");
++  ise(error.instanceof, true, "error is correctly an instanceof TypeError");
++  is(error.fileName, "http://example.com/browser/browser/devtools/webaudioeditor/test/doc_bug_1112378.html", "error has correct fileName");
++
++  error = yield evalInDebuggee("throwDOMException()");
++  is(error.lineNumber, 37, "exception has correct lineNumber");
++  is(error.columnNumber, 0, "exception has correct columnNumber");
++  is(error.code, 9, "exception has correct code");
++  is(error.result, 2152923145, "exception has correct result");
++  is(error.name, "NotSupportedError", "exception has correct name");
++  is(error.message, "Operation is not supported", "exception has correct message");
++  is(error.stringified, "NotSupportedError: Operation is not supported", "exception is stringified correctly");
++  ise(error.instanceof, true, "exception is correctly an instance of DOMException");
++  is(error.filename, "http://example.com/browser/browser/devtools/webaudioeditor/test/doc_bug_1112378.html", "exception has correct filename");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/doc_bug_1112378.html b/browser/devtools/webaudioeditor/test/doc_bug_1112378.html
+new file mode 100644
+index 0000000..ecdfd7d
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_bug_1112378.html
+@@ -0,0 +1,57 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++
++      function throwError () {
++        try {
++          osc.connect({});
++        } catch (e) {
++          return {
++            lineNumber: e.lineNumber,
++            fileName: e.fileName,
++            columnNumber: e.columnNumber,
++            message: e.message,
++            instanceof: e instanceof TypeError,
++            stringified: e.toString(),
++            name: e.name
++          }
++        }
++      }
++
++      function throwDOMException () {
++        try {
++          osc.frequency.setValueAtTime(0, -1);
++        } catch (e) {
++          return {
++            lineNumber: e.lineNumber,
++            columnNumber: e.columnNumber,
++            filename: e.filename,
++            message: e.message,
++            code: e.code,
++            result: e.result,
++            instanceof: e instanceof DOMException,
++            stringified: e.toString(),
++            name: e.name
++          }
++        }
++      }
++
++
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/test/head.js b/browser/devtools/webaudioeditor/test/head.js
+index a679161..d1398ba 100644
+--- a/browser/devtools/webaudioeditor/test/head.js
++++ b/browser/devtools/webaudioeditor/test/head.js
+@@ -11,20 +11,23 @@ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
+ Services.prefs.setBoolPref("devtools.debugger.log", false);
+ 
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
++let { generateUUID } = Cc["@mozilla.org/uuid-generator;1"].getService(Ci.nsIUUIDGenerator);
+ 
+ let { WebAudioFront } = devtools.require("devtools/server/actors/webaudio");
+ let TargetFactory = devtools.TargetFactory;
++let mm = null;
+ 
++const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/webaudioeditor/test/";
+ const SIMPLE_CONTEXT_URL = EXAMPLE_URL + "doc_simple-context.html";
+ const COMPLEX_CONTEXT_URL = EXAMPLE_URL + "doc_complex-context.html";
+ const SIMPLE_NODES_URL = EXAMPLE_URL + "doc_simple-node-creation.html";
+ const MEDIA_NODES_URL = EXAMPLE_URL + "doc_media-node-creation.html";
+ const BUFFER_AND_ARRAY_URL = EXAMPLE_URL + "doc_buffer-and-array.html";
+ const DESTROY_NODES_URL = EXAMPLE_URL + "doc_destroy-nodes.html";
+ const CONNECT_PARAM_URL = EXAMPLE_URL + "doc_connect-param.html";
+@@ -42,16 +45,25 @@ gDevTools.testing = true;
+ registerCleanupFunction(() => {
+   gDevTools.testing = false;
+   info("finish() was called, cleaning up...");
+   Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
+   Services.prefs.setBoolPref("devtools.webaudioeditor.enabled", gToolEnabled);
+   Cu.forceGC();
+ });
+ 
++/**
++ * Call manually in tests that use frame script utils after initializing
++ * the web audio editor. Call after init but before navigating to a different page.
++ */
++function loadFrameScripts () {
++  mm = gBrowser.selectedBrowser.messageManager;
++  mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
++}
++
+ function addTab(aUrl, aWindow) {
+   info("Adding tab: " + aUrl);
+ 
+   let deferred = Promise.defer();
+   let targetWindow = aWindow || window;
+   let targetBrowser = targetWindow.gBrowser;
+ 
+   targetWindow.focus();
+@@ -436,16 +448,43 @@ function checkAutomationValue (values, time, expected) {
+ function waitForInspectorRender (panelWin, EVENTS) {
+   return Promise.all([
+     once(panelWin, EVENTS.UI_PROPERTIES_TAB_RENDERED),
+     once(panelWin, EVENTS.UI_AUTOMATION_TAB_RENDERED)
+   ]);
+ }
+ 
+ /**
++ * Takes a string `script` and evaluates it directly in the content
++ * in potentially a different process.
++ */
++function evalInDebuggee (script) {
++  let deferred = Promise.defer();
++
++  if (!mm) {
++    throw new Error("`loadFrameScripts()` must be called when using MessageManager.");
++  }
++
++  let id = generateUUID().toString();
++  mm.sendAsyncMessage("devtools:test:eval", { script: script, id: id });
++  mm.addMessageListener("devtools:test:eval:response", handler);
++
++  function handler ({ data }) {
++    if (id !== data.id) {
++      return;
++    }
++
++    mm.removeMessageListener("devtools:test:eval:response", handler);
++    deferred.resolve(data.value);
++  }
++
++  return deferred.promise;
++}
++
++/**
+  * List of audio node properties to test against expectations of the AudioNode actor
+  */
+ 
+ const NODE_DEFAULT_VALUES = {
+   "AudioDestinationNode": {},
+   "MediaElementAudioSourceNode": {},
+   "MediaStreamAudioSourceNode": {},
+   "MediaStreamAudioDestinationNode": {
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index e1207e4..881c586 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -2,17 +2,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ const events = require("sdk/event/core");
+ const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const protocol = require("devtools/server/protocol");
+-const {ContentObserver} = require("devtools/content-observer");
++const {serializeStack, parseStack} = require("toolkit/loader");
+ 
+ const {on, once, off, emit} = events;
+ const {method, Arg, Option, RetVal} = protocol;
+ 
+ /**
+  * Type describing a single function call in a stack trace.
+  */
+ protocol.types.addDictType("call-stack-item", {
+@@ -412,17 +412,22 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+      * Instruments a function on the specified target object.
+      */
+     function overrideFunction(global, target, name, descriptor, callback) {
+       // Invoking .apply on an unxrayed content function doesn't work, because
+       // the arguments array is inaccessible to it. Get Xrays back.
+       let originalFunc = Cu.unwaiveXrays(target[name]);
+ 
+       Cu.exportFunction(function(...args) {
+-        let result = Cu.waiveXrays(originalFunc.apply(this, args));
++        let result;
++        try {
++          result = Cu.waiveXrays(originalFunc.apply(this, args));
++        } catch (e) {
++          throw createContentError(e, unwrappedWindow);
++        }
+ 
+         if (self._recording) {
+           let stack = getStack(name);
+           let type = CallWatcherFront.METHOD_FUNCTION;
+           callback(unwrappedWindow, global, this, type, name, stack, args, result);
+         }
+         return result;
+       }, target, { defineAs: name });
+@@ -688,8 +693,50 @@ function getBitToEnumValue(type, object, arg) {
+     if (flag && (arg & flag) === flag) {
+       flags.push(table[flag]);
+     }
+   }
+ 
+   // Cache the combined bitmask value
+   return table[arg] = flags.join(" | ") || arg;
+ }
++
++/**
++ * Creates a new error from an error that originated from content but was called
++ * from a wrapped overridden method. This is so we can make our own error
++ * that does not look like it originated from the call watcher.
++ *
++ * We use toolkit/loader's parseStack and serializeStack rather than the
++ * parsing done in the local `getStack` function, because it does not expose
++ * column number, would have to change the protocol models `call-stack-items` and `call-details`
++ * which hurts backwards compatibility, and the local `getStack` is an optimized, hot function.
++ */
++function createContentError (e, win) {
++  let { message, name, stack } = e;
++  let parsedStack = parseStack(stack);
++  let { fileName, lineNumber, columnNumber } = parsedStack[parsedStack.length - 1];
++  let error;
++
++  let isDOMException = e instanceof Ci.nsIDOMDOMException;
++  let constructor = isDOMException ? win.DOMException : (win[e.name] || win.Error);
++
++  if (isDOMException) {
++    error = new constructor(message, name);
++    Object.defineProperties(error, {
++      code: { value: e.code },
++      columnNumber: { value: 0 }, // columnNumber is always 0 for DOMExceptions?
++      filename: { value: fileName }, // note the lowercase `filename`
++      lineNumber: { value: lineNumber },
++      result: { value: e.result },
++      stack: { value: serializeStack(parsedStack) }
++    });
++  }
++  else {
++    // Constructing an error here retains all the stack information,
++    // and we can add message, fileName and lineNumber via constructor, though
++    // need to manually add columnNumber.
++    error = new constructor(message, fileName, lineNumber);
++    Object.defineProperty(error, "columnNumber", {
++      value: columnNumber
++    });
++  }
++  return error;
++}
+-- 
+2.2.1
+

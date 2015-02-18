@@ -1,0 +1,239 @@
+From 2ba1ece13e0bba625d20f1f3e4171103acdddb57 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 10 Feb 2015 11:08:28 -0800
+Subject: Bug 1130901 - Export patched methods in call-watcher actor with Cu.exportFunctions so that Function.prototype methods can be called without permission errors. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 4090858..69afc93 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -7,16 +7,17 @@ support-files =
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-param.html
+   doc_connect-multi-param.html
+   doc_iframe-context.html
+   doc_automation.html
+   doc_bug_1125817.html
++  doc_bug_1130901.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+@@ -24,49 +25,45 @@ support-files =
+ [browser_audionode-actor-bypass.js]
+ [browser_audionode-actor-connectnode-disconnect.js]
+ [browser_audionode-actor-connectparam.js]
+ skip-if = true # bug 1092571
+ [browser_audionode-actor-add-automation-event.js]
+ [browser_audionode-actor-get-automation-data-01.js]
+ [browser_audionode-actor-get-automation-data-02.js]
+ [browser_audionode-actor-get-automation-data-03.js]
++[browser_callwatcher-01.js]
+ [browser_webaudio-actor-simple.js]
+ [browser_webaudio-actor-destroy-node.js]
+ [browser_webaudio-actor-connect-param.js]
+ [browser_webaudio-actor-automation-event.js]
+ 
++[browser_wa_automation-view-01.js]
++[browser_wa_automation-view-02.js]
++[browser_wa_controller-01.js]
+ [browser_wa_destroy-node-01.js]
+-
+ [browser_wa_first-run.js]
+-[browser_wa_reset-01.js]
+-[browser_wa_reset-02.js]
+-[browser_wa_reset-03.js]
+-[browser_wa_reset-04.js]
+-[browser_wa_navigate.js]
+-[browser_wa_controller-01.js]
+-
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-render-05.js]
+ skip-if = true # bug 1092571
+ [browser_wa_graph-selected.js]
+ [browser_wa_graph-zoom.js]
+-
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+ [browser_wa_inspector-bypass-01.js]
+-
++[browser_wa_navigate.js]
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-edit-01.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-edit-02.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-media-nodes.js]
+ [browser_wa_properties-view-params.js]
+ [browser_wa_properties-view-params-objects.js]
+-
+-[browser_wa_automation-view-01.js]
+-[browser_wa_automation-view-02.js]
++[browser_wa_reset-01.js]
++[browser_wa_reset-02.js]
++[browser_wa_reset-03.js]
++[browser_wa_reset-04.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_callwatcher-01.js b/browser/devtools/webaudioeditor/test/browser_callwatcher-01.js
+new file mode 100644
+index 0000000..a3dc801
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_callwatcher-01.js
+@@ -0,0 +1,26 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Bug 1130901
++ * Tests to ensure that calling call/apply on methods wrapped
++ * via CallWatcher do not throw a security permissions error:
++ * "Error: Permission denied to access property 'call'"
++ */
++
++const BUG_1130901_URL = EXAMPLE_URL + "doc_bug_1130901.html";
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(BUG_1130901_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
++
++  reload(target);
++
++  yield waitForGraphRendered(panelWin, 3, 0);
++
++  ok(true, "Successfully created a node from AudioContext via `call`.");
++  ok(true, "Successfully created a node from AudioContext via `apply`.");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/doc_bug_1130901.html b/browser/devtools/webaudioeditor/test/doc_bug_1130901.html
+new file mode 100644
+index 0000000..1ce1ebf
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_bug_1130901.html
+@@ -0,0 +1,22 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      ctx.createOscillator.call(ctx);
++      ctx.createGain.apply(ctx, []);
++    </script>
++  </body>
++
++</html>
+diff --git a/toolkit/devtools/server/actors/call-watcher.js b/toolkit/devtools/server/actors/call-watcher.js
+index 9908584..e1207e4 100644
+--- a/toolkit/devtools/server/actors/call-watcher.js
++++ b/toolkit/devtools/server/actors/call-watcher.js
+@@ -411,27 +411,28 @@ let CallWatcherActor = exports.CallWatcherActor = protocol.ActorClass({
+     /**
+      * Instruments a function on the specified target object.
+      */
+     function overrideFunction(global, target, name, descriptor, callback) {
+       // Invoking .apply on an unxrayed content function doesn't work, because
+       // the arguments array is inaccessible to it. Get Xrays back.
+       let originalFunc = Cu.unwaiveXrays(target[name]);
+ 
+-      Object.defineProperty(target, name, {
+-        value: function(...args) {
+-          let result = Cu.waiveXrays(originalFunc.apply(this, args));
++      Cu.exportFunction(function(...args) {
++        let result = Cu.waiveXrays(originalFunc.apply(this, args));
+ 
+-          if (self._recording) {
+-            let stack = getStack(name);
+-            let type = CallWatcherFront.METHOD_FUNCTION;
+-            callback(unwrappedWindow, global, this, type, name, stack, args, result);
+-          }
+-          return result;
+-        },
++        if (self._recording) {
++          let stack = getStack(name);
++          let type = CallWatcherFront.METHOD_FUNCTION;
++          callback(unwrappedWindow, global, this, type, name, stack, args, result);
++        }
++        return result;
++      }, target, { defineAs: name });
++
++      Object.defineProperty(target, name, {
+         configurable: descriptor.configurable,
+         enumerable: descriptor.enumerable,
+         writable: true
+       });
+     }
+ 
+     /**
+      * Instruments a getter or setter on the specified target object.
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index b17db9e..c3eb646 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -518,34 +518,33 @@ let AudioNodeActor = exports.AudioNodeActor = protocol.ActorClass({
+       // WebAudioActor event will be fired, subsequently calling
+       // `_recordAutomationEvent`. Some finesse is required to handle
+       // the cast of TypedArray arguments over the protocol, which is
+       // taken care of below. The event will cast the argument back
+       // into an array to be broadcasted from WebAudioActor, but the
+       // double-casting will only occur when starting from `addAutomationEvent`,
+       // which is only used in tests.
+       let param = XPCNativeWrapper.unwrap(node[paramName]);
++      let contentGlobal = Cu.getGlobalForObject(param);
++      let contentArgs = Cu.cloneInto(args, contentGlobal);
+ 
+       // If calling `setValueCurveAtTime`, the first argument
+       // is a Float32Array, which won't be able to be serialized
+       // over the protocol. Cast a normal array to a Float32Array here.
+       if (eventName === "setValueCurveAtTime") {
+-        let contentGlobal = Cu.getGlobalForObject(param);
+-        // Since we cannot iterate over and modify the actual Float32Array
+-        // in the content, we'll have to pass in an array to the constructor
+-        // from the same context, since we can iterate over non-TypedArrays.
+-        let contentArray = copyInto(new contentGlobal.Array(), args[0]);
+-
+         // Create a Float32Array from the content, seeding with an array
+         // from the same scope.
+-        let curve = new contentGlobal.Float32Array(contentArray);
+-        args[0] = curve;
++        let curve = new contentGlobal.Float32Array(contentArgs[0]);
++        contentArgs[0] = curve;
+       }
+ 
+-      param[eventName].apply(param, args);
++      // Apply the args back from the content scope, which is necessary
++      // due to the method wrapping changing in bug 1130901 to be exported
++      // directly to the content scope.
++      param[eventName].apply(param, contentArgs);
+     } catch (e) {
+       return constructError(e);
+     }
+   }, {
+     request: {
+       paramName: Arg(0, "string"),
+       eventName: Arg(1, "string"),
+       args: Arg(2, "nullable:json")
+-- 
+2.2.1
+
