@@ -1,0 +1,496 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 11 Feb 2015 13:57:17 -0800
+Subject: Bug 1123815 - Enable performance tools by default, disable profiler and timeline tools/tests. r=vp
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index be343e7..66cf058 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1403,40 +1403,18 @@ pref("devtools.debugger.tracer", false);
+ // The default Debugger UI settings
+ pref("devtools.debugger.ui.panes-sources-width", 200);
+ pref("devtools.debugger.ui.panes-instruments-width", 300);
+ pref("devtools.debugger.ui.panes-visible-on-startup", false);
+ pref("devtools.debugger.ui.variables-sorting-enabled", true);
+ pref("devtools.debugger.ui.variables-only-enum-visible", false);
+ pref("devtools.debugger.ui.variables-searchbox-visible", false);
+ 
+-// Enable the Profiler
+-pref("devtools.profiler.enabled", true);
+-
+-// Timeline panel settings
+-#ifdef NIGHTLY_BUILD
+-pref("devtools.timeline.enabled", true);
+-#else
+-pref("devtools.timeline.enabled", false);
+-#endif
+-pref("devtools.timeline.hiddenMarkers", "[]");
+-
+-// Enable perftools via build command
+-#ifdef MOZ_DEVTOOLS_PERFTOOLS
+-  pref("devtools.performance_dev.enabled", true);
+-#else
+-  pref("devtools.performance_dev.enabled", false);
+-#endif
+-
+-// The default Profiler UI settings
+-// TODO remove `devtools.profiler.ui.` branches when performance
+-// tool lands (bug 1075567)
+-pref("devtools.profiler.ui.flatten-tree-recursion", true);
+-pref("devtools.profiler.ui.show-platform-data", false);
+-pref("devtools.profiler.ui.show-idle-blocks", true);
++// Enable the Performance tools
++pref("devtools.performance.enabled", true);
+ 
+ // The default Performance UI settings
+ pref("devtools.performance.ui.invert-call-tree", true);
+ pref("devtools.performance.ui.invert-flame-graph", false);
+ pref("devtools.performance.ui.flatten-tree-recursion", true);
+ pref("devtools.performance.ui.show-platform-data", false);
+ pref("devtools.performance.ui.show-idle-blocks", true);
+ pref("devtools.performance.ui.enable-memory", false);
+diff --git a/browser/devtools/framework/gDevTools.jsm b/browser/devtools/framework/gDevTools.jsm
+index 8bcffb2..4b6dd39 100644
+--- a/browser/devtools/framework/gDevTools.jsm
++++ b/browser/devtools/framework/gDevTools.jsm
+@@ -1166,18 +1166,18 @@ let gDevToolsBrowser = {
+     }
+   },
+ 
+   /**
+    * Connects to the SPS profiler when the developer tools are open. This is
+    * necessary because of the WebConsole's `profile` and `profileEnd` methods.
+    */
+   _connectToProfiler: function DT_connectToProfiler(event, toolbox) {
+-    let SharedProfilerUtils = devtools.require("devtools/profiler/shared");
+-    let connection = SharedProfilerUtils.getProfilerConnection(toolbox);
++    let SharedPerformanceUtils = devtools.require("devtools/performance/front");
++    let connection = SharedPerformanceUtils.getPerformanceActorsConnection(toolbox.target);
+     connection.open();
+   },
+ 
+   /**
+    * Remove the menuitem for a tool to all open browser windows.
+    *
+    * @param {string} toolId
+    *        id of the tool to remove
+diff --git a/browser/devtools/framework/toolbox-options.xul b/browser/devtools/framework/toolbox-options.xul
+index 665a575..33144c9 100644
+--- a/browser/devtools/framework/toolbox-options.xul
++++ b/browser/devtools/framework/toolbox-options.xul
+@@ -82,17 +82,17 @@
+           <checkbox label="&options.stylesheetAutocompletion.label;"
+                     tooltiptext="&options.stylesheetAutocompletion.tooltip;"
+                     data-pref="devtools.styleeditor.autocompletion-enabled"/>
+         </vbox>
+         <label>&options.profiler.label;</label>
+         <vbox id="profiler-options" class="options-groupbox">
+           <checkbox label="&options.showPlatformData.label;"
+                     tooltiptext="&options.showPlatformData.tooltip;"
+-                    data-pref="devtools.profiler.ui.show-platform-data"/>
++                    data-pref="devtools.performance.ui.show-platform-data"/>
+         </vbox>
+       </vbox>
+ 
+       <vbox id="sourceeditor-box" class="options-vertical-pane" flex="1">
+         <label>&options.sourceeditor.label;</label>
+         <vbox id="sourceeditor-options" class="options-groupbox">
+           <checkbox id="devtools-sourceeditor-detectindentation"
+                     label="&options.sourceeditor.detectindentation.label;"
+diff --git a/browser/devtools/framework/toolbox-process-window.js b/browser/devtools/framework/toolbox-process-window.js
+index 7cc5c9d..9949c66 100644
+--- a/browser/devtools/framework/toolbox-process-window.js
++++ b/browser/devtools/framework/toolbox-process-window.js
+@@ -44,17 +44,17 @@ let connect = Task.async(function*() {
+       gClient.listTabs(openToolbox);
+     }
+   });
+ });
+ 
+ // Certain options should be toggled since we can assume chrome debugging here
+ function setPrefDefaults() {
+   Services.prefs.setBoolPref("devtools.inspector.showUserAgentStyles", true);
+-  Services.prefs.setBoolPref("devtools.profiler.ui.show-platform-data", true);
++  Services.prefs.setBoolPref("devtools.performance.ui.show-platform-data", true);
+   Services.prefs.setBoolPref("browser.devedition.theme.showCustomizeButton", false);
+   Services.prefs.setBoolPref("devtools.inspector.showAllAnonymousContent", true);
+ }
+ 
+ window.addEventListener("load", function() {
+   let cmdClose = document.getElementById("toolbox-cmd-close");
+   cmdClose.addEventListener("command", onCloseCommand);
+   setPrefDefaults();
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index afa1729..dbc1217 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -82,35 +82,29 @@ browser.jar:
+     content/browser/devtools/webaudioeditor/includes.js                (webaudioeditor/includes.js)
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/webaudioeditor/views/properties.js        (webaudioeditor/views/properties.js)
+     content/browser/devtools/webaudioeditor/views/automation.js        (webaudioeditor/views/automation.js)
+-    content/browser/devtools/profiler.xul                              (profiler/profiler.xul)
+-    content/browser/devtools/profiler.js                               (profiler/profiler.js)
+-    content/browser/devtools/ui-recordings.js                          (profiler/ui-recordings.js)
+-    content/browser/devtools/ui-profile.js                             (profiler/ui-profile.js)
+-#ifdef MOZ_DEVTOOLS_PERFTOOLS
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/performance-controller.js     (performance/performance-controller.js)
+     content/browser/devtools/performance/performance-view.js           (performance/performance-view.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
+     content/browser/devtools/performance/views/toolbar.js              (performance/views/toolbar.js)
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/details-subview.js      (performance/views/details-abstract-subview.js)
+     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
+     content/browser/devtools/performance/views/details-js-call-tree.js      (performance/views/details-js-call-tree.js)
+     content/browser/devtools/performance/views/details-js-flamegraph.js     (performance/views/details-js-flamegraph.js)
+     content/browser/devtools/performance/views/details-memory-call-tree.js  (performance/views/details-memory-call-tree.js)
+     content/browser/devtools/performance/views/details-memory-flamegraph.js (performance/views/details-memory-flamegraph.js)
+     content/browser/devtools/performance/views/recordings.js           (performance/views/recordings.js)
+-#endif
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+     content/browser/devtools/framework/toolbox-options.js              (framework/toolbox-options.js)
+@@ -141,10 +135,8 @@ browser.jar:
+     content/browser/devtools/graphs-frame.xhtml                        (shared/widgets/graphs-frame.xhtml)
+     content/browser/devtools/spectrum-frame.xhtml                      (shared/widgets/spectrum-frame.xhtml)
+     content/browser/devtools/spectrum.css                              (shared/widgets/spectrum.css)
+     content/browser/devtools/cubic-bezier-frame.xhtml                  (shared/widgets/cubic-bezier-frame.xhtml)
+     content/browser/devtools/cubic-bezier.css                          (shared/widgets/cubic-bezier.css)
+     content/browser/devtools/eyedropper.xul                            (eyedropper/eyedropper.xul)
+     content/browser/devtools/eyedropper/crosshairs.css                 (eyedropper/crosshairs.css)
+     content/browser/devtools/eyedropper/nocursor.css                   (eyedropper/nocursor.css)
+-    content/browser/devtools/timeline/timeline.xul                     (timeline/timeline.xul)
+-    content/browser/devtools/timeline/timeline.js                      (timeline/timeline.js)
+diff --git a/browser/devtools/main.js b/browser/devtools/main.js
+index 3c9aa84..e02240f 100644
+--- a/browser/devtools/main.js
++++ b/browser/devtools/main.js
+@@ -25,48 +25,44 @@ let events = require("sdk/system/events");
+ loader.lazyGetter(this, "OptionsPanel", () => require("devtools/framework/toolbox-options").OptionsPanel);
+ loader.lazyGetter(this, "InspectorPanel", () => require("devtools/inspector/inspector-panel").InspectorPanel);
+ loader.lazyGetter(this, "WebConsolePanel", () => require("devtools/webconsole/panel").WebConsolePanel);
+ loader.lazyGetter(this, "DebuggerPanel", () => require("devtools/debugger/panel").DebuggerPanel);
+ loader.lazyGetter(this, "StyleEditorPanel", () => require("devtools/styleeditor/styleeditor-panel").StyleEditorPanel);
+ loader.lazyGetter(this, "ShaderEditorPanel", () => require("devtools/shadereditor/panel").ShaderEditorPanel);
+ loader.lazyGetter(this, "CanvasDebuggerPanel", () => require("devtools/canvasdebugger/panel").CanvasDebuggerPanel);
+ loader.lazyGetter(this, "WebAudioEditorPanel", () => require("devtools/webaudioeditor/panel").WebAudioEditorPanel);
+-loader.lazyGetter(this, "ProfilerPanel", () => require("devtools/profiler/panel").ProfilerPanel);
+ loader.lazyGetter(this, "PerformancePanel", () => require("devtools/performance/panel").PerformancePanel);
+-loader.lazyGetter(this, "TimelinePanel", () => require("devtools/timeline/panel").TimelinePanel);
+ loader.lazyGetter(this, "NetMonitorPanel", () => require("devtools/netmonitor/panel").NetMonitorPanel);
+ loader.lazyGetter(this, "StoragePanel", () => require("devtools/storage/panel").StoragePanel);
+ loader.lazyGetter(this, "ScratchpadPanel", () => require("devtools/scratchpad/scratchpad-panel").ScratchpadPanel);
+ 
+ // Strings
+ const toolboxProps = "chrome://browser/locale/devtools/toolbox.properties";
+ const inspectorProps = "chrome://browser/locale/devtools/inspector.properties";
+ const webConsoleProps = "chrome://browser/locale/devtools/webconsole.properties";
+ const debuggerProps = "chrome://browser/locale/devtools/debugger.properties";
+ const styleEditorProps = "chrome://browser/locale/devtools/styleeditor.properties";
+ const shaderEditorProps = "chrome://browser/locale/devtools/shadereditor.properties";
+ const canvasDebuggerProps = "chrome://browser/locale/devtools/canvasdebugger.properties";
+ const webAudioEditorProps = "chrome://browser/locale/devtools/webaudioeditor.properties";
+ const profilerProps = "chrome://browser/locale/devtools/profiler.properties";
+-const timelineProps = "chrome://browser/locale/devtools/timeline.properties";
+ const netMonitorProps = "chrome://browser/locale/devtools/netmonitor.properties";
+ const storageProps = "chrome://browser/locale/devtools/storage.properties";
+ const scratchpadProps = "chrome://browser/locale/devtools/scratchpad.properties";
+ 
+ loader.lazyGetter(this, "toolboxStrings", () => Services.strings.createBundle(toolboxProps));
+ loader.lazyGetter(this, "profilerStrings",() => Services.strings.createBundle(profilerProps));
+ loader.lazyGetter(this, "webConsoleStrings", () => Services.strings.createBundle(webConsoleProps));
+ loader.lazyGetter(this, "debuggerStrings", () => Services.strings.createBundle(debuggerProps));
+ loader.lazyGetter(this, "styleEditorStrings", () => Services.strings.createBundle(styleEditorProps));
+ loader.lazyGetter(this, "shaderEditorStrings", () => Services.strings.createBundle(shaderEditorProps));
+ loader.lazyGetter(this, "canvasDebuggerStrings", () => Services.strings.createBundle(canvasDebuggerProps));
+ loader.lazyGetter(this, "webAudioEditorStrings", () => Services.strings.createBundle(webAudioEditorProps));
+ loader.lazyGetter(this, "inspectorStrings", () => Services.strings.createBundle(inspectorProps));
+-loader.lazyGetter(this, "timelineStrings", () => Services.strings.createBundle(timelineProps));
+ loader.lazyGetter(this, "netMonitorStrings", () => Services.strings.createBundle(netMonitorProps));
+ loader.lazyGetter(this, "storageStrings", () => Services.strings.createBundle(storageProps));
+ loader.lazyGetter(this, "scratchpadStrings", () => Services.strings.createBundle(scratchpadProps));
+ 
+ let Tools = {};
+ exports.Tools = Tools;
+ 
+ // Definitions
+@@ -244,87 +240,40 @@ Tools.canvasDebugger = {
+     return target.hasActor("canvas") && !target.chrome;
+   },
+ 
+   build: function (iframeWindow, toolbox) {
+     return new CanvasDebuggerPanel(iframeWindow, toolbox);
+   }
+ };
+ 
+-Tools.jsprofiler = {
+-  id: "jsprofiler",
+-  accesskey: l10n("profiler.accesskey", profilerStrings),
+-  key: l10n("profiler.commandkey2", profilerStrings),
+-  ordinal: 7,
+-  modifiers: "shift",
+-  visibilityswitch: "devtools.profiler.enabled",
+-  icon: "chrome://browser/skin/devtools/tool-profiler.svg",
+-  invertIconForLightTheme: true,
+-  url: "chrome://browser/content/devtools/profiler.xul",
+-  label: l10n("profiler.label2", profilerStrings),
+-  panelLabel: l10n("profiler.panelLabel2", profilerStrings),
+-  tooltip: l10n("profiler.tooltip2", profilerStrings),
+-  inMenu: true,
+-
+-  isTargetSupported: function (target) {
+-    // Hide the profiler when debugging devices pre bug 1046394,
+-    // that don't expose profiler actor in content processes.
+-    return target.hasActor("profiler");
+-  },
+-
+-  build: function (frame, target) {
+-    return new ProfilerPanel(frame, target);
+-  }
+-};
+-
+ Tools.performance = {
+   id: "performance",
+-  ordinal: 19,
++  ordinal: 7,
+   icon: "chrome://browser/skin/devtools/tool-profiler.svg",
+   invertIconForLightTheme: true,
+   url: "chrome://browser/content/devtools/performance.xul",
+-  // TODO bug 1082695 audit the Performance tools labels
+-  label: "Performance++", //l10n("profiler.label2", profilerStrings),
+-  panelLabel: "Performance++", //l10n("profiler.panelLabel2", profilerStrings),
++  visibilityswitch: "devtools.performance.enabled",
++  label: l10n("profiler.label2", profilerStrings),
++  panelLabel: l10n("profiler.panelLabel2", profilerStrings),
+   tooltip: l10n("profiler.tooltip2", profilerStrings),
+   accesskey: l10n("profiler.accesskey", profilerStrings),
+   key: l10n("profiler.commandkey2", profilerStrings),
+   modifiers: "shift",
+   inMenu: true,
+ 
+   isTargetSupported: function (target) {
+     return target.hasActor("profiler");
+   },
+ 
+   build: function (frame, target) {
+     return new PerformancePanel(frame, target);
+   }
+ };
+ 
+-Tools.timeline = {
+-  id: "timeline",
+-  ordinal: 8,
+-  visibilityswitch: "devtools.timeline.enabled",
+-  icon: "chrome://browser/skin/devtools/tool-network.svg",
+-  invertIconForLightTheme: true,
+-  url: "chrome://browser/content/devtools/timeline/timeline.xul",
+-  label: l10n("timeline.label", timelineStrings),
+-  panelLabel: l10n("timeline.panelLabel", timelineStrings),
+-  tooltip: l10n("timeline.tooltip", timelineStrings),
+-
+-  isTargetSupported: function(target) {
+-    return target.hasActor("timeline");
+-  },
+-
+-  build: function (iframeWindow, toolbox) {
+-    let panel = new TimelinePanel(iframeWindow, toolbox);
+-    return panel.open();
+-  }
+-};
+-
+ Tools.netMonitor = {
+   id: "netmonitor",
+   accesskey: l10n("netmonitor.accesskey", netMonitorStrings),
+   key: l10n("netmonitor.commandkey", netMonitorStrings),
+   ordinal: 9,
+   modifiers: osString == "Darwin" ? "accel,alt" : "accel,shift",
+   visibilityswitch: "devtools.netmonitor.enabled",
+   icon: "chrome://browser/skin/devtools/tool-network.svg",
+@@ -417,33 +366,22 @@ let defaultTools = [
+   Tools.options,
+   Tools.webConsole,
+   Tools.inspector,
+   Tools.jsdebugger,
+   Tools.styleEditor,
+   Tools.shaderEditor,
+   Tools.canvasDebugger,
+   Tools.webAudioEditor,
+-  Tools.jsprofiler,
+-  Tools.timeline,
++  Tools.performance,
+   Tools.netMonitor,
+   Tools.storage,
+   Tools.scratchpad
+ ];
+ 
+-// Only enable in-development performance tools if `--enable-devtools-perf`
+-// used in build, turning on `devtools.performance_dev.enabled`.
+-// Add to normal `defaultTools` when ready for normal release,
+-// pull out MOZ_DEVTOOLS_PERFTOOLS setting in `./configure.in`, and
+-// leave config on in `./browser/app/profile/firefox.js`, and always
+-// build in `./browser/devtools/moz.build`.
+-if (Services.prefs.getBoolPref("devtools.performance_dev.enabled")) {
+-  defaultTools.push(Tools.performance);
+-}
+-
+ exports.defaultTools = defaultTools;
+ 
+ for (let definition of defaultTools) {
+   gDevTools.registerTool(definition);
+ }
+ 
+ Tools.darkTheme = {
+   id: "dark",
+diff --git a/browser/devtools/moz.build b/browser/devtools/moz.build
+index 5791934..30d083f 100644
+--- a/browser/devtools/moz.build
++++ b/browser/devtools/moz.build
+@@ -12,36 +12,32 @@ DIRS += [
+     'debugger',
+     'eyedropper',
+     'fontinspector',
+     'framework',
+     'inspector',
+     'layoutview',
+     'markupview',
+     'netmonitor',
+-    'profiler',
++    'performance',
+     'projecteditor',
+     'responsivedesign',
+     'scratchpad',
+     'shadereditor',
+     'shared',
+     'sourceeditor',
+     'storage',
+     'styleeditor',
+     'styleinspector',
+     'tilt',
+-    'timeline',
+     'webaudioeditor',
+     'webconsole',
+     'webide',
+ ]
+ 
+-if CONFIG['MOZ_DEVTOOLS_PERFTOOLS']:
+-  DIRS += ['performance']
+-
+ EXTRA_COMPONENTS += [
+     'devtools-clhandler.js',
+     'devtools-clhandler.manifest',
+ ]
+ 
+ JAR_MANIFESTS += ['jar.mn']
+ 
+ EXTRA_JS_MODULES.devtools += [
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 0976b11..cc3617b 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -39,27 +39,23 @@ gDevTools.testing = true;
+ let DEFAULT_PREFS = [
+   "devtools.debugger.log",
+   "devtools.performance.ui.invert-call-tree",
+   "devtools.performance.ui.flatten-tree-recursion",
+   "devtools.performance.ui.show-platform-data",
+   "devtools.performance.ui.show-idle-blocks",
+   "devtools.performance.ui.enable-memory",
+   "devtools.performance.ui.enable-framerate",
+-
+-  // remove after bug 1075567 is resolved.
+-  "devtools.performance_dev.enabled"
+ ].reduce((prefs, pref) => {
+   prefs[pref] = Services.prefs.getBoolPref(pref);
+   return prefs;
+ }, {});
+ 
+-// Enable the new performance panel for all tests. Remove this after
+-// bug 1075567 is resolved.
+-Services.prefs.setBoolPref("devtools.performance_dev.enabled", true);
++// Enable the new performance panel for all tests.
++Services.prefs.setBoolPref("devtools.performance.enabled", true);
+ // Enable logging for all the tests. Both the debugger server and frontend will
+ // be affected by this pref.
+ Services.prefs.setBoolPref("devtools.debugger.log", false);
+ 
+ /**
+  * Call manually in tests that use frame script utils after initializing
+  * the tool. Must be called after initializing so we can detect
+  * whether or not `content` is a CPOW or not. Call after init but before navigating
+diff --git a/browser/devtools/profiler/moz.build b/browser/devtools/profiler/moz.build
+index d7817dd..c1763d5 100644
+--- a/browser/devtools/profiler/moz.build
++++ b/browser/devtools/profiler/moz.build
+@@ -2,10 +2,8 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.profiler += [
+     'panel.js',
+     'utils/shared.js'
+ ]
+-
+-BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/browser/devtools/timeline/moz.build b/browser/devtools/timeline/moz.build
+index b2f2d61..9d119c8 100644
+--- a/browser/devtools/timeline/moz.build
++++ b/browser/devtools/timeline/moz.build
+@@ -1,10 +1,8 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.timeline += [
+     'panel.js',
+ ]
+-
+-BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/configure.in b/configure.in
+index 4ca0299..386216a 100644
+--- a/configure.in
++++ b/configure.in
+@@ -7663,29 +7663,16 @@ fi
+ 
+ if test "$MOZ_CHROME_FILE_FORMAT" != "jar" &&
+     test "$MOZ_CHROME_FILE_FORMAT" != "flat" &&
+     test "$MOZ_CHROME_FILE_FORMAT" != "omni"; then
+     AC_MSG_ERROR([--enable-chrome-format must be set to either jar, flat, or omni])
+ fi
+ 
+ dnl =========================================================
+-dnl Enable support for revamped devtools Performance Tools
+-dnl =========================================================
+-
+-MOZ_ARG_ENABLE_BOOL(devtools-perf,
+-[  --enable-devtools-perf Set compile flags necessary for compiling devtools perftools],
+-MOZ_DEVTOOLS_PERFTOOLS=1,
+-MOZ_DEVTOOLS_PERFTOOLS= )
+-if test -n "$MOZ_DEVTOOLS_PERFTOOLS"; then
+-  AC_DEFINE(MOZ_DEVTOOLS_PERFTOOLS)
+-fi
+-AC_SUBST(MOZ_DEVTOOLS_PERFTOOLS)
+-
+-dnl =========================================================
+ dnl Omnijar packaging (bug 552121)
+ dnl =========================================================
+ dnl Omnijar packaging is compatible with flat packaging.
+ dnl In unpackaged builds, omnijar looks for files as if
+ dnl things were flat packaged. After packaging, all files
+ dnl are loaded from a single jar. MOZ_CHROME_FILE_FORMAT
+ dnl is set to flat since putting files into jars is only
+ dnl done during packaging with omnijar.
+-- 
+2.2.1
+
