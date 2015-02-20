@@ -1,0 +1,336 @@
+From 693e164f0d94c42c62d5640d5b92f197c6a0b24b Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 18 Feb 2015 18:17:31 -0800
+Subject: Bug 1122766 - Fix canvas debugger to continue recording frames until one with a draw call. r=vp
+
+diff --git a/browser/devtools/canvasdebugger/test/browser.ini b/browser/devtools/canvasdebugger/test/browser.ini
+index 2de0d2f..f8569be 100644
+--- a/browser/devtools/canvasdebugger/test/browser.ini
++++ b/browser/devtools/canvasdebugger/test/browser.ini
+@@ -1,11 +1,12 @@
+ [DEFAULT]
+ subsuite = devtools
+ support-files =
++  doc_raf-begin.html
+   doc_simple-canvas.html
+   doc_simple-canvas-bitmasks.html
+   doc_simple-canvas-deep-stack.html
+   doc_simple-canvas-transparent.html
+   doc_webgl-bindings.html
+   doc_webgl-enum.html
+   head.js
+ 
+@@ -29,14 +30,15 @@ support-files =
+ [browser_canvas-frontend-img-screenshots.js]
+ [browser_canvas-frontend-img-thumbnails-01.js]
+ [browser_canvas-frontend-img-thumbnails-02.js]
+ [browser_canvas-frontend-open.js]
+ skip-if = e10s # bug 1102301 - leaks while running as a standalone directory in e10s mode
+ [browser_canvas-frontend-record-01.js]
+ [browser_canvas-frontend-record-02.js]
+ [browser_canvas-frontend-record-03.js]
++[browser_canvas-frontend-record-04.js]
+ [browser_canvas-frontend-reload-01.js]
+ [browser_canvas-frontend-reload-02.js]
+ [browser_canvas-frontend-slider-01.js]
+ [browser_canvas-frontend-slider-02.js]
+ [browser_canvas-frontend-snapshot-select.js]
+ [browser_canvas-frontend-stepping.js]
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-04.js b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-04.js
+index f8413ad..0684e2e 100644
+--- a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-04.js
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-04.js
+@@ -17,17 +17,17 @@ function ifTestingSupported() {
+   yield navigated;
+   ok(true, "Target automatically navigated when the front was set up.");
+ 
+   let snapshotActor = yield front.recordAnimationFrame();
+   ok(snapshotActor,
+     "A snapshot actor was sent after recording.");
+ 
+   let animationOverview = yield snapshotActor.getOverview();
+-  ok(snapshotActor,
++  ok(animationOverview,
+     "An animation overview could be retrieved after recording.");
+ 
+   let thumbnails = animationOverview.thumbnails;
+   ok(thumbnails,
+     "An array of thumbnails was sent after recording.");
+   is(thumbnails.length, 4,
+     "The number of thumbnails is correct.");
+ 
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-04.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-04.js
+new file mode 100644
+index 0000000..9bf9218
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-04.js
+@@ -0,0 +1,34 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Bug 1122766
++ * Tests that the canvas actor correctly returns from recordAnimationFrame
++ * in the scenario where a loop starts with rAF and has rAF in the beginning
++ * of its loop, when the recording starts before the rAFs start.
++ */
++
++function ifTestingSupported() {
++  let { target, panel } = yield initCanvasDebuggerFrontend(RAF_BEGIN_URL);
++  let { window, EVENTS, gFront, SnapshotsListView } = panel.panelWin;
++  loadFrameScripts();
++
++  yield reload(target);
++
++  let recordingFinished = once(window, EVENTS.SNAPSHOT_RECORDING_FINISHED);
++  SnapshotsListView._onRecordButtonClick();
++
++  // Wait until after the recording started to trigger the content.
++  // Use the gFront method rather than the SNAPSHOT_RECORDING_STARTED event
++  // which triggers before the underlying actor call
++  yield waitUntil(function*() { return !(yield gFront.isRecording()); });
++
++  // Start animation in content
++  evalInDebuggee("start();");
++
++  yield recordingFinished;
++  ok(true, "Finished recording a snapshot of the animation loop.");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/canvasdebugger/test/doc_raf-begin.html b/browser/devtools/canvasdebugger/test/doc_raf-begin.html
+new file mode 100644
+index 0000000..8727f83
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/doc_raf-begin.html
+@@ -0,0 +1,36 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Canvas inspector test page</title>
++  </head>
++
++  <body>
++    <canvas width="128" height="128"></canvas>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      var ctx = document.querySelector("canvas").getContext("2d");
++
++      function drawRect(fill, size) {
++        ctx.fillStyle = fill;
++        ctx.fillRect(size[0], size[1], size[2], size[3]);
++      }
++
++      function drawScene() {
++        window.requestAnimationFrame(drawScene);
++        ctx.clearRect(0, 0, 128, 128);
++        drawRect("rgb(192, 192, 192)", [0, 0, 128, 128]);
++        drawRect("rgba(0, 0, 192, 0.5)", [30, 30, 55, 50]);
++        drawRect("rgba(192, 0, 0, 0.5)", [10, 10, 55, 50]);
++      }
++
++      function start () { window.requestAnimationFrame(drawScene); }
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/canvasdebugger/test/head.js b/browser/devtools/canvasdebugger/test/head.js
+index 1192bea..6445a4f2 100644
+--- a/browser/devtools/canvasdebugger/test/head.js
++++ b/browser/devtools/canvasdebugger/test/head.js
+@@ -15,29 +15,31 @@ let { generateUUID } = Cc['@mozilla.org/uuid-generator;1'].getService(Ci.nsIUUID
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
+ let { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.jsm", {});
+ let { CallWatcherFront } = devtools.require("devtools/server/actors/call-watcher");
+ let { CanvasFront } = devtools.require("devtools/server/actors/canvas");
++let { setTimeout } = devtools.require("sdk/timers");
+ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
+ let mm = null
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/canvasdebugger/test/";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
+ const SIMPLE_BITMASKS_URL = EXAMPLE_URL + "doc_simple-canvas-bitmasks.html";
+ const SIMPLE_CANVAS_TRANSPARENT_URL = EXAMPLE_URL + "doc_simple-canvas-transparent.html";
+ const SIMPLE_CANVAS_DEEP_STACK_URL = EXAMPLE_URL + "doc_simple-canvas-deep-stack.html";
+ const WEBGL_ENUM_URL = EXAMPLE_URL + "doc_webgl-enum.html";
+ const WEBGL_BINDINGS_URL = EXAMPLE_URL + "doc_webgl-bindings.html";
++const RAF_BEGIN_URL = EXAMPLE_URL + "doc_raf-begin.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.canvasdebugger.enabled");
+ 
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
+@@ -270,8 +272,27 @@ function evalInDebuggee (script) {
+ 
+   return deferred.promise;
+ }
+ 
+ function getSourceActor(aSources, aURL) {
+   let item = aSources.getItemForAttachment(a => a.source.url === aURL);
+   return item ? item.value : null;
+ }
++
++/**
++ * Waits until a predicate returns true.
++ *
++ * @param function predicate
++ *        Invoked once in a while until it returns true.
++ * @param number interval [optional]
++ *        How often the predicate is invoked, in milliseconds.
++ */
++function *waitUntil (predicate, interval = 10) {
++  if (yield predicate()) {
++    return Promise.resolve(true);
++  }
++  let deferred = Promise.defer();
++  setTimeout(function() {
++    waitUntil(predicate).then(() => deferred.resolve(true));
++  }, interval);
++  return deferred.promise;
++}
+diff --git a/toolkit/devtools/server/actors/canvas.js b/toolkit/devtools/server/actors/canvas.js
+index 2871c66..2eeee1b 100644
+--- a/toolkit/devtools/server/actors/canvas.js
++++ b/toolkit/devtools/server/actors/canvas.js
+@@ -224,16 +224,20 @@ let FrameSnapshotFront = protocol.FrontClass(FrameSnapshotActor, {
+ });
+ 
+ /**
+  * This Canvas Actor handles simple instrumentation of all the methods
+  * of a 2D or WebGL context, to provide information regarding all the calls
+  * made when drawing frame inside an animation loop.
+  */
+ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
++  // Reset for each recording, boolean indicating whether or not
++  // any draw calls were called for a recording.
++  _animationContainsDrawCall: false,
++
+   typeName: "canvas",
+   initialize: function(conn, tabActor) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+     this.tabActor = tabActor;
+     this._onContentFunctionCall = this._onContentFunctionCall.bind(this);
+   },
+   destroy: function(conn) {
+     protocol.Actor.prototype.destroy.call(this, conn);
+@@ -282,29 +286,40 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+    */
+   isInitialized: method(function() {
+     return !!this._initialized;
+   }, {
+     response: { initialized: RetVal("boolean") }
+   }),
+ 
+   /**
++   * Returns whether or not the CanvasActor is recording an animation.
++   * Used in tests.
++   */
++  isRecording: method(function() {
++    return !!this._callWatcher.isRecording();
++  }, {
++    response: { recording: RetVal("boolean") } 
++  }),
++
++  /**
+    * Records a snapshot of all the calls made during the next animation frame.
+    * The animation should be implemented via the de-facto requestAnimationFrame
+    * utility, not inside a `setInterval` or recursive `setTimeout`.
+    *
+    * XXX: Currently only supporting requestAnimationFrame. When this isn't used,
+    * it'd be a good idea to display a huge red flashing banner telling people to
+    * STOP USING `setInterval` OR `setTimeout` FOR ANIMATION. Bug 978948.
+    */
+   recordAnimationFrame: method(function() {
+     if (this._callWatcher.isRecording()) {
+       return this._currentAnimationFrameSnapshot.promise;
+     }
+ 
++    this._recordingContainsDrawCall = false;
+     this._callWatcher.eraseRecording();
+     this._callWatcher.resumeRecording();
+ 
+     let deferred = this._currentAnimationFrameSnapshot = promise.defer();
+     return deferred.promise;
+   }, {
+     response: { snapshot: RetVal("frame-snapshot") }
+   }),
+@@ -335,17 +350,21 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+   },
+ 
+   /**
+    * Handle animations generated using requestAnimationFrame.
+    */
+   _handleAnimationFrame: function(functionCall) {
+     if (!this._animationStarted) {
+       this._handleAnimationFrameBegin();
+-    } else {
++    }
++    // Check to see if draw calls occurred yet, as it could be future frames,
++    // like in the scenario where requestAnimationFrame is called to trigger an animation,
++    // and rAF is at the beginning of the animate loop.
++    else if (this._animationContainsDrawCall) {
+       this._handleAnimationFrameEnd(functionCall);
+     }
+   },
+ 
+   /**
+    * Called whenever an animation frame rendering begins.
+    */
+   _handleAnimationFrameBegin: function() {
+@@ -357,16 +376,17 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+    * Called whenever an animation frame rendering ends.
+    */
+   _handleAnimationFrameEnd: function() {
+     // Get a hold of all the function calls made during this animation frame.
+     // Since only one snapshot can be recorded at a time, erase all the
+     // previously recorded calls.
+     let functionCalls = this._callWatcher.pauseRecording();
+     this._callWatcher.eraseRecording();
++    this._animationContainsDrawCall = false;
+ 
+     // Since the animation frame finished, get a hold of the (already retrieved)
+     // canvas pixels to conveniently create a screenshot of the final rendering.
+     let index = this._lastDrawCallIndex;
+     let width = this._lastContentCanvasWidth;
+     let height = this._lastContentCanvasHeight;
+     let flipped = !!this._lastThumbnailFlipped; // undefined -> false
+     let pixels = ContextUtils.getPixelStorage()["8bit"];
+@@ -405,16 +425,18 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+     let index = this._lastDrawCallIndex = functionCalls.indexOf(functionCall);
+     let w = this._lastContentCanvasWidth = contentCanvas.width;
+     let h = this._lastContentCanvasHeight = contentCanvas.height;
+ 
+     // To keep things fast, generate images of small and fixed dimensions.
+     let dimensions = CanvasFront.THUMBNAIL_SIZE;
+     let thumbnail;
+ 
++    this._animationContainsDrawCall = true;
++
+     // Create a thumbnail on every draw call on the canvas context, to augment
+     // the respective function call actor with this additional data.
+     if (global == CallWatcherFront.CANVAS_WEBGL_CONTEXT) {
+       // Check if drawing to a custom framebuffer (when rendering to texture).
+       // Don't create a thumbnail in this particular case.
+       let framebufferBinding = caller.getParameter(caller.FRAMEBUFFER_BINDING);
+       if (framebufferBinding == null) {
+         thumbnail = ContextUtils.getPixelsForWebGL(caller, 0, 0, w, h, dimensions);
+-- 
+2.2.1
+

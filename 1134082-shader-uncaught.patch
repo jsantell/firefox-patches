@@ -1,0 +1,493 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 18 Feb 2015 15:22:17 -0800
+Subject: Bug 1134082 - Fix uncaught promise exceptions in shader editor. r=vp
+
+diff --git a/browser/devtools/shadereditor/shadereditor.js b/browser/devtools/shadereditor/shadereditor.js
+index ec6eafe..9301987 100644
+--- a/browser/devtools/shadereditor/shadereditor.js
++++ b/browser/devtools/shadereditor/shadereditor.js
+@@ -5,16 +5,17 @@
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource://gre/modules/Task.jsm");
+ Cu.import("resource:///modules/devtools/SideMenuWidget.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
++Cu.import("resource://gre/modules/devtools/Console.jsm");
+ 
+ const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const {Tooltip} = require("devtools/shared/widgets/Tooltip");
+ const Editor = require("devtools/sourceeditor/editor");
+ const Telemetry = require("devtools/shared/telemetry");
+ const telemetry = new Telemetry();
+@@ -118,36 +119,36 @@ let EventsHandler = {
+   },
+ 
+   /**
+    * Called for each location change in the debugged tab.
+    */
+   _onTabNavigated: function(event, {isFrameSwitching}) {
+     switch (event) {
+       case "will-navigate": {
+-        Task.spawn(function*() {
+-          // Make sure the backend is prepared to handle WebGL contexts.
+-          if (!isFrameSwitching) {
+-            gFront.setup({ reload: false });
+-          }
+-
+-          // Reset UI.
+-          ShadersListView.empty();
+-          // When switching to an iframe, ensure displaying the reload button.
+-          // As the document has already been loaded without being hooked.
+-          if (isFrameSwitching) {
+-            $("#reload-notice").hidden = false;
+-            $("#waiting-notice").hidden = true;
+-          } else {
+-            $("#reload-notice").hidden = true;
+-            $("#waiting-notice").hidden = false;
+-          }
+-          yield ShadersEditorsView.setText({ vs: "", fs: "" });
+-          $("#content").hidden = true;
+-        }).then(() => window.emit(EVENTS.UI_RESET));
++        // Make sure the backend is prepared to handle WebGL contexts.
++        if (!isFrameSwitching) {
++          gFront.setup({ reload: false });
++        }
++
++        // Reset UI.
++        ShadersListView.empty();
++        // When switching to an iframe, ensure displaying the reload button.
++        // As the document has already been loaded without being hooked.
++        if (isFrameSwitching) {
++          $("#reload-notice").hidden = false;
++          $("#waiting-notice").hidden = true;
++        } else {
++          $("#reload-notice").hidden = true;
++          $("#waiting-notice").hidden = false;
++        }
++
++        $("#content").hidden = true;
++        window.emit(EVENTS.UI_RESET);
++
+         break;
+       }
+       case "navigate": {
+         // Manually retrieve the list of program actors known to the server,
+         // because the backend won't emit "program-linked" notifications
+         // in the case of a bfcache navigation (since no new programs are
+         // actually linked).
+         gFront.getPrograms().then(this._onProgramsAdded);
+@@ -365,17 +366,17 @@ let ShadersEditorsView = {
+     this._fsChanged = this._onChanged.bind(this, "fs");
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: Task.async(function*() {
+     this._destroyed = true;
+-    this._toggleListeners("off");
++    yield this._toggleListeners("off");
+     for (let p of this._editorPromises.values()) {
+       let editor = yield p;
+       editor.destroy();
+     }
+   }),
+ 
+   /**
+    * Sets the text displayed in the vertex and fragment shader editors.
+@@ -409,19 +410,16 @@ let ShadersEditorsView = {
+    *
+    * @param string type
+    *        Specifies for which shader type should an editor be retrieved,
+    *        either are "vs" for a vertex, or "fs" for a fragment shader.
+    * @return object
+    *        Returns a promise that resolves to an editor instance
+    */
+   _getEditor: function(type) {
+-    if ($("#content").hidden) {
+-      return promise.reject(new Error("Shader Editor is still waiting for a WebGL context to be created."));
+-    }
+     if (this._editorPromises.has(type)) {
+       return this._editorPromises.get(type);
+     }
+ 
+     let deferred = promise.defer();
+     this._editorPromises.set(type, deferred.promise);
+ 
+     // Initialize the source editor and store the newly created instance
+diff --git a/browser/devtools/shadereditor/test/browser_se_aaa_run_first_leaktest.js b/browser/devtools/shadereditor/test/browser_se_aaa_run_first_leaktest.js
+index bfec65b..5e2f3bd 100644
+--- a/browser/devtools/shadereditor/test/browser_se_aaa_run_first_leaktest.js
++++ b/browser/devtools/shadereditor/test/browser_se_aaa_run_first_leaktest.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if the shader editor leaks on initialization and sudden destruction.
+  * You can also use this initialization format as a template for other tests.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+ 
+diff --git a/browser/devtools/shadereditor/test/browser_se_editors-contents.js b/browser/devtools/shadereditor/test/browser_se_editors-contents.js
+index f6705dc..b3f85f8 100644
+--- a/browser/devtools/shadereditor/test/browser_se_editors-contents.js
++++ b/browser/devtools/shadereditor/test/browser_se_editors-contents.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if the editors contain the correct text when a program
+  * becomes available.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, ShadersEditorsView, EVENTS } = panel.panelWin;
+diff --git a/browser/devtools/shadereditor/test/browser_se_editors-error-gutter.js b/browser/devtools/shadereditor/test/browser_se_editors-error-gutter.js
+index 6129bdb..8f8c2b4 100644
+--- a/browser/devtools/shadereditor/test/browser_se_editors-error-gutter.js
++++ b/browser/devtools/shadereditor/test/browser_se_editors-error-gutter.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if error indicators are shown in the editor's gutter and text area
+  * when there's a shader compilation error.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, EVENTS, ShadersEditorsView } = panel.panelWin;
+diff --git a/browser/devtools/shadereditor/test/browser_se_editors-error-tooltip.js b/browser/devtools/shadereditor/test/browser_se_editors-error-tooltip.js
+index 6605ef0..5bdc0d8 100644
+--- a/browser/devtools/shadereditor/test/browser_se_editors-error-tooltip.js
++++ b/browser/devtools/shadereditor/test/browser_se_editors-error-tooltip.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if error tooltips can be opened from the editor's gutter when there's
+  * a shader compilation error.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, EVENTS, ShadersEditorsView } = panel.panelWin;
+diff --git a/browser/devtools/shadereditor/test/browser_se_editors-lazy-init.js b/browser/devtools/shadereditor/test/browser_se_editors-lazy-init.js
+index 6b7b0eb..4f31ac6 100644
+--- a/browser/devtools/shadereditor/test/browser_se_editors-lazy-init.js
++++ b/browser/devtools/shadereditor/test/browser_se_editors-lazy-init.js
+@@ -1,40 +1,19 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if source editors are lazily initialized.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, ShadersEditorsView } = panel.panelWin;
+ 
+-  try {
+-    yield ShadersEditorsView._getEditor("vs");
+-    ok(false, "The promise for a vertex shader editor should be rejected.");
+-  } catch (e) {
+-    ok(true, "The vertex shader editors wasn't initialized.");
+-  }
+-
+-  try {
+-    yield ShadersEditorsView._getEditor("fs");
+-    ok(false, "The promise for a fragment shader editor should be rejected.");
+-  } catch (e) {
+-    ok(true, "The fragment shader editors wasn't initialized.");
+-  }
+-
+   reload(target);
+   yield once(gFront, "program-linked");
+ 
+   let vsEditor = yield ShadersEditorsView._getEditor("vs");
+   let fsEditor = yield ShadersEditorsView._getEditor("fs");
+ 
+   ok(vsEditor, "A vertex shader editor was initialized.");
+   ok(fsEditor, "A fragment shader editor was initialized.");
+diff --git a/browser/devtools/shadereditor/test/browser_se_first-run.js b/browser/devtools/shadereditor/test/browser_se_first-run.js
+index 4ea0ed76..bc02546 100644
+--- a/browser/devtools/shadereditor/test/browser_se_first-run.js
++++ b/browser/devtools/shadereditor/test/browser_se_first-run.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if the shader editor shows the appropriate UI when opened.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, $ } = panel.panelWin;
+ 
+diff --git a/browser/devtools/shadereditor/test/browser_se_navigation.js b/browser/devtools/shadereditor/test/browser_se_navigation.js
+index eacdb54..5336744 100644
+--- a/browser/devtools/shadereditor/test/browser_se_navigation.js
++++ b/browser/devtools/shadereditor/test/browser_se_navigation.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests target navigations are handled correctly in the UI.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, $, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
+ 
+@@ -43,45 +36,32 @@ function ifWebGLSupported() {
+     "The vertex shader editor contains the correct text.");
+   is(fsEditor.getText().indexOf("gl_FragColor"), 97,
+     "The fragment shader editor contains the correct text.");
+ 
+   let navigating = once(target, "will-navigate");
+   let navigated = once(target, "will-navigate");
+   navigate(target, "about:blank");
+ 
+-  yield navigating;
+-  yield once(panel.panelWin, EVENTS.UI_RESET);
++  yield promise.all([navigating, once(panel.panelWin, EVENTS.UI_RESET) ]);
+ 
+   is($("#reload-notice").hidden, true,
+     "The 'reload this page' notice should be hidden while navigating.");
+   is($("#waiting-notice").hidden, false,
+     "The 'waiting for a WebGL context' notice should be visible while navigating.");
+   is($("#content").hidden, true,
+     "The tool's content should be hidden now that there's no WebGL content.");
+ 
+   is(ShadersListView.itemCount, 0,
+     "The shaders list should be empty.");
+   is(ShadersListView.selectedItem, null,
+     "The shaders list has no correct item.");
+   is(ShadersListView.selectedIndex, -1,
+     "The shaders list has a negative index.");
+ 
+-  yield ShadersEditorsView._getEditor("vs").then(() => {
+-    ok(false, "The promise for a vertex shader editor should be rejected.");
+-  }, () => {
+-    ok(true, "The vertex shader editors wasn't initialized.");
+-  });
+-
+-  yield ShadersEditorsView._getEditor("fs").then(() => {
+-    ok(false, "The promise for a fragment shader editor should be rejected.");
+-  }, () => {
+-    ok(true, "The fragment shader editors wasn't initialized.");
+-  });
+-
+   yield navigated;
+ 
+   is($("#reload-notice").hidden, true,
+     "The 'reload this page' notice should still be hidden after navigating.");
+   is($("#waiting-notice").hidden, false,
+     "The 'waiting for a WebGL context' notice should still be visible after navigating.");
+   is($("#content").hidden, true,
+     "The tool's content should be still hidden since there's no WebGL content.");
+diff --git a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
+index 23df460..4cdfed7 100644
+--- a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
++++ b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-01.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if blackboxing a program works properly.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, debuggee, panel } = yield initShaderEditor(MULTIPLE_CONTEXTS_URL);
+   let { gFront, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
+ 
+diff --git a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js
+index 2f3eb12..c2fdd38 100644
+--- a/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js
++++ b/browser/devtools/shadereditor/test/browser_se_programs-blackbox-02.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if blackboxing a program works properly in tandem with blended
+  * overlapping geometry.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, debuggee, panel } = yield initShaderEditor(BLENDED_GEOMETRY_CANVAS_URL);
+   let { gFront, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
+diff --git a/browser/devtools/shadereditor/test/browser_se_programs-list.js b/browser/devtools/shadereditor/test/browser_se_programs-list.js
+index 3d676a6..5900a8e 100644
+--- a/browser/devtools/shadereditor/test/browser_se_programs-list.js
++++ b/browser/devtools/shadereditor/test/browser_se_programs-list.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if the programs list contains an entry after vertex and fragment
+  * shaders are linked.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(MULTIPLE_CONTEXTS_URL);
+   let { gFront, EVENTS, L10N, ShadersListView, ShadersEditorsView } = panel.panelWin;
+diff --git a/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js b/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js
+index 2524432..c7e932c 100644
+--- a/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js
++++ b/browser/devtools/shadereditor/test/browser_se_shaders-edit-01.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if editing a vertex and a fragment shader works properly.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, $, EVENTS, ShadersEditorsView } = panel.panelWin;
+ 
+diff --git a/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js b/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js
+index 1deff7a..0b6aaf0 100644
+--- a/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js
++++ b/browser/devtools/shadereditor/test/browser_se_shaders-edit-02.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed.
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if compile or linkage errors are emitted when a shader source
+  * gets malformed after being edited.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(SIMPLE_CANVAS_URL);
+   let { gFront, EVENTS, ShadersEditorsView } = panel.panelWin;
+diff --git a/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js b/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js
+index 15c1b6a..a73afed 100644
+--- a/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js
++++ b/browser/devtools/shadereditor/test/browser_se_shaders-edit-03.js
+@@ -1,18 +1,11 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+-///////////////////
+-//
+-// Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+-//
+-thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+-
+ /**
+  * Tests if editing a vertex and a fragment shader would permanently store
+  * their new source on the backend and reshow it in the frontend when required.
+  */
+ 
+ function ifWebGLSupported() {
+   let { target, panel } = yield initShaderEditor(MULTIPLE_CONTEXTS_URL);
+   let { gFront, EVENTS, ShadersListView, ShadersEditorsView } = panel.panelWin;
+-- 
+2.2.1
+

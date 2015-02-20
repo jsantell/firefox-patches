@@ -1,0 +1,2557 @@
+From dada037617ee63a9cbdab219e1f7796ff5c8652f Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 19 Feb 2015 16:37:45 -0800
+Subject: Bug 985488 - Allow canvas debugger to time out and stop recording frames. Canvas debugger 'wait' style now matches other media styles. Update labels in canvas debugger to explicitly state that it's waiting for rAF cycles, rather than appearing as if something went wrong. r=vp
+
+diff --git a/browser/devtools/canvasdebugger/callslist.js b/browser/devtools/canvasdebugger/callslist.js
+new file mode 100644
+index 0000000..1a5d005
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/callslist.js
+@@ -0,0 +1,508 @@
++/**
++ * Functions handling details about a single recorded animation frame snapshot
++ * (the calls list, rendering preview, thumbnails filmstrip etc.).
++ */
++let CallsListView = Heritage.extend(WidgetMethods, {
++  /**
++   * Initialization function, called when the tool is started.
++   */
++  initialize: function() {
++    this.widget = new SideMenuWidget($("#calls-list"));
++    this._slider = $("#calls-slider");
++    this._searchbox = $("#calls-searchbox");
++    this._filmstrip = $("#snapshot-filmstrip");
++
++    this._onSelect = this._onSelect.bind(this);
++    this._onSlideMouseDown = this._onSlideMouseDown.bind(this);
++    this._onSlideMouseUp = this._onSlideMouseUp.bind(this);
++    this._onSlide = this._onSlide.bind(this);
++    this._onSearch = this._onSearch.bind(this);
++    this._onScroll = this._onScroll.bind(this);
++    this._onExpand = this._onExpand.bind(this);
++    this._onStackFileClick = this._onStackFileClick.bind(this);
++    this._onThumbnailClick = this._onThumbnailClick.bind(this);
++
++    this.widget.addEventListener("select", this._onSelect, false);
++    this._slider.addEventListener("mousedown", this._onSlideMouseDown, false);
++    this._slider.addEventListener("mouseup", this._onSlideMouseUp, false);
++    this._slider.addEventListener("change", this._onSlide, false);
++    this._searchbox.addEventListener("input", this._onSearch, false);
++    this._filmstrip.addEventListener("wheel", this._onScroll, false);
++  },
++
++  /**
++   * Destruction function, called when the tool is closed.
++   */
++  destroy: function() {
++    this.widget.removeEventListener("select", this._onSelect, false);
++    this._slider.removeEventListener("mousedown", this._onSlideMouseDown, false);
++    this._slider.removeEventListener("mouseup", this._onSlideMouseUp, false);
++    this._slider.removeEventListener("change", this._onSlide, false);
++    this._searchbox.removeEventListener("input", this._onSearch, false);
++    this._filmstrip.removeEventListener("wheel", this._onScroll, false);
++  },
++
++  /**
++   * Populates this container with a list of function calls.
++   *
++   * @param array functionCalls
++   *        A list of function call actors received from the backend.
++   */
++  showCalls: function(functionCalls) {
++    this.empty();
++
++    for (let i = 0, len = functionCalls.length; i < len; i++) {
++      let call = functionCalls[i];
++
++      let view = document.createElement("vbox");
++      view.className = "call-item-view devtools-monospace";
++      view.setAttribute("flex", "1");
++
++      let contents = document.createElement("hbox");
++      contents.className = "call-item-contents";
++      contents.setAttribute("align", "center");
++      contents.addEventListener("dblclick", this._onExpand);
++      view.appendChild(contents);
++
++      let index = document.createElement("label");
++      index.className = "plain call-item-index";
++      index.setAttribute("flex", "1");
++      index.setAttribute("value", i + 1);
++
++      let gutter = document.createElement("hbox");
++      gutter.className = "call-item-gutter";
++      gutter.appendChild(index);
++      contents.appendChild(gutter);
++
++      // Not all function calls have a caller that was stringified (e.g.
++      // context calls have a "gl" or "ctx" caller preview).
++      if (call.callerPreview) {
++        let context = document.createElement("label");
++        context.className = "plain call-item-context";
++        context.setAttribute("value", call.callerPreview);
++        contents.appendChild(context);
++
++        let separator = document.createElement("label");
++        separator.className = "plain call-item-separator";
++        separator.setAttribute("value", ".");
++        contents.appendChild(separator);
++      }
++
++      let name = document.createElement("label");
++      name.className = "plain call-item-name";
++      name.setAttribute("value", call.name);
++      contents.appendChild(name);
++
++      let argsPreview = document.createElement("label");
++      argsPreview.className = "plain call-item-args";
++      argsPreview.setAttribute("crop", "end");
++      argsPreview.setAttribute("flex", "100");
++      // Getters and setters are displayed differently from regular methods.
++      if (call.type == CallWatcherFront.METHOD_FUNCTION) {
++        argsPreview.setAttribute("value", "(" + call.argsPreview + ")");
++      } else {
++        argsPreview.setAttribute("value", " = " + call.argsPreview);
++      }
++      contents.appendChild(argsPreview);
++
++      let location = document.createElement("label");
++      location.className = "plain call-item-location";
++      location.setAttribute("value", getFileName(call.file) + ":" + call.line);
++      location.setAttribute("crop", "start");
++      location.setAttribute("flex", "1");
++      location.addEventListener("mousedown", this._onExpand);
++      contents.appendChild(location);
++
++      // Append a function call item to this container.
++      this.push([view], {
++        staged: true,
++        attachment: {
++          actor: call
++        }
++      });
++
++      // Highlight certain calls that are probably more interesting than
++      // everything else, making it easier to quickly glance over them.
++      if (CanvasFront.DRAW_CALLS.has(call.name)) {
++        view.setAttribute("draw-call", "");
++      }
++      if (CanvasFront.INTERESTING_CALLS.has(call.name)) {
++        view.setAttribute("interesting-call", "");
++      }
++    }
++
++    // Flushes all the prepared function call items into this container.
++    this.commit();
++    window.emit(EVENTS.CALL_LIST_POPULATED);
++
++    // Resetting the function selection slider's value (shown in this
++    // container's toolbar) would trigger a selection event, which should be
++    // ignored in this case.
++    this._ignoreSliderChanges = true;
++    this._slider.value = 0;
++    this._slider.max = functionCalls.length - 1;
++    this._ignoreSliderChanges = false;
++  },
++
++  /**
++   * Displays an image in the rendering preview of this container, generated
++   * for the specified draw call in the recorded animation frame snapshot.
++   *
++   * @param array screenshot
++   *        A single "snapshot-image" instance received from the backend.
++   */
++  showScreenshot: function(screenshot) {
++    let { index, width, height, scaling, flipped, pixels } = screenshot;
++
++    let screenshotNode = $("#screenshot-image");
++    screenshotNode.setAttribute("flipped", flipped);
++    drawBackground("screenshot-rendering", width, height, pixels);
++
++    let dimensionsNode = $("#screenshot-dimensions");
++    let actualWidth = (width / scaling) | 0;
++    let actualHeight = (height / scaling) | 0;
++    dimensionsNode.setAttribute("value",
++      SHARED_L10N.getFormatStr("dimensions", actualWidth, actualHeight));
++
++    window.emit(EVENTS.CALL_SCREENSHOT_DISPLAYED);
++  },
++
++  /**
++   * Populates this container's footer with a list of thumbnails, one generated
++   * for each draw call in the recorded animation frame snapshot.
++   *
++   * @param array thumbnails
++   *        An array of "snapshot-image" instances received from the backend.
++   */
++  showThumbnails: function(thumbnails) {
++    while (this._filmstrip.hasChildNodes()) {
++      this._filmstrip.firstChild.remove();
++    }
++    for (let thumbnail of thumbnails) {
++      this.appendThumbnail(thumbnail);
++    }
++
++    window.emit(EVENTS.THUMBNAILS_DISPLAYED);
++  },
++
++  /**
++   * Displays an image in the thumbnails list of this container, generated
++   * for the specified draw call in the recorded animation frame snapshot.
++   *
++   * @param array thumbnail
++   *        A single "snapshot-image" instance received from the backend.
++   */
++  appendThumbnail: function(thumbnail) {
++    let { index, width, height, flipped, pixels } = thumbnail;
++
++    let thumbnailNode = document.createElementNS(HTML_NS, "canvas");
++    thumbnailNode.setAttribute("flipped", flipped);
++    thumbnailNode.width = Math.max(CanvasFront.THUMBNAIL_SIZE, width);
++    thumbnailNode.height = Math.max(CanvasFront.THUMBNAIL_SIZE, height);
++    drawImage(thumbnailNode, width, height, pixels, { centered: true });
++
++    thumbnailNode.className = "filmstrip-thumbnail";
++    thumbnailNode.onmousedown = e => this._onThumbnailClick(e, index);
++    thumbnailNode.setAttribute("index", index);
++    this._filmstrip.appendChild(thumbnailNode);
++  },
++
++  /**
++   * Sets the currently highlighted thumbnail in this container.
++   * A screenshot will always correlate to a thumbnail in the filmstrip,
++   * both being identified by the same 'index' of the context function call.
++   *
++   * @param number index
++   *        The context function call's index.
++   */
++  set highlightedThumbnail(index) {
++    let currHighlightedThumbnail = $(".filmstrip-thumbnail[index='" + index + "']");
++    if (currHighlightedThumbnail == null) {
++      return;
++    }
++
++    let prevIndex = this._highlightedThumbnailIndex
++    let prevHighlightedThumbnail = $(".filmstrip-thumbnail[index='" + prevIndex + "']");
++    if (prevHighlightedThumbnail) {
++      prevHighlightedThumbnail.removeAttribute("highlighted");
++    }
++
++    currHighlightedThumbnail.setAttribute("highlighted", "");
++    currHighlightedThumbnail.scrollIntoView();
++    this._highlightedThumbnailIndex = index;
++  },
++
++  /**
++   * Gets the currently highlighted thumbnail in this container.
++   * @return number
++   */
++  get highlightedThumbnail() {
++    return this._highlightedThumbnailIndex;
++  },
++
++  /**
++   * The select listener for this container.
++   */
++  _onSelect: function({ detail: callItem }) {
++    if (!callItem) {
++      return;
++    }
++
++    // Some of the stepping buttons don't make sense specifically while the
++    // last function call is selected.
++    if (this.selectedIndex == this.itemCount - 1) {
++      $("#resume").setAttribute("disabled", "true");
++      $("#step-over").setAttribute("disabled", "true");
++      $("#step-out").setAttribute("disabled", "true");
++    } else {
++      $("#resume").removeAttribute("disabled");
++      $("#step-over").removeAttribute("disabled");
++      $("#step-out").removeAttribute("disabled");
++    }
++
++    // Correlate the currently selected item with the function selection
++    // slider's value. Avoid triggering a redundant selection event.
++    this._ignoreSliderChanges = true;
++    this._slider.value = this.selectedIndex;
++    this._ignoreSliderChanges = false;
++
++    // Can't generate screenshots for function call actors loaded from disk.
++    // XXX: Bug 984844.
++    if (callItem.attachment.actor.isLoadedFromDisk) {
++      return;
++    }
++
++    // To keep continuous selection buttery smooth (for example, while pressing
++    // the DOWN key or moving the slider), only display the screenshot after
++    // any kind of user input stops.
++    setConditionalTimeout("screenshot-display", SCREENSHOT_DISPLAY_DELAY, () => {
++      return !this._isSliding;
++    }, () => {
++      let frameSnapshot = SnapshotsListView.selectedItem.attachment.actor
++      let functionCall = callItem.attachment.actor;
++      frameSnapshot.generateScreenshotFor(functionCall).then(screenshot => {
++        this.showScreenshot(screenshot);
++        this.highlightedThumbnail = screenshot.index;
++      }).catch(Cu.reportError);
++    });
++  },
++
++  /**
++   * The mousedown listener for the call selection slider.
++   */
++  _onSlideMouseDown: function() {
++    this._isSliding = true;
++  },
++
++  /**
++   * The mouseup listener for the call selection slider.
++   */
++  _onSlideMouseUp: function() {
++    this._isSliding = false;
++  },
++
++  /**
++   * The change listener for the call selection slider.
++   */
++  _onSlide: function() {
++    // Avoid performing any operations when programatically changing the value.
++    if (this._ignoreSliderChanges) {
++      return;
++    }
++    let selectedFunctionCallIndex = this.selectedIndex = this._slider.value;
++
++    // While sliding, immediately show the most relevant thumbnail for a
++    // function call, for a nice diff-like animation effect between draws.
++    let thumbnails = SnapshotsListView.selectedItem.attachment.thumbnails;
++    let thumbnail = getThumbnailForCall(thumbnails, selectedFunctionCallIndex);
++
++    // Avoid drawing and highlighting if the selected function call has the
++    // same thumbnail as the last one.
++    if (thumbnail.index == this.highlightedThumbnail) {
++      return;
++    }
++    // If a thumbnail wasn't found (e.g. the backend avoids creating thumbnails
++    // when rendering offscreen), simply defer to the first available one.
++    if (thumbnail.index == -1) {
++      thumbnail = thumbnails[0];
++    }
++
++    let { index, width, height, flipped, pixels } = thumbnail;
++    this.highlightedThumbnail = index;
++
++    let screenshotNode = $("#screenshot-image");
++    screenshotNode.setAttribute("flipped", flipped);
++    drawBackground("screenshot-rendering", width, height, pixels);
++  },
++
++  /**
++   * The input listener for the calls searchbox.
++   */
++  _onSearch: function(e) {
++    let lowerCaseSearchToken = this._searchbox.value.toLowerCase();
++
++    this.filterContents(e => {
++      let call = e.attachment.actor;
++      let name = call.name.toLowerCase();
++      let file = call.file.toLowerCase();
++      let line = call.line.toString().toLowerCase();
++      let args = call.argsPreview.toLowerCase();
++
++      return name.contains(lowerCaseSearchToken) ||
++             file.contains(lowerCaseSearchToken) ||
++             line.contains(lowerCaseSearchToken) ||
++             args.contains(lowerCaseSearchToken);
++    });
++  },
++
++  /**
++   * The wheel listener for the filmstrip that contains all the thumbnails.
++   */
++  _onScroll: function(e) {
++    this._filmstrip.scrollLeft += e.deltaX;
++  },
++
++  /**
++   * The click/dblclick listener for an item or location url in this container.
++   * When expanding an item, it's corresponding call stack will be displayed.
++   */
++  _onExpand: function(e) {
++    let callItem = this.getItemForElement(e.target);
++    let view = $(".call-item-view", callItem.target);
++
++    // If the call stack nodes were already created, simply re-show them
++    // or jump to the corresponding file and line in the Debugger if a
++    // location link was clicked.
++    if (view.hasAttribute("call-stack-populated")) {
++      let isExpanded = view.getAttribute("call-stack-expanded") == "true";
++
++      // If clicking on the location, jump to the Debugger.
++      if (e.target.classList.contains("call-item-location")) {
++        let { file, line } = callItem.attachment.actor;
++        viewSourceInDebugger(file, line);
++        return;
++      }
++      // Otherwise hide the call stack.
++      else {
++        view.setAttribute("call-stack-expanded", !isExpanded);
++        $(".call-item-stack", view).hidden = isExpanded;
++        return;
++      }
++    }
++
++    let list = document.createElement("vbox");
++    list.className = "call-item-stack";
++    view.setAttribute("call-stack-populated", "");
++    view.setAttribute("call-stack-expanded", "true");
++    view.appendChild(list);
++
++    /**
++     * Creates a function call nodes in this container for a stack.
++     */
++    let display = stack => {
++      for (let i = 1; i < stack.length; i++) {
++        let call = stack[i];
++
++        let contents = document.createElement("hbox");
++        contents.className = "call-item-stack-fn";
++        contents.style.MozPaddingStart = (i * STACK_FUNC_INDENTATION) + "px";
++
++        let name = document.createElement("label");
++        name.className = "plain call-item-stack-fn-name";
++        name.setAttribute("value", "↳ " + call.name + "()");
++        contents.appendChild(name);
++
++        let spacer = document.createElement("spacer");
++        spacer.setAttribute("flex", "100");
++        contents.appendChild(spacer);
++
++        let location = document.createElement("label");
++        location.className = "plain call-item-stack-fn-location";
++        location.setAttribute("value", getFileName(call.file) + ":" + call.line);
++        location.setAttribute("crop", "start");
++        location.setAttribute("flex", "1");
++        location.addEventListener("mousedown", e => this._onStackFileClick(e, call));
++        contents.appendChild(location);
++
++        list.appendChild(contents);
++      }
++
++      window.emit(EVENTS.CALL_STACK_DISPLAYED);
++    };
++
++    // If this animation snapshot is loaded from disk, there are no corresponding
++    // backend actors available and the data is immediately available.
++    let functionCall = callItem.attachment.actor;
++    if (functionCall.isLoadedFromDisk) {
++      display(functionCall.stack);
++    }
++    // ..otherwise we need to request the function call stack from the backend.
++    else {
++      callItem.attachment.actor.getDetails().then(fn => display(fn.stack));
++    }
++  },
++
++  /**
++   * The click listener for a location link in the call stack.
++   *
++   * @param string file
++   *        The url of the source owning the function.
++   * @param number line
++   *        The line of the respective function.
++   */
++  _onStackFileClick: function(e, { file, line }) {
++    viewSourceInDebugger(file, line);
++  },
++
++  /**
++   * The click listener for a thumbnail in the filmstrip.
++   *
++   * @param number index
++   *        The function index in the recorded animation frame snapshot.
++   */
++  _onThumbnailClick: function(e, index) {
++    this.selectedIndex = index;
++  },
++
++  /**
++   * The click listener for the "resume" button in this container's toolbar.
++   */
++  _onResume: function() {
++    // Jump to the next draw call in the recorded animation frame snapshot.
++    let drawCall = getNextDrawCall(this.items, this.selectedItem);
++    if (drawCall) {
++      this.selectedItem = drawCall;
++      return;
++    }
++
++    // If there are no more draw calls, just jump to the last context call.
++    this._onStepOut();
++  },
++
++  /**
++   * The click listener for the "step over" button in this container's toolbar.
++   */
++  _onStepOver: function() {
++    this.selectedIndex++;
++  },
++
++  /**
++   * The click listener for the "step in" button in this container's toolbar.
++   */
++  _onStepIn: function() {
++    if (this.selectedIndex == -1) {
++      this._onResume();
++      return;
++    }
++    let callItem = this.selectedItem;
++    let { file, line } = callItem.attachment.actor;
++    viewSourceInDebugger(file, line);
++  },
++
++  /**
++   * The click listener for the "step out" button in this container's toolbar.
++   */
++  _onStepOut: function() {
++    this.selectedIndex = this.itemCount - 1;
++  }
++});
+diff --git a/browser/devtools/canvasdebugger/canvasdebugger.js b/browser/devtools/canvasdebugger/canvasdebugger.js
+index e333fe8..aaa9ae0 100644
+--- a/browser/devtools/canvasdebugger/canvasdebugger.js
++++ b/browser/devtools/canvasdebugger/canvasdebugger.js
+@@ -4,25 +4,29 @@
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource:///modules/devtools/SideMenuWidget.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
++Cu.import("resource://gre/modules/devtools/Console.jsm");
++Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ 
+ const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+ const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const { CallWatcherFront } = require("devtools/server/actors/call-watcher");
+ const { CanvasFront } = require("devtools/server/actors/canvas");
+ const Telemetry = require("devtools/shared/telemetry");
+ const telemetry = new Telemetry();
+ 
++const CANVAS_ACTOR_RECORDING_ATTEMPT = gDevTools.testing ? 500 : 5000;
++
+ XPCOMUtils.defineLazyModuleGetter(this, "Task",
+   "resource://gre/modules/Task.jsm");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "PluralForm",
+   "resource://gre/modules/PluralForm.jsm");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "FileUtils",
+   "resource://gre/modules/FileUtils.jsm");
+@@ -36,19 +40,22 @@ XPCOMUtils.defineLazyModuleGetter(this, "DevToolsUtils",
+ // The panel's window global is an EventEmitter firing the following events:
+ const EVENTS = {
+   // When the UI is reset from tab navigation.
+   UI_RESET: "CanvasDebugger:UIReset",
+ 
+   // When all the animation frame snapshots are removed by the user.
+   SNAPSHOTS_LIST_CLEARED: "CanvasDebugger:SnapshotsListCleared",
+ 
+-  // When an animation frame snapshot starts/finishes being recorded.
++  // When an animation frame snapshot starts/finishes being recorded, and
++  // whether it was completed succesfully or cancelled.
+   SNAPSHOT_RECORDING_STARTED: "CanvasDebugger:SnapshotRecordingStarted",
+   SNAPSHOT_RECORDING_FINISHED: "CanvasDebugger:SnapshotRecordingFinished",
++  SNAPSHOT_RECORDING_COMPLETED: "CanvasDebugger:SnapshotRecordingCompleted",
++  SNAPSHOT_RECORDING_CANCELLED: "CanvasDebugger:SnapshotRecordingCancelled",
+ 
+   // When an animation frame snapshot was selected and all its data displayed.
+   SNAPSHOT_RECORDING_SELECTED: "CanvasDebugger:SnapshotRecordingSelected",
+ 
+   // After all the function calls associated with an animation frame snapshot
+   // are displayed in the UI.
+   CALL_LIST_POPULATED: "CanvasDebugger:CallListPopulated",
+ 
+@@ -152,915 +159,27 @@ let EventsHandler = {
+     CallsListView.empty();
+ 
+     $("#record-snapshot").removeAttribute("checked");
+     $("#record-snapshot").removeAttribute("disabled");
+     $("#record-snapshot").hidden = false;
+ 
+     $("#reload-notice").hidden = true;
+     $("#empty-notice").hidden = false;
+-    $("#import-notice").hidden = true;
++    $("#waiting-notice").hidden = true;
+ 
+     $("#debugging-pane-contents").hidden = true;
+     $("#screenshot-container").hidden = true;
+     $("#snapshot-filmstrip").hidden = true;
+ 
+     window.emit(EVENTS.UI_RESET);
+   }
+ };
+ 
+ /**
+- * Functions handling the recorded animation frame snapshots UI.
+- */
+-let SnapshotsListView = Heritage.extend(WidgetMethods, {
+-  /**
+-   * Initialization function, called when the tool is started.
+-   */
+-  initialize: function() {
+-    this.widget = new SideMenuWidget($("#snapshots-list"), {
+-      showArrows: true
+-    });
+-
+-    this._onSelect = this._onSelect.bind(this);
+-    this._onClearButtonClick = this._onClearButtonClick.bind(this);
+-    this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
+-    this._onImportButtonClick = this._onImportButtonClick.bind(this);
+-    this._onSaveButtonClick = this._onSaveButtonClick.bind(this);
+-
+-    this.emptyText = L10N.getStr("noSnapshotsText");
+-    this.widget.addEventListener("select", this._onSelect, false);
+-  },
+-
+-  /**
+-   * Destruction function, called when the tool is closed.
+-   */
+-  destroy: function() {
+-    this.widget.removeEventListener("select", this._onSelect, false);
+-  },
+-
+-  /**
+-   * Adds a snapshot entry to this container.
+-   *
+-   * @return object
+-   *         The newly inserted item.
+-   */
+-  addSnapshot: function() {
+-    let contents = document.createElement("hbox");
+-    contents.className = "snapshot-item";
+-
+-    let thumbnail = document.createElementNS(HTML_NS, "canvas");
+-    thumbnail.className = "snapshot-item-thumbnail";
+-    thumbnail.width = CanvasFront.THUMBNAIL_SIZE;
+-    thumbnail.height = CanvasFront.THUMBNAIL_SIZE;
+-
+-    let title = document.createElement("label");
+-    title.className = "plain snapshot-item-title";
+-    title.setAttribute("value",
+-      L10N.getFormatStr("snapshotsList.itemLabel", this.itemCount + 1));
+-
+-    let calls = document.createElement("label");
+-    calls.className = "plain snapshot-item-calls";
+-    calls.setAttribute("value",
+-      L10N.getStr("snapshotsList.loadingLabel"));
+-
+-    let save = document.createElement("label");
+-    save.className = "plain snapshot-item-save";
+-    save.addEventListener("click", this._onSaveButtonClick, false);
+-
+-    let spacer = document.createElement("spacer");
+-    spacer.setAttribute("flex", "1");
+-
+-    let footer = document.createElement("hbox");
+-    footer.className = "snapshot-item-footer";
+-    footer.appendChild(save);
+-
+-    let details = document.createElement("vbox");
+-    details.className = "snapshot-item-details";
+-    details.appendChild(title);
+-    details.appendChild(calls);
+-    details.appendChild(spacer);
+-    details.appendChild(footer);
+-
+-    contents.appendChild(thumbnail);
+-    contents.appendChild(details);
+-
+-    // Append a recorded snapshot item to this container.
+-    return this.push([contents], {
+-      attachment: {
+-        // The snapshot and function call actors, along with the thumbnails
+-        // will be available as soon as recording finishes.
+-        actor: null,
+-        calls: null,
+-        thumbnails: null,
+-        screenshot: null
+-      }
+-    });
+-  },
+-
+-  /**
+-   * Customizes a shapshot in this container.
+-   *
+-   * @param Item snapshotItem
+-   *        An item inserted via `SnapshotsListView.addSnapshot`.
+-   * @param object snapshotActor
+-   *        The frame snapshot actor received from the backend.
+-   * @param object snapshotOverview
+-   *        Additional data about the snapshot received from the backend.
+-   */
+-  customizeSnapshot: function(snapshotItem, snapshotActor, snapshotOverview) {
+-    // Make sure the function call actors are stored on the item,
+-    // to be used when populating the CallsListView.
+-    snapshotItem.attachment.actor = snapshotActor;
+-    let functionCalls = snapshotItem.attachment.calls = snapshotOverview.calls;
+-    let thumbnails = snapshotItem.attachment.thumbnails = snapshotOverview.thumbnails;
+-    let screenshot = snapshotItem.attachment.screenshot = snapshotOverview.screenshot;
+-
+-    let lastThumbnail = thumbnails[thumbnails.length - 1];
+-    let { width, height, flipped, pixels } = lastThumbnail;
+-
+-    let thumbnailNode = $(".snapshot-item-thumbnail", snapshotItem.target);
+-    thumbnailNode.setAttribute("flipped", flipped);
+-    drawImage(thumbnailNode, width, height, pixels, { centered: true });
+-
+-    let callsNode = $(".snapshot-item-calls", snapshotItem.target);
+-    let drawCalls = functionCalls.filter(e => CanvasFront.DRAW_CALLS.has(e.name));
+-
+-    let drawCallsStr = PluralForm.get(drawCalls.length,
+-      L10N.getStr("snapshotsList.drawCallsLabel"));
+-    let funcCallsStr = PluralForm.get(functionCalls.length,
+-      L10N.getStr("snapshotsList.functionCallsLabel"));
+-
+-    callsNode.setAttribute("value",
+-      drawCallsStr.replace("#1", drawCalls.length) + ", " +
+-      funcCallsStr.replace("#1", functionCalls.length));
+-
+-    let saveNode = $(".snapshot-item-save", snapshotItem.target);
+-    saveNode.setAttribute("disabled", !!snapshotItem.isLoadedFromDisk);
+-    saveNode.setAttribute("value", snapshotItem.isLoadedFromDisk
+-      ? L10N.getStr("snapshotsList.loadedLabel")
+-      : L10N.getStr("snapshotsList.saveLabel"));
+-
+-    // Make sure there's always a selected item available.
+-    if (!this.selectedItem) {
+-      this.selectedIndex = 0;
+-    }
+-  },
+-
+-  /**
+-   * The select listener for this container.
+-   */
+-  _onSelect: function({ detail: snapshotItem }) {
+-    if (!snapshotItem) {
+-      return;
+-    }
+-    let { calls, thumbnails, screenshot } = snapshotItem.attachment;
+-
+-    $("#reload-notice").hidden = true;
+-    $("#empty-notice").hidden = true;
+-    $("#import-notice").hidden = false;
+-
+-    $("#debugging-pane-contents").hidden = true;
+-    $("#screenshot-container").hidden = true;
+-    $("#snapshot-filmstrip").hidden = true;
+-
+-    Task.spawn(function*() {
+-      // Wait for a few milliseconds between presenting the function calls,
+-      // screenshot and thumbnails, to allow each component being
+-      // sequentially drawn. This gives the illusion of snappiness.
+-
+-      yield DevToolsUtils.waitForTime(SNAPSHOT_DATA_DISPLAY_DELAY);
+-      CallsListView.showCalls(calls);
+-      $("#debugging-pane-contents").hidden = false;
+-      $("#import-notice").hidden = true;
+-
+-      yield DevToolsUtils.waitForTime(SNAPSHOT_DATA_DISPLAY_DELAY);
+-      CallsListView.showThumbnails(thumbnails);
+-      $("#snapshot-filmstrip").hidden = false;
+-
+-      yield DevToolsUtils.waitForTime(SNAPSHOT_DATA_DISPLAY_DELAY);
+-      CallsListView.showScreenshot(screenshot);
+-      $("#screenshot-container").hidden = false;
+-
+-      window.emit(EVENTS.SNAPSHOT_RECORDING_SELECTED);
+-    });
+-  },
+-
+-  /**
+-   * The click listener for the "clear" button in this container.
+-   */
+-  _onClearButtonClick: function() {
+-    Task.spawn(function*() {
+-      SnapshotsListView.empty();
+-      CallsListView.empty();
+-
+-      $("#reload-notice").hidden = true;
+-      $("#empty-notice").hidden = true;
+-      $("#import-notice").hidden = true;
+-
+-      if (yield gFront.isInitialized()) {
+-        $("#empty-notice").hidden = false;
+-      } else {
+-        $("#reload-notice").hidden = false;
+-      }
+-
+-      $("#debugging-pane-contents").hidden = true;
+-      $("#screenshot-container").hidden = true;
+-      $("#snapshot-filmstrip").hidden = true;
+-
+-      window.emit(EVENTS.SNAPSHOTS_LIST_CLEARED);
+-    });
+-  },
+-
+-  /**
+-   * The click listener for the "record" button in this container.
+-   */
+-  _onRecordButtonClick: function() {
+-    Task.spawn(function*() {
+-      $("#record-snapshot").setAttribute("checked", "true");
+-      $("#record-snapshot").setAttribute("disabled", "true");
+-
+-      // Insert a "dummy" snapshot item in the view, to hint that recording
+-      // has now started. However, wait for a few milliseconds before actually
+-      // starting the recording, since that might block rendering and prevent
+-      // the dummy snapshot item from being drawn.
+-      let snapshotItem = this.addSnapshot();
+-
+-      // If this is the first item, immediately show the "Loading…" notice.
+-      if (this.itemCount == 1) {
+-        $("#empty-notice").hidden = true;
+-        $("#import-notice").hidden = false;
+-      }
+-
+-      yield DevToolsUtils.waitForTime(SNAPSHOT_START_RECORDING_DELAY);
+-      window.emit(EVENTS.SNAPSHOT_RECORDING_STARTED);
+-
+-      let snapshotActor = yield gFront.recordAnimationFrame();
+-      let snapshotOverview = yield snapshotActor.getOverview();
+-      this.customizeSnapshot(snapshotItem, snapshotActor, snapshotOverview);
+-
+-      $("#record-snapshot").removeAttribute("checked");
+-      $("#record-snapshot").removeAttribute("disabled");
+-
+-      window.emit(EVENTS.SNAPSHOT_RECORDING_FINISHED);
+-    }.bind(this));
+-  },
+-
+-  /**
+-   * The click listener for the "import" button in this container.
+-   */
+-  _onImportButtonClick: function() {
+-    let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+-    fp.init(window, L10N.getStr("snapshotsList.saveDialogTitle"), Ci.nsIFilePicker.modeOpen);
+-    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogJSONFilter"), "*.json");
+-    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogAllFilter"), "*.*");
+-
+-    if (fp.show() != Ci.nsIFilePicker.returnOK) {
+-      return;
+-    }
+-
+-    let channel = NetUtil.newChannel2(fp.file,
+-                                      null,
+-                                      null,
+-                                      window.document,
+-                                      null, // aLoadingPrincipal
+-                                      null, // aTriggeringPrincipal
+-                                      Ci.nsILoadInfo.SEC_NORMAL,
+-                                      Ci.nsIContentPolicy.TYPE_OTHER);
+-    channel.contentType = "text/plain";
+-
+-    NetUtil.asyncFetch2(channel, (inputStream, status) => {
+-      if (!Components.isSuccessCode(status)) {
+-        console.error("Could not import recorded animation frame snapshot file.");
+-        return;
+-      }
+-      try {
+-        let string = NetUtil.readInputStreamToString(inputStream, inputStream.available());
+-        var data = JSON.parse(string);
+-      } catch (e) {
+-        console.error("Could not read animation frame snapshot file.");
+-        return;
+-      }
+-      if (data.fileType != CALLS_LIST_SERIALIZER_IDENTIFIER) {
+-        console.error("Unrecognized animation frame snapshot file.");
+-        return;
+-      }
+-
+-      // Add a `isLoadedFromDisk` flag on everything to avoid sending invalid
+-      // requests to the backend, since we're not dealing with actors anymore.
+-      let snapshotItem = this.addSnapshot();
+-      snapshotItem.isLoadedFromDisk = true;
+-      data.calls.forEach(e => e.isLoadedFromDisk = true);
+-
+-      this.customizeSnapshot(snapshotItem, data.calls, data);
+-    });
+-  },
+-
+-  /**
+-   * The click listener for the "save" button of each item in this container.
+-   */
+-  _onSaveButtonClick: function(e) {
+-    let snapshotItem = this.getItemForElement(e.target);
+-
+-    let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+-    fp.init(window, L10N.getStr("snapshotsList.saveDialogTitle"), Ci.nsIFilePicker.modeSave);
+-    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogJSONFilter"), "*.json");
+-    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogAllFilter"), "*.*");
+-    fp.defaultString = "snapshot.json";
+-
+-    // Start serializing all the function call actors for the specified snapshot,
+-    // while the nsIFilePicker dialog is being opened. Snappy.
+-    let serialized = Task.spawn(function*() {
+-      let data = {
+-        fileType: CALLS_LIST_SERIALIZER_IDENTIFIER,
+-        version: CALLS_LIST_SERIALIZER_VERSION,
+-        calls: [],
+-        thumbnails: [],
+-        screenshot: null
+-      };
+-      let functionCalls = snapshotItem.attachment.calls;
+-      let thumbnails = snapshotItem.attachment.thumbnails;
+-      let screenshot = snapshotItem.attachment.screenshot;
+-
+-      // Prepare all the function calls for serialization.
+-      yield DevToolsUtils.yieldingEach(functionCalls, (call, i) => {
+-        let { type, name, file, line, argsPreview, callerPreview } = call;
+-        return call.getDetails().then(({ stack }) => {
+-          data.calls[i] = {
+-            type: type,
+-            name: name,
+-            file: file,
+-            line: line,
+-            stack: stack,
+-            argsPreview: argsPreview,
+-            callerPreview: callerPreview
+-          };
+-        });
+-      });
+-
+-      // Prepare all the thumbnails for serialization.
+-      yield DevToolsUtils.yieldingEach(thumbnails, (thumbnail, i) => {
+-        let { index, width, height, flipped, pixels } = thumbnail;
+-        data.thumbnails.push({ index, width, height, flipped, pixels });
+-      });
+-
+-      // Prepare the screenshot for serialization.
+-      let { index, width, height, flipped, pixels } = screenshot;
+-      data.screenshot = { index, width, height, flipped, pixels };
+-
+-      let string = JSON.stringify(data);
+-      let converter = Cc["@mozilla.org/intl/scriptableunicodeconverter"].
+-        createInstance(Ci.nsIScriptableUnicodeConverter);
+-
+-      converter.charset = "UTF-8";
+-      return converter.convertToInputStream(string);
+-    });
+-
+-    // Open the nsIFilePicker and wait for the function call actors to finish
+-    // being serialized, in order to save the generated JSON data to disk.
+-    fp.open({ done: result => {
+-      if (result == Ci.nsIFilePicker.returnCancel) {
+-        return;
+-      }
+-      let footer = $(".snapshot-item-footer", snapshotItem.target);
+-      let save = $(".snapshot-item-save", snapshotItem.target);
+-
+-      // Show a throbber and a "Saving…" label if serializing isn't immediate.
+-      setNamedTimeout("call-list-save", CALLS_LIST_SLOW_SAVE_DELAY, () => {
+-        footer.classList.add("devtools-throbber");
+-        save.setAttribute("disabled", "true");
+-        save.setAttribute("value", L10N.getStr("snapshotsList.savingLabel"));
+-      });
+-
+-      serialized.then(inputStream => {
+-        let outputStream = FileUtils.openSafeFileOutputStream(fp.file);
+-
+-        NetUtil.asyncCopy(inputStream, outputStream, status => {
+-          if (!Components.isSuccessCode(status)) {
+-            console.error("Could not save recorded animation frame snapshot file.");
+-          }
+-          clearNamedTimeout("call-list-save");
+-          footer.classList.remove("devtools-throbber");
+-          save.removeAttribute("disabled");
+-          save.setAttribute("value", L10N.getStr("snapshotsList.saveLabel"));
+-        });
+-      });
+-    }});
+-  }
+-});
+-
+-/**
+- * Functions handling details about a single recorded animation frame snapshot
+- * (the calls list, rendering preview, thumbnails filmstrip etc.).
+- */
+-let CallsListView = Heritage.extend(WidgetMethods, {
+-  /**
+-   * Initialization function, called when the tool is started.
+-   */
+-  initialize: function() {
+-    this.widget = new SideMenuWidget($("#calls-list"));
+-    this._slider = $("#calls-slider");
+-    this._searchbox = $("#calls-searchbox");
+-    this._filmstrip = $("#snapshot-filmstrip");
+-
+-    this._onSelect = this._onSelect.bind(this);
+-    this._onSlideMouseDown = this._onSlideMouseDown.bind(this);
+-    this._onSlideMouseUp = this._onSlideMouseUp.bind(this);
+-    this._onSlide = this._onSlide.bind(this);
+-    this._onSearch = this._onSearch.bind(this);
+-    this._onScroll = this._onScroll.bind(this);
+-    this._onExpand = this._onExpand.bind(this);
+-    this._onStackFileClick = this._onStackFileClick.bind(this);
+-    this._onThumbnailClick = this._onThumbnailClick.bind(this);
+-
+-    this.widget.addEventListener("select", this._onSelect, false);
+-    this._slider.addEventListener("mousedown", this._onSlideMouseDown, false);
+-    this._slider.addEventListener("mouseup", this._onSlideMouseUp, false);
+-    this._slider.addEventListener("change", this._onSlide, false);
+-    this._searchbox.addEventListener("input", this._onSearch, false);
+-    this._filmstrip.addEventListener("wheel", this._onScroll, false);
+-  },
+-
+-  /**
+-   * Destruction function, called when the tool is closed.
+-   */
+-  destroy: function() {
+-    this.widget.removeEventListener("select", this._onSelect, false);
+-    this._slider.removeEventListener("mousedown", this._onSlideMouseDown, false);
+-    this._slider.removeEventListener("mouseup", this._onSlideMouseUp, false);
+-    this._slider.removeEventListener("change", this._onSlide, false);
+-    this._searchbox.removeEventListener("input", this._onSearch, false);
+-    this._filmstrip.removeEventListener("wheel", this._onScroll, false);
+-  },
+-
+-  /**
+-   * Populates this container with a list of function calls.
+-   *
+-   * @param array functionCalls
+-   *        A list of function call actors received from the backend.
+-   */
+-  showCalls: function(functionCalls) {
+-    this.empty();
+-
+-    for (let i = 0, len = functionCalls.length; i < len; i++) {
+-      let call = functionCalls[i];
+-
+-      let view = document.createElement("vbox");
+-      view.className = "call-item-view devtools-monospace";
+-      view.setAttribute("flex", "1");
+-
+-      let contents = document.createElement("hbox");
+-      contents.className = "call-item-contents";
+-      contents.setAttribute("align", "center");
+-      contents.addEventListener("dblclick", this._onExpand);
+-      view.appendChild(contents);
+-
+-      let index = document.createElement("label");
+-      index.className = "plain call-item-index";
+-      index.setAttribute("flex", "1");
+-      index.setAttribute("value", i + 1);
+-
+-      let gutter = document.createElement("hbox");
+-      gutter.className = "call-item-gutter";
+-      gutter.appendChild(index);
+-      contents.appendChild(gutter);
+-
+-      // Not all function calls have a caller that was stringified (e.g.
+-      // context calls have a "gl" or "ctx" caller preview).
+-      if (call.callerPreview) {
+-        let context = document.createElement("label");
+-        context.className = "plain call-item-context";
+-        context.setAttribute("value", call.callerPreview);
+-        contents.appendChild(context);
+-
+-        let separator = document.createElement("label");
+-        separator.className = "plain call-item-separator";
+-        separator.setAttribute("value", ".");
+-        contents.appendChild(separator);
+-      }
+-
+-      let name = document.createElement("label");
+-      name.className = "plain call-item-name";
+-      name.setAttribute("value", call.name);
+-      contents.appendChild(name);
+-
+-      let argsPreview = document.createElement("label");
+-      argsPreview.className = "plain call-item-args";
+-      argsPreview.setAttribute("crop", "end");
+-      argsPreview.setAttribute("flex", "100");
+-      // Getters and setters are displayed differently from regular methods.
+-      if (call.type == CallWatcherFront.METHOD_FUNCTION) {
+-        argsPreview.setAttribute("value", "(" + call.argsPreview + ")");
+-      } else {
+-        argsPreview.setAttribute("value", " = " + call.argsPreview);
+-      }
+-      contents.appendChild(argsPreview);
+-
+-      let location = document.createElement("label");
+-      location.className = "plain call-item-location";
+-      location.setAttribute("value", getFileName(call.file) + ":" + call.line);
+-      location.setAttribute("crop", "start");
+-      location.setAttribute("flex", "1");
+-      location.addEventListener("mousedown", this._onExpand);
+-      contents.appendChild(location);
+-
+-      // Append a function call item to this container.
+-      this.push([view], {
+-        staged: true,
+-        attachment: {
+-          actor: call
+-        }
+-      });
+-
+-      // Highlight certain calls that are probably more interesting than
+-      // everything else, making it easier to quickly glance over them.
+-      if (CanvasFront.DRAW_CALLS.has(call.name)) {
+-        view.setAttribute("draw-call", "");
+-      }
+-      if (CanvasFront.INTERESTING_CALLS.has(call.name)) {
+-        view.setAttribute("interesting-call", "");
+-      }
+-    }
+-
+-    // Flushes all the prepared function call items into this container.
+-    this.commit();
+-    window.emit(EVENTS.CALL_LIST_POPULATED);
+-
+-    // Resetting the function selection slider's value (shown in this
+-    // container's toolbar) would trigger a selection event, which should be
+-    // ignored in this case.
+-    this._ignoreSliderChanges = true;
+-    this._slider.value = 0;
+-    this._slider.max = functionCalls.length - 1;
+-    this._ignoreSliderChanges = false;
+-  },
+-
+-  /**
+-   * Displays an image in the rendering preview of this container, generated
+-   * for the specified draw call in the recorded animation frame snapshot.
+-   *
+-   * @param array screenshot
+-   *        A single "snapshot-image" instance received from the backend.
+-   */
+-  showScreenshot: function(screenshot) {
+-    let { index, width, height, scaling, flipped, pixels } = screenshot;
+-
+-    let screenshotNode = $("#screenshot-image");
+-    screenshotNode.setAttribute("flipped", flipped);
+-    drawBackground("screenshot-rendering", width, height, pixels);
+-
+-    let dimensionsNode = $("#screenshot-dimensions");
+-    let actualWidth = (width / scaling) | 0;
+-    let actualHeight = (height / scaling) | 0;
+-    dimensionsNode.setAttribute("value",
+-      SHARED_L10N.getFormatStr("dimensions", actualWidth, actualHeight));
+-
+-    window.emit(EVENTS.CALL_SCREENSHOT_DISPLAYED);
+-  },
+-
+-  /**
+-   * Populates this container's footer with a list of thumbnails, one generated
+-   * for each draw call in the recorded animation frame snapshot.
+-   *
+-   * @param array thumbnails
+-   *        An array of "snapshot-image" instances received from the backend.
+-   */
+-  showThumbnails: function(thumbnails) {
+-    while (this._filmstrip.hasChildNodes()) {
+-      this._filmstrip.firstChild.remove();
+-    }
+-    for (let thumbnail of thumbnails) {
+-      this.appendThumbnail(thumbnail);
+-    }
+-
+-    window.emit(EVENTS.THUMBNAILS_DISPLAYED);
+-  },
+-
+-  /**
+-   * Displays an image in the thumbnails list of this container, generated
+-   * for the specified draw call in the recorded animation frame snapshot.
+-   *
+-   * @param array thumbnail
+-   *        A single "snapshot-image" instance received from the backend.
+-   */
+-  appendThumbnail: function(thumbnail) {
+-    let { index, width, height, flipped, pixels } = thumbnail;
+-
+-    let thumbnailNode = document.createElementNS(HTML_NS, "canvas");
+-    thumbnailNode.setAttribute("flipped", flipped);
+-    thumbnailNode.width = Math.max(CanvasFront.THUMBNAIL_SIZE, width);
+-    thumbnailNode.height = Math.max(CanvasFront.THUMBNAIL_SIZE, height);
+-    drawImage(thumbnailNode, width, height, pixels, { centered: true });
+-
+-    thumbnailNode.className = "filmstrip-thumbnail";
+-    thumbnailNode.onmousedown = e => this._onThumbnailClick(e, index);
+-    thumbnailNode.setAttribute("index", index);
+-    this._filmstrip.appendChild(thumbnailNode);
+-  },
+-
+-  /**
+-   * Sets the currently highlighted thumbnail in this container.
+-   * A screenshot will always correlate to a thumbnail in the filmstrip,
+-   * both being identified by the same 'index' of the context function call.
+-   *
+-   * @param number index
+-   *        The context function call's index.
+-   */
+-  set highlightedThumbnail(index) {
+-    let currHighlightedThumbnail = $(".filmstrip-thumbnail[index='" + index + "']");
+-    if (currHighlightedThumbnail == null) {
+-      return;
+-    }
+-
+-    let prevIndex = this._highlightedThumbnailIndex
+-    let prevHighlightedThumbnail = $(".filmstrip-thumbnail[index='" + prevIndex + "']");
+-    if (prevHighlightedThumbnail) {
+-      prevHighlightedThumbnail.removeAttribute("highlighted");
+-    }
+-
+-    currHighlightedThumbnail.setAttribute("highlighted", "");
+-    currHighlightedThumbnail.scrollIntoView();
+-    this._highlightedThumbnailIndex = index;
+-  },
+-
+-  /**
+-   * Gets the currently highlighted thumbnail in this container.
+-   * @return number
+-   */
+-  get highlightedThumbnail() {
+-    return this._highlightedThumbnailIndex;
+-  },
+-
+-  /**
+-   * The select listener for this container.
+-   */
+-  _onSelect: function({ detail: callItem }) {
+-    if (!callItem) {
+-      return;
+-    }
+-
+-    // Some of the stepping buttons don't make sense specifically while the
+-    // last function call is selected.
+-    if (this.selectedIndex == this.itemCount - 1) {
+-      $("#resume").setAttribute("disabled", "true");
+-      $("#step-over").setAttribute("disabled", "true");
+-      $("#step-out").setAttribute("disabled", "true");
+-    } else {
+-      $("#resume").removeAttribute("disabled");
+-      $("#step-over").removeAttribute("disabled");
+-      $("#step-out").removeAttribute("disabled");
+-    }
+-
+-    // Correlate the currently selected item with the function selection
+-    // slider's value. Avoid triggering a redundant selection event.
+-    this._ignoreSliderChanges = true;
+-    this._slider.value = this.selectedIndex;
+-    this._ignoreSliderChanges = false;
+-
+-    // Can't generate screenshots for function call actors loaded from disk.
+-    // XXX: Bug 984844.
+-    if (callItem.attachment.actor.isLoadedFromDisk) {
+-      return;
+-    }
+-
+-    // To keep continuous selection buttery smooth (for example, while pressing
+-    // the DOWN key or moving the slider), only display the screenshot after
+-    // any kind of user input stops.
+-    setConditionalTimeout("screenshot-display", SCREENSHOT_DISPLAY_DELAY, () => {
+-      return !this._isSliding;
+-    }, () => {
+-      let frameSnapshot = SnapshotsListView.selectedItem.attachment.actor
+-      let functionCall = callItem.attachment.actor;
+-      frameSnapshot.generateScreenshotFor(functionCall).then(screenshot => {
+-        this.showScreenshot(screenshot);
+-        this.highlightedThumbnail = screenshot.index;
+-      }).catch(Cu.reportError);
+-    });
+-  },
+-
+-  /**
+-   * The mousedown listener for the call selection slider.
+-   */
+-  _onSlideMouseDown: function() {
+-    this._isSliding = true;
+-  },
+-
+-  /**
+-   * The mouseup listener for the call selection slider.
+-   */
+-  _onSlideMouseUp: function() {
+-    this._isSliding = false;
+-  },
+-
+-  /**
+-   * The change listener for the call selection slider.
+-   */
+-  _onSlide: function() {
+-    // Avoid performing any operations when programatically changing the value.
+-    if (this._ignoreSliderChanges) {
+-      return;
+-    }
+-    let selectedFunctionCallIndex = this.selectedIndex = this._slider.value;
+-
+-    // While sliding, immediately show the most relevant thumbnail for a
+-    // function call, for a nice diff-like animation effect between draws.
+-    let thumbnails = SnapshotsListView.selectedItem.attachment.thumbnails;
+-    let thumbnail = getThumbnailForCall(thumbnails, selectedFunctionCallIndex);
+-
+-    // Avoid drawing and highlighting if the selected function call has the
+-    // same thumbnail as the last one.
+-    if (thumbnail.index == this.highlightedThumbnail) {
+-      return;
+-    }
+-    // If a thumbnail wasn't found (e.g. the backend avoids creating thumbnails
+-    // when rendering offscreen), simply defer to the first available one.
+-    if (thumbnail.index == -1) {
+-      thumbnail = thumbnails[0];
+-    }
+-
+-    let { index, width, height, flipped, pixels } = thumbnail;
+-    this.highlightedThumbnail = index;
+-
+-    let screenshotNode = $("#screenshot-image");
+-    screenshotNode.setAttribute("flipped", flipped);
+-    drawBackground("screenshot-rendering", width, height, pixels);
+-  },
+-
+-  /**
+-   * The input listener for the calls searchbox.
+-   */
+-  _onSearch: function(e) {
+-    let lowerCaseSearchToken = this._searchbox.value.toLowerCase();
+-
+-    this.filterContents(e => {
+-      let call = e.attachment.actor;
+-      let name = call.name.toLowerCase();
+-      let file = call.file.toLowerCase();
+-      let line = call.line.toString().toLowerCase();
+-      let args = call.argsPreview.toLowerCase();
+-
+-      return name.contains(lowerCaseSearchToken) ||
+-             file.contains(lowerCaseSearchToken) ||
+-             line.contains(lowerCaseSearchToken) ||
+-             args.contains(lowerCaseSearchToken);
+-    });
+-  },
+-
+-  /**
+-   * The wheel listener for the filmstrip that contains all the thumbnails.
+-   */
+-  _onScroll: function(e) {
+-    this._filmstrip.scrollLeft += e.deltaX;
+-  },
+-
+-  /**
+-   * The click/dblclick listener for an item or location url in this container.
+-   * When expanding an item, it's corresponding call stack will be displayed.
+-   */
+-  _onExpand: function(e) {
+-    let callItem = this.getItemForElement(e.target);
+-    let view = $(".call-item-view", callItem.target);
+-
+-    // If the call stack nodes were already created, simply re-show them
+-    // or jump to the corresponding file and line in the Debugger if a
+-    // location link was clicked.
+-    if (view.hasAttribute("call-stack-populated")) {
+-      let isExpanded = view.getAttribute("call-stack-expanded") == "true";
+-
+-      // If clicking on the location, jump to the Debugger.
+-      if (e.target.classList.contains("call-item-location")) {
+-        let { file, line } = callItem.attachment.actor;
+-        viewSourceInDebugger(file, line);
+-        return;
+-      }
+-      // Otherwise hide the call stack.
+-      else {
+-        view.setAttribute("call-stack-expanded", !isExpanded);
+-        $(".call-item-stack", view).hidden = isExpanded;
+-        return;
+-      }
+-    }
+-
+-    let list = document.createElement("vbox");
+-    list.className = "call-item-stack";
+-    view.setAttribute("call-stack-populated", "");
+-    view.setAttribute("call-stack-expanded", "true");
+-    view.appendChild(list);
+-
+-    /**
+-     * Creates a function call nodes in this container for a stack.
+-     */
+-    let display = stack => {
+-      for (let i = 1; i < stack.length; i++) {
+-        let call = stack[i];
+-
+-        let contents = document.createElement("hbox");
+-        contents.className = "call-item-stack-fn";
+-        contents.style.MozPaddingStart = (i * STACK_FUNC_INDENTATION) + "px";
+-
+-        let name = document.createElement("label");
+-        name.className = "plain call-item-stack-fn-name";
+-        name.setAttribute("value", "↳ " + call.name + "()");
+-        contents.appendChild(name);
+-
+-        let spacer = document.createElement("spacer");
+-        spacer.setAttribute("flex", "100");
+-        contents.appendChild(spacer);
+-
+-        let location = document.createElement("label");
+-        location.className = "plain call-item-stack-fn-location";
+-        location.setAttribute("value", getFileName(call.file) + ":" + call.line);
+-        location.setAttribute("crop", "start");
+-        location.setAttribute("flex", "1");
+-        location.addEventListener("mousedown", e => this._onStackFileClick(e, call));
+-        contents.appendChild(location);
+-
+-        list.appendChild(contents);
+-      }
+-
+-      window.emit(EVENTS.CALL_STACK_DISPLAYED);
+-    };
+-
+-    // If this animation snapshot is loaded from disk, there are no corresponding
+-    // backend actors available and the data is immediately available.
+-    let functionCall = callItem.attachment.actor;
+-    if (functionCall.isLoadedFromDisk) {
+-      display(functionCall.stack);
+-    }
+-    // ..otherwise we need to request the function call stack from the backend.
+-    else {
+-      callItem.attachment.actor.getDetails().then(fn => display(fn.stack));
+-    }
+-  },
+-
+-  /**
+-   * The click listener for a location link in the call stack.
+-   *
+-   * @param string file
+-   *        The url of the source owning the function.
+-   * @param number line
+-   *        The line of the respective function.
+-   */
+-  _onStackFileClick: function(e, { file, line }) {
+-    viewSourceInDebugger(file, line);
+-  },
+-
+-  /**
+-   * The click listener for a thumbnail in the filmstrip.
+-   *
+-   * @param number index
+-   *        The function index in the recorded animation frame snapshot.
+-   */
+-  _onThumbnailClick: function(e, index) {
+-    this.selectedIndex = index;
+-  },
+-
+-  /**
+-   * The click listener for the "resume" button in this container's toolbar.
+-   */
+-  _onResume: function() {
+-    // Jump to the next draw call in the recorded animation frame snapshot.
+-    let drawCall = getNextDrawCall(this.items, this.selectedItem);
+-    if (drawCall) {
+-      this.selectedItem = drawCall;
+-      return;
+-    }
+-
+-    // If there are no more draw calls, just jump to the last context call.
+-    this._onStepOut();
+-  },
+-
+-  /**
+-   * The click listener for the "step over" button in this container's toolbar.
+-   */
+-  _onStepOver: function() {
+-    this.selectedIndex++;
+-  },
+-
+-  /**
+-   * The click listener for the "step in" button in this container's toolbar.
+-   */
+-  _onStepIn: function() {
+-    if (this.selectedIndex == -1) {
+-      this._onResume();
+-      return;
+-    }
+-    let callItem = this.selectedItem;
+-    let { file, line } = callItem.attachment.actor;
+-    viewSourceInDebugger(file, line);
+-  },
+-
+-  /**
+-   * The click listener for the "step out" button in this container's toolbar.
+-   */
+-  _onStepOut: function() {
+-    this.selectedIndex = this.itemCount - 1;
+-  }
+-});
+-
+-/**
+  * Localization convenience methods.
+  */
+ let L10N = new ViewHelpers.L10N(STRINGS_URI);
+ let SHARED_L10N = new ViewHelpers.L10N(SHARED_STRINGS_URI);
+ 
+ /**
+  * Convenient way of emitting events from the panel window.
+  */
+diff --git a/browser/devtools/canvasdebugger/canvasdebugger.xul b/browser/devtools/canvasdebugger/canvasdebugger.xul
+index 55637c7..786745c 100644
+--- a/browser/devtools/canvasdebugger/canvasdebugger.xul
++++ b/browser/devtools/canvasdebugger/canvasdebugger.xul
+@@ -10,16 +10,18 @@
+ <!DOCTYPE window [
+   <!ENTITY % canvasDebuggerDTD SYSTEM "chrome://browser/locale/devtools/canvasdebugger.dtd">
+   %canvasDebuggerDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+   <script type="application/javascript" src="canvasdebugger.js"/>
++  <script type="application/javascript" src="canvasdebugger/callslist.js"/>
++  <script type="application/javascript" src="canvasdebugger/snapshotslist.js"/>
+ 
+   <hbox class="theme-body" flex="1">
+     <vbox id="snapshots-pane">
+       <toolbar id="snapshots-toolbar"
+                class="devtools-toolbar">
+         <hbox id="snapshots-controls">
+           <toolbarbutton id="record-snapshot"
+                          class="devtools-toolbarbutton"
+@@ -66,23 +68,25 @@
+         <label value="&canvasDebuggerUI.emptyNotice1;"/>
+         <button id="canvas-debugging-empty-notice-button"
+                 class="devtools-toolbarbutton"
+                 standalone="true"
+                 oncommand="SnapshotsListView._onRecordButtonClick()"/>
+         <label value="&canvasDebuggerUI.emptyNotice2;"/>
+       </hbox>
+ 
+-      <hbox id="import-notice"
+-            class="notice-container"
++      <hbox id="waiting-notice"
++            class="notice-container devtools-throbber"
+             align="center"
+             pack="center"
+             flex="1"
+             hidden="true">
+-        <label value="&canvasDebuggerUI.importNotice;"/>
++        <label id="requests-menu-waiting-notice-label"
++               class="plain"
++               value="&canvasDebuggerUI.waitingNotice;"/>
+       </hbox>
+ 
+       <box id="debugging-pane-contents"
+            class="devtools-responsive-container"
+            flex="1"
+            hidden="true">
+         <vbox id="calls-list-container" flex="1">
+           <toolbar id="debugging-toolbar"
+diff --git a/browser/devtools/canvasdebugger/snapshotslist.js b/browser/devtools/canvasdebugger/snapshotslist.js
+new file mode 100644
+index 0000000..8c8272c
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/snapshotslist.js
+@@ -0,0 +1,491 @@
++/**
++ * Functions handling the recorded animation frame snapshots UI.
++ */
++let SnapshotsListView = Heritage.extend(WidgetMethods, {
++  /**
++   * Initialization function, called when the tool is started.
++   */
++  initialize: function() {
++    this.widget = new SideMenuWidget($("#snapshots-list"), {
++      showArrows: true
++    });
++
++    this._onSelect = this._onSelect.bind(this);
++    this._onClearButtonClick = this._onClearButtonClick.bind(this);
++    this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
++    this._onImportButtonClick = this._onImportButtonClick.bind(this);
++    this._onSaveButtonClick = this._onSaveButtonClick.bind(this);
++    this._onRecordSuccess = this._onRecordSuccess.bind(this);
++    this._onRecordFailure = this._onRecordFailure.bind(this);
++    this._stopRecordingAnimation = this._stopRecordingAnimation.bind(this);
++
++    window.on(EVENTS.SNAPSHOT_RECORDING_FINISHED, this._enableRecordButton);
++    this.emptyText = L10N.getStr("noSnapshotsText");
++    this.widget.addEventListener("select", this._onSelect, false);
++  },
++
++  /**
++   * Destruction function, called when the tool is closed.
++   */
++  destroy: function() {
++    clearNamedTimeout("canvas-actor-recording");
++    window.off(EVENTS.SNAPSHOT_RECORDING_FINISHED, this._enableRecordButton);
++    this.widget.removeEventListener("select", this._onSelect, false);
++  },
++
++  /**
++   * Adds a snapshot entry to this container.
++   *
++   * @return object
++   *         The newly inserted item.
++   */
++  addSnapshot: function() {
++    let contents = document.createElement("hbox");
++    contents.className = "snapshot-item";
++
++    let thumbnail = document.createElementNS(HTML_NS, "canvas");
++    thumbnail.className = "snapshot-item-thumbnail";
++    thumbnail.width = CanvasFront.THUMBNAIL_SIZE;
++    thumbnail.height = CanvasFront.THUMBNAIL_SIZE;
++
++    let title = document.createElement("label");
++    title.className = "plain snapshot-item-title";
++    title.setAttribute("value",
++      L10N.getFormatStr("snapshotsList.itemLabel", this.itemCount + 1));
++
++    let calls = document.createElement("label");
++    calls.className = "plain snapshot-item-calls";
++    calls.setAttribute("value",
++      L10N.getStr("snapshotsList.loadingLabel"));
++
++    let save = document.createElement("label");
++    save.className = "plain snapshot-item-save";
++    save.addEventListener("click", this._onSaveButtonClick, false);
++
++    let spacer = document.createElement("spacer");
++    spacer.setAttribute("flex", "1");
++
++    let footer = document.createElement("hbox");
++    footer.className = "snapshot-item-footer";
++    footer.appendChild(save);
++
++    let details = document.createElement("vbox");
++    details.className = "snapshot-item-details";
++    details.appendChild(title);
++    details.appendChild(calls);
++    details.appendChild(spacer);
++    details.appendChild(footer);
++
++    contents.appendChild(thumbnail);
++    contents.appendChild(details);
++
++    // Append a recorded snapshot item to this container.
++    return this.push([contents], {
++      attachment: {
++        // The snapshot and function call actors, along with the thumbnails
++        // will be available as soon as recording finishes.
++        actor: null,
++        calls: null,
++        thumbnails: null,
++        screenshot: null
++      }
++    });
++  },
++
++  /**
++   * Removes the last snapshot added, in the event no requestAnimationFrame loop was found.
++   */
++  removeSnapshot: function () {
++    this.removeAt(this.itemCount - 1);
++    // If this is the only item, revert back to the empty notice
++    if (this.itemCount === 0) {
++      $("#empty-notice").hidden = false;
++      $("#waiting-notice").hidden = true;
++    }
++  },
++
++  /**
++   * Customizes a shapshot in this container.
++   *
++   * @param Item snapshotItem
++   *        An item inserted via `SnapshotsListView.addSnapshot`.
++   * @param object snapshotActor
++   *        The frame snapshot actor received from the backend.
++   * @param object snapshotOverview
++   *        Additional data about the snapshot received from the backend.
++   */
++  customizeSnapshot: function(snapshotItem, snapshotActor, snapshotOverview) {
++    // Make sure the function call actors are stored on the item,
++    // to be used when populating the CallsListView.
++    snapshotItem.attachment.actor = snapshotActor;
++    let functionCalls = snapshotItem.attachment.calls = snapshotOverview.calls;
++    let thumbnails = snapshotItem.attachment.thumbnails = snapshotOverview.thumbnails;
++    let screenshot = snapshotItem.attachment.screenshot = snapshotOverview.screenshot;
++
++    let lastThumbnail = thumbnails[thumbnails.length - 1];
++    let { width, height, flipped, pixels } = lastThumbnail;
++
++    let thumbnailNode = $(".snapshot-item-thumbnail", snapshotItem.target);
++    thumbnailNode.setAttribute("flipped", flipped);
++    drawImage(thumbnailNode, width, height, pixels, { centered: true });
++
++    let callsNode = $(".snapshot-item-calls", snapshotItem.target);
++    let drawCalls = functionCalls.filter(e => CanvasFront.DRAW_CALLS.has(e.name));
++
++    let drawCallsStr = PluralForm.get(drawCalls.length,
++      L10N.getStr("snapshotsList.drawCallsLabel"));
++    let funcCallsStr = PluralForm.get(functionCalls.length,
++      L10N.getStr("snapshotsList.functionCallsLabel"));
++
++    callsNode.setAttribute("value",
++      drawCallsStr.replace("#1", drawCalls.length) + ", " +
++      funcCallsStr.replace("#1", functionCalls.length));
++
++    let saveNode = $(".snapshot-item-save", snapshotItem.target);
++    saveNode.setAttribute("disabled", !!snapshotItem.isLoadedFromDisk);
++    saveNode.setAttribute("value", snapshotItem.isLoadedFromDisk
++      ? L10N.getStr("snapshotsList.loadedLabel")
++      : L10N.getStr("snapshotsList.saveLabel"));
++
++    // Make sure there's always a selected item available.
++    if (!this.selectedItem) {
++      this.selectedIndex = 0;
++    }
++  },
++
++  /**
++   * The select listener for this container.
++   */
++  _onSelect: function({ detail: snapshotItem }) {
++    if (!snapshotItem) {
++      return;
++    }
++    let { calls, thumbnails, screenshot } = snapshotItem.attachment;
++
++    $("#reload-notice").hidden = true;
++    $("#empty-notice").hidden = true;
++    $("#waiting-notice").hidden = false;
++
++    $("#debugging-pane-contents").hidden = true;
++    $("#screenshot-container").hidden = true;
++    $("#snapshot-filmstrip").hidden = true;
++
++    Task.spawn(function*() {
++      // Wait for a few milliseconds between presenting the function calls,
++      // screenshot and thumbnails, to allow each component being
++      // sequentially drawn. This gives the illusion of snappiness.
++
++      yield DevToolsUtils.waitForTime(SNAPSHOT_DATA_DISPLAY_DELAY);
++      CallsListView.showCalls(calls);
++      $("#debugging-pane-contents").hidden = false;
++      $("#waiting-notice").hidden = true;
++
++      yield DevToolsUtils.waitForTime(SNAPSHOT_DATA_DISPLAY_DELAY);
++      CallsListView.showThumbnails(thumbnails);
++      $("#snapshot-filmstrip").hidden = false;
++
++      yield DevToolsUtils.waitForTime(SNAPSHOT_DATA_DISPLAY_DELAY);
++      CallsListView.showScreenshot(screenshot);
++      $("#screenshot-container").hidden = false;
++
++      window.emit(EVENTS.SNAPSHOT_RECORDING_SELECTED);
++    });
++  },
++
++  /**
++   * The click listener for the "clear" button in this container.
++   */
++  _onClearButtonClick: function() {
++    Task.spawn(function*() {
++      SnapshotsListView.empty();
++      CallsListView.empty();
++
++      $("#reload-notice").hidden = true;
++      $("#empty-notice").hidden = true;
++      $("#waiting-notice").hidden = true;
++
++      if (yield gFront.isInitialized()) {
++        $("#empty-notice").hidden = false;
++      } else {
++        $("#reload-notice").hidden = false;
++      }
++
++      $("#debugging-pane-contents").hidden = true;
++      $("#screenshot-container").hidden = true;
++      $("#snapshot-filmstrip").hidden = true;
++
++      window.emit(EVENTS.SNAPSHOTS_LIST_CLEARED);
++    });
++  },
++
++  /**
++   * The click listener for the "record" button in this container.
++   */
++  _onRecordButtonClick: function () {
++    this._disableRecordButton();
++
++    if (this._recording) {
++      this._stopRecordingAnimation();
++      return;
++    }
++
++    // Insert a "dummy" snapshot item in the view, to hint that recording
++    // has now started. However, wait for a few milliseconds before actually
++    // starting the recording, since that might block rendering and prevent
++    // the dummy snapshot item from being drawn.
++    this.addSnapshot();
++
++    // If this is the first item, immediately show the "Loading…" notice.
++    if (this.itemCount == 1) {
++      $("#empty-notice").hidden = true;
++      $("#waiting-notice").hidden = false;
++    }
++
++    this._recordAnimation();
++  },
++
++  /**
++   * Makes the record button able to be clicked again.
++   */
++  _enableRecordButton: function () {
++    $("#record-snapshot").removeAttribute("disabled");
++  },
++
++  /**
++   * Makes the record button unable to be clicked.
++   */
++  _disableRecordButton: function () {
++    $("#record-snapshot").setAttribute("disabled", true);
++  },
++
++  /**
++   * Begins recording an animation.
++   */
++  _recordAnimation: Task.async(function *() {
++    if (this._recording) {
++      return;
++    }
++    this._recording = true;
++    $("#record-snapshot").setAttribute("checked", "true");
++
++    setNamedTimeout("canvas-actor-recording", CANVAS_ACTOR_RECORDING_ATTEMPT, this._stopRecordingAnimation);
++
++    yield DevToolsUtils.waitForTime(SNAPSHOT_START_RECORDING_DELAY);
++    window.emit(EVENTS.SNAPSHOT_RECORDING_STARTED);
++
++    gFront.recordAnimationFrame().then(snapshot => {
++      if (snapshot) {
++        this._onRecordSuccess(snapshot);
++      } else {
++        this._onRecordFailure();
++      }
++    });
++
++    // Wait another delay before reenabling the button to stop the recording
++    // if a recording is not found.
++    yield DevToolsUtils.waitForTime(SNAPSHOT_START_RECORDING_DELAY);
++    this._enableRecordButton();
++  }),
++
++  /**
++   * Stops recording animation. Called when a click on the stopwatch occurs during a recording,
++   * or if a recording times out.
++   */
++  _stopRecordingAnimation: Task.async(function *() {
++    clearNamedTimeout("canvas-actor-recording");
++    let actorCanStop = yield gTarget.actorHasMethod("canvas", "stopRecordingAnimationFrame");
++
++    if (actorCanStop) {
++      yield gFront.stopRecordingAnimationFrame();
++    }
++    // If actor does not have the method to stop recording (Fx39+),
++    // manually call the record failure method. This will call a connection failure
++    // on disconnect as a result of `gFront.recordAnimationFrame()` never resolving,
++    // but this is better than it hanging when there is no requestAnimationFrame anyway.
++    else {
++      this._onRecordFailure();
++    }
++
++    this._recording = false;
++    $("#record-snapshot").removeAttribute("checked");
++    this._enableRecordButton();
++  }),
++
++  /**
++   * Resolves from the front's recordAnimationFrame to setup the interface with the screenshots.
++   */
++  _onRecordSuccess: Task.async(function *(snapshotActor) {
++    // Clear bail-out case if frame found in CANVAS_ACTOR_RECORDING_ATTEMPT milliseconds
++    clearNamedTimeout("canvas-actor-recording");
++    let snapshotItem = this.getItemAtIndex(this.itemCount - 1);
++    let snapshotOverview = yield snapshotActor.getOverview();
++    this.customizeSnapshot(snapshotItem, snapshotActor, snapshotOverview);
++
++    this._recording = false;
++    $("#record-snapshot").removeAttribute("checked");
++
++    window.emit(EVENTS.SNAPSHOT_RECORDING_COMPLETED);
++    window.emit(EVENTS.SNAPSHOT_RECORDING_FINISHED);
++  }),
++
++  /**
++   * Called as a reject from the front's recordAnimationFrame.
++   */
++  _onRecordFailure: function () {
++    clearNamedTimeout("canvas-actor-recording");
++    showNotification(gToolbox, "canvas-debugger-timeout", L10N.getStr("recordingTimeoutFailure"));
++    window.emit(EVENTS.SNAPSHOT_RECORDING_CANCELLED);
++    window.emit(EVENTS.SNAPSHOT_RECORDING_FINISHED);
++    this.removeSnapshot();
++  },
++
++  /**
++   * The click listener for the "import" button in this container.
++   */
++  _onImportButtonClick: function() {
++    let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
++    fp.init(window, L10N.getStr("snapshotsList.saveDialogTitle"), Ci.nsIFilePicker.modeOpen);
++    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogJSONFilter"), "*.json");
++    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogAllFilter"), "*.*");
++
++    if (fp.show() != Ci.nsIFilePicker.returnOK) {
++      return;
++    }
++
++    let channel = NetUtil.newChannel2(fp.file,
++                                      null,
++                                      null,
++                                      window.document,
++                                      null, // aLoadingPrincipal
++                                      null, // aTriggeringPrincipal
++                                      Ci.nsILoadInfo.SEC_NORMAL,
++                                      Ci.nsIContentPolicy.TYPE_OTHER);
++    channel.contentType = "text/plain";
++
++    NetUtil.asyncFetch2(channel, (inputStream, status) => {
++      if (!Components.isSuccessCode(status)) {
++        console.error("Could not import recorded animation frame snapshot file.");
++        return;
++      }
++      try {
++        let string = NetUtil.readInputStreamToString(inputStream, inputStream.available());
++        var data = JSON.parse(string);
++      } catch (e) {
++        console.error("Could not read animation frame snapshot file.");
++        return;
++      }
++      if (data.fileType != CALLS_LIST_SERIALIZER_IDENTIFIER) {
++        console.error("Unrecognized animation frame snapshot file.");
++        return;
++      }
++
++      // Add a `isLoadedFromDisk` flag on everything to avoid sending invalid
++      // requests to the backend, since we're not dealing with actors anymore.
++      let snapshotItem = this.addSnapshot();
++      snapshotItem.isLoadedFromDisk = true;
++      data.calls.forEach(e => e.isLoadedFromDisk = true);
++
++      this.customizeSnapshot(snapshotItem, data.calls, data);
++    });
++  },
++
++  /**
++   * The click listener for the "save" button of each item in this container.
++   */
++  _onSaveButtonClick: function(e) {
++    let snapshotItem = this.getItemForElement(e.target);
++
++    let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
++    fp.init(window, L10N.getStr("snapshotsList.saveDialogTitle"), Ci.nsIFilePicker.modeSave);
++    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogJSONFilter"), "*.json");
++    fp.appendFilter(L10N.getStr("snapshotsList.saveDialogAllFilter"), "*.*");
++    fp.defaultString = "snapshot.json";
++
++    // Start serializing all the function call actors for the specified snapshot,
++    // while the nsIFilePicker dialog is being opened. Snappy.
++    let serialized = Task.spawn(function*() {
++      let data = {
++        fileType: CALLS_LIST_SERIALIZER_IDENTIFIER,
++        version: CALLS_LIST_SERIALIZER_VERSION,
++        calls: [],
++        thumbnails: [],
++        screenshot: null
++      };
++      let functionCalls = snapshotItem.attachment.calls;
++      let thumbnails = snapshotItem.attachment.thumbnails;
++      let screenshot = snapshotItem.attachment.screenshot;
++
++      // Prepare all the function calls for serialization.
++      yield DevToolsUtils.yieldingEach(functionCalls, (call, i) => {
++        let { type, name, file, line, argsPreview, callerPreview } = call;
++        return call.getDetails().then(({ stack }) => {
++          data.calls[i] = {
++            type: type,
++            name: name,
++            file: file,
++            line: line,
++            stack: stack,
++            argsPreview: argsPreview,
++            callerPreview: callerPreview
++          };
++        });
++      });
++
++      // Prepare all the thumbnails for serialization.
++      yield DevToolsUtils.yieldingEach(thumbnails, (thumbnail, i) => {
++        let { index, width, height, flipped, pixels } = thumbnail;
++        data.thumbnails.push({ index, width, height, flipped, pixels });
++      });
++
++      // Prepare the screenshot for serialization.
++      let { index, width, height, flipped, pixels } = screenshot;
++      data.screenshot = { index, width, height, flipped, pixels };
++
++      let string = JSON.stringify(data);
++      let converter = Cc["@mozilla.org/intl/scriptableunicodeconverter"].
++        createInstance(Ci.nsIScriptableUnicodeConverter);
++
++      converter.charset = "UTF-8";
++      return converter.convertToInputStream(string);
++    });
++
++    // Open the nsIFilePicker and wait for the function call actors to finish
++    // being serialized, in order to save the generated JSON data to disk.
++    fp.open({ done: result => {
++      if (result == Ci.nsIFilePicker.returnCancel) {
++        return;
++      }
++      let footer = $(".snapshot-item-footer", snapshotItem.target);
++      let save = $(".snapshot-item-save", snapshotItem.target);
++
++      // Show a throbber and a "Saving…" label if serializing isn't immediate.
++      setNamedTimeout("call-list-save", CALLS_LIST_SLOW_SAVE_DELAY, () => {
++        footer.classList.add("devtools-throbber");
++        save.setAttribute("disabled", "true");
++        save.setAttribute("value", L10N.getStr("snapshotsList.savingLabel"));
++      });
++
++      serialized.then(inputStream => {
++        let outputStream = FileUtils.openSafeFileOutputStream(fp.file);
++
++        NetUtil.asyncCopy(inputStream, outputStream, status => {
++          if (!Components.isSuccessCode(status)) {
++            console.error("Could not save recorded animation frame snapshot file.");
++          }
++          clearNamedTimeout("call-list-save");
++          footer.classList.remove("devtools-throbber");
++          save.removeAttribute("disabled");
++          save.setAttribute("value", L10N.getStr("snapshotsList.saveLabel"));
++        });
++      });
++    }});
++  }
++});
++
++function showNotification (toolbox, name, message) {
++  let notificationBox = toolbox.getNotificationBox();
++  let notification = notificationBox.getNotificationWithValue(name);
++  if (!notification) {
++    notificationBox.appendNotification(message, name, "", notificationBox.PRIORITY_WARNING_HIGH);
++  }
++}
+diff --git a/browser/devtools/canvasdebugger/test/browser.ini b/browser/devtools/canvasdebugger/test/browser.ini
+index 2de0d2f..2b7084d 100644
+--- a/browser/devtools/canvasdebugger/test/browser.ini
++++ b/browser/devtools/canvasdebugger/test/browser.ini
+@@ -1,11 +1,12 @@
+ [DEFAULT]
+ subsuite = devtools
+ support-files =
++  doc_no-canvas.html
+   doc_simple-canvas.html
+   doc_simple-canvas-bitmasks.html
+   doc_simple-canvas-deep-stack.html
+   doc_simple-canvas-transparent.html
+   doc_webgl-bindings.html
+   doc_webgl-enum.html
+   head.js
+ 
+@@ -14,16 +15,17 @@ support-files =
+ [browser_canvas-actor-test-03.js]
+ [browser_canvas-actor-test-04.js]
+ [browser_canvas-actor-test-05.js]
+ [browser_canvas-actor-test-06.js]
+ [browser_canvas-actor-test-07.js]
+ [browser_canvas-actor-test-08.js]
+ [browser_canvas-actor-test-09.js]
+ [browser_canvas-actor-test-10.js]
++[browser_canvas-actor-test-11.js]
+ [browser_canvas-frontend-call-highlight.js]
+ [browser_canvas-frontend-call-list.js]
+ [browser_canvas-frontend-call-search.js]
+ [browser_canvas-frontend-call-stack-01.js]
+ [browser_canvas-frontend-call-stack-02.js]
+ [browser_canvas-frontend-call-stack-03.js]
+ [browser_canvas-frontend-clear.js]
+ [browser_canvas-frontend-img-screenshots.js]
+@@ -35,8 +37,10 @@ skip-if = e10s # bug 1102301 - leaks while running as a standalone directory in
+ [browser_canvas-frontend-record-02.js]
+ [browser_canvas-frontend-record-03.js]
+ [browser_canvas-frontend-reload-01.js]
+ [browser_canvas-frontend-reload-02.js]
+ [browser_canvas-frontend-slider-01.js]
+ [browser_canvas-frontend-slider-02.js]
+ [browser_canvas-frontend-snapshot-select.js]
+ [browser_canvas-frontend-stepping.js]
++[browser_canvas-frontend-stop-01.js]
++[browser_canvas-frontend-stop-02.js]
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-11.js b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-11.js
+new file mode 100644
+index 0000000..498abb2
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-11.js
+@@ -0,0 +1,29 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the recording can be disabled via stopRecordingAnimationFrame
++ * in the event no rAF loop is found.
++ */
++
++function ifTestingSupported() {
++  let { target, front } = yield initCanvasDebuggerBackend(NO_CANVAS_URL);
++  loadFrameScripts();
++
++  let navigated = once(target, "navigate");
++
++  yield front.setup({ reload: true });
++  ok(true, "The front was setup up successfully.");
++
++  yield navigated;
++  ok(true, "Target automatically navigated when the front was set up.");
++
++  let startRecording = front.recordAnimationFrame();
++  yield front.stopRecordingAnimationFrame();
++
++  ok(!(yield startRecording),
++    "recordAnimationFrame() does not return a SnapshotActor when cancelled.");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-open.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-open.js
+index 0f2b096..20b06db 100644
+--- a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-open.js
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-open.js
+@@ -20,18 +20,18 @@ function ifTestingSupported() {
+     "The 'import snapshot' button should initially be visible.");
+   is($("#clear-snapshots").hasAttribute("hidden"), false,
+     "The 'clear snapshots' button should initially be visible.");
+ 
+   is($("#reload-notice").hasAttribute("hidden"), false,
+     "The reload notice should initially be visible.");
+   is($("#empty-notice").getAttribute("hidden"), "true",
+     "The empty notice should initially be hidden.");
+-  is($("#import-notice").getAttribute("hidden"), "true",
+-    "The import notice should initially be hidden.");
++  is($("#waiting-notice").getAttribute("hidden"), "true",
++    "The waiting notice should initially be hidden.");
+ 
+   is($("#screenshot-container").getAttribute("hidden"), "true",
+     "The screenshot container should initially be hidden.");
+   is($("#snapshot-filmstrip").getAttribute("hidden"), "true",
+     "The snapshot filmstrip should initially be hidden.");
+ 
+   is($("#debugging-pane-contents").getAttribute("hidden"), "true",
+     "The rest of the UI should initially be hidden.");
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-01.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-01.js
+index cb17ae5..1b31712 100644
+--- a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-01.js
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-01.js
+@@ -27,18 +27,16 @@ function ifTestingSupported() {
+   let recordingFinished = once(window, EVENTS.SNAPSHOT_RECORDING_FINISHED);
+   SnapshotsListView._onRecordButtonClick();
+ 
+   yield recordingStarted;
+   ok(true, "Started recording a snapshot of the animation loop.");
+ 
+   is($("#record-snapshot").getAttribute("checked"), "true",
+     "The 'record snapshot' button should now be checked.");
+-  is($("#record-snapshot").getAttribute("disabled"), "true",
+-    "The 'record snapshot' button should now be disabled.");
+   is($("#record-snapshot").hasAttribute("hidden"), false,
+     "The 'record snapshot' button should still be visible.");
+ 
+   is(SnapshotsListView.itemCount, 1,
+     "There should be one item available in the snapshots list view now.");
+   is(SnapshotsListView.selectedIndex, -1,
+     "There should be no selected item in the snapshots list view yet.");
+ 
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-02.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-02.js
+index 45ed595..f25988d 100644
+--- a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-02.js
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-record-02.js
+@@ -31,18 +31,18 @@ function ifTestingSupported() {
+ 
+   is($(".snapshot-item-save", item.target).getAttribute("value"), "",
+     "The placeholder item's save label should not have a value yet.");
+ 
+   is($("#reload-notice").getAttribute("hidden"), "true",
+     "The reload notice should now be hidden.");
+   is($("#empty-notice").getAttribute("hidden"), "true",
+     "The empty notice should now be hidden.");
+-  is($("#import-notice").hasAttribute("hidden"), false,
+-    "The import notice should now be visible.");
++  is($("#waiting-notice").hasAttribute("hidden"), false,
++    "The waiting notice should now be visible.");
+ 
+   is($("#screenshot-container").getAttribute("hidden"), "true",
+     "The screenshot container should still be hidden.");
+   is($("#snapshot-filmstrip").getAttribute("hidden"), "true",
+     "The snapshot filmstrip should still be hidden.");
+ 
+   is($("#debugging-pane-contents").getAttribute("hidden"), "true",
+     "The rest of the UI should still be hidden.");
+@@ -52,18 +52,18 @@ function ifTestingSupported() {
+ 
+   yield recordingSelected;
+   ok(true, "Finished selecting a snapshot of the animation loop.");
+ 
+   is($("#reload-notice").getAttribute("hidden"), "true",
+     "The reload notice should now be hidden.");
+   is($("#empty-notice").getAttribute("hidden"), "true",
+     "The empty notice should now be hidden.");
+-  is($("#import-notice").getAttribute("hidden"), "true",
+-    "The import notice should now be hidden.");
++  is($("#waiting-notice").getAttribute("hidden"), "true",
++    "The waiting notice should now be hidden.");
+ 
+   is($("#screenshot-container").hasAttribute("hidden"), false,
+     "The screenshot container should now be visible.");
+   is($("#snapshot-filmstrip").hasAttribute("hidden"), false,
+     "The snapshot filmstrip should now be visible.");
+ 
+   is($("#debugging-pane-contents").hasAttribute("hidden"), false,
+     "The rest of the UI should now be visible.");
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-reload-01.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-reload-01.js
+index 9e50436..9ebea8d 100644
+--- a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-reload-01.js
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-reload-01.js
+@@ -34,18 +34,18 @@ function ifTestingSupported() {
+     "The 'import snapshot' button should still be visible.");
+   is($("#clear-snapshots").hasAttribute("hidden"), false,
+     "The 'clear snapshots' button should still be visible.");
+ 
+   is($("#reload-notice").getAttribute("hidden"), "true",
+     "The reload notice should now be hidden.");
+   is($("#empty-notice").hasAttribute("hidden"), false,
+     "The empty notice should now be visible.");
+-  is($("#import-notice").getAttribute("hidden"), "true",
+-    "The import notice should now be hidden.");
++  is($("#waiting-notice").getAttribute("hidden"), "true",
++    "The waiting notice should now be hidden.");
+ 
+   is($("#snapshot-filmstrip").getAttribute("hidden"), "true",
+     "The snapshot filmstrip should still be hidden.");
+   is($("#screenshot-container").getAttribute("hidden"), "true",
+     "The screenshot container should still be hidden.");
+ 
+   is($("#debugging-pane-contents").getAttribute("hidden"), "true",
+     "The rest of the UI should still be hidden.");
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-01.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-01.js
+new file mode 100644
+index 0000000..6eddbaa
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-01.js
+@@ -0,0 +1,36 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that you can stop a recording that does not have a rAF cycle.
++ */
++
++function ifTestingSupported() {
++  let { target, panel } = yield initCanvasDebuggerFrontend(NO_CANVAS_URL);
++  let { window, EVENTS, $, SnapshotsListView } = panel.panelWin;
++
++  yield reload(target);
++
++  let recordingStarted = once(window, EVENTS.SNAPSHOT_RECORDING_STARTED);
++  SnapshotsListView._onRecordButtonClick();
++
++  yield recordingStarted;
++
++  is($("#empty-notice").hidden, true, "Empty notice not shown");
++  is($("#waiting-notice").hidden, false, "Waiting notice shown");
++
++  let recordingFinished = once(window, EVENTS.SNAPSHOT_RECORDING_FINISHED);
++  let recordingCancelled = once(window, EVENTS.SNAPSHOT_RECORDING_CANCELLED);
++  SnapshotsListView._onRecordButtonClick();
++
++  yield promise.all([recordingFinished, recordingCancelled]);
++
++  ok(true, "Recording stopped and was considered failed.");
++
++  is(SnapshotsListView.itemCount, 0, "No snapshots in the list.");
++  is($("#empty-notice").hidden, false, "Empty notice shown");
++  is($("#waiting-notice").hidden, true, "Waiting notice not shown");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-02.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-02.js
+new file mode 100644
+index 0000000..1c5ec71
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-02.js
+@@ -0,0 +1,35 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that a recording that does not have a rAF cycle fails after timeout.
++ */
++
++function ifTestingSupported() {
++  let { target, panel } = yield initCanvasDebuggerFrontend(NO_CANVAS_URL);
++  let { window, EVENTS, $, SnapshotsListView } = panel.panelWin;
++
++  yield reload(target);
++
++  let recordingStarted = once(window, EVENTS.SNAPSHOT_RECORDING_STARTED);
++  SnapshotsListView._onRecordButtonClick();
++
++  yield recordingStarted;
++
++  is($("#empty-notice").hidden, true, "Empty notice not shown");
++  is($("#waiting-notice").hidden, false, "Waiting notice shown");
++
++  let recordingFinished = once(window, EVENTS.SNAPSHOT_RECORDING_FINISHED);
++  let recordingCancelled = once(window, EVENTS.SNAPSHOT_RECORDING_CANCELLED);
++
++  yield promise.all([recordingFinished, recordingCancelled]);
++
++  ok(true, "Recording stopped and was considered failed.");
++
++  is(SnapshotsListView.itemCount, 0, "No snapshots in the list.");
++  is($("#empty-notice").hidden, false, "Empty notice shown");
++  is($("#waiting-notice").hidden, true, "Waiting notice not shown");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/canvasdebugger/test/doc_no-canvas.html b/browser/devtools/canvasdebugger/test/doc_no-canvas.html
+new file mode 100644
+index 0000000..a5934e3
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/doc_no-canvas.html
+@@ -0,0 +1,14 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Canvas inspector test page</title>
++  </head>
++
++  <body>
++  </body>
++
++</html>
+diff --git a/browser/devtools/canvasdebugger/test/head.js b/browser/devtools/canvasdebugger/test/head.js
+index 1192bea..530ead2 100644
+--- a/browser/devtools/canvasdebugger/test/head.js
++++ b/browser/devtools/canvasdebugger/test/head.js
+@@ -22,28 +22,31 @@ let { CallWatcherFront } = devtools.require("devtools/server/actors/call-watcher
+ let { CanvasFront } = devtools.require("devtools/server/actors/canvas");
+ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
+ let mm = null
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/canvasdebugger/test/";
++const NO_CANVAS_URL = EXAMPLE_URL + "doc_no-canvas.html";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
+ const SIMPLE_BITMASKS_URL = EXAMPLE_URL + "doc_simple-canvas-bitmasks.html";
+ const SIMPLE_CANVAS_TRANSPARENT_URL = EXAMPLE_URL + "doc_simple-canvas-transparent.html";
+ const SIMPLE_CANVAS_DEEP_STACK_URL = EXAMPLE_URL + "doc_simple-canvas-deep-stack.html";
+ const WEBGL_ENUM_URL = EXAMPLE_URL + "doc_webgl-enum.html";
+ const WEBGL_BINDINGS_URL = EXAMPLE_URL + "doc_webgl-bindings.html";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ let gToolEnabled = Services.prefs.getBoolPref("devtools.canvasdebugger.enabled");
+ 
++gDevTools.testing = true;
++
+ registerCleanupFunction(() => {
+   info("finish() was called, cleaning up...");
+   Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
+   Services.prefs.setBoolPref("devtools.canvasdebugger.enabled", gToolEnabled);
+ 
+   // Some of yhese tests use a lot of memory due to GL contexts, so force a GC
+   // to help fragmentation.
+   info("Forcing GC after canvas debugger test.");
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index afa1729..9744223 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -71,16 +71,18 @@ browser.jar:
+     content/browser/devtools/debugger-controller.js                    (debugger/debugger-controller.js)
+     content/browser/devtools/debugger-view.js                          (debugger/debugger-view.js)
+     content/browser/devtools/debugger-toolbar.js                       (debugger/debugger-toolbar.js)
+     content/browser/devtools/debugger-panes.js                         (debugger/debugger-panes.js)
+     content/browser/devtools/shadereditor.xul                          (shadereditor/shadereditor.xul)
+     content/browser/devtools/shadereditor.js                           (shadereditor/shadereditor.js)
+     content/browser/devtools/canvasdebugger.xul                        (canvasdebugger/canvasdebugger.xul)
+     content/browser/devtools/canvasdebugger.js                         (canvasdebugger/canvasdebugger.js)
++    content/browser/devtools/canvasdebugger/snapshotslist.js           (canvasdebugger/snapshotslist.js)
++    content/browser/devtools/canvasdebugger/callslist.js               (canvasdebugger/callslist.js)
+     content/browser/devtools/d3.js                                     (shared/d3.js)
+     content/browser/devtools/webaudioeditor.xul                        (webaudioeditor/webaudioeditor.xul)
+     content/browser/devtools/dagre-d3.js                               (webaudioeditor/lib/dagre-d3.js)
+     content/browser/devtools/webaudioeditor/includes.js                (webaudioeditor/includes.js)
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+diff --git a/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.dtd b/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.dtd
+index 5ffd617..730faf1 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.dtd
+@@ -19,19 +19,19 @@
+   -  along with the button that triggers a page refresh. -->
+ <!ENTITY canvasDebuggerUI.reloadNotice2   "the page to be able to debug &lt;canvas&gt; contexts.">
+ 
+ <!-- LOCALIZATION NOTE (canvasDebuggerUI.emptyNotice1/2): This is the label shown
+   -  in the call list view when empty. -->
+ <!ENTITY canvasDebuggerUI.emptyNotice1    "Click on the">
+ <!ENTITY canvasDebuggerUI.emptyNotice2    "button to record an animation frame's call stack.">
+ 
+-<!-- LOCALIZATION NOTE (canvasDebuggerUI.reloadNotice1): This is the label shown
+-  -  in the call list view while loading a snapshot. -->
+-<!ENTITY canvasDebuggerUI.importNotice    "Loading…">
++<!-- LOCALIZATION NOTE (canvasDebuggerUI.waitingNotice): This is the label shown
++  -  in the call list view while recording a snapshot. -->
++<!ENTITY canvasDebuggerUI.waitingNotice   "Recording a requestAnimationFrame cycle…">
+ 
+ <!-- LOCALIZATION NOTE (canvasDebuggerUI.recordSnapshot): This string is displayed
+   -  on a button that starts a new snapshot. -->
+ <!ENTITY canvasDebuggerUI.recordSnapshot.tooltip "Record the next frame in the animation loop.">
+ 
+ <!-- LOCALIZATION NOTE (canvasDebuggerUI.importSnapshot): This string is displayed
+   -  on a button that opens a dialog to import a saved snapshot data file. -->
+ <!ENTITY canvasDebuggerUI.importSnapshot "Import…">
+diff --git a/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.properties b/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.properties
+index e3afd27..db48d97 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/canvasdebugger.properties
+@@ -71,8 +71,14 @@ snapshotsList.saveDialogAllFilter=All Files
+ # as a generic description about how many draw calls were made.
+ snapshotsList.drawCallsLabel=#1 draw;#1 draws
+ 
+ # LOCALIZATION NOTE (snapshotsList.functionCallsLabel):
+ # See: http://developer.mozilla.org/en/docs/Localization_and_Plurals
+ # This string is displayed in the snapshots list of the Canvas Debugger,
+ # as a generic description about how many function calls were made in total.
+ snapshotsList.functionCallsLabel=#1 call;#1 calls
++
++# LOCALIZATION NOTE (recordingTimeoutFailure):
++# This notification alert is displayed when attempting to record a requestAnimationFrame
++# cycle in the Canvas Debugger and no cycles detected. This alerts the user that no
++# loops were found.
++recordingTimeoutFailure=Canvas Debugger could not find a requestAnimationFrame cycle.
+diff --git a/browser/themes/shared/devtools/canvasdebugger.inc.css b/browser/themes/shared/devtools/canvasdebugger.inc.css
+index 0697afd..5e4355e 100644
+--- a/browser/themes/shared/devtools/canvasdebugger.inc.css
++++ b/browser/themes/shared/devtools/canvasdebugger.inc.css
+@@ -9,40 +9,33 @@
+ %define checkerboardPattern linear-gradient(45deg, @checkerboardCell@ 25%, transparent 25%, transparent 75%, @checkerboardCell@ 75%, @checkerboardCell@), linear-gradient(45deg, @checkerboardCell@ 25%, transparent 25%, transparent 75%, @checkerboardCell@ 75%, @checkerboardCell@)
+ %define gutterWidth 3em
+ %define gutterPaddingStart 22px
+ 
+ /* Reload and waiting notices */
+ 
+ .notice-container {
+   margin-top: -50vh;
+-  font-size: 120%;
+   background-color: var(--theme-toolbar-background);
+   color: var(--theme-body-color-alt);
+ }
+ 
+ #empty-notice > button {
+   min-width: 30px;
+   min-height: 28px;
+   margin: 0;
+   list-style-image: url(profiler-stopwatch.svg);
+ }
+ 
+ #empty-notice > button .button-text {
+   display: none;
+ }
+ 
+-.theme-dark #import-notice {
+-  font-size: 250%;
+-  color: rgba(255,255,255,0.2);
+-}
+-
+-.theme-light #import-notice {
+-  font-size: 250%;
+-  color: rgba(0,0,0,0.2);
++#waiting-notice {
++  font-size: 110%;
+ }
+ 
+ /* Snapshots pane */
+ 
+ #snapshots-pane > tabs {
+   -moz-border-end: 1px solid;
+ }
+ 
+diff --git a/toolkit/devtools/server/actors/canvas.js b/toolkit/devtools/server/actors/canvas.js
+index 2871c66..6a2a423 100644
+--- a/toolkit/devtools/server/actors/canvas.js
++++ b/toolkit/devtools/server/actors/canvas.js
+@@ -285,33 +285,50 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+   }, {
+     response: { initialized: RetVal("boolean") }
+   }),
+ 
+   /**
+    * Records a snapshot of all the calls made during the next animation frame.
+    * The animation should be implemented via the de-facto requestAnimationFrame
+    * utility, not inside a `setInterval` or recursive `setTimeout`.
++   * Resolves to the snapshot actor, or `null` if the recording was cancelled.
+    *
+    * XXX: Currently only supporting requestAnimationFrame. When this isn't used,
+    * it'd be a good idea to display a huge red flashing banner telling people to
+    * STOP USING `setInterval` OR `setTimeout` FOR ANIMATION. Bug 978948.
+    */
+   recordAnimationFrame: method(function() {
+     if (this._callWatcher.isRecording()) {
+       return this._currentAnimationFrameSnapshot.promise;
+     }
+ 
+     this._callWatcher.eraseRecording();
+     this._callWatcher.resumeRecording();
+ 
+     let deferred = this._currentAnimationFrameSnapshot = promise.defer();
+     return deferred.promise;
+   }, {
+-    response: { snapshot: RetVal("frame-snapshot") }
++    response: { snapshot: RetVal("nullable:frame-snapshot") }
++  }),
++
++  /**
++   * Cease attempts to record an animation frame.
++   */
++  stopRecordingAnimationFrame: method(function() {
++   if (!this._callWatcher.isRecording()) {
++      return;
++    }
++    this._animationStarted = false;
++    this._callWatcher.pauseRecording();
++    this._callWatcher.eraseRecording();
++    this._currentAnimationFrameSnapshot.resolve(null);
++    this._currentAnimationFrameSnapshot = null;
++  }, {
++    oneway: true
+   }),
+ 
+   /**
+    * Invoked whenever an instrumented function is called, be it on a
+    * 2d or WebGL context, or an animation generator like requestAnimationFrame.
+    */
+   _onContentFunctionCall: function(functionCall) {
+     let { window, name, args } = functionCall.details;
+-- 
+2.2.1
+
