@@ -1,0 +1,181 @@
+# HG changeset patch
+# User Yash Mehrotra <yashmehrotra95@gmail.com>
+# Date 1424464374 -19800
+# Node ID 8b99e97a9638009c99fdb116a5435590d12d3480
+# Parent  9696d1c4b3ba3c8dbf937ee7747cb16abefb3603
+Bug 1009056 - Web Audio Editor Inspector Width is now a preference r=jsantell
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1492,16 +1492,19 @@ pref("devtools.styleeditor.transitions",
+ pref("devtools.shadereditor.enabled", false);
+ 
+ // Enable the Canvas Debugger.
+ pref("devtools.canvasdebugger.enabled", false);
+ 
+ // Enable the Web Audio Editor
+ pref("devtools.webaudioeditor.enabled", false);
+ 
++// Web Audio Editor Inspector Width should be a preference
++pref("devtools.webaudioeditor.inspectorWidth", 300);
++
+ // Default theme ("dark" or "light")
+ #ifdef MOZ_DEV_EDITION
+ pref("devtools.theme", "dark");
+ #else
+ pref("devtools.theme", "light");
+ #endif
+ 
+ // Display the introductory text
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -48,16 +48,17 @@ skip-if = true # bug 1092571
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-render-05.js]
+ skip-if = true # bug 1092571
+ [browser_wa_graph-selected.js]
+ [browser_wa_graph-zoom.js]
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
++[browser_wa_inspector-width.js]
+ [browser_wa_inspector-bypass-01.js]
+ [browser_wa_navigate.js]
+ [browser_wa_properties-view.js]
+ [browser_wa_properties-view-edit-01.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-edit-02.js]
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-media-nodes.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_inspector-width.js b/browser/devtools/webaudioeditor/test/browser_wa_inspector-width.js
+new file mode 100644
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_inspector-width.js
+@@ -0,0 +1,63 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++ 
++/**
++ * Test that the WebAudioInspector's Width is saved as
++ * a preference
++ */
++ 
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(SIMPLE_CONTEXT_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS, InspectorView } = panelWin;
++  let gVars = InspectorView._propsView;
++ 
++  let started = once(gFront, "start-context");
++ 
++  reload(target);
++ 
++  let [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++  let nodeIds = actors.map(actor => actor.actorID);
++ 
++  ok(!InspectorView.isVisible(), "InspectorView hidden on start.");
++ 
++  // Open inspector pane
++  $("#inspector-pane-toggle").click();
++  yield once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED);
++ 
++  let newInspectorWidth = 500;
++ 
++  // Setting width to new_inspector_width
++  $("#web-audio-inspector").setAttribute("width", newInspectorWidth);
++  reload(target);
++ 
++  //Width should be 500 after reloading
++  [actors] = yield Promise.all([
++    get3(gFront, "create-node"),
++    waitForGraphRendered(panelWin, 3, 2)
++  ]);
++  nodeIds = actors.map(actor => actor.actorID);
++ 
++  // Open inspector pane
++  $("#inspector-pane-toggle").click();
++  yield once(panelWin, EVENTS.UI_INSPECTOR_TOGGLED);
++ 
++  let nodeSet = Promise.all([
++    once(panelWin, EVENTS.UI_INSPECTOR_NODE_SET),
++    once(panelWin, EVENTS.UI_PROPERTIES_TAB_RENDERED),
++    once(panelWin, EVENTS.UI_AUTOMATION_TAB_RENDERED)
++  ]);
++ 
++  click(panelWin, findGraphNode(panelWin, nodeIds[1]));
++  yield nodeSet;
++ 
++  // Getting the width of the audio inspector
++  let width = $("#web-audio-inspector").getAttribute("width");
++ 
++  is(width, newInspectorWidth, "WebAudioEditor's Inspector width should be saved as a preference");
++ 
++  yield teardown(target);
++});
+\ No newline at end of file
+diff --git a/browser/devtools/webaudioeditor/views/inspector.js b/browser/devtools/webaudioeditor/views/inspector.js
+--- a/browser/devtools/webaudioeditor/views/inspector.js
++++ b/browser/devtools/webaudioeditor/views/inspector.js
+@@ -1,16 +1,14 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-// Store width as a preference rather than hardcode
+-// TODO bug 1009056
+-const INSPECTOR_WIDTH = 300;
++const MIN_INSPECTOR_WIDTH = 300;
+ 
+ // Strings for rendering
+ const EXPAND_INSPECTOR_STRING = L10N.getStr("expandInspector");
+ const COLLAPSE_INSPECTOR_STRING = L10N.getStr("collapseInspector");
+ 
+ /**
+  * Functions handling the audio node inspector UI.
+  */
+@@ -27,17 +25,17 @@ let InspectorView = {
+ 
+   /**
+    * Initialization function called when the tool starts up.
+    */
+   initialize: function () {
+     // Set up view controller
+     this.el = $("#web-audio-inspector");
+     this.splitter = $("#inspector-splitter");
+-    this.el.setAttribute("width", INSPECTOR_WIDTH);
++    this.el.setAttribute("width", Services.prefs.getIntPref("devtools.webaudioeditor.inspectorWidth"));
+     this.button = $("#inspector-pane-toggle");
+     mixin(this, ToggleMixin);
+     this.bindToggle();
+ 
+     // Hide inspector view on startup
+     this.hideImmediately();
+ 
+     this._onNodeSelect = this._onNodeSelect.bind(this);
+@@ -144,16 +142,20 @@ let InspectorView = {
+   _onNodeSelect: function (_, id) {
+     this.setCurrentAudioNode(gAudioNodes.get(id));
+ 
+     // Ensure inspector is visible when selecting a new node
+     this.show();
+   },
+ 
+   _onResize: function () {
++    if (this.el.getAttribute("width") < MIN_INSPECTOR_WIDTH) {
++      this.el.setAttribute("width", MIN_INSPECTOR_WIDTH);
++    }
++    Services.prefs.setIntPref("devtools.webaudioeditor.inspectorWidth", this.el.getAttribute("width"));
+     window.emit(EVENTS.UI_INSPECTOR_RESIZE);
+   },
+ 
+   /**
+    * Called when `DESTROY_NODE` is fired to remove the node from props view if
+    * it's currently selected.
+    */
+   _onDestroyNode: function (node) {
