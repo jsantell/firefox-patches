@@ -1,0 +1,387 @@
+From 7b27da7a829946de5123470e7e51b8d5924ef4b1 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 20 Feb 2015 10:36:49 -0800
+Subject: Bug 978948 - Add animation generator support for setTimeout in the canvas debugger. r=vp
+
+diff --git a/browser/devtools/canvasdebugger/test/browser.ini b/browser/devtools/canvasdebugger/test/browser.ini
+index f8569be..35deb23 100644
+--- a/browser/devtools/canvasdebugger/test/browser.ini
++++ b/browser/devtools/canvasdebugger/test/browser.ini
+@@ -1,12 +1,13 @@
+ [DEFAULT]
+ subsuite = devtools
+ support-files =
+   doc_raf-begin.html
++  doc_settimeout.html
+   doc_simple-canvas.html
+   doc_simple-canvas-bitmasks.html
+   doc_simple-canvas-deep-stack.html
+   doc_simple-canvas-transparent.html
+   doc_webgl-bindings.html
+   doc_webgl-enum.html
+   head.js
+ 
+@@ -15,16 +16,17 @@ support-files =
+ [browser_canvas-actor-test-03.js]
+ [browser_canvas-actor-test-04.js]
+ [browser_canvas-actor-test-05.js]
+ [browser_canvas-actor-test-06.js]
+ [browser_canvas-actor-test-07.js]
+ [browser_canvas-actor-test-08.js]
+ [browser_canvas-actor-test-09.js]
+ [browser_canvas-actor-test-10.js]
++[browser_canvas-actor-test-11.js]
+ [browser_canvas-frontend-call-highlight.js]
+ [browser_canvas-frontend-call-list.js]
+ [browser_canvas-frontend-call-search.js]
+ [browser_canvas-frontend-call-stack-01.js]
+ [browser_canvas-frontend-call-stack-02.js]
+ [browser_canvas-frontend-call-stack-03.js]
+ [browser_canvas-frontend-clear.js]
+ [browser_canvas-frontend-img-screenshots.js]
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-11.js b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-11.js
+new file mode 100644
+index 0000000..60b085b
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-actor-test-11.js
+@@ -0,0 +1,138 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that loops using setTimeout are recorded and stored
++ * for a canvas context, and that the generated screenshots are correct.
++ */
++
++function ifTestingSupported() {
++  let { target, front } = yield initCanvasDebuggerBackend(SET_TIMEOUT_URL);
++
++  let navigated = once(target, "navigate");
++
++  yield front.setup({ reload: true });
++  ok(true, "The front was setup up successfully.");
++
++  yield navigated;
++  ok(true, "Target automatically navigated when the front was set up.");
++
++  let snapshotActor = yield front.recordAnimationFrame();
++  ok(snapshotActor,
++    "A snapshot actor was sent after recording.");
++
++  let animationOverview = yield snapshotActor.getOverview();
++  ok(snapshotActor,
++    "An animation overview could be retrieved after recording.");
++
++  let functionCalls = animationOverview.calls;
++  ok(functionCalls,
++    "An array of function call actors was sent after recording.");
++  is(functionCalls.length, 8,
++    "The number of function call actors is correct.");
++
++  is(functionCalls[0].type, CallWatcherFront.METHOD_FUNCTION,
++    "The first called function is correctly identified as a method.");
++  is(functionCalls[0].name, "clearRect",
++    "The first called function's name is correct.");
++  is(functionCalls[0].file, SET_TIMEOUT_URL,
++    "The first called function's file is correct.");
++  is(functionCalls[0].line, 25,
++    "The first called function's line is correct.");
++  is(functionCalls[0].argsPreview, "0, 0, 128, 128",
++    "The first called function's args preview is correct.");
++  is(functionCalls[0].callerPreview, "ctx",
++    "The first called function's caller preview is correct.");
++
++  is(functionCalls[6].type, CallWatcherFront.METHOD_FUNCTION,
++    "The penultimate called function is correctly identified as a method.");
++  is(functionCalls[6].name, "fillRect",
++    "The penultimate called function's name is correct.");
++  is(functionCalls[6].file, SET_TIMEOUT_URL,
++    "The penultimate called function's file is correct.");
++  is(functionCalls[6].line, 21,
++    "The penultimate called function's line is correct.");
++  is(functionCalls[6].argsPreview, "10, 10, 55, 50",
++    "The penultimate called function's args preview is correct.");
++  is(functionCalls[6].callerPreview, "ctx",
++    "The penultimate called function's caller preview is correct.");
++
++  is(functionCalls[7].type, CallWatcherFront.METHOD_FUNCTION,
++    "The last called function is correctly identified as a method.");
++  is(functionCalls[7].name, "setTimeout",
++    "The last called function's name is correct.");
++  is(functionCalls[7].file, SET_TIMEOUT_URL,
++    "The last called function's file is correct.");
++  is(functionCalls[7].line, 30,
++    "The last called function's line is correct.");
++  ok(functionCalls[7].argsPreview.contains("Function"),
++    "The last called function's args preview is correct.");
++  is(functionCalls[7].callerPreview, "",
++    "The last called function's caller preview is correct.");
++
++  let firstNonDrawCall = yield functionCalls[1].getDetails();
++  let secondNonDrawCall = yield functionCalls[3].getDetails();
++  let lastNonDrawCall = yield functionCalls[7].getDetails();
++
++  is(firstNonDrawCall.name, "fillStyle",
++    "The first non-draw function's name is correct.");
++  is(secondNonDrawCall.name, "fillStyle",
++    "The second non-draw function's name is correct.");
++  is(lastNonDrawCall.name, "setTimeout",
++    "The last non-draw function's name is correct.");
++
++  let firstScreenshot = yield snapshotActor.generateScreenshotFor(functionCalls[1]);
++  let secondScreenshot = yield snapshotActor.generateScreenshotFor(functionCalls[3]);
++  let lastScreenshot = yield snapshotActor.generateScreenshotFor(functionCalls[7]);
++
++  ok(firstScreenshot,
++    "A screenshot was successfully retrieved for the first non-draw function.");
++  ok(secondScreenshot,
++    "A screenshot was successfully retrieved for the second non-draw function.");
++  ok(lastScreenshot,
++    "A screenshot was successfully retrieved for the last non-draw function.");
++
++  let firstActualScreenshot = yield snapshotActor.generateScreenshotFor(functionCalls[0]);
++  ok(sameArray(firstScreenshot.pixels, firstActualScreenshot.pixels),
++    "The screenshot for the first non-draw function is correct.");
++  is(firstScreenshot.width, 128,
++    "The screenshot for the first non-draw function has the correct width.");
++  is(firstScreenshot.height, 128,
++    "The screenshot for the first non-draw function has the correct height.");
++
++  let secondActualScreenshot =  yield snapshotActor.generateScreenshotFor(functionCalls[2]);
++  ok(sameArray(secondScreenshot.pixels, secondActualScreenshot.pixels),
++    "The screenshot for the second non-draw function is correct.");
++  is(secondScreenshot.width, 128,
++    "The screenshot for the second non-draw function has the correct width.");
++  is(secondScreenshot.height, 128,
++    "The screenshot for the second non-draw function has the correct height.");
++
++  let lastActualScreenshot = yield snapshotActor.generateScreenshotFor(functionCalls[6]);
++  ok(sameArray(lastScreenshot.pixels, lastActualScreenshot.pixels),
++    "The screenshot for the last non-draw function is correct.");
++  is(lastScreenshot.width, 128,
++    "The screenshot for the last non-draw function has the correct width.");
++  is(lastScreenshot.height, 128,
++    "The screenshot for the last non-draw function has the correct height.");
++
++  ok(!sameArray(firstScreenshot.pixels, secondScreenshot.pixels),
++    "The screenshots taken on consecutive draw calls are different (1).");
++  ok(!sameArray(secondScreenshot.pixels, lastScreenshot.pixels),
++    "The screenshots taken on consecutive draw calls are different (2).");
++
++  yield removeTab(target.tab);
++  finish();
++}
++
++function sameArray(a, b) {
++  if (a.length != b.length) {
++    return false;
++  }
++  for (let i = 0; i < a.length; i++) {
++    if (a[i] !== b[i]) {
++      return false;
++    }
++  }
++  return true;
++}
+diff --git a/browser/devtools/canvasdebugger/test/doc_settimeout.html b/browser/devtools/canvasdebugger/test/doc_settimeout.html
+new file mode 100644
+index 0000000..57cfbda
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/doc_settimeout.html
+@@ -0,0 +1,37 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Canvas inspector test page</title>
++  </head>
++
++  <body>
++    <canvas width="128" height="128"></canvas>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      var ctx = document.querySelector("canvas").getContext("2d");
++
++      function drawRect(fill, size) {
++        ctx.fillStyle = fill;
++        ctx.fillRect(size[0], size[1], size[2], size[3]);
++      }
++
++      function drawScene() {
++        ctx.clearRect(0, 0, 128, 128);
++        drawRect("rgb(192, 192, 192)", [0, 0, 128, 128]);
++        drawRect("rgba(0, 0, 192, 0.5)", [30, 30, 55, 50]);
++        drawRect("rgba(192, 0, 0, 0.5)", [10, 10, 55, 50]);
++
++        window.setTimeout(drawScene, 50);
++      }
++
++      drawScene();
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/canvasdebugger/test/head.js b/browser/devtools/canvasdebugger/test/head.js
+index 6445a4f2..8eb3757 100644
+--- a/browser/devtools/canvasdebugger/test/head.js
++++ b/browser/devtools/canvasdebugger/test/head.js
+@@ -23,16 +23,17 @@ let { CanvasFront } = devtools.require("devtools/server/actors/canvas");
+ let { setTimeout } = devtools.require("sdk/timers");
+ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
+ let mm = null
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/canvasdebugger/test/";
++const SET_TIMEOUT_URL = EXAMPLE_URL + "doc_settimeout.html";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
+ const SIMPLE_BITMASKS_URL = EXAMPLE_URL + "doc_simple-canvas-bitmasks.html";
+ const SIMPLE_CANVAS_TRANSPARENT_URL = EXAMPLE_URL + "doc_simple-canvas-transparent.html";
+ const SIMPLE_CANVAS_DEEP_STACK_URL = EXAMPLE_URL + "doc_simple-canvas-deep-stack.html";
+ const WEBGL_ENUM_URL = EXAMPLE_URL + "doc_webgl-enum.html";
+ const WEBGL_BINDINGS_URL = EXAMPLE_URL + "doc_webgl-bindings.html";
+ const RAF_BEGIN_URL = EXAMPLE_URL + "doc_raf-begin.html";
+ 
+diff --git a/toolkit/devtools/server/actors/canvas.js b/toolkit/devtools/server/actors/canvas.js
+index b36fb14..354d1b0 100644
+--- a/toolkit/devtools/server/actors/canvas.js
++++ b/toolkit/devtools/server/actors/canvas.js
+@@ -18,16 +18,20 @@ const CANVAS_CONTEXTS = [
+   "WebGLRenderingContext"
+ ];
+ 
+ const ANIMATION_GENERATORS = [
+   "requestAnimationFrame",
+   "mozRequestAnimationFrame"
+ ];
+ 
++const LOOP_GENERATORS = [
++  "setTimeout"
++];
++
+ const DRAW_CALLS = [
+   // 2D canvas
+   "fill",
+   "stroke",
+   "clearRect",
+   "fillRect",
+   "strokeRect",
+   "fillText",
+@@ -203,17 +207,18 @@ let FrameSnapshotFront = protocol.FrontClass(FrameSnapshotActor, {
+     impl: "_getOverview"
+   }),
+ 
+   /**
+    * This implementation saves a roundtrip to the backend if the screenshot
+    * was already generated and retrieved once.
+    */
+   generateScreenshotFor: custom(function(functionCall) {
+-    if (CanvasFront.ANIMATION_GENERATORS.has(functionCall.name)) {
++    if (CanvasFront.ANIMATION_GENERATORS.has(functionCall.name) ||
++        CanvasFront.LOOP_GENERATORS.has(functionCall.name)) {
+       return promise.resolve(this._animationFrameEndScreenshot);
+     }
+     let cachedScreenshot = this._cachedScreenshots.get(functionCall);
+     if (cachedScreenshot) {
+       return cachedScreenshot;
+     }
+     let screenshot = this._generateScreenshotFor(functionCall);
+     this._cachedScreenshots.set(functionCall, screenshot);
+@@ -252,17 +257,17 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+       return;
+     }
+     this._initialized = true;
+ 
+     this._callWatcher = new CallWatcherActor(this.conn, this.tabActor);
+     this._callWatcher.onCall = this._onContentFunctionCall;
+     this._callWatcher.setup({
+       tracedGlobals: CANVAS_CONTEXTS,
+-      tracedFunctions: ANIMATION_GENERATORS,
++      tracedFunctions: [...ANIMATION_GENERATORS, ...LOOP_GENERATORS],
+       performReload: reload,
+       storeCalls: true
+     });
+   }, {
+     request: { reload: Option(0, "boolean") },
+     oneway: true
+   }),
+ 
+@@ -298,21 +303,17 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+     return !!this._callWatcher.isRecording();
+   }, {
+     response: { recording: RetVal("boolean") }
+   }),
+ 
+   /**
+    * Records a snapshot of all the calls made during the next animation frame.
+    * The animation should be implemented via the de-facto requestAnimationFrame
+-   * utility, not inside a `setInterval` or recursive `setTimeout`.
+-   *
+-   * XXX: Currently only supporting requestAnimationFrame. When this isn't used,
+-   * it'd be a good idea to display a huge red flashing banner telling people to
+-   * STOP USING `setInterval` OR `setTimeout` FOR ANIMATION. Bug 978948.
++   * utility, or inside recursive `setTimeout`s. `setInterval` at this time are not supported.
+    */
+   recordAnimationFrame: method(function() {
+     if (this._callWatcher.isRecording()) {
+       return this._currentAnimationFrameSnapshot.promise;
+     }
+ 
+     this._recordingContainsDrawCall = false;
+     this._callWatcher.eraseRecording();
+@@ -334,20 +335,28 @@ let CanvasActor = exports.CanvasActor = protocol.ActorClass({
+     // The function call arguments are required to replay animation frames,
+     // in order to generate screenshots. However, simply storing references to
+     // every kind of object is a bad idea, since their properties may change.
+     // Consider transformation matrices for example, which are typically
+     // Float32Arrays whose values can easily change across context calls.
+     // They need to be cloned.
+     inplaceShallowCloneArrays(args, window);
+ 
++    // Handle animations generated using requestAnimationFrame
+     if (CanvasFront.ANIMATION_GENERATORS.has(name)) {
+       this._handleAnimationFrame(functionCall);
+       return;
+     }
++    // Handle animations generated using setTimeout. While using
++    // those timers is considered extremely poor practice, they're still widely
++    // used on the web, especially for old demos; it's nice to support them as well.
++    if (CanvasFront.LOOP_GENERATORS.has(name)) {
++      this._handleAnimationFrame(functionCall);
++      return;
++    }
+     if (CanvasFront.DRAW_CALLS.has(name) && this._animationStarted) {
+       this._handleDrawCall(functionCall);
+       return;
+     }
+   },
+ 
+   /**
+    * Handle animations generated using requestAnimationFrame.
+@@ -807,16 +816,17 @@ let CanvasFront = exports.CanvasFront = protocol.FrontClass(CanvasActor, {
+   }
+ });
+ 
+ /**
+  * Constants.
+  */
+ CanvasFront.CANVAS_CONTEXTS = new Set(CANVAS_CONTEXTS);
+ CanvasFront.ANIMATION_GENERATORS = new Set(ANIMATION_GENERATORS);
++CanvasFront.LOOP_GENERATORS = new Set(LOOP_GENERATORS);
+ CanvasFront.DRAW_CALLS = new Set(DRAW_CALLS);
+ CanvasFront.INTERESTING_CALLS = new Set(INTERESTING_CALLS);
+ CanvasFront.THUMBNAIL_SIZE = 50; // px
+ CanvasFront.WEBGL_SCREENSHOT_MAX_HEIGHT = 256; // px
+ CanvasFront.INVALID_SNAPSHOT_IMAGE = {
+   index: -1,
+   width: 0,
+   height: 0,
+-- 
+2.2.1
+
