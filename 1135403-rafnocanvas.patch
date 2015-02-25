@@ -1,0 +1,125 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 24 Feb 2015 09:18:35 -0800
+Subject: Bug 1135403 - Test that canvas debugger handles scenario where there is an animation cycle, but no draw calls or canvas. r=vp
+
+diff --git a/browser/devtools/canvasdebugger/test/browser.ini b/browser/devtools/canvasdebugger/test/browser.ini
+index 89cd16a..84e2bbf 100644
+--- a/browser/devtools/canvasdebugger/test/browser.ini
++++ b/browser/devtools/canvasdebugger/test/browser.ini
+@@ -1,14 +1,15 @@
+ [DEFAULT]
+ subsuite = devtools
+ support-files =
+   doc_raf-begin.html
+   doc_settimeout.html
+   doc_no-canvas.html
++  doc_raf-no-canvas.html
+   doc_simple-canvas.html
+   doc_simple-canvas-bitmasks.html
+   doc_simple-canvas-deep-stack.html
+   doc_simple-canvas-transparent.html
+   doc_webgl-bindings.html
+   doc_webgl-enum.html
+   head.js
+ 
+@@ -43,8 +44,9 @@ skip-if = e10s # bug 1102301 - leaks while running as a standalone directory in
+ [browser_canvas-frontend-reload-01.js]
+ [browser_canvas-frontend-reload-02.js]
+ [browser_canvas-frontend-slider-01.js]
+ [browser_canvas-frontend-slider-02.js]
+ [browser_canvas-frontend-snapshot-select.js]
+ [browser_canvas-frontend-stepping.js]
+ [browser_canvas-frontend-stop-01.js]
+ [browser_canvas-frontend-stop-02.js]
++[browser_canvas-frontend-stop-03.js]
+diff --git a/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-03.js b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-03.js
+new file mode 100644
+index 0000000..cdc4115
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/browser_canvas-frontend-stop-03.js
+@@ -0,0 +1,36 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that a recording that has a rAF cycle, but no draw calls, fails
++ * after timeout.
++ */
++
++function ifTestingSupported() {
++  let { target, panel } = yield initCanvasDebuggerFrontend(RAF_NO_CANVAS_URL);
++  let { window, EVENTS, $, SnapshotsListView } = panel.panelWin;
++
++  yield reload(target);
++
++  let recordingStarted = once(window, EVENTS.SNAPSHOT_RECORDING_STARTED);
++  SnapshotsListView._onRecordButtonClick();
++
++  yield recordingStarted;
++
++  is($("#empty-notice").hidden, true, "Empty notice not shown");
++  is($("#waiting-notice").hidden, false, "Waiting notice shown");
++
++  let recordingFinished = once(window, EVENTS.SNAPSHOT_RECORDING_FINISHED);
++  let recordingCancelled = once(window, EVENTS.SNAPSHOT_RECORDING_CANCELLED);
++
++  yield promise.all([recordingFinished, recordingCancelled]);
++
++  ok(true, "Recording stopped and was considered failed.");
++
++  is(SnapshotsListView.itemCount, 0, "No snapshots in the list.");
++  is($("#empty-notice").hidden, false, "Empty notice shown");
++  is($("#waiting-notice").hidden, true, "Waiting notice not shown");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/canvasdebugger/test/doc_raf-no-canvas.html b/browser/devtools/canvasdebugger/test/doc_raf-no-canvas.html
+new file mode 100644
+index 0000000..fa93762
+--- /dev/null
++++ b/browser/devtools/canvasdebugger/test/doc_raf-no-canvas.html
+@@ -0,0 +1,18 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Canvas inspector test page</title>
++  </head>
++
++  <body>
++    <script>
++      function render () { window.requestAnimationFrame(render); }
++      window.requestAnimationFrame(render);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/canvasdebugger/test/head.js b/browser/devtools/canvasdebugger/test/head.js
+index 092892e..0589bf7 100644
+--- a/browser/devtools/canvasdebugger/test/head.js
++++ b/browser/devtools/canvasdebugger/test/head.js
+@@ -25,16 +25,17 @@ let TiltGL = devtools.require("devtools/tilt/tilt-gl");
+ let TargetFactory = devtools.TargetFactory;
+ let Toolbox = devtools.Toolbox;
+ let mm = null
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/canvasdebugger/test/";
+ const SET_TIMEOUT_URL = EXAMPLE_URL + "doc_settimeout.html";
+ const NO_CANVAS_URL = EXAMPLE_URL + "doc_no-canvas.html";
++const RAF_NO_CANVAS_URL = EXAMPLE_URL + "doc_raf-no-canvas.html";
+ const SIMPLE_CANVAS_URL = EXAMPLE_URL + "doc_simple-canvas.html";
+ const SIMPLE_BITMASKS_URL = EXAMPLE_URL + "doc_simple-canvas-bitmasks.html";
+ const SIMPLE_CANVAS_TRANSPARENT_URL = EXAMPLE_URL + "doc_simple-canvas-transparent.html";
+ const SIMPLE_CANVAS_DEEP_STACK_URL = EXAMPLE_URL + "doc_simple-canvas-deep-stack.html";
+ const WEBGL_ENUM_URL = EXAMPLE_URL + "doc_webgl-enum.html";
+ const WEBGL_BINDINGS_URL = EXAMPLE_URL + "doc_webgl-bindings.html";
+ const RAF_BEGIN_URL = EXAMPLE_URL + "doc_raf-begin.html";
+ 
+-- 
+2.2.1
+
