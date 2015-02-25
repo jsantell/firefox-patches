@@ -1,0 +1,101 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 23 Feb 2015 20:13:52 -0800
+Subject: Bug 1135965 - Render response JSON as optional raw text. r=vp
+
+diff --git a/browser/devtools/netmonitor/netmonitor-view.js b/browser/devtools/netmonitor/netmonitor-view.js
+index 867f04e..f627b00 100644
+--- a/browser/devtools/netmonitor/netmonitor-view.js
++++ b/browser/devtools/netmonitor/netmonitor-view.js
+@@ -2565,17 +2565,22 @@ NetworkDetailsView.prototype = {
+       // Valid JSON or JSONP.
+       if (jsonObject) {
+         $("#response-content-json-box").hidden = false;
+         let jsonScopeName = callbackPadding
+           ? L10N.getFormatStr("jsonpScopeName", callbackPadding)
+           : L10N.getStr("jsonScopeName");
+ 
+         let jsonVar = { label: jsonScopeName, rawObject: jsonObject };
++
+         yield this._json.controller.setSingleVariable(jsonVar).expanded;
++
++        // Set raw view
++        let editor = yield NetMonitorView.editor("#response-content-json-raw");
++        editor.setText(responseBody);
+       }
+       // Malformed JSON.
+       else {
+         $("#response-content-textarea-box").hidden = false;
+         let infoHeader = $("#response-content-info-header");
+         infoHeader.setAttribute("value", jsonObjectParseError);
+         infoHeader.setAttribute("tooltiptext", jsonObjectParseError);
+         infoHeader.hidden = false;
+diff --git a/browser/devtools/netmonitor/netmonitor.xul b/browser/devtools/netmonitor/netmonitor.xul
+index ad6dbc1..08d7935 100644
+--- a/browser/devtools/netmonitor/netmonitor.xul
++++ b/browser/devtools/netmonitor/netmonitor.xul
+@@ -380,19 +380,34 @@
+                     <vbox id="request-post-data-textarea" flex="1"/>
+                   </vbox>
+                 </vbox>
+               </tabpanel>
+               <tabpanel id="response-tabpanel"
+                         class="tabpanel-content">
+                 <vbox flex="1">
+                   <label id="response-content-info-header"/>
+-                  <vbox id="response-content-json-box" flex="1" hidden="true">
+-                    <vbox id="response-content-json" flex="1"/>
+-                  </vbox>
++                  <tabbox id="response-content-json-box"
++                          class="devtools-sidebar-tabs"
++                          handleCtrlTab="false" flex="1" hidden="true">
++                    <tabs>
++                      <tab label="Preview" />
++                      <tab label="Raw" />
++                    </tabs>
++                    <tabpanels flex="1">
++                      <tabpanel class="tabpanel-content">
++                        <vbox flex="1">
++                          <vbox flex="1" id="response-content-json" />
++                        </vbox>
++                      </tabpanel>
++                      <tabpanel class="tabpanel-content">
++                        <vbox flex="1" id="response-content-json-raw" />
++                      </tabpanel>
++                    </tabpanels>
++                  </tabbox>
+                   <vbox id="response-content-textarea-box" flex="1" hidden="true">
+                     <vbox id="response-content-textarea" flex="1"/>
+                   </vbox>
+                   <vbox id="response-content-image-box" flex="1" hidden="true">
+                     <image id="response-content-image"/>
+                     <hbox>
+                       <label class="plain tabpanel-summary-label"
+                              value="&netmonitorUI.response.name;"/>
+diff --git a/browser/devtools/netmonitor/test/browser_net_simple-request-details.js b/browser/devtools/netmonitor/test/browser_net_simple-request-details.js
+index bb2ff3d..1ec5a0d 100644
+--- a/browser/devtools/netmonitor/test/browser_net_simple-request-details.js
++++ b/browser/devtools/netmonitor/test/browser_net_simple-request-details.js
+@@ -201,18 +201,18 @@ function test() {
+           "The mode active in the source editor is incorrect.");
+       });
+     }
+ 
+     function testTimingsTab() {
+       EventUtils.sendMouseEvent({ type: "mousedown" },
+         document.querySelectorAll("#details-pane tab")[4]);
+ 
+-      let tab = document.querySelectorAll("#details-pane tab")[4];
+-      let tabpanel = document.querySelectorAll("#details-pane tabpanel")[4];
++      let tab = document.querySelector("#timings-tab");
++      let tabpanel = document.querySelector("#timings-tabpanel");
+ 
+       is(tab.getAttribute("selected"), "true",
+         "The timings tab in the network details pane should be selected.");
+ 
+       ok(tabpanel.querySelector("#timings-summary-blocked .requests-menu-timings-total")
+         .getAttribute("value").match(/[0-9]+/),
+         "The blocked timing info does not appear to be correct.");
+ 
+-- 
+2.2.1
+
