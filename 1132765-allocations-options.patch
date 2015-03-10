@@ -1,0 +1,358 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 10 Mar 2015 10:24:48 -0700
+Subject: Bug 1132765 - Pass through performance memory options for 'probability' and 'maxLogLength' from the front to the memory actor. r=vp
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index afcbb37..74bfd6a 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1451,16 +1451,18 @@ pref("devtools.timeline.hiddenMarkers", "[]");
+ // The default Profiler UI settings
+ // TODO remove `devtools.profiler.ui.` branches when performance
+ // tool lands (bug 1075567)
+ pref("devtools.profiler.ui.flatten-tree-recursion", true);
+ pref("devtools.profiler.ui.show-platform-data", false);
+ pref("devtools.profiler.ui.show-idle-blocks", true);
+ 
+ // The default Performance UI settings
++pref("devtools.performance.memory.sample-probability", "0.05");
++pref("devtools.performance.memory.max-log-length", 2147483647); // Math.pow(2,31) - 1
+ pref("devtools.performance.timeline.hidden-markers", "[]");
+ pref("devtools.performance.ui.invert-call-tree", true);
+ pref("devtools.performance.ui.invert-flame-graph", false);
+ pref("devtools.performance.ui.flatten-tree-recursion", true);
+ pref("devtools.performance.ui.show-platform-data", false);
+ pref("devtools.performance.ui.show-idle-blocks", true);
+ pref("devtools.performance.ui.enable-memory", false);
+ pref("devtools.performance.ui.enable-framerate", true);
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index c28d374..108f042 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -324,17 +324,17 @@ PerformanceFront.prototype = {
+   /**
+    * Starts the timeline actor, if necessary.
+    */
+   _startMemory: Task.async(function *(options) {
+     if (!options.withAllocations) {
+       return 0;
+     }
+     yield this._request("memory", "attach");
+-    let memoryStartTime = yield this._request("memory", "startRecordingAllocations");
++    let memoryStartTime = yield this._request("memory", "startRecordingAllocations", options);
+     yield this._pullAllocationSites();
+     return memoryStartTime;
+   }),
+ 
+   /**
+    * Stops the timeline actor, if necessary.
+    */
+   _stopMemory: Task.async(function *(options) {
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 2d5c667..2a2e311 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -177,17 +177,19 @@ let PerformanceController = {
+     this._onTimelineData = this._onTimelineData.bind(this);
+     this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+ 
+     // All boolean prefs should be handled via the OptionsView in the
+     // ToolbarView, so that they may be accessible via the "gear" menu.
+     // Every other pref should be registered here.
+     this._nonBooleanPrefs = new ViewHelpers.Prefs("devtools.performance", {
+-      "hidden-markers": ["Json", "timeline.hidden-markers"]
++      "hidden-markers": ["Json", "timeline.hidden-markers"],
++      "memory-sample-probability": ["Float", "memory.sample-probability"],
++      "memory-max-log-length": ["Int", "memory.max-log-length"]
+     });
+ 
+     this._nonBooleanPrefs.registerObserver();
+     this._nonBooleanPrefs.on("pref-changed", this._onPrefChanged);
+ 
+     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+@@ -257,21 +259,23 @@ let PerformanceController = {
+   /**
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+     let withMemory = this.getOption("enable-memory");
+     let withTicks = this.getOption("enable-framerate");
+     let withAllocations = this.getOption("enable-memory");
++    let probability = this.getPref("memory-sample-probability");
++    let maxLogLength = this.getPref("memory-max-log-length");
+ 
+-    let recording = this._createRecording({ withMemory, withTicks, withAllocations });
++    let recording = this._createRecording({ withMemory, withTicks, withAllocations, probability, maxLogLength });
+ 
+     this.emit(EVENTS.RECORDING_WILL_START, recording);
+-    yield recording.startRecording({ withTicks, withMemory, withAllocations });
++    yield recording.startRecording({ withMemory, withTicks, withAllocations, probability, maxLogLength });
+     this.emit(EVENTS.RECORDING_STARTED, recording);
+ 
+     this.setCurrentRecording(recording);
+   }),
+ 
+   /**
+    * Stops recording with the PerformanceFront. Emits `EVENTS.RECORDING_STOPPED`
+    * when the front has stopped recording.
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index ecf96fe..fd60c01 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -49,16 +49,17 @@ support-files =
+ [browser_perf-options-flatten-tree-recursion-02.js]
+ [browser_perf-options-show-platform-data-01.js]
+ [browser_perf-options-show-platform-data-02.js]
+ [browser_perf-options-show-idle-blocks-01.js]
+ [browser_perf-options-show-idle-blocks-02.js]
+ [browser_perf-options-enable-memory-01.js]
+ [browser_perf-options-enable-memory-02.js]
+ [browser_perf-options-enable-framerate.js]
++[browser_perf-options-allocations.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
+ [browser_perf-overview-render-03.js]
+ [browser_perf-overview-selection-01.js]
+ [browser_perf-overview-selection-02.js]
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-overview-time-interval.js]
+ [browser_perf-shared-connection-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-options-allocations.js b/browser/devtools/performance/test/browser_perf-options-allocations.js
+new file mode 100644
+index 0000000..713493c
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-options-allocations.js
+@@ -0,0 +1,33 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++
++/**
++ * Tests that setting the `devtools.performance.memory.` prefs propagate to the memory actor.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController, $, gFront } = panel.panelWin;
++  Services.prefs.setBoolPref(MEMORY_PREF, true);
++
++  let originalProbability = Services.prefs.getCharPref("devtools.performance.memory.sample-probability");
++  let originalLogLength = Services.prefs.getIntPref("devtools.performance.memory.max-log-length");
++
++  Services.prefs.setCharPref("devtools.performance.memory.sample-probability", "0.213");
++  Services.prefs.setIntPref("devtools.performance.memory.max-log-length", 777777);
++
++  yield startRecording(panel);
++
++  let { probability, maxLogLength } = yield gFront._request("memory", "getAllocationsSettings");
++
++  yield stopRecording(panel);
++
++  is(probability, 0.213, "allocations probability option is set on memory actor");
++  is(maxLogLength, 777777, "allocations max log length option is set on memory actor");
++
++  Services.prefs.setBoolPref(MEMORY_PREF, false);
++  Services.prefs.setCharPref("devtools.performance.memory.sample-probability", originalProbability);
++  Services.prefs.setIntPref("devtools.performance.memory.max-log-length", originalLogLength);
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
+index 096238c..89cf5dd 100644
+--- a/browser/devtools/shared/test/browser.ini
++++ b/browser/devtools/shared/test/browser.ini
+@@ -53,17 +53,18 @@ support-files =
+ skip-if = e10s # Layouthelpers test should not run in a content page.
+ [browser_layoutHelpers-getBoxQuads.js]
+ skip-if = e10s # Layouthelpers test should not run in a content page.
+ [browser_num-l10n.js]
+ [browser_observableobject.js]
+ [browser_options-view-01.js]
+ [browser_outputparser.js]
+ skip-if = e10s # Test intermittently fails with e10s. Bug 1124162.
+-[browser_prefs.js]
++[browser_prefs-01.js]
++[browser_prefs-02.js]
+ [browser_require_basic.js]
+ [browser_spectrum.js]
+ [browser_theme.js]
+ [browser_tableWidget_basic.js]
+ [browser_tableWidget_keyboard_interaction.js]
+ [browser_tableWidget_mouse_interaction.js]
+ skip-if = buildapp == 'mulet'
+ [browser_telemetry_button_eyedropper.js]
+diff --git a/browser/devtools/shared/test/browser_prefs.js b/browser/devtools/shared/test/browser_prefs-01.js
+similarity index 100%
+rename from browser/devtools/shared/test/browser_prefs.js
+rename to browser/devtools/shared/test/browser_prefs-01.js
+diff --git a/browser/devtools/shared/test/browser_prefs-02.js b/browser/devtools/shared/test/browser_prefs-02.js
+new file mode 100644
+index 0000000..0099aa9
+--- /dev/null
++++ b/browser/devtools/shared/test/browser_prefs-02.js
+@@ -0,0 +1,39 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Tests that ViewHelpers.Prefs work properly with custom types of Float and Json.
++
++let {ViewHelpers} = Cu.import("resource:///modules/devtools/ViewHelpers.jsm", {});
++
++function test() {
++  let originalJson = Services.prefs.getCharPref("devtools.performance.timeline.hidden-markers");
++  let originalFloat = Services.prefs.getCharPref("devtools.performance.memory.sample-probability");
++
++  let Prefs = new ViewHelpers.Prefs("devtools.performance", {
++    "float": ["Float", "memory.sample-probability"],
++    "json": ["Json", "timeline.hidden-markers"]
++  });
++
++  Prefs.registerObserver();
++
++  // Float
++  Services.prefs.setCharPref("devtools.performance.timeline.hidden-markers", "{\"a\":1}");
++  is(Prefs.json.a, 1, "The JSON pref value is correctly casted on get.");
++
++  Prefs.json = { b: 2 };
++  is(Prefs.json.a, undefined, "The JSON pref value is correctly casted on set (1).");
++  is(Prefs.json.b, 2, "The JSON pref value is correctly casted on set (2).");
++
++  // Float
++  Services.prefs.setCharPref("devtools.performance.memory.sample-probability", "3.14");
++  is(Prefs.float, 3.14, "The float pref value is correctly casted on get.");
++
++  Prefs.float = 6.28;
++  is(Prefs.float, 6.28, "The float pref value is correctly casted on set.");
++
++  Prefs.unregisterObserver();
++
++  Services.prefs.setCharPref("devtools.performance.timeline.hidden-markers", originalJson);
++  Services.prefs.setCharPref("devtools.performance.memory.sample-probability", originalFloat);
++  finish();
++}
+diff --git a/browser/devtools/shared/widgets/ViewHelpers.jsm b/browser/devtools/shared/widgets/ViewHelpers.jsm
+index 9d19563..8cd990b 100644
+--- a/browser/devtools/shared/widgets/ViewHelpers.jsm
++++ b/browser/devtools/shared/widgets/ViewHelpers.jsm
+@@ -385,17 +385,18 @@ ViewHelpers.L10N.prototype = {
+ };
+ 
+ /**
+  * Shortcuts for lazily accessing and setting various preferences.
+  * Usage:
+  *   let prefs = new ViewHelpers.Prefs("root.path.to.branch", {
+  *     myIntPref: ["Int", "leaf.path.to.my-int-pref"],
+  *     myCharPref: ["Char", "leaf.path.to.my-char-pref"],
+- *     myJsonPref: ["Json", "leaf.path.to.my-json-pref"]
++ *     myJsonPref: ["Json", "leaf.path.to.my-json-pref"],
++ *     myFloatPref: ["Float", "leaf.path.to.my-float-pref"]
+  *     ...
+  *   });
+  *
+  * Get/set:
+  *   prefs.myCharPref = "foo";
+  *   let aux = prefs.myCharPref;
+  *
+  * Observe:
+@@ -472,33 +473,37 @@ ViewHelpers.Prefs.prototype = {
+    */
+   _set: function(aType, aPrefsRoot, aPrefName, aValue) {
+     Services.prefs["set" + aType + "Pref"]([aPrefsRoot, aPrefName].join("."), aValue);
+     this._cache.set(aPrefName, aValue);
+   },
+ 
+   /**
+    * Maps a property name to a pref, defining lazy getters and setters.
+-   * Supported types are "Bool", "Char", "Int" and "Json" (which is basically
+-   * just sugar for "Char" using the standard JSON serializer).
++   * Supported types are "Bool", "Char", "Int", "Float" (sugar around "Char" type and casting),
++   * and "Json" (which is basically just sugar for "Char" using the standard JSON serializer).
+    *
+    * @param string aAccessorName
+    * @param string aType
+    * @param string aPrefsRoot
+    * @param string aPrefName
+    * @param array aSerializer
+    */
+   _map: function(aAccessorName, aType, aPrefsRoot, aPrefName, aSerializer = { in: e => e, out: e => e }) {
+     if (aPrefName in this) {
+       throw new Error(`Can't use ${aPrefName} because it's already a property.`);
+     }
+     if (aType == "Json") {
+       this._map(aAccessorName, "Char", aPrefsRoot, aPrefName, { in: JSON.parse, out: JSON.stringify });
+       return;
+     }
++    if (aType == "Float") {
++      this._map(aAccessorName, "Char", aPrefsRoot, aPrefName, { in: Number.parseFloat, out: (n) => n + ""});
++      return;
++    }
+ 
+     Object.defineProperty(this, aAccessorName, {
+       get: () => aSerializer.in(this._get(aType, aPrefsRoot, aPrefName)),
+       set: (e) => this._set(aType, aPrefsRoot, aPrefName, aSerializer.out(e))
+     });
+   },
+ 
+   /**
+diff --git a/toolkit/devtools/server/actors/memory.js b/toolkit/devtools/server/actors/memory.js
+index 1051418..104e73a 100644
+--- a/toolkit/devtools/server/actors/memory.js
++++ b/toolkit/devtools/server/actors/memory.js
+@@ -177,16 +177,17 @@ let MemoryActor = protocol.ActorClass({
+   /**
+    * Start recording allocation sites.
+    *
+    * @param AllocationsRecordingOptions options
+    *        See the protocol.js definition of AllocationsRecordingOptions above.
+    */
+   startRecordingAllocations: method(expectState("attached", function(options = {}) {
+     this._frameCache.initFrames();
++
+     this.dbg.memory.allocationSamplingProbability = options.probability != null
+       ? options.probability
+       : 1.0;
+     if (options.maxLogLength != null) {
+       this.dbg.memory.maxAllocationsLogLength = options.maxLogLength;
+     }
+     this.dbg.memory.trackingAllocationSites = true;
+ 
+@@ -215,16 +216,33 @@ let MemoryActor = protocol.ActorClass({
+     request: {},
+     response: {
+       // Accept `nullable` in the case of server Gecko <= 37, handled on the front
+       value: RetVal(0, "nullable:number")
+     }
+   }),
+ 
+   /**
++   * Return settings used in `startRecordingAllocations` for `probability`
++   * and `maxLogLength`. Currently only uses in tests.
++   */
++  getAllocationsSettings: method(expectState("attached", function() {
++    return {
++      maxLogLength: this.dbg.memory.maxAllocationsLogLength,
++      probability: this.dbg.memory.allocationSamplingProbability
++    };
++  },
++  `getting allocations settings`), {
++    request: {},
++    response: {
++      options: RetVal(0, "json")
++    }
++  }),
++
++  /**
+    * Get a list of the most recent allocations since the last time we got
+    * allocations, as well as a summary of all allocations since we've been
+    * recording.
+    *
+    * @returns Object
+    *          An object of the form:
+    *
+    *            {
+-- 
+2.2.1
+

@@ -1,0 +1,746 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 9 Mar 2015 20:18:35 -0700
+Subject: Bug 1141261 - Implement a queueing system for actor events in
+ web audio editor to execute events in correct order. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
+index 544650a..5e83b35 100644
+--- a/browser/devtools/webaudioeditor/controller.js
++++ b/browser/devtools/webaudioeditor/controller.js
+@@ -37,19 +37,31 @@ function shutdownWebAudioEditor() {
+ /**
+  * Functions handling target-related lifetime events.
+  */
+ let WebAudioEditorController = {
+   /**
+    * Listen for events emitted by the current tab target.
+    */
+   initialize: Task.async(function* () {
++    // Create a queue to manage all the events from the
++    // front so they can be executed in order
++    this.queue = new Queue();
++
+     telemetry.toolOpened("webaudioeditor");
+     this._onTabNavigated = this._onTabNavigated.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
++    this._onStartContext = this._onStartContext.bind(this);
++
++    this._onCreateNode = this.queue.addHandler(this._onCreateNode.bind(this));
++    this._onConnectNode = this.queue.addHandler(this._onConnectNode.bind(this));
++    this._onConnectParam = this.queue.addHandler(this._onConnectParam.bind(this));
++    this._onDisconnectNode = this.queue.addHandler(this._onDisconnectNode.bind(this));
++    this._onChangeParam = this.queue.addHandler(this._onChangeParam.bind(this));
++    this._onDestroyNode = this.queue.addHandler(this._onDestroyNode.bind(this));
+ 
+     gTarget.on("will-navigate", this._onTabNavigated);
+     gTarget.on("navigate", this._onTabNavigated);
+     gFront.on("start-context", this._onStartContext);
+     gFront.on("create-node", this._onCreateNode);
+     gFront.on("connect-node", this._onConnectNode);
+     gFront.on("connect-param", this._onConnectParam);
+     gFront.on("disconnect-node", this._onDisconnectNode);
+@@ -82,46 +94,37 @@ let WebAudioEditorController = {
+     gFront.off("start-context", this._onStartContext);
+     gFront.off("create-node", this._onCreateNode);
+     gFront.off("connect-node", this._onConnectNode);
+     gFront.off("connect-param", this._onConnectParam);
+     gFront.off("disconnect-node", this._onDisconnectNode);
+     gFront.off("change-param", this._onChangeParam);
+     gFront.off("destroy-node", this._onDestroyNode);
+     gDevTools.off("pref-changed", this._onThemeChange);
++    yield this.queue.clear();
++    this.queue = null;
+   },
+ 
+   /**
+    * Called when page is reloaded to show the reload notice and waiting
+    * for an audio context notice.
+    */
+   reset: function () {
+     $("#content").hidden = true;
+     ContextView.resetUI();
+     InspectorView.resetUI();
+     PropertiesView.resetUI();
+   },
+ 
+-  // Since node events (create, disconnect, connect) are all async,
+-  // we have to make sure to wait that the node has finished creating
+-  // before performing an operation on it.
+-  getNode: function* (nodeActor) {
++  /**
++   * Takes an AudioNodeActor and returns the corresponding AudioNodeModel.
++   */
++  getNode: function (nodeActor) {
+     let id = nodeActor.actorID;
+     let node = gAudioNodes.get(id);
+-
+-    if (!node) {
+-      let { resolve, promise } = defer();
+-      gAudioNodes.on("add", function createNodeListener (createdNode) {
+-        if (createdNode.id === id) {
+-          gAudioNodes.off("add", createNodeListener);
+-          resolve(createdNode);
+-        }
+-      });
+-      node = yield promise;
+-    }
+     return node;
+   },
+ 
+   /**
+    * Fired when the devtools theme changes (light, dark, etc.)
+    * so that the graph can update marker styling, as that
+    * cannot currently be done with CSS.
+    */
+@@ -130,40 +133,40 @@ let WebAudioEditorController = {
+   },
+ 
+   /**
+    * Called for each location change in the debugged tab.
+    */
+   _onTabNavigated: Task.async(function* (event, {isFrameSwitching}) {
+     switch (event) {
+       case "will-navigate": {
++        yield this.queue.clear();
++        gAudioNodes.reset();
++
+         // Make sure the backend is prepared to handle audio contexts.
+         if (!isFrameSwitching) {
+           yield gFront.setup({ reload: false });
+         }
+ 
+         // Clear out current UI.
+-        this.reset();
++        yield this.reset();
+ 
+         // When switching to an iframe, ensure displaying the reload button.
+         // As the document has already been loaded without being hooked.
+         if (isFrameSwitching) {
+           $("#reload-notice").hidden = false;
+           $("#waiting-notice").hidden = true;
+         } else {
+           // Otherwise, we are loading a new top level document,
+           // so we don't need to reload anymore and should receive
+           // new node events.
+           $("#reload-notice").hidden = true;
+           $("#waiting-notice").hidden = false;
+         }
+ 
+-        // Clear out stored audio nodes
+-        gAudioNodes.reset();
+-
+         window.emit(EVENTS.UI_RESET);
+         break;
+       }
+       case "navigate": {
+         // TODO Case of bfcache, needs investigating
+         // bug 994250
+         break;
+       }
+@@ -177,17 +180,17 @@ let WebAudioEditorController = {
+   _onStartContext: function() {
+     $("#reload-notice").hidden = true;
+     $("#waiting-notice").hidden = true;
+     $("#content").hidden = false;
+     window.emit(EVENTS.START_CONTEXT);
+   },
+ 
+   /**
+-   * Called when a new node is created. Creates an `AudioNodeView` instance
++   * Called when a new node is created. Creates an `AudioNodeModel` instance
+    * for tracking throughout the editor.
+    */
+   _onCreateNode: Task.async(function* (nodeActor) {
+     yield gAudioNodes.add(nodeActor);
+   }),
+ 
+   /**
+    * Called on `destroy-node` when an AudioNode is GC'd. Removes
+@@ -195,39 +198,39 @@ let WebAudioEditorController = {
+    */
+   _onDestroyNode: function (nodeActor) {
+     gAudioNodes.remove(gAudioNodes.get(nodeActor.actorID));
+   },
+ 
+   /**
+    * Called when a node is connected to another node.
+    */
+-  _onConnectNode: Task.async(function* ({ source: sourceActor, dest: destActor }) {
+-    let source = yield WebAudioEditorController.getNode(sourceActor);
+-    let dest = yield WebAudioEditorController.getNode(destActor);
++  _onConnectNode: function ({ source: sourceActor, dest: destActor }) {
++    let source = this.getNode(sourceActor);
++    let dest = this.getNode(destActor);
+     source.connect(dest);
+-  }),
++  },
+ 
+   /**
+    * Called when a node is conneceted to another node's AudioParam.
+    */
+-  _onConnectParam: Task.async(function* ({ source: sourceActor, dest: destActor, param }) {
+-    let source = yield WebAudioEditorController.getNode(sourceActor);
+-    let dest = yield WebAudioEditorController.getNode(destActor);
++  _onConnectParam: function ({ source: sourceActor, dest: destActor, param }) {
++    let source = this.getNode(sourceActor);
++    let dest = this.getNode(destActor);
+     source.connect(dest, param);
+-  }),
++  },
+ 
+   /**
+    * Called when a node is disconnected.
+    */
+-  _onDisconnectNode: Task.async(function* (nodeActor) {
+-    let node = yield WebAudioEditorController.getNode(nodeActor);
++  _onDisconnectNode: function (nodeActor) {
++    let node = this.getNode(nodeActor);
+     node.disconnect();
+-  }),
++  },
+ 
+   /**
+    * Called when a node param is changed.
+    */
+-  _onChangeParam: Task.async(function* ({ actor, param, value }) {
+-    let node = yield WebAudioEditorController.getNode(actor);
++  _onChangeParam: function ({ actor, param, value }) {
++    let node = this.getNode(actor);
+     window.emit(EVENTS.CHANGE_PARAM, node, param, value);
+-  })
++  }
+ };
+diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
+index 2e6b8ec..10a4ce3 100644
+--- a/browser/devtools/webaudioeditor/includes.js
++++ b/browser/devtools/webaudioeditor/includes.js
+@@ -11,16 +11,17 @@ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ 
+ const devtools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
+ const { require } = devtools;
+ 
+ let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ let { EventTarget } = require("sdk/event/target");
+ 
++const { Queue } = require("devtools/webaudioeditor/queue");
+ const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ const { Class } = require("sdk/core/heritage");
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const STRINGS_URI = "chrome://browser/locale/devtools/webaudioeditor.properties"
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const Telemetry = require("devtools/shared/telemetry");
+ const telemetry = new Telemetry();
+ devtools.lazyImporter(this, "LineGraphWidget",
+diff --git a/browser/devtools/webaudioeditor/modules/queue.js b/browser/devtools/webaudioeditor/modules/queue.js
+new file mode 100644
+index 0000000..02db593
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/modules/queue.js
+@@ -0,0 +1,96 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const Promise = require("sdk/core/promise");
++
++/**
++ * Wraps an event handler that responds to an actor request and triggers
++ * them in the order they arrive. This is necessary because some handlers are async and
++ * introduce race conditions. Example (bug 1141261), connect two nodes, and we have to wait
++ * for both nodes to be created (another async handler), but the disconnect handler resolves faster
++ * as it only has to wait for one node, and none of these timings are reliable.
++ *
++ * So queue them up here and execute them in order when the previous handler completes.
++ *
++ * Usage:
++ *
++ * var q = new Queue();
++ *
++ * let handler = q.addHandler(handler);
++ * gFront.on("event", handler);
++ */
++
++function Queue () {
++  this._messages = [];
++  this._processing = false;
++  this._currentProcess = null;
++  this._process = this._process.bind(this);
++  this._asyncHandler = this._asyncHandler.bind(this);
++}
++exports.Queue = Queue;
++
++/**
++ * Wrap a function that returns a new function
++ * that executes the original in accordance with the queue.
++ */
++Queue.prototype.addHandler = function (fn) {
++  return (...args) => {
++    this._messages.push([fn, ...args]);
++    if (!this._processing) {
++      this._process();
++    }
++  }
++};
++
++Queue.prototype._process = function () {
++  if (this._messages.length === 0) {
++    this._processing = false;
++    return;
++  }
++
++  this._processing = true;
++
++  let [fn, ...args] = this._messages.shift();
++  let result = fn.apply(null, args);
++  if (result && result.then) {
++    // Store the current process if its async, so we
++    // can wait for it to finish if we clear.
++    this._currentProcess = result.then(this._asyncHandler, this._asyncHandler);
++  } else {
++    this._process();
++  }
++};
++
++/**
++ * Used to wrap up an async message completion.
++ */
++Queue.prototype._asyncHandler = function () {
++  this._currentProcess = null;
++  this._process();
++};
++
++/**
++ * Return the number of in-flight messages.
++ */
++Queue.prototype.getMessageCount = function () {
++  return this._messages.length;
++};
++
++/**
++ * Clear out all remaining messages. Returns a promise if there's
++ * an async message currently being processed that resolves upon
++ * the message completion.
++ */
++Queue.prototype.clear = function () {
++  this._messages.length = 0;
++  this._processing = false;
++
++  // If currently waiting for the last async message to finish,
++  // wait for it, then clear out the messages.
++  if (this._currentProcess) {
++    return this._currentProcess;
++  }
++  return Promise.resolve();
++};
+diff --git a/browser/devtools/webaudioeditor/moz.build b/browser/devtools/webaudioeditor/moz.build
+index 7fbea6c..65b8de7 100644
+--- a/browser/devtools/webaudioeditor/moz.build
++++ b/browser/devtools/webaudioeditor/moz.build
+@@ -1,10 +1,11 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.webaudioeditor += [
++    'modules/queue.js',
+     'panel.js'
+ ]
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index f58bdf6..333f7bc 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -6,19 +6,20 @@ support-files =
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-param.html
+   doc_connect-multi-param.html
+   doc_iframe-context.html
+   doc_automation.html
++  doc_bug_1112378.html
+   doc_bug_1125817.html
+   doc_bug_1130901.html
+-  doc_bug_1112378.html
++  doc_bug_1141261.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-get-type.js]
+@@ -46,16 +47,17 @@ skip-if = true # bug 1092571
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-render-05.js]
+ skip-if = true # bug 1092571
++[browser_wa_graph-render-06.js]
+ [browser_wa_graph-selected.js]
+ [browser_wa_graph-zoom.js]
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+ [browser_wa_inspector-width.js]
+ [browser_wa_inspector-bypass-01.js]
+ [browser_wa_navigate.js]
+ [browser_wa_properties-view.js]
+@@ -65,8 +67,11 @@ skip-if = true # bug 1010423
+ skip-if = true # bug 1010423
+ [browser_wa_properties-view-media-nodes.js]
+ [browser_wa_properties-view-params.js]
+ [browser_wa_properties-view-params-objects.js]
+ [browser_wa_reset-01.js]
+ [browser_wa_reset-02.js]
+ [browser_wa_reset-03.js]
+ [browser_wa_reset-04.js]
++
++[browser_queue-01.js]
++[browser_queue-02.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_queue-01.js b/browser/devtools/webaudioeditor/test/browser_queue-01.js
+new file mode 100644
+index 0000000..d17d3cc
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_queue-01.js
+@@ -0,0 +1,83 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests to ensure the queue module created for bug 1141261 works as intended
++ */
++
++add_task(function*() {
++  let { promise, resolve } = Promise.defer();
++  let { Queue } = devtools.require("devtools/webaudioeditor/queue");
++
++  let q = new Queue();
++  let messages = [];
++
++  let create = q.addHandler(function (id) {
++    return Task.spawn(function () {
++      yield wait(1);
++      processed("create", id);
++    });
++  });
++
++  let connect = q.addHandler(function (source, dest) {
++    processed("connect", source, dest);
++  });
++
++  create(1);
++  create(2);
++  connect(1, 2);
++  create(5);
++  connect(1, 5);
++  create(6);
++
++
++  function processed () {
++    messages.push(arguments);
++
++    // If we have 6 messages, check the order
++    if (messages.length === 6) {
++      checkFirstBatch();
++
++      // Fire off more messages after the queue is done,
++      // waiting a tick to ensure it works after draining
++      // the queue
++      Task.spawn(function () {
++        create(10);
++        connect(1, 10);
++      });
++      return;
++    }
++
++    if (messages.length === 8) {
++      checkSecondBatch();
++      resolve();
++    }
++  }
++
++  function checkFirstBatch () {
++    is(messages[0][0], "create", "first message check");
++    is(messages[0][1], 1, "first message args");
++    is(messages[1][0], "create", "second message check");
++    is(messages[1][1], 2, "second message args");
++    is(messages[2][0], "connect", "third message check (sync)");
++    is(messages[2][1], 1, "third message args");
++    is(messages[2][2], 2, "third message args");
++    is(messages[3][0], "create", "fourth message check");
++    is(messages[3][1], 5, "fourth message args");
++    is(messages[4][0], "connect", "fifth message check (sync)");
++    is(messages[4][1], 1, "fifth message args");
++    is(messages[4][2], 5, "fifth message args");
++    is(messages[5][0], "create", "sixth message check");
++    is(messages[5][1], 6, "sixth message args");
++  }
++
++  function checkSecondBatch () {
++    is(messages[6][0], "create", "seventh message check");
++    is(messages[6][1], 10, "seventh message args");
++    is(messages[7][0], "connect", "eighth message check");
++    is(messages[7][1], 1, "eighth message args");
++    is(messages[7][2], 10, "eighth message args");
++  }
++
++  return promise;
++});
+diff --git a/browser/devtools/webaudioeditor/test/browser_queue-02.js b/browser/devtools/webaudioeditor/test/browser_queue-02.js
+new file mode 100644
+index 0000000..479c93b
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_queue-02.js
+@@ -0,0 +1,50 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests queue module's clear and getMessageCount functions work.
++ */
++
++add_task(function*() {
++  let { promise, resolve } = Promise.defer();
++  let { Queue } = devtools.require("devtools/webaudioeditor/queue");
++
++  let q = new Queue();
++  let messages = [];
++  let cleared = false;
++  let lastProcessedId = null;
++
++  let processed = Task.async(function *(id) {
++    if (cleared) {
++      throw new Error("Messages should not be processed after clearing the queue");
++    }
++    messages.push(id);
++
++    is(q.getMessageCount(), 10 - messages.length, "getMessageCount() should count all queued up messages");
++
++    // On our 5th message, clear out all remaining tasks
++    if (messages.length === 5) {
++      is(lastProcessedId, 3, "Current message is not yet finished processing");
++      yield q.clear();
++      is(lastProcessedId, 4, "Current message is finished processing after yielding from queue.clear()");
++      cleared = true;
++
++      is(q.getMessageCount(), 0, "getMessageCount() returns 0 after being cleared");
++      // Wait a bit before finishing to ensure no more messages get processed
++      setTimeout(resolve, 300);
++    }
++  });
++
++  let exec = q.addHandler(function (id) {
++    return Task.spawn(function () {
++      yield wait(1);
++      processed(id);
++    }).then(() => lastProcessedId = id);
++  });
++
++  for (let i = 0; i < 10; i++) {
++    exec(i);
++  }
++
++  return promise;
++});
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js b/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
+index 3fb70b1..01394b0 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
+@@ -13,15 +13,16 @@ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(BUG_1125817_URL);
+   let { panelWin } = panel;
+   let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     once(gAudioNodes, "add", 2),
+-    once(gAudioNodes, "disconnect")
++    once(gAudioNodes, "disconnect"),
++    waitForGraphRendered(panelWin, 2, 0)
+   ]);
+ 
+   ok(true, "Successfully disconnected a just-created node.");
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-06.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-06.js
+new file mode 100644
+index 0000000..e152f69
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-06.js
+@@ -0,0 +1,25 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests to ensure that param connections trigger graph redraws
++ */
++
++const BUG_1141261_URL = EXAMPLE_URL + "doc_bug_1141261.html";
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(BUG_1141261_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    getN(gFront, "create-node", 3),
++    waitForGraphRendered(panelWin, 3, 1, 0)
++  ]);
++
++  ok(true, "Graph correctly shows gain node as disconnected");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js b/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
+index 3208227..d93a58f 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
+@@ -1,15 +1,15 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ ///////////////////
+ //
+ // Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
++// As part of bug 1077403, the leaking uncaught rejection should be fixed.
+ //
+ thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Connection closed");
+ 
+ /**
+  * Tests that reloading a tab will properly listen for the `start-context`
+  * event and reshow the tools after reloading.
+  */
+ 
+@@ -48,18 +48,21 @@ add_task(function*() {
+     "The tool's content should not be hidden anymore.");
+ 
+   navigating = once(target, "will-navigate");
+   started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   yield Promise.all([navigating, started]);
++  let rendered = waitForGraphRendered(panel.panelWin, 3, 2);
+ 
+   is($("#reload-notice").hidden, true,
+     "The 'reload this page' notice should be hidden after context found after reload.");
+   is($("#waiting-notice").hidden, true,
+     "The 'waiting for an audio context' notice should be hidden after context found after reload.");
+   is($("#content").hidden, false,
+     "The tool's content should reappear without closing and reopening the toolbox.");
+ 
++  yield rendered;
++
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/doc_bug_1141261.html b/browser/devtools/webaudioeditor/test/doc_bug_1141261.html
+new file mode 100644
+index 0000000..87c1210
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_bug_1141261.html
+@@ -0,0 +1,25 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++      let gain = ctx.createGain();
++      osc.connect(gain);
++      gain.connect(ctx.destination);
++      gain.disconnect();
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/webaudioeditor/views/context.js b/browser/devtools/webaudioeditor/views/context.js
+index f2160ac..46b0ab5 100644
+--- a/browser/devtools/webaudioeditor/views/context.js
++++ b/browser/devtools/webaudioeditor/views/context.js
+@@ -1,14 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const { debounce } = require("sdk/lang/functional");
++// Previously used `debounce`, but after using an ordered queue
++// for actor events, too many events were queued, causing large
++// render delays, rather than incremental additions in rendering.
++// So now we use `throttle`, which will render at most `n` milliseconds.
++const { throttle } = require("sdk/lang/functional");
+ 
+ // Globals for d3 stuff
+ // Default properties of the graph on rerender
+ const GRAPH_DEFAULTS = {
+   translate: [20, 20],
+   scale: 1
+ };
+ 
+@@ -17,17 +21,18 @@ const ARROW_HEIGHT = 5;
+ const ARROW_WIDTH = 8;
+ 
+ // Styles for markers as they cannot be done with CSS.
+ const MARKER_STYLING = {
+   light: "#AAA",
+   dark: "#CED3D9"
+ };
+ 
+-const GRAPH_DEBOUNCE_TIMER = 100;
++// Render graph at most once every 500ms
++const GRAPH_THROTTLE_TIMER = 500;
+ 
+ // `gAudioNodes` events that should require the graph
+ // to redraw
+ const GRAPH_REDRAW_EVENTS = ["add", "connect", "disconnect", "remove"];
+ 
+ /**
+  * Functions handling the graph UI.
+  */
+@@ -36,17 +41,17 @@ let ContextView = {
+    * Initialization function, called when the tool is started.
+    */
+   initialize: function() {
+     this._onGraphClick = this._onGraphClick.bind(this);
+     this._onThemeChange = this._onThemeChange.bind(this);
+     this._onStartContext = this._onStartContext.bind(this);
+     this._onEvent = this._onEvent.bind(this);
+ 
+-    this.draw = debounce(this.draw.bind(this), GRAPH_DEBOUNCE_TIMER);
++    this.draw = throttle(this.draw.bind(this), GRAPH_THROTTLE_TIMER);
+     $("#graph-target").addEventListener("click", this._onGraphClick, false);
+ 
+     window.on(EVENTS.THEME_CHANGE, this._onThemeChange);
+     window.on(EVENTS.START_CONTEXT, this._onStartContext);
+     gAudioNodes.on("*", this._onEvent);
+   },
+ 
+   /**
+-- 
+2.2.1
+
