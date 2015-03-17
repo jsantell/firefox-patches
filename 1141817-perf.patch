@@ -1,0 +1,121 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 12 Mar 2015 11:41:41 -0700
+Subject: Bug 1141817 - Fix yield statement to correctly return memory actor state so that the performance tool can poll for allocations during recording. r=vp
+
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index 108f042..3999b86 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -347,30 +347,33 @@ PerformanceFront.prototype = {
+     return memoryEndTime;
+   }),
+ 
+   /**
+    * At regular intervals, pull allocations from the memory actor, and forward
+    * them to consumers.
+    */
+   _pullAllocationSites: Task.async(function *() {
++    let isAttached = (yield this._request("memory", "getState")) === "attached";
++
++    if (!isAttached) {
++      return;
++    }
++
+     let memoryData = yield this._request("memory", "getAllocations");
+-    let isStillAttached = yield this._request("memory", "getState") == "attached";
+ 
+     this.emit("allocations", {
+       sites: memoryData.allocations,
+       timestamps: memoryData.allocationsTimestamps,
+       frames: memoryData.frames,
+       counts: memoryData.counts
+     });
+ 
+-    if (isStillAttached) {
+-      let delay = DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT;
+-      this._sitesPullTimeout = setTimeout(this._pullAllocationSites, delay);
+-    }
++    let delay = DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT;
++    this._sitesPullTimeout = setTimeout(this._pullAllocationSites, delay);
+   }),
+ 
+   /**
+    * Overrides the options sent to the built-in profiler module when activating,
+    * such as the maximum entries count, the sampling interval etc.
+    *
+    * Used in tests and for older backend implementations.
+    */
+diff --git a/browser/devtools/performance/test/browser_perf-front.js b/browser/devtools/performance/test/browser_perf-front.js
+index fae9bf7..7fa15ed 100644
+--- a/browser/devtools/performance/test/browser_perf-front.js
++++ b/browser/devtools/performance/test/browser_perf-front.js
+@@ -5,50 +5,65 @@
+  * Test basic functionality of PerformanceFront, emitting start and endtime values
+  */
+ 
+ let WAIT_TIME = 1000;
+ 
+ function spawnTest () {
+   let { target, front } = yield initBackend(SIMPLE_URL);
+ 
++  let count = 0;
++  let counter = () => count++;
++
+   let {
+     profilerStartTime,
+     timelineStartTime,
+     memoryStartTime
+   } = yield front.startRecording({
+     withAllocations: true
+   });
+ 
+   ok(typeof profilerStartTime === "number",
+     "The front.startRecording() emits a profiler start time.");
+   ok(typeof timelineStartTime === "number",
+     "The front.startRecording() emits a timeline start time.");
+   ok(typeof memoryStartTime === "number",
+     "The front.startRecording() emits a memory start time.");
+ 
+-  yield busyWait(WAIT_TIME);
++  // Record allocation events to ensure it's called more than once
++  // so we know it's polling
++  front.on("allocations", counter);
++
++  yield Promise.all([
++    busyWait(WAIT_TIME),
++    waitUntil(() => count > 1)
++  ]);
+ 
+   let {
+     profilerEndTime,
+     timelineEndTime,
+     memoryEndTime
+   } = yield front.stopRecording({
+     withAllocations: true
+   });
+ 
++  front.off("allocations", counter);
++
+   ok(typeof profilerEndTime === "number",
+     "The front.stopRecording() emits a profiler end time.");
+   ok(typeof timelineEndTime === "number",
+     "The front.stopRecording() emits a timeline end time.");
+   ok(typeof memoryEndTime === "number",
+     "The front.stopRecording() emits a memory end time.");
+ 
+   ok(profilerEndTime > profilerStartTime,
+     "The profilerEndTime is after profilerStartTime.");
+   ok(timelineEndTime > timelineStartTime,
+     "The timelineEndTime is after timelineStartTime.");
+   ok(memoryEndTime > memoryStartTime,
+     "The memoryEndTime is after memoryStartTime.");
+ 
++  is((yield front._request("memory", "getState")), "detached",
++    "memory actor is detached when stopping recording with allocations");
++
+   yield removeTab(target.tab);
+   finish();
+ }
+-- 
+2.2.1
+

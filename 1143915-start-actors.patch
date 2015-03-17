@@ -1,0 +1,169 @@
+From f10f7f144d9209270f294da4677a2262aec59afd Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 16 Mar 2015 16:40:09 -0700
+Subject: Bug 1143915 - Allow multiple calls to memory and timeline actor's start methods, to return the local start time from the actor. r=vp
+
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index b69602c..816cb5b 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -33,17 +33,18 @@ support-files =
+ [browser_perf-front-basic-profiler-01.js]
+ [browser_perf-front-basic-timeline-01.js]
+ #[browser_perf-front-profiler-01.js] bug 1077464
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+ #[browser_perf-front-profiler-06.js]
+-[browser_perf-front.js]
++[browser_perf-front-01.js]
++[browser_perf-front-02.js]
+ [browser_perf-jump-to-debugger-01.js]
+ [browser_perf-jump-to-debugger-02.js]
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-invert-call-tree-01.js]
+ [browser_perf-options-invert-call-tree-02.js]
+ [browser_perf-options-invert-flame-graph-01.js]
+ [browser_perf-options-invert-flame-graph-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-front.js b/browser/devtools/performance/test/browser_perf-front-01.js
+similarity index 100%
+rename from browser/devtools/performance/test/browser_perf-front.js
+rename to browser/devtools/performance/test/browser_perf-front-01.js
+diff --git a/browser/devtools/performance/test/browser_perf-front-02.js b/browser/devtools/performance/test/browser_perf-front-02.js
+new file mode 100644
+index 0000000..fe2ce72
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-front-02.js
+@@ -0,0 +1,35 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test that timeline and memory actors can be started multiple times to get
++ * different start times for different recording sessions.
++ */
++
++let WAIT_TIME = 1000;
++
++function spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_URL);
++  let config = { withMemory: true, withTicks: true };
++
++  yield front._request("memory", "attach");
++
++  let timelineStart1 = yield front._request("timeline", "start", config);
++  let memoryStart1 = yield front._request("memory", "startRecordingAllocations");
++  let timelineStart2 = yield front._request("timeline", "start", config);
++  let memoryStart2 = yield front._request("memory", "startRecordingAllocations");
++  let timelineStop = yield front._request("timeline", "stop");
++  let memoryStop = yield front._request("memory", "stopRecordingAllocations");
++
++  info(timelineStart1);
++  info(timelineStart2);
++  ok(typeof timelineStart1 === "number", "first timeline start returned a number");
++  ok(typeof timelineStart2 === "number", "second timeline start returned a number");
++  ok(typeof memoryStart1 === "number", "first memory start returned a number");
++  ok(typeof memoryStart2 === "number", "second memory start returned a number");
++  ok(timelineStart1 < timelineStart2, "can start timeline actor twice and get different start times");
++  ok(memoryStart1 < memoryStart2, "can start memory actor twice and get different start times");
++
++  yield removeTab(target.tab);
++  finish();
++}
+diff --git a/toolkit/devtools/server/actors/memory.js b/toolkit/devtools/server/actors/memory.js
+index 104e73a..f0708c1 100644
+--- a/toolkit/devtools/server/actors/memory.js
++++ b/toolkit/devtools/server/actors/memory.js
+@@ -176,16 +176,20 @@ let MemoryActor = protocol.ActorClass({
+ 
+   /**
+    * Start recording allocation sites.
+    *
+    * @param AllocationsRecordingOptions options
+    *        See the protocol.js definition of AllocationsRecordingOptions above.
+    */
+   startRecordingAllocations: method(expectState("attached", function(options = {}) {
++    if (this.dbg.memory.trackingAllocationSites) {
++      return Date.now();
++    }
++
+     this._frameCache.initFrames();
+ 
+     this.dbg.memory.allocationSamplingProbability = options.probability != null
+       ? options.probability
+       : 1.0;
+     if (options.maxLogLength != null) {
+       this.dbg.memory.maxAllocationsLogLength = options.maxLogLength;
+     }
+diff --git a/toolkit/devtools/server/actors/timeline.js b/toolkit/devtools/server/actors/timeline.js
+index b2f0703..ad90150 100644
+--- a/toolkit/devtools/server/actors/timeline.js
++++ b/toolkit/devtools/server/actors/timeline.js
+@@ -103,17 +103,16 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+   /**
+    * Initializes this actor with the provided connection and tab actor.
+    */
+   initialize: function(conn, tabActor) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+     this.tabActor = tabActor;
+ 
+     this._isRecording = false;
+-    this._startTime = 0;
+     this._stackFrames = null;
+ 
+     // Make sure to get markers from new windows as they become available
+     this._onWindowReady = this._onWindowReady.bind(this);
+     events.on(this.tabActor, "window-ready", this._onWindowReady);
+   },
+ 
+   /**
+@@ -233,21 +232,23 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+       value: RetVal("boolean")
+     }
+   }),
+ 
+   /**
+    * Start recording profile markers.
+    */
+   start: method(function({ withMemory, withTicks }) {
++    var startTime = this.docShells[0].now();
++
+     if (this._isRecording) {
+-      return;
++      return startTime;
+     }
++
+     this._isRecording = true;
+-    this._startTime = this.docShells[0].now();
+     this._stackFrames = new StackFrameCache();
+     this._stackFrames.initFrames();
+ 
+     for (let docShell of this.docShells) {
+       docShell.recordProfileTimelineMarkers = true;
+     }
+ 
+     if (withMemory) {
+@@ -255,17 +256,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+     }
+ 
+     if (withTicks) {
+       this._framerateActor = new FramerateActor(this.conn, this.tabActor);
+       this._framerateActor.startRecording();
+     }
+ 
+     this._pullTimelineData();
+-    return this._startTime;
++    return startTime;
+   }, {
+     request: {
+       withMemory: Option(0, "boolean"),
+       withTicks: Option(0, "boolean")
+     },
+     response: {
+       value: RetVal("number")
+     }
+-- 
+2.2.1
+

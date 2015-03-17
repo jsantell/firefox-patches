@@ -1,0 +1,2763 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 13 Mar 2015 15:42:18 -0700
+Subject: Bug 1077464 - Wire console.profile/profileEnd to the new
+ performance tool. Move most of the recording-model logic from the front end
+ into the PerformanceFront and PerformanceActorConnection so it can manage
+ recordings without the front end being viewed. r=vp
+
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index b8f07fd..5190937 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -1,16 +1,17 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { extend } = require("sdk/util/object");
++const { RecordingModel } = require("devtools/performance/recording-model");
+ 
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ loader.lazyRequireGetter(this, "TimelineFront",
+   "devtools/server/actors/timeline", true);
+ loader.lazyRequireGetter(this, "MemoryFront",
+@@ -25,16 +26,22 @@ loader.lazyImporter(this, "gDevTools",
+ loader.lazyImporter(this, "setTimeout",
+   "resource://gre/modules/Timer.jsm");
+ loader.lazyImporter(this, "clearTimeout",
+   "resource://gre/modules/Timer.jsm");
+ 
+ // How often do we pull allocation sites from the memory actor.
+ const DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT = 200; // ms
+ 
++// Events to pipe from PerformanceActorsConnection to the PerformanceFront
++const CONNECTION_PIPE_EVENTS = [
++  "console-profile-start", "console-profile-ending", "console-profile-end",
++  "timeline-data", "profiler-already-active", "profiler-activated"
++];
++
+ /**
+  * A cache of all PerformanceActorsConnection instances.
+  * The keys are Target objects.
+  */
+ let SharedPerformanceActors = new WeakMap();
+ 
+ /**
+  * Instantiates a shared PerformanceActorsConnection for the specified target.
+@@ -64,18 +71,29 @@ SharedPerformanceActors.forTarget = function(target) {
+  *
+  * @param Target target
+  *        The target owning this connection.
+  */
+ function PerformanceActorsConnection(target) {
+   EventEmitter.decorate(this);
+ 
+   this._target = target;
++  this._toolbox = gDevTools.getToolbox(target);
+   this._client = this._target.client;
+   this._request = this._request.bind(this);
++  this._pendingConsoleRecordings = [];
++  this._sitesPullTimeout = 0;
++  this._recordings = [];
++
++  this._onTimelineMarkers = this._onTimelineMarkers.bind(this);
++  this._onTimelineFrames = this._onTimelineFrames.bind(this);
++  this._onTimelineMemory = this._onTimelineMemory.bind(this);
++  this._onTimelineTicks = this._onTimelineTicks.bind(this);
++  this._onProfilerEvent = this._onProfilerEvent.bind(this);
++  this._pullAllocationSites = this._pullAllocationSites.bind(this);
+ 
+   Services.obs.notifyObservers(null, "performance-actors-connection-created", null);
+ }
+ 
+ PerformanceActorsConnection.prototype = {
+ 
+   // Properties set when mocks are being used
+   _usingMockMemory: false,
+@@ -101,27 +119,48 @@ PerformanceActorsConnection.prototype = {
+     // are available. Older Gecko versions don't have existing implementations,
+     // in which case all the methods we need can be easily mocked.
+     yield this._connectProfilerActor();
+     yield this._connectTimelineActor();
+     yield this._connectMemoryActor();
+ 
+     this._connected = true;
+ 
++    yield this._registerListeners();
++
+     Services.obs.notifyObservers(null, "performance-actors-connection-opened", null);
+   }),
+ 
+   /**
+    * Destroys this connection.
+    */
+   destroy: Task.async(function*() {
++    this._timeline.off("markers", this._onTimelineMarkers);
++    this._timeline.off("frames", this._onTimelineFrames);
++    this._timeline.off("memory", this._onTimelineMemory);
++    this._timeline.off("ticks", this._onTimelineTicks);
++    this._client.removeListener("eventNotification", this._onProfilerEvent);
++
+     yield this._disconnectActors();
+     this._connected = false;
+   }),
+ 
++  _registerListeners: Task.async(function*() {
++    // Pipe events from TimelineActor to the PerformanceFront
++    this._timeline.on("markers", this._onTimelineMarkers);
++    this._timeline.on("frames", this._onTimelineFrames);
++    this._timeline.on("memory", this._onTimelineMemory);
++    this._timeline.on("ticks", this._onTimelineTicks);
++
++    // Register events on the profiler actor to hook into `console.profile*` calls.
++    let events = ["console-api-profiler", "profiler-stopped"];
++    yield this._request("profiler", "registerEventNotifications", { events });
++    this._client.addListener("eventNotification", this._onProfilerEvent);
++  }),
++
+   /**
+    * Initializes a connection to the profiler actor.
+    */
+   _connectProfilerActor: Task.async(function*() {
+     // Chrome and content process targets already have obtained a reference
+     // to the profiler tab actor. Use it immediately.
+     if (this._target.form && this._target.form.profilerActor) {
+       this._profiler = this._target.form.profilerActor;
+@@ -199,96 +238,223 @@ PerformanceActorsConnection.prototype = {
+     if (actor == "timeline") {
+       return this._timeline[method].apply(this._timeline, args);
+     }
+ 
+     // Handle requests to the memory actor.
+     if (actor == "memory") {
+       return this._memory[method].apply(this._memory, args);
+     }
+-  }
+-};
++  },
+ 
+-/**
+- * A thin wrapper around a shared PerformanceActorsConnection for the parent target.
+- * Handles manually starting and stopping a recording.
+- *
+- * @param PerformanceActorsConnection connection
+- *        The shared instance for the parent target.
+- */
+-function PerformanceFront(connection) {
+-  EventEmitter.decorate(this);
++  /**
++   * Invoked whenever a registered event was emitted by the profiler actor.
++   *
++   * @param object response
++   *        The data received from the backend.
++   */
++  _onProfilerEvent: function (_, { topic, subject, details }) {
++    if (topic === "console-api-profiler") {
++      if (subject.action === "profile") {
++        this._onConsoleProfileStart(details);
++      }
++      else if (subject.action === "profileEnd") {
++        this._onConsoleProfileEnd(details);
++      }
++    } else if (topic === "profiler-stopped") {
++      this._onProfilerUnexpectedlyStopped();
++    }
++  },
+ 
+-  this._request = connection._request;
++  /**
++   * TODO handle bug 1144438
++   */
++  _onProfilerUnexpectedlyStopped: function () {
+ 
+-  // Pipe events from TimelineActor to the PerformanceFront
+-  connection._timeline.on("markers", markers => this.emit("markers", markers));
+-  connection._timeline.on("frames", (delta, frames) => this.emit("frames", delta, frames));
+-  connection._timeline.on("memory", (delta, measurement) => this.emit("memory", delta, measurement));
+-  connection._timeline.on("ticks", (delta, timestamps) => this.emit("ticks", delta, timestamps));
++  },
+ 
+-  // Set when mocks are being used
+-  this._usingMockMemory = connection._usingMockMemory;
+-  this._usingMockTimeline = connection._usingMockTimeline;
++  /**
++   * Invoked whenever `console.profile` is called.
++   *
++   * @param string profileLabel
++   *        The provided string argument if available; undefined otherwise.
++   * @param number currentTime
++   *        The time (in milliseconds) when the call was made, relative to when
++   *        the nsIProfiler module was started.
++   */
++  _onConsoleProfileStart: Task.async(function *({ profileLabel, currentTime: startTime }) {
++    let recordings = this._recordings;
+ 
+-  this._pullAllocationSites = this._pullAllocationSites.bind(this);
+-  this._sitesPullTimeout = 0;
+-}
++    // Abort if a profile with this label already exists.
++    if (recordings.find(e => e.getLabel() === profileLabel)) {
++      return;
++    }
+ 
+-PerformanceFront.prototype = {
++    // Ensure the performance front is set up and ready.
++    // Slight performance overhead for this, should research some more.
++    // This is to ensure that there is a front to receive the events for
++    // the console profiles.
++    yield this._toolbox.loadTool("performance");
++
++    let model = yield this.startRecording(extend(getRecordingModelPrefs(), {
++      console: true,
++      label: profileLabel
++    }));
++
++    this.emit("console-profile-start", model);
++  }),
++
++  _onConsoleProfileEnd: Task.async(function *(profilerData) {
++    let pending = this._recordings.filter(r => r.isConsole() && r.isRecording());
++    if (pending.length === 0) {
++      return;
++    }
++
++    let model;
++    // Try to find the corresponding `console.profile` call if
++    // a label was used in profileEnd(). If no matches, abort.
++    if (profilerData.profileLabel) {
++      model = pending.find(e => e.getLabel() === profilerData.profileLabel);
++    }
++    // If no label supplied, pop off the most recent pending console recording
++    else {
++      model = pending[pending.length - 1];
++    }
++
++    // If `profileEnd()` was called with a label, and there are no matching
++    // sessions, abort
++    if (!model) {
++      return;
++    }
++
++    this.emit("console-profile-ending", model);
++    yield this.stopRecording(model);
++    this.emit("console-profile-end", model);
++  }),
++
++  /**
++   * Handlers for TimelineActor events. All pipe to `_onTimelineData`
++   * with the appropriate event name.
++   */
++  _onTimelineMarkers: function (markers) { this._onTimelineData("markers", markers); },
++  _onTimelineFrames: function (delta, frames) { this._onTimelineData("frames", delta, frames); },
++  _onTimelineMemory: function (delta, measurement) { this._onTimelineData("memory", delta, measurement); },
++  _onTimelineTicks: function (delta, timestamps) { this._onTimelineData("ticks", delta, timestamps); },
++
++  /**
++   * Called whenever there is timeline data of any of the following types:
++   * - markers
++   * - frames
++   * - memory
++   * - ticks
++   * - allocations
++   *
++   * Populate our internal store of recordings for all currently recording sessions.
++   */
++
++  _onTimelineData: function (...data) {
++    this._recordings.forEach(e => e.addTimelineData.apply(e, data));
++    this.emit("timeline-data", ...data);
++  },
+ 
+   /**
+-   * Manually begins a recording session.
++   * Begins a recording session
+    *
+    * @param object options
+    *        An options object to pass to the actors. Supported properties are
+-   *        `withTicks`, `withMemory` and `withAllocations`.
++   *        `withTicks`, `withMemory` and `withAllocations`, `probability`, and `maxLogLength`.
+    * @return object
+    *         A promise that is resolved once recording has started.
+    */
+   startRecording: Task.async(function*(options = {}) {
++    let model = new RecordingModel(options);
+     // All actors are started asynchronously over the remote debugging protocol.
+     // Get the corresponding start times from each one of them.
+     let profilerStartTime = yield this._startProfiler();
+     let timelineStartTime = yield this._startTimeline(options);
+     let memoryStartTime = yield this._startMemory(options);
+ 
+-    return {
++    let data = {
+       profilerStartTime,
+       timelineStartTime,
+       memoryStartTime
+     };
++
++    // Signify to the model that the recording has started,
++    // populate with data and store the recording model here.
++    model._onStartRecording(data);
++    this._recordings.push(model);
++
++    return model;
+   }),
+ 
+   /**
+-   * Manually ends the current recording session.
++   * Manually ends the recording session for the corresponding RecordingModel.
+    *
+-   * @param object options
+-   *        @see PerformanceFront.prototype.startRecording
+-   * @return object
+-   *         A promise that is resolved once recording has stopped,
+-   *         with the profiler and memory data, along with all the end times.
++   * @param RecordingModel model
++   *        The corresponding RecordingModel that belongs to the recording session wished to stop.
++   * @return RecordingModel
++   *         Returns the same model, populated with the profiling data.
+    */
+-  stopRecording: Task.async(function*(options = {}) {
+-    let memoryEndTime = yield this._stopMemory(options);
+-    let timelineEndTime = yield this._stopTimeline(options);
++  stopRecording: Task.async(function*(model) {
++    // If model isn't in the PerformanceActorsConnections internal store,
++    // then do nothing.
++    if (!this._recordings.includes(model)) {
++      return;
++    }
++
++    // Currently there are two ways profiles stop recording. Either manually in the
++    // performance tool, or via console.profileEnd. Once a recording is done,
++    // we want to deliver the model to the performance tool (either as a return
++    // from the PerformanceFront or via `console-profile-end` event) and then
++    // remove it from the internal store.
++    //
++    // In the case where a console.profile is generated via the console (so the tools are
++    // open), we initialize the Performance tool so it can listen to those events.
++    this._recordings.splice(this._recordings.indexOf(model), 1);
++
++    let config = model.getConfiguration();
+     let profilerData = yield this._request("profiler", "getProfile");
++    let memoryEndTime = Date.now();
++    let timelineEndTime = Date.now();
++
++    // Only if there are no more sessions recording do we stop
++    // the underlying memory and timeline actors. If we're still recording,
++    // juse use Date.now() for the memory and timeline end times, as those
++    // are only used in tests.
++    if (!this.isRecording()) {
++      memoryEndTime = yield this._stopMemory(config);
++      timelineEndTime = yield this._stopTimeline(config);
++    }
+ 
+-    return {
++    // Set the results on the RecordingModel itself.
++    model._onStopRecording({
+       // Data available only at the end of a recording.
+       profile: profilerData.profile,
+ 
+       // End times for all the actors.
+       profilerEndTime: profilerData.currentTime,
+       timelineEndTime: timelineEndTime,
+       memoryEndTime: memoryEndTime
+-    };
++    });
++
++    return model;
+   }),
+ 
+   /**
++   * Checks all currently stored recording models and returns a boolean
++   * if there is a session currently being recorded.
++   *
++   * @return Boolean
++   */
++  isRecording: function () {
++    return this._recordings.some(recording => recording.isRecording());
++  },
++
++  /**
+    * Starts the profiler actor, if necessary.
+    */
+   _startProfiler: Task.async(function *() {
+     // Start the profiler only if it wasn't already active. The built-in
+     // nsIPerformance module will be kept recording, because it's the same instance
+     // for all targets and interacts with the whole platform, so we don't want
+     // to affect other clients by stopping (or restarting) it.
+     let profilerStatus = yield this._request("profiler", "isActive");
+@@ -382,17 +548,18 @@ PerformanceFront.prototype = {
+ 
+     let isDetached = (yield this._request("memory", "getState")) !== "attached";
+     if (isDetached) {
+       deferred.resolve();
+       return;
+     }
+ 
+     let memoryData = yield this._request("memory", "getAllocations");
+-    this.emit("allocations", {
++
++    this._onTimelineData("allocations", {
+       sites: memoryData.allocations,
+       timestamps: memoryData.allocationsTimestamps,
+       frames: memoryData.frames,
+       counts: memoryData.counts
+     });
+ 
+     let delay = DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT;
+     this._sitesPullTimeout = setTimeout(this._pullAllocationSites, delay);
+@@ -408,16 +575,70 @@ PerformanceFront.prototype = {
+    */
+   _customProfilerOptions: {
+     entries: 1000000,
+     interval: 1,
+     features: ["js"],
+     threadFilters: ["GeckoMain"]
+   },
+ 
++  toString: () => "[object PerformanceActorsConnection]"
++};
++
++/**
++ * A thin wrapper around a shared PerformanceActorsConnection for the parent target.
++ * Handles manually starting and stopping a recording.
++ *
++ * @param PerformanceActorsConnection connection
++ *        The shared instance for the parent target.
++ */
++function PerformanceFront(connection) {
++  EventEmitter.decorate(this);
++
++  this._connection = connection;
++  this._request = connection._request;
++
++  // Set when mocks are being used
++  this._usingMockMemory = connection._usingMockMemory;
++  this._usingMockTimeline = connection._usingMockTimeline;
++
++  // Pipe the console profile events from the connection
++  // to the front so that the UI can listen.
++  CONNECTION_PIPE_EVENTS.forEach(eventName => this._connection.on(eventName, () => this.emit.apply(this, arguments)));
++}
++
++PerformanceFront.prototype = {
++
++  /**
++   * Manually begins a recording session and creates a RecordingModel.
++   * Calls the underlying PerformanceActorsConnection's startRecording method.
++   *
++   * @param object options
++   *        An options object to pass to the actors. Supported properties are
++   *        `withTicks`, `withMemory` and `withAllocations`, `probability` and `maxLogLength`.
++   * @return object
++   *         A promise that is resolved once recording has started.
++   */
++  startRecording: function (options) {
++    return this._connection.startRecording(options);
++  },
++
++  /**
++   * Manually ends the recording session for the corresponding RecordingModel.
++   * Calls the underlying PerformanceActorsConnection's
++   *
++   * @param RecordingModel model
++   *        The corresponding RecordingModel that belongs to the recording session wished to stop.
++   * @return RecordingModel
++   *         Returns the same model, populated with the profiling data.
++   */
++  stopRecording: function (model) {
++    return this._connection.stopRecording(model);
++  },
++
+   /**
+    * Returns an object indicating if mock actors are being used or not.
+    */
+   getMocksInUse: function () {
+     return {
+       memory: this._usingMockMemory,
+       timeline: this._usingMockTimeline
+     };
+@@ -429,10 +650,23 @@ PerformanceFront.prototype = {
+  * provided thread client.
+  */
+ function listTabs(client) {
+   let deferred = promise.defer();
+   client.listTabs(deferred.resolve);
+   return deferred.promise;
+ }
+ 
++/**
++ * Creates an object of configurations based off of preferences for a RecordingModel.
++ */
++function getRecordingModelPrefs () {
++  return {
++    withMemory: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
++    withTicks: Services.prefs.getBoolPref("devtools.performance.ui.enable-framerate"),
++    withAllocations: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
++    allocationsSampleProbability: +Services.prefs.getCharPref("devtools.performance.memory.sample-probability"),
++    allocationsMaxLogLength: Services.prefs.getIntPref("devtools.performance.memory.max-log-length")
++  };
++}
++
+ exports.getPerformanceActorsConnection = target => SharedPerformanceActors.forTarget(target);
+ exports.PerformanceFront = PerformanceFront;
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index 9aa9002..eaf3eb2 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -1,42 +1,43 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
++const { Task } = require("resource://gre/modules/Task.jsm");
+ 
+ loader.lazyRequireGetter(this, "PerformanceIO",
+   "devtools/performance/io", true);
+ loader.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/performance/recording-utils", true);
+ 
+ /**
+  * Model for a wholistic profile, containing the duration, profiling data,
+  * frames data, timeline (marker, tick, memory) data, and methods to mark
+  * a recording as 'in progress' or 'finished'.
+  */
+ 
+ const RecordingModel = function (options={}) {
+-  this._front = options.front;
+-  this._performance = options.performance;
+   this._label = options.label || "";
++  this._console = options.console || false;
+ 
+   this._configuration = {
+     withTicks: options.withTicks || false,
+     withMemory: options.withMemory || false,
+     withAllocations: options.withAllocations || false,
+     allocationsSampleProbability: options.allocationsSampleProbability || 0,
+     allocationsMaxLogLength: options.allocationsMaxLogLength || 0
+   };
+ };
+ 
+ RecordingModel.prototype = {
+   // Private fields, only needed when a recording is started or stopped.
++  _console: false,
+   _imported: false,
+   _recording: false,
+   _profilerStartTime: 0,
+   _timelineStartTime: 0,
+   _memoryStartTime: 0,
+   _configuration: {},
+ 
+   // Serializable fields, necessary and sufficient for import and export.
+@@ -76,43 +77,43 @@ RecordingModel.prototype = {
+    *        The file to stream the data into.
+    */
+   exportRecording: Task.async(function *(file) {
+     let recordingData = this.getAllData();
+     yield PerformanceIO.saveRecordingToFile(recordingData, file);
+   }),
+ 
+   /**
+-   * Starts recording with the PerformanceFront.
++   * Sets up the instance with data from the SharedPerformanceConnection when
++   * starting a recording. Should only be called by SharedPerformanceConnection.
+    */
+-  startRecording: Task.async(function *() {
++  _onStartRecording: function (info) {
+     // Times must come from the actor in order to be self-consistent.
+     // However, we also want to update the view with the elapsed time
+     // even when the actor is not generating data. To do this we get
+     // the local time and use it to compute a reasonable elapsed time.
+-    this._localStartTime = this._performance.now();
++    this._localStartTime = Date.now()
+ 
+-    let info = yield this._front.startRecording(this.getConfiguration());
+     this._profilerStartTime = info.profilerStartTime;
+     this._timelineStartTime = info.timelineStartTime;
+     this._memoryStartTime = info.memoryStartTime;
+     this._recording = true;
+ 
+     this._markers = [];
+     this._frames = [];
+     this._memory = [];
+     this._ticks = [];
+     this._allocations = { sites: [], timestamps: [], frames: [], counts: [] };
+-  }),
++  },
+ 
+   /**
+-   * Stops recording with the PerformanceFront.
++   * Sets results available from stopping a recording from SharedPerformanceConnection.
++   * Should only be called by SharedPerformanceConnection.
+    */
+-  stopRecording: Task.async(function *() {
+-    let info = yield this._front.stopRecording(this.getConfiguration());
++  _onStopRecording: Task.async(function *(info) {
+     this._profile = info.profile;
+     this._duration = info.profilerEndTime - this._profilerStartTime;
+     this._recording = false;
+ 
+     // We'll need to filter out all samples that fall out of current profile's
+     // range since the profiler is continuously running. Because of this, sample
+     // times are not guaranteed to have a zero epoch, so offset the timestamps.
+     RecordingUtils.filterSamples(this._profile, this._profilerStartTime);
+@@ -135,17 +136,17 @@ RecordingModel.prototype = {
+    * Gets duration of this recording, in milliseconds.
+    * @return number
+    */
+   getDuration: function () {
+     // Compute an approximate ending time for the current recording if it is
+     // still in progress. This is needed to ensure that the view updates even
+     // when new data is not being generated.
+     if (this._recording) {
+-      return this._performance.now() - this._localStartTime;
++      return Date.now() - this._localStartTime;
+     } else {
+       return this._duration;
+     }
+   },
+ 
+   /**
+    * Returns configuration object of specifying whether the recording
+    * was started withTicks, withMemory and withAllocations.
+@@ -215,16 +216,32 @@ RecordingModel.prototype = {
+     let ticks = this.getTicks();
+     let allocations = this.getAllocations();
+     let profile = this.getProfile();
+     return { label, duration, markers, frames, memory, ticks, allocations, profile };
+   },
+ 
+   /**
+    * Returns a boolean indicating whether or not this recording model
++   * was imported via file.
++   */
++  isImported: function () {
++    return this._imported;
++  },
++
++  /**
++   * Returns a boolean indicating whether or not this recording model
++   * was started via a `console.profile` call.
++   */
++  isConsole: function () {
++    return this._console;
++  },
++
++  /**
++   * Returns a boolean indicating whether or not this recording model
+    * is recording.
+    */
+   isRecording: function () {
+     return this._recording;
+   },
+ 
+   /**
+    * Fired whenever the PerformanceFront emits markers, memory or ticks.
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index b9dcf5d..7c300f8 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -55,16 +55,23 @@ devtools.lazyImporter(this, "SideMenuWidget",
+ 
+ const BRANCH_NAME = "devtools.performance.ui.";
+ 
+ // Events emitted by various objects in the panel.
+ const EVENTS = {
+   // Fired by the PerformanceController and OptionsView when a pref changes.
+   PREF_CHANGED: "Performance:PrefChanged",
+ 
++  // When the SharedPerformanceConnection handles profiles created via `console.profile()`,
++  // the controller handles those events and emits the below events for consumption
++  // by other views.
++  CONSOLE_RECORDING_STARTED: "Performance:ConsoleRecordingStarted",
++  CONSOLE_RECORDING_WILL_STOP: "Performance:ConsoleRecordingWillStop",
++  CONSOLE_RECORDING_STOPPED: "Performance:ConsoleRecordingStopped",
++
+   // Emitted by the PerformanceView when the state (display mode) changes,
+   // for example when switching between "empty", "recording" or "recorded".
+   // This causes certain panels to be hidden or visible.
+   UI_STATE_CHANGED: "Performance:UI:StateChanged",
+ 
+   // Emitted by the PerformanceView on clear button click
+   UI_CLEAR_RECORDINGS: "Performance:UI:ClearRecordings",
+ 
+@@ -89,18 +96,16 @@ const EVENTS = {
+ 
+   // When recordings have been cleared out
+   RECORDINGS_CLEARED: "Performance:RecordingsCleared",
+ 
+   // When a recording is imported or exported via the PerformanceController
+   RECORDING_IMPORTED: "Performance:RecordingImported",
+   RECORDING_EXPORTED: "Performance:RecordingExported",
+ 
+-  // When the PerformanceController has new recording data
+-  TIMELINE_DATA: "Performance:TimelineData",
+ 
+   // Emitted by the OverviewView when more data has been rendered
+   OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
+   FRAMERATE_GRAPH_RENDERED: "Performance:UI:OverviewFramerateRendered",
+   MARKERS_GRAPH_RENDERED: "Performance:UI:OverviewMarkersRendered",
+   MEMORY_GRAPH_RENDERED: "Performance:UI:OverviewMemoryRendered",
+ 
+   // Emitted by the OverviewView when a range has been selected in the graphs
+@@ -169,67 +174,63 @@ let PerformanceController = {
+    * main UI events.
+    */
+   initialize: Task.async(function* () {
+     this.startRecording = this.startRecording.bind(this);
+     this.stopRecording = this.stopRecording.bind(this);
+     this.importRecording = this.importRecording.bind(this);
+     this.exportRecording = this.exportRecording.bind(this);
+     this.clearRecordings = this.clearRecordings.bind(this);
+-    this._onTimelineData = this._onTimelineData.bind(this);
+     this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
++    this._onConsoleProfileStart = this._onConsoleProfileStart.bind(this);
++    this._onConsoleProfileEnd = this._onConsoleProfileEnd.bind(this);
++    this._onConsoleProfileEnding = this._onConsoleProfileEnding.bind(this);
+ 
+     // All boolean prefs should be handled via the OptionsView in the
+     // ToolbarView, so that they may be accessible via the "gear" menu.
+     // Every other pref should be registered here.
+     this._nonBooleanPrefs = new ViewHelpers.Prefs("devtools.performance", {
+       "hidden-markers": ["Json", "timeline.hidden-markers"],
+       "memory-sample-probability": ["Float", "memory.sample-probability"],
+       "memory-max-log-length": ["Int", "memory.max-log-length"]
+     });
+ 
+     this._nonBooleanPrefs.registerObserver();
+     this._nonBooleanPrefs.on("pref-changed", this._onPrefChanged);
+ 
++    gFront.on("console-profile-start", this._onConsoleProfileStart);
++    gFront.on("console-profile-ending", this._onConsoleProfileEnding);
++    gFront.on("console-profile-end", this._onConsoleProfileEnd);
+     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.on(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.on(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+-
+-    gFront.on("markers", this._onTimelineData); // timeline markers
+-    gFront.on("frames", this._onTimelineData); // stack frames
+-    gFront.on("memory", this._onTimelineData); // memory measurements
+-    gFront.on("ticks", this._onTimelineData); // framerate
+-    gFront.on("allocations", this._onTimelineData); // memory allocations
+   }),
+ 
+   /**
+    * Remove events handled by the PerformanceController
+    */
+   destroy: function() {
+     this._nonBooleanPrefs.unregisterObserver();
+     this._nonBooleanPrefs.off("pref-changed", this._onPrefChanged);
+ 
++    gFront.off("console-profile-start", this._onConsoleProfileStart);
++    gFront.off("console-profile-ending", this._onConsoleProfileEnding);
++    gFront.off("console-profile-end", this._onConsoleProfileEnd);
+     ToolbarView.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.off(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.off(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+-
+-    gFront.off("markers", this._onTimelineData);
+-    gFront.off("frames", this._onTimelineData);
+-    gFront.off("memory", this._onTimelineData);
+-    gFront.off("ticks", this._onTimelineData);
+-    gFront.off("allocations", this._onTimelineData);
+   },
+ 
+   /**
+    * Get a boolean preference setting from `prefName` via the underlying
+    * OptionsView in the ToolbarView.
+    *
+    * @param string prefName
+    * @return boolean
+@@ -256,40 +257,41 @@ let PerformanceController = {
+     this._nonBooleanPrefs[prefName] = prefValue;
+   },
+ 
+   /**
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+-    let recording = this._createRecording({
++    let options = {
+       withMemory: this.getOption("enable-memory"),
+       withTicks: this.getOption("enable-framerate"),
+       withAllocations: this.getOption("enable-memory"),
+       allocationsSampleProbability: this.getPref("memory-sample-probability"),
+       allocationsMaxLogLength: this.getPref("memory-max-log-length")
+-    });
++    };
+ 
+-    this.emit(EVENTS.RECORDING_WILL_START, recording);
+-    yield recording.startRecording();
+-    this.emit(EVENTS.RECORDING_STARTED, recording);
++    this.emit(EVENTS.RECORDING_WILL_START);
+ 
+-    this.setCurrentRecording(recording);
++    let recording = yield gFront.startRecording(options);
++    this._recordings.push(recording);
++
++    this.emit(EVENTS.RECORDING_STARTED, recording);
+   }),
+ 
+   /**
+    * Stops recording with the PerformanceFront. Emits `EVENTS.RECORDING_STOPPED`
+    * when the front has stopped recording.
+    */
+   stopRecording: Task.async(function *() {
+-    let recording = this.getLatestRecording();
++    let recording = this.getLatestManualRecording();
+ 
+     this.emit(EVENTS.RECORDING_WILL_STOP, recording);
+-    yield recording.stopRecording();
++    yield gFront.stopRecording(recording);
+     this.emit(EVENTS.RECORDING_STOPPED, recording);
+   }),
+ 
+   /**
+    * Saves the given recording to a file. Emits `EVENTS.RECORDING_EXPORTED`
+    * when the file was saved.
+    *
+    * @param RecordingModel recording
+@@ -302,17 +304,17 @@ let PerformanceController = {
+     this.emit(EVENTS.RECORDING_EXPORTED, recording);
+   }),
+ 
+   /**
+    * Clears all recordings from the list as well as the current recording.
+    * Emits `EVENTS.RECORDINGS_CLEARED` when complete so other components can clean up.
+    */
+   clearRecordings: Task.async(function* () {
+-    let latest = this.getLatestRecording();
++    let latest = this.getLatestManualRecording();
+ 
+     if (latest && latest.isRecording()) {
+       yield this.stopRecording();
+     }
+ 
+     this._recordings.length = 0;
+     this.setCurrentRecording(null);
+     this.emit(EVENTS.RECORDINGS_CLEARED);
+@@ -321,42 +323,27 @@ let PerformanceController = {
+   /**
+    * Loads a recording from a file, adding it to the recordings list. Emits
+    * `EVENTS.RECORDING_IMPORTED` when the file was loaded.
+    *
+    * @param nsILocalFile file
+    *        The file to import the data from.
+    */
+   importRecording: Task.async(function*(_, file) {
+-    let recording = this._createRecording();
++    let recording = new RecordingModel();
++    this._recordings.push(recording);
+     yield recording.importRecording(file);
+ 
+     this.emit(EVENTS.RECORDING_IMPORTED, recording);
+   }),
+ 
+   /**
+-   * Creates a new RecordingModel, fires events and stores it
+-   * internally in the controller.
+-   *
+-   * @param object options
+-   *        @see PerformanceFront.prototype.startRecording
+-   * @return RecordingModel
+-   *         The newly created recording model.
+-   */
+-  _createRecording: function (options={}) {
+-    let recording = new RecordingModel(Heritage.extend(options, {
+-      front: gFront,
+-      performance: window.performance
+-    }));
+-    this._recordings.push(recording);
+-    return recording;
+-  },
+-
+-  /**
+-   * Sets the currently active RecordingModel.
++   * Sets the currently active RecordingModel. Should rarely be called directly,
++   * as RecordingsView handles this when manually selected a recording item. Exceptions
++   * are when clearing the view.
+    * @param RecordingModel recording
+    */
+   setCurrentRecording: function (recording) {
+     if (this._currentRecording !== recording) {
+       this._currentRecording = recording;
+       this.emit(EVENTS.RECORDING_SELECTED, recording);
+     }
+   },
+@@ -368,57 +355,79 @@ let PerformanceController = {
+   getCurrentRecording: function () {
+     return this._currentRecording;
+   },
+ 
+   /**
+    * Get most recently added recording that was triggered manually (via UI).
+    * @return RecordingModel
+    */
+-  getLatestRecording: function () {
++  getLatestManualRecording: function () {
+     for (let i = this._recordings.length - 1; i >= 0; i--) {
+-      return this._recordings[i];
++      let model = this._recordings[i];
++      if (!model.isConsole() && !model.isImported()) {
++        return this._recordings[i];
++      }
+     }
+     return null;
+   },
+ 
+   /**
+    * Gets the current timeline blueprint without the hidden markers.
+    * @return object
+    */
+   getTimelineBlueprint: function() {
+     let blueprint = TIMELINE_BLUEPRINT;
+     let hiddenMarkers = this.getPref("hidden-markers");
+     return RecordingUtils.getFilteredBlueprint({ blueprint, hiddenMarkers });
+   },
+ 
+   /**
+-   * Fired whenever the PerformanceFront emits markers, memory or ticks.
+-   */
+-  _onTimelineData: function (...data) {
+-    this._recordings.forEach(e => e.addTimelineData.apply(e, data));
+-    this.emit(EVENTS.TIMELINE_DATA, ...data);
+-  },
+-
+-  /**
+    * Fired from RecordingsView, we listen on the PerformanceController so we can
+    * set it here and re-emit on the controller, where all views can listen.
+    */
+   _onRecordingSelectFromView: function (_, recording) {
+     this.setCurrentRecording(recording);
+   },
+ 
+   /**
+    * Fired when the ToolbarView fires a PREF_CHANGED event.
+    * with the value.
+    */
+   _onPrefChanged: function (_, prefName, prefValue) {
+     this.emit(EVENTS.PREF_CHANGED, prefName, prefValue);
+   },
+ 
++  /**
++   * Fired when `console.profile()` is executed.
++   */
++  _onConsoleProfileStart: function (_, recording) {
++    this._recordings.push(recording);
++    this.emit(EVENTS.CONSOLE_RECORDING_STARTED, recording);
++  },
++
++  _onConsoleProfileEnding: function (_, recording) {
++    this.emit(EVENTS.CONSOLE_RECORDING_WILL_STOP, recording);
++  },
++
++  /**
++   * Fired when `console.profileEnd()` is executed, and
++   * has a corresponding `console.profile()` session.
++   */
++  _onConsoleProfileEnd: function (_, recording) {
++    this.emit(EVENTS.CONSOLE_RECORDING_STOPPED, recording);
++  },
++
++  /**
++   * Returns the internal store of recording models.
++   */
++  getRecordings: function () {
++    return this._recordings;
++  },
++
+   toString: () => "[object PerformanceController]"
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
+index 3959d6c..118e290 100644
+--- a/browser/devtools/performance/performance-view.js
++++ b/browser/devtools/performance/performance-view.js
+@@ -15,16 +15,20 @@ let PerformanceView = {
+   states: {
+     empty: [
+       { deck: "#performance-view", pane: "#empty-notice" }
+     ],
+     recording: [
+       { deck: "#performance-view", pane: "#performance-view-content" },
+       { deck: "#details-pane-container", pane: "#recording-notice" }
+     ],
++    "console-recording": [
++      { deck: "#performance-view", pane: "#performance-view-content" },
++      { deck: "#details-pane-container", pane: "#console-recording-notice" }
++    ],
+     recorded: [
+       { deck: "#performance-view", pane: "#performance-view-content" },
+       { deck: "#details-pane-container", pane: "#details-pane" }
+     ]
+   },
+ 
+   /**
+    * Sets up the view with event binding and main subviews.
+@@ -50,16 +54,17 @@ let PerformanceView = {
+     this._importButton.addEventListener("click", this._onImportButtonClick);
+     this._clearButton.addEventListener("click", this._onClearButtonClick);
+ 
+     // Bind to controller events to unlock the record button
+     PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+ 
+     this.setState("empty");
+ 
+     // Initialize the ToolbarView first, because other views may need access
+     // to the OptionsView via the controller, to read prefs.
+     yield ToolbarView.initialize();
+     yield RecordingsView.initialize();
+@@ -76,38 +81,46 @@ let PerformanceView = {
+     }
+     this._importButton.removeEventListener("click", this._onImportButtonClick);
+     this._clearButton.removeEventListener("click", this._onClearButtonClick);
+ 
+     PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+ 
+     yield ToolbarView.destroy();
+     yield RecordingsView.destroy();
+     yield OverviewView.destroy();
+     yield DetailsView.destroy();
+   }),
+ 
+   /**
+    * Sets the state of the profiler view. Possible options are "empty",
+-   * "recording", "recorded".
++   * "recording", "console-recording", "recorded".
+    */
+   setState: function (state) {
+     let viewConfig = this.states[state];
+     if (!viewConfig) {
+       throw new Error(`Invalid state for PerformanceView: ${state}`);
+     }
+     for (let { deck, pane } of viewConfig) {
+       $(deck).selectedPanel = $(pane);
+     }
+ 
+     this._state = state;
++
++    if (state === "console-recording") {
++      let recording = PerformanceController.getCurrentRecording();
++      let label = recording.getLabel() || "";
++      $(".console-profile-recording-notice").value = L10N.getFormatStr("consoleProfile.recordingNotice", label);
++      $(".console-profile-stop-notice").value = L10N.getFormatStr("consoleProfile.stopCommand", label);
++    }
+     this.emit(EVENTS.UI_STATE_CHANGED, state);
+   },
+ 
+   /**
+    * Returns the state of the PerformanceView.
+    */
+   getState: function () {
+     return this._state;
+@@ -143,21 +156,24 @@ let PerformanceView = {
+     this._lockRecordButton();
+     this._recordButton.removeAttribute("checked");
+   },
+ 
+   /**
+    * When a recording is complete.
+    */
+   _onRecordingStopped: function (_, recording) {
+-    this._unlockRecordButton();
++    // A stopped recording can be from `console.profileEnd` -- only unlock
++    // the button if its the main recording that was started via UI.
++    if (!recording.isConsole()) {
++      this._unlockRecordButton();
++    }
+ 
+-    // If this recording stopped is the current recording, set the
+-    // state to "recorded". A stopped recording doesn't necessarily
+-    // have to be the current recording (console.profileEnd, for example)
++    // If the currently selected recording is the one that just stopped,
++    // switch state to "recorded".
+     if (recording === PerformanceController.getCurrentRecording()) {
+       this.setState("recorded");
+     }
+   },
+ 
+   /**
+    * Handler for clicking the clear button.
+    */
+@@ -191,16 +207,18 @@ let PerformanceView = {
+   },
+ 
+   /**
+    * Fired when a recording is selected. Used to toggle the profiler view state.
+    */
+   _onRecordingSelected: function (_, recording) {
+     if (!recording) {
+       this.setState("empty");
++    } else if (recording.isRecording() && recording.isConsole()) {
++      this.setState("console-recording");
+     } else if (recording.isRecording()) {
+       this.setState("recording");
+     } else {
+       this.setState("recorded");
+     }
+   },
+ 
+   toString: () => "[object PerformanceView]"
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index f084f42..39648f2 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -147,16 +147,25 @@
+                   pack="center"
+                   flex="1">
+               <label value="&profilerUI.stopNotice1;"/>
+               <button class="devtools-toolbarbutton record-button"
+                       standalone="true"
+                       checked="true" />
+               <label value="&profilerUI.stopNotice2;"/>
+             </hbox>
++            <hbox id="console-recording-notice"
++                  class="notice-container"
++                  align="center"
++                  pack="center"
++                  flex="1">
++              <label class="console-profile-recording-notice" />
++              <br />
++              <label class="console-profile-stop-notice" />
++            </hbox>
+             <deck id="details-pane" flex="1">
+               <hbox id="waterfall-view" flex="1">
+                 <vbox id="waterfall-breakdown" flex="1" />
+                 <splitter class="devtools-side-splitter"/>
+                 <vbox id="waterfall-details"
+                       class="theme-sidebar"
+                       width="150"
+                       height="150"/>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index b69602c..4805e4f 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -13,16 +13,24 @@ support-files =
+ [browser_perf-compatibility-01.js]
+ [browser_perf-compatibility-02.js]
+ [browser_perf-compatibility-03.js]
+ [browser_perf-compatibility-04.js]
+ [browser_perf-clear-01.js]
+ [browser_perf-clear-02.js]
+ [browser_perf-columns-js-calltree.js]
+ [browser_perf-columns-memory-calltree.js]
++[browser_perf-console-record-01.js]
++[browser_perf-console-record-02.js]
++[browser_perf-console-record-03.js]
++[browser_perf-console-record-04.js]
++[browser_perf-console-record-05.js]
++[browser_perf-console-record-06.js]
++[browser_perf-console-record-07.js]
++[browser_perf-console-record-08.js]
+ [browser_perf-data-massaging-01.js]
+ [browser_perf-data-samples.js]
+ [browser_perf-details-calltree-render.js]
+ [browser_perf-details-flamegraph-render.js]
+ [browser_perf-details-memory-calltree-render.js]
+ [browser_perf-details-memory-flamegraph-render.js]
+ [browser_perf-details-waterfall-render.js]
+ [browser_perf-details-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-01.js b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+index 1fd2b63..a295cd9 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-01.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+@@ -13,54 +13,36 @@ function spawnTest () {
+     TEST_MOCK_TIMELINE_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+   let { memory, timeline } = front.getMocksInUse();
+   ok(memory, "memory should be mocked.");
+   ok(timeline, "timeline should be mocked.");
+ 
+-  let {
+-    profilerStartTime,
+-    timelineStartTime,
+-    memoryStartTime
+-  } = yield front.startRecording({
++  let recording = yield front.startRecording({
+     withTicks: true,
+     withMemory: true,
+     withAllocations: true,
+     allocationsSampleProbability: +Services.prefs.getCharPref(MEMORY_SAMPLE_PROB_PREF),
+     allocationsMaxLogLength: Services.prefs.getIntPref(MEMORY_MAX_LOG_LEN_PREF)
+   });
+ 
+-  ok(typeof profilerStartTime === "number",
+-    "The front.startRecording() emits a profiler start time.");
+-  ok(typeof timelineStartTime === "number",
+-    "The front.startRecording() emits a timeline start time.");
+-  ok(typeof memoryStartTime === "number",
+-    "The front.startRecording() emits a memory start time.");
++  ok(typeof recording._profilerStartTime === "number",
++    "The front.startRecording() returns a recording with a profiler start time");
++  ok(typeof recording._timelineStartTime === "number",
++    "The front.startRecording() returns a recording with a timeline start time");
++  ok(typeof recording._memoryStartTime === "number",
++    "The front.startRecording() returns a recording with a memory start time");
+ 
+   yield busyWait(WAIT_TIME);
+ 
+-  let {
+-    profilerEndTime,
+-    timelineEndTime,
+-    memoryEndTime
+-  } = yield front.stopRecording({
+-    withAllocations: true
+-  });
++  yield front.stopRecording(recording);
+ 
+-  ok(typeof profilerEndTime === "number",
+-    "The front.stopRecording() emits a profiler end time.");
+-  ok(typeof timelineEndTime === "number",
+-    "The front.stopRecording() emits a timeline end time.");
+-  ok(typeof memoryEndTime === "number",
+-    "The front.stopRecording() emits a memory end time.");
++  ok(typeof recording.getDuration() === "number",
++    "The front.stopRecording() allows recording to get a duration.");
+ 
+-  ok(profilerEndTime > profilerStartTime,
++  ok(recording.getDuration() >= 0,
+     "The profilerEndTime is after profilerStartTime.");
+-  is(timelineEndTime, timelineStartTime,
+-    "The timelineEndTime is the same as timelineStartTime.");
+-  is(memoryEndTime, memoryStartTime,
+-    "The memoryEndTime is the same as memoryStartTime.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-03.js b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+index 442f617..db13eef 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-03.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+@@ -12,54 +12,36 @@ function spawnTest () {
+     TEST_MOCK_MEMORY_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+   let { memory, timeline } = front.getMocksInUse();
+   ok(memory, "memory should be mocked.");
+   ok(!timeline, "timeline should not be mocked.");
+ 
+-  let {
+-    profilerStartTime,
+-    timelineStartTime,
+-    memoryStartTime
+-  } = yield front.startRecording({
++  let recording = yield front.startRecording({
+     withTicks: true,
+     withMemory: true,
+     withAllocations: true,
+     allocationsSampleProbability: +Services.prefs.getCharPref(MEMORY_SAMPLE_PROB_PREF),
+     allocationsMaxLogLength: Services.prefs.getIntPref(MEMORY_MAX_LOG_LEN_PREF)
+   });
+ 
+-  ok(typeof profilerStartTime === "number",
+-    "The front.startRecording() emits a profiler start time.");
+-  ok(typeof timelineStartTime === "number",
+-    "The front.startRecording() emits a timeline start time.");
+-  ok(typeof memoryStartTime === "number",
+-    "The front.startRecording() emits a memory start time.");
++  ok(typeof recording._profilerStartTime === "number",
++    "The front.startRecording() returns a recording with a profiler start time");
++  ok(typeof recording._timelineStartTime === "number",
++    "The front.startRecording() returns a recording with a timeline start time");
++  ok(typeof recording._memoryStartTime === "number",
++    "The front.startRecording() returns a recording with a memory start time");
+ 
+   yield busyWait(WAIT_TIME);
+ 
+-  let {
+-    profilerEndTime,
+-    timelineEndTime,
+-    memoryEndTime
+-  } = yield front.stopRecording({
+-    withAllocations: true
+-  });
++  yield front.stopRecording(recording);
+ 
+-  ok(typeof profilerEndTime === "number",
+-    "The front.stopRecording() emits a profiler end time.");
+-  ok(typeof timelineEndTime === "number",
+-    "The front.stopRecording() emits a timeline end time.");
+-  ok(typeof memoryEndTime === "number",
+-    "The front.stopRecording() emits a memory end time.");
++  ok(typeof recording.getDuration() === "number",
++    "The front.stopRecording() allows recording to get a duration.");
+ 
+-  ok(profilerEndTime > profilerStartTime,
++  ok(recording.getDuration() >= 0,
+     "The profilerEndTime is after profilerStartTime.");
+-  ok(timelineEndTime > timelineStartTime,
+-    "The timelineEndTime is after timelineStartTime.");
+-  is(memoryEndTime, memoryStartTime,
+-    "The memoryEndTime is the same as memoryStartTime.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-01.js b/browser/devtools/performance/test/browser_perf-console-record-01.js
+new file mode 100644
+index 0000000..852ed6b
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-01.js
+@@ -0,0 +1,44 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler is populated by console recordings that have finished
++ * before it was opened.
++ */
++
++let { getPerformanceActorsConnection } = devtools.require("devtools/performance/front");
++let WAIT_TIME = 10;
++
++function spawnTest () {
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
++  yield profilerConnected;
++  let connection = getPerformanceActorsConnection(target);
++
++  let profileStart = once(connection, "console-profile-start");
++  console.profile("rust");
++  yield profileStart;
++
++  busyWait(WAIT_TIME);
++  let profileEnd = once(connection, "console-profile-end");
++  console.profileEnd("rust");
++  yield profileEnd;
++
++  yield gDevTools.showToolbox(target, "performance");
++  let panel = toolbox.getCurrentPanel();
++  let { panelWin: { PerformanceController, RecordingsView }} = panel;
++
++  let recordings = PerformanceController.getRecordings();
++  is(recordings.length, 1, "one recording found in the performance panel.");
++  is(recordings[0].isConsole(), true, "recording came from console.profile.");
++  is(recordings[0].getLabel(), "rust", "correct label in the recording model.");
++
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The profile from console should be selected as its the only one in the RecordingsView.");
++
++  is(RecordingsView.selectedItem.attachment.getLabel(), "rust",
++    "The profile label for the first recording is correct.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-02.js b/browser/devtools/performance/test/browser_perf-console-record-02.js
+new file mode 100644
+index 0000000..aa569c7
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-02.js
+@@ -0,0 +1,50 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler is populated by in-progress console recordings
++ * when it is opened.
++ */
++
++let { getPerformanceActorsConnection } = devtools.require("devtools/performance/front");
++let WAIT_TIME = 10;
++
++function spawnTest () {
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
++  yield profilerConnected;
++  let connection = getPerformanceActorsConnection(target);
++
++  let profileStart = once(connection, "console-profile-start");
++  console.profile("rust");
++  yield profileStart;
++  profileStart = once(connection, "console-profile-start");
++  console.profile("rust2");
++  yield profileStart;
++
++  yield gDevTools.showToolbox(target, "performance");
++  let panel = toolbox.getCurrentPanel();
++  let { panelWin: { PerformanceController, RecordingsView }} = panel;
++
++  let recordings = PerformanceController.getRecordings();
++  is(recordings.length, 2, "two recordings found in the performance panel.");
++  is(recordings[0].isConsole(), true, "recording came from console.profile (1).");
++  is(recordings[0].getLabel(), "rust", "correct label in the recording model (1).");
++  is(recordings[0].isRecording(), true, "recording is still recording (1).");
++  is(recordings[1].isConsole(), true, "recording came from console.profile (2).");
++  is(recordings[1].getLabel(), "rust2", "correct label in the recording model (2).");
++  is(recordings[1].isRecording(), true, "recording is still recording (2).");
++
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should be selected.");
++
++  let profileEnd = once(connection, "console-profile-end");
++  console.profileEnd("rust");
++  yield profileEnd;
++  profileEnd = once(connection, "console-profile-end");
++  console.profileEnd("rust2");
++  yield profileEnd;
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-03.js b/browser/devtools/performance/test/browser_perf-console-record-03.js
+new file mode 100644
+index 0000000..2d9ddee
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-03.js
+@@ -0,0 +1,52 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler is populated by in-progress console recordings, and
++ * also console recordings that have finished before it was opened.
++ */
++
++let { getPerformanceActorsConnection } = devtools.require("devtools/performance/front");
++let WAIT_TIME = 10;
++
++function spawnTest () {
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
++  yield profilerConnected;
++  let connection = getPerformanceActorsConnection(target);
++
++  let profileStart = once(connection, "console-profile-start");
++  console.profile("rust");
++  yield profileStart;
++
++  let profileEnd = once(connection, "console-profile-end");
++  console.profileEnd("rust");
++  yield profileEnd;
++
++  profileStart = once(connection, "console-profile-start");
++  console.profile("rust2");
++  yield profileStart;
++
++  yield gDevTools.showToolbox(target, "performance");
++  let panel = toolbox.getCurrentPanel();
++  let { panelWin: { PerformanceController, RecordingsView }} = panel;
++
++  let recordings = PerformanceController.getRecordings();
++  is(recordings.length, 2, "two recordings found in the performance panel.");
++  is(recordings[0].isConsole(), true, "recording came from console.profile (1).");
++  is(recordings[0].getLabel(), "rust", "correct label in the recording model (1).");
++  is(recordings[0].isRecording(), false, "recording is still recording (1).");
++  is(recordings[1].isConsole(), true, "recording came from console.profile (2).");
++  is(recordings[1].getLabel(), "rust2", "correct label in the recording model (2).");
++  is(recordings[1].isRecording(), true, "recording is still recording (2).");
++
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should be selected.");
++
++  profileEnd = once(connection, "console-profile-end");
++  console.profileEnd("rust2");
++  yield profileEnd;
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-04.js b/browser/devtools/performance/test/browser_perf-console-record-04.js
+new file mode 100644
+index 0000000..80a7808
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-04.js
+@@ -0,0 +1,36 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the profiler can handle creation and stopping of console profiles
++ * after being opened.
++ */
++
++function spawnTest () {
++  loadFrameScripts();
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView } = panel.panelWin;
++  yield profilerConnected;
++
++  yield consoleProfile(panel.panelWin, "rust");
++
++  let recordings = PerformanceController.getRecordings();
++  is(recordings.length, 1, "a recordings found in the performance panel.");
++  is(recordings[0].isConsole(), true, "recording came from console.profile.");
++  is(recordings[0].getLabel(), "rust", "correct label in the recording model.");
++  is(recordings[0].isRecording(), true, "recording is still recording.");
++
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should be selected.");
++
++  // Ensure overview is still rendering
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++
++  yield consoleProfileEnd(panel.panelWin, "rust");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-05.js b/browser/devtools/performance/test/browser_perf-console-record-05.js
+new file mode 100644
+index 0000000..42b8067
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-05.js
+@@ -0,0 +1,45 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that multiple recordings with the same label (non-overlapping) appear
++ * in the recording list.
++ */
++
++function spawnTest () {
++  loadFrameScripts();
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView } = panel.panelWin;
++  yield profilerConnected;
++
++  yield consoleProfile(panel.panelWin, "rust");
++
++  let recordings = PerformanceController.getRecordings();
++  is(recordings.length, 1, "a recordings found in the performance panel.");
++  is(recordings[0].isConsole(), true, "recording came from console.profile.");
++  is(recordings[0].getLabel(), "rust", "correct label in the recording model.");
++  is(recordings[0].isRecording(), true, "recording is still recording.");
++
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should be selected.");
++
++  // Ensure overview is still rendering
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++
++  yield consoleProfileEnd(panel.panelWin, "rust");
++
++  yield consoleProfile(panel.panelWin, "rust");
++  recordings = PerformanceController.getRecordings();
++  is(recordings.length, 2, "a recordings found in the performance panel.");
++  is(recordings[1].isConsole(), true, "recording came from console.profile.");
++  is(recordings[1].getLabel(), "rust", "correct label in the recording model.");
++  is(recordings[1].isRecording(), true, "recording is still recording.");
++
++  yield consoleProfileEnd(panel.panelWin, "rust");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-06.js b/browser/devtools/performance/test/browser_perf-console-record-06.js
+new file mode 100644
+index 0000000..b07817d
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-06.js
+@@ -0,0 +1,58 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that console recordings can overlap (not completely nested).
++ */
++
++function spawnTest () {
++  loadFrameScripts();
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView, WaterfallView } = panel.panelWin;
++  yield profilerConnected;
++
++  yield consoleProfile(panel.panelWin, "rust");
++
++  let recordings = PerformanceController.getRecordings();
++  is(recordings.length, 1, "a recording found in the performance panel.");
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should be selected.");
++
++  yield consoleProfile(panel.panelWin, "golang");
++
++  recordings = PerformanceController.getRecordings();
++  is(recordings.length, 2, "two recordings found in the performance panel.");
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should still be selected.");
++
++  // Ensure overview is still rendering
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++
++  let detailsRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  yield consoleProfileEnd(panel.panelWin, "rust");
++  yield detailsRendered;
++
++  recordings = PerformanceController.getRecordings();
++  is(recordings.length, 2, "two recordings found in the performance panel.");
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should still be selected.");
++  is(RecordingsView.selectedItem.attachment.isRecording(), false,
++    "The first console recording should no longer be recording.");
++
++  detailsRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  yield consoleProfileEnd(panel.panelWin, "golang");
++  yield detailsRendered;
++
++  recordings = PerformanceController.getRecordings();
++  is(recordings.length, 2, "two recordings found in the performance panel.");
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should still be selected.");
++  is(recordings[1].isRecording(), false,
++    "The second console recording should no longer be recording.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-07.js b/browser/devtools/performance/test/browser_perf-console-record-07.js
+new file mode 100644
+index 0000000..a46e8c0
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-07.js
+@@ -0,0 +1,64 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that a call to console.profileEnd() with no label ends the
++ * most recent console recording, and console.profileEnd() with a label that does not
++ * match any pending recordings does nothing.
++ */
++
++function spawnTest () {
++  loadFrameScripts();
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView, WaterfallView } = panel.panelWin;
++  yield profilerConnected;
++
++  yield consoleProfile(panel.panelWin);
++  yield consoleProfile(panel.panelWin, "1");
++  yield consoleProfile(panel.panelWin, "2");
++
++  let recordings = PerformanceController.getRecordings();
++  is(recordings.length, 3, "3 recordings found");
++  is(RecordingsView.selectedItem.attachment, recordings[0],
++    "The first console recording should be selected.");
++
++  yield consoleProfileEnd(panel.panelWin);
++
++  // First off a label-less profileEnd to make sure no other recordings close
++  consoleProfileEnd(panel.panelWin, "fxos");
++  yield idleWait(500);
++
++  recordings = PerformanceController.getRecordings();
++  is(recordings.length, 3, "3 recordings found");
++
++  is(recordings[0].getLabel(), "", "Checking label of recording 1");
++  is(recordings[1].getLabel(), "1", "Checking label of recording 2");
++  is(recordings[2].getLabel(), "2", "Checking label of recording 3");
++  is(recordings[0].isRecording(), true,
++    "The not most recent recording should not stop when calling console.profileEnd with no args.");
++  is(recordings[1].isRecording(), true,
++    "The not most recent recording should not stop when calling console.profileEnd with no args.");
++  is(recordings[2].isRecording(), false,
++    "Only thw most recent recording should stop when calling console.profileEnd with no args.");
++
++  let detailsRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  yield consoleProfileEnd(panel.panelWin);
++  yield consoleProfileEnd(panel.panelWin);
++
++  is(recordings[0].isRecording(), false,
++    "All recordings should now be ended. (1)");
++  is(recordings[1].isRecording(), false,
++    "All recordings should now be ended. (2)");
++  is(recordings[2].isRecording(), false,
++    "All recordings should now be ended. (3)");
++
++  yield detailsRendered;
++
++  consoleProfileEnd(panel.panelWin);
++  yield idleWait(500);
++  ok(true, "Calling additional console.profileEnd() with no argument and no pending recordings does nothing.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-08.js b/browser/devtools/performance/test/browser_perf-console-record-08.js
+new file mode 100644
+index 0000000..e146ac3
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-08.js
+@@ -0,0 +1,91 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler can correctly handle simultaneous console and manual
++ * recordings (via `console.profile` and clicking the record button).
++ */
++
++let C = 1; // is console
++let R = 2; // is recording
++let S = 4; // is selected
++
++function testRecordings (win, expected) {
++  let recordings = win.PerformanceController.getRecordings();
++  let current = win.PerformanceController.getCurrentRecording();
++  is(recordings.length, expected.length, "expected number of recordings");
++  recordings.forEach((recording, i) => {
++    ok(recording.isConsole() == !!(expected[i] & C), `recording ${i+1} has expected console state.`);
++    ok(recording.isRecording() == !!(expected[i] & R), `recording ${i+1} has expected console state.`);
++    ok((recording === current) == !!(expected[i] & S), `recording ${i+1} has expected selected state.`);
++  });
++}
++
++function spawnTest () {
++  loadFrameScripts();
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
++  let win = panel.panelWin;
++  let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView, WaterfallView } = win;
++  yield profilerConnected;
++
++  info("Starting console.profile()...");
++  yield consoleProfile(win);
++  testRecordings(win, [C+S+R]);
++  info("Starting manual recording...");
++  yield startRecording(panel);
++  testRecordings(win, [C+R, R+S]);
++  info("Starting console.profile(\"3\")...");
++  yield consoleProfile(win, "3");
++  testRecordings(win, [C+R, R+S, C+R]);
++  info("Starting console.profile(\"3\")...");
++  yield consoleProfile(win, "4");
++  testRecordings(win, [C+R, R+S, C+R, C+R]);
++
++  info("Ending console.profileEnd()...");
++  yield consoleProfileEnd(win);
++
++  testRecordings(win, [C+R, R+S, C+R, C]);
++  ok(OverviewView.isRendering(), "still rendering overview with manual recorded selected.");
++
++  let onSelected = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  info("Select last recording...");
++  RecordingsView.selectedIndex = 3;
++  yield onSelected;
++  testRecordings(win, [C+R, R, C+R, C+S]);
++  ok(!OverviewView.isRendering(), "stop rendering overview when selected completed recording.");
++
++  info("Manually stop manual recording...");
++  yield stopRecording(panel);
++  testRecordings(win, [C+R, S, C+R, C]);
++  ok(!OverviewView.isRendering(), "stop rendering overview when selected completed recording.");
++
++  onSelected = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  info("Select first recording...");
++  RecordingsView.selectedIndex = 0;
++  yield onSelected;
++  testRecordings(win, [C+R+S, 0, C+R, C]);
++  yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
++  ok(OverviewView.isRendering(), "should be rendering overview when selected recording in progress.");
++
++  info("Ending console.profileEnd()...");
++  yield consoleProfileEnd(win);
++  testRecordings(win, [C+R+S, 0, C, C]);
++  ok(OverviewView.isRendering(), "should still be rendering overview when selected recording in progress.");
++  info("Start one more manual recording...");
++  yield startRecording(panel);
++  testRecordings(win, [C+R, 0, C, C, R+S]);
++  ok(OverviewView.isRendering(), "should be rendering overview when selected recording in progress.");
++  info("Stop manual recording...");
++  yield stopRecording(panel);
++  testRecordings(win, [C+R, 0, C, C, S]);
++  ok(!OverviewView.isRendering(), "stop rendering overview when selected completed recording.");
++
++  info("Ending console.profileEnd()...");
++  yield consoleProfileEnd(win);
++  testRecordings(win, [C, 0, C, C, S]);
++  ok(!OverviewView.isRendering(), "stop rendering overview when selected completed recording.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-data-massaging-01.js b/browser/devtools/performance/test/browser_perf-data-massaging-01.js
+index 349c89e..878fe90 100644
+--- a/browser/devtools/performance/test/browser_perf-data-massaging-01.js
++++ b/browser/devtools/performance/test/browser_perf-data-massaging-01.js
+@@ -9,53 +9,49 @@
+ const WAIT_TIME = 1000; // ms
+ 
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let front = panel.panelWin.gFront;
+ 
+   // Perform the first recording...
+ 
+-  let firstRecordingDataStart = yield front.startRecording();
+-  let firstRecordingStartTime = firstRecordingDataStart.profilerStartTime;
++  let firstRecording = yield front.startRecording();
++  let firstRecordingStartTime = firstRecording._profilerStartTime;
+   info("Started profiling at: " + firstRecordingStartTime);
+ 
+   busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
+ 
+-  let firstRecordingDataStop = yield front.stopRecording();
+-  let firstRecordingFinishTime = firstRecordingDataStop.profilerEndTime;
++  yield front.stopRecording(firstRecording);
+ 
+   is(firstRecordingStartTime, 0,
+     "The profiling start time should be 0 for the first recording.");
+-  ok(firstRecordingFinishTime - firstRecordingStartTime >= WAIT_TIME,
++  ok(firstRecording.getDuration() >= WAIT_TIME,
+     "The first recording duration is correct.");
+-  ok(firstRecordingFinishTime >= WAIT_TIME,
+-    "The first recording finish time is correct.");
+ 
+   // Perform the second recording...
+ 
+-  let secondRecordingDataStart = yield front.startRecording();
+-  let secondRecordingStartTime = secondRecordingDataStart.profilerStartTime;
++  let secondRecording = yield front.startRecording();
++  let secondRecordingStartTime = secondRecording._profilerStartTime;
+   info("Started profiling at: " + secondRecordingStartTime);
+ 
+   busyWait(WAIT_TIME); // allow the profiler module to sample more cpu activity
+ 
+-  let secondRecordingDataStop = yield front.stopRecording();
+-  let secondRecordingFinishTime = secondRecordingDataStop.profilerEndTime;
+-  let secondRecordingProfile = secondRecordingDataStop.profile;
++  yield front.stopRecording(secondRecording);
++  let secondRecordingProfile = secondRecording.getProfile();
+   let secondRecordingSamples = secondRecordingProfile.threads[0].samples;
+ 
+-  isnot(secondRecordingStartTime, 0,
++  isnot(secondRecording._profilerStartTime, 0,
+     "The profiling start time should not be 0 on the second recording.");
+-  ok(secondRecordingFinishTime - secondRecordingStartTime >= WAIT_TIME,
++  ok(secondRecording.getDuration() >= WAIT_TIME,
+     "The second recording duration is correct.");
+ 
+   ok(secondRecordingSamples[0].time < secondRecordingStartTime,
+     "The second recorded sample times were normalized.");
+   ok(secondRecordingSamples[0].time > 0,
+     "The second recorded sample times were normalized correctly.");
+-  ok(!secondRecordingSamples.find(e => e.time + secondRecordingStartTime <= firstRecordingFinishTime),
++  ok(!secondRecordingSamples.find(e => e.time + secondRecordingStartTime <= firstRecording.getDuration()),
+     "There should be no samples from the first recording in the second one, " +
+     "even though the total number of frames did not overflow.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-data-samples.js b/browser/devtools/performance/test/browser_perf-data-samples.js
+index 51d71b6..c61615a 100644
+--- a/browser/devtools/performance/test/browser_perf-data-samples.js
++++ b/browser/devtools/performance/test/browser_perf-data-samples.js
+@@ -8,20 +8,21 @@
+  */
+ 
+ const WAIT_TIME = 1000; // ms
+ 
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let front = panel.panelWin.gFront;
+ 
+-  yield front.startRecording();
++  let rec = yield front.startRecording();
+   busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
+ 
+-  let { profile } = yield front.stopRecording();
++  yield front.stopRecording(rec);
++  let profile = rec.getProfile();
+   let sampleCount = 0;
+ 
+   for (let thread of profile.threads) {
+     info("Checking thread: " + thread.name);
+ 
+     for (let sample of thread.samples) {
+       sampleCount++;
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js b/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
+index 2e9a5ac..cc23692 100644
+--- a/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
++++ b/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
+@@ -5,51 +5,28 @@
+  * Test basic functionality of PerformanceFront
+  */
+ 
+ let WAIT_TIME = 1000;
+ 
+ function spawnTest () {
+   let { target, front } = yield initBackend(SIMPLE_URL);
+ 
+-  let startData = yield front.startRecording();
+-  let { profilerStartTime, timelineStartTime, memoryStartTime } = startData;
+-
+-  ok("profilerStartTime" in startData,
+-    "A `profilerStartTime` property is properly set in the recording data.");
+-  ok("timelineStartTime" in startData,
+-    "A `timelineStartTime` property is properly set in the recording data.");
+-  ok("memoryStartTime" in startData,
+-    "A `memoryStartTime` property is properly set in the recording data.");
+-
+-  ok(profilerStartTime !== undefined,
+-    "A `profilerStartTime` property exists in the recording data.");
+-  ok(timelineStartTime !== undefined,
+-    "A `timelineStartTime` property exists in the recording data.");
+-  is(memoryStartTime, 0,
+-    "A `memoryStartTime` property exists in the recording data, but it's 0.");
++  let startModel = yield front.startRecording();
++  let { profilerStartTime, timelineStartTime, memoryStartTime } = startModel;
++
++  ok(startModel._profilerStartTime !== undefined,
++    "A `_profilerStartTime` property exists in the recording model.");
++  ok(startModel._timelineStartTime !== undefined,
++    "A `_timelineStartTime` property exists in the recording model.");
++  ise(startModel._memoryStartTime, 0,
++    "A `_memoryStartTime` property exists in the recording model, but it's 0.");
+ 
+   yield busyWait(WAIT_TIME);
+ 
+-  let stopData = yield front.stopRecording();
+-  let { profile, profilerEndTime, timelineEndTime, memoryEndTime } = stopData;
+-
+-  ok("profile" in stopData,
+-    "A `profile` property is properly set in the recording data.");
+-  ok("profilerEndTime" in stopData,
+-    "A `profilerEndTime` property is properly set in the recording data.");
+-  ok("timelineEndTime" in stopData,
+-    "A `timelineEndTime` property is properly set in the recording data.");
+-  ok("memoryEndTime" in stopData,
+-    "A `memoryEndTime` property is properly set in the recording data.");
+-
+-  ok(profile,
+-    "A `profile` property exists in the recording data.");
+-  ok(profilerEndTime !== undefined,
+-    "A `profilerEndTime` property exists in the recording data.");
+-  ok(timelineEndTime !== undefined,
+-    "A `timelineEndTime` property exists in the recording data.");
+-  is(memoryEndTime, 0,
+-    "A `memoryEndTime` property exists in the recording data, but it's 0.");
++  let stopModel = yield front.stopRecording(startModel);
++
++  ok(stopModel.getProfile(), "recording model has a profile after stopping.");
++  ok(stopModel.getDuration(), "recording model has a duration after stopping.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+index 256bfac..0a168fa 100644
+--- a/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
++++ b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+@@ -18,65 +18,64 @@ function spawnTest () {
+   };
+ 
+   let deferreds = {
+     markers: Promise.defer(),
+     memory: Promise.defer(),
+     ticks: Promise.defer()
+   };
+ 
+-  front.on("markers", handler);
+-  front.on("memory", handler);
+-  front.on("ticks", handler);
++  front.on("timeline-data", handler);
+ 
+   yield front.startRecording({ withMemory: true, withTicks: true });
+   yield Promise.all(Object.keys(deferreds).map(type => deferreds[type].promise));
+   yield front.stopRecording();
++  front.off("timeline-data", handler);
+ 
+   is(counters.markers.length, 1, "one marker event fired.");
+   is(counters.memory.length, 3, "three memory events fired.");
+   is(counters.ticks.length, 3, "three ticks events fired.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ 
+-  function handler (name, ...args) {
++  function handler (_, name, ...args) {
+     if (name === "markers") {
++      if (counters.markers.length >= 1) { return; }
+       let [markers] = args;
+       ok(markers[0].start, "received atleast one marker with `start`");
+       ok(markers[0].end, "received atleast one marker with `end`");
+       ok(markers[0].name, "received atleast one marker with `name`");
+ 
+       counters.markers.push(markers);
+-      front.off(name, handler);
+-      deferreds[name].resolve();
+     }
+     else if (name === "memory") {
++      if (counters.memory.length >= 3) { return; }
+       let [delta, measurement] = args;
+       is(typeof delta, "number", "received `delta` in memory event");
+       ok(delta > lastMemoryDelta, "received `delta` in memory event");
+       ok(measurement.total, "received `total` in memory event");
+ 
+       counters.memory.push({ delta, measurement });
+       lastMemoryDelta = delta;
+     }
+     else if (name === "ticks") {
++      if (counters.ticks.length >= 3) { return; }
+       let [delta, timestamps] = args;
+       ok(delta > lastTickDelta, "received `delta` in ticks event");
+ 
+       // Timestamps aren't guaranteed to always contain tick events, since
+       // they're dependent on the refresh driver, which may be blocked.
+ 
+       counters.ticks.push({ delta, timestamps });
+       lastTickDelta = delta;
+     }
+     else {
+       throw new Error("unknown event " + name);
+     }
+ 
+     if (name === "markers" && counters[name].length === 1 ||
+         name === "memory" && counters[name].length === 3 ||
+         name === "ticks" && counters[name].length === 3) {
+-      front.off(name, handler);
+       deferreds[name].resolve();
+     }
+   };
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-02.js b/browser/devtools/performance/test/browser_perf-front-profiler-02.js
+index 9bba500..04bf949 100644
+--- a/browser/devtools/performance/test/browser_perf-front-profiler-02.js
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-02.js
+@@ -10,26 +10,26 @@
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+   let front = panel.panelWin.gFront;
+ 
+   ok(!nsIProfilerModule.IsActive(),
+     "The built-in profiler module should not have been automatically started.");
+ 
+   let activated = front.once("profiler-activated");
+-  yield front.startRecording();
++  let rec = yield front.startRecording();
+   yield activated;
+-  yield front.stopRecording();
++  yield front.stopRecording(rec);
+   ok(nsIProfilerModule.IsActive(),
+     "The built-in profiler module should still be active (1).");
+ 
+   let alreadyActive = front.once("profiler-already-active");
+-  yield front.startRecording();
++  rec = yield front.startRecording();
+   yield alreadyActive;
+-  yield front.stopRecording();
++  yield front.stopRecording(rec);
+   ok(nsIProfilerModule.IsActive(),
+     "The built-in profiler module should still be active (2).");
+ 
+   yield teardown(panel);
+ 
+   ok(!nsIProfilerModule.IsActive(),
+     "The built-in profiler module should have been automatically stoped.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-04.js b/browser/devtools/performance/test/browser_perf-front-profiler-04.js
+index 29535c0..470fb5a 100644
+--- a/browser/devtools/performance/test/browser_perf-front-profiler-04.js
++++ b/browser/devtools/performance/test/browser_perf-front-profiler-04.js
+@@ -14,27 +14,27 @@ let test = Task.async(function*() {
+   let INTERVAL = 1;
+   let FEATURES = ["js"];
+   nsIProfilerModule.StartProfiler(ENTRIES, INTERVAL, FEATURES, FEATURES.length);
+ 
+   let { panel: firstPanel } = yield initPerformance(SIMPLE_URL);
+   let firstFront = firstPanel.panelWin.gFront;
+ 
+   let firstAlreadyActive = firstFront.once("profiler-already-active");
+-  let { profilerStartTime: firstStartTime } = yield firstFront.startRecording();
++  let recording = yield firstFront.startRecording();
+   yield firstAlreadyActive;
+-  ok(firstStartTime > 0, "The profiler was not restarted.");
++  ok(recording._profilerStartTime > 0, "The profiler was not restarted.");
+ 
+   let { panel: secondPanel } = yield initPerformance(SIMPLE_URL);
+   let secondFront = secondPanel.panelWin.gFront;
+ 
+   let secondAlreadyActive = secondFront.once("profiler-already-active");
+-  let { profilerStartTime: secondStartTime } = yield secondFront.startRecording();
++  let secondRecording = yield secondFront.startRecording();
+   yield secondAlreadyActive;
+-  ok(secondStartTime > 0, "The profiler was not restarted.");
++  ok(secondRecording._profilerStartTime > 0, "The profiler was not restarted.");
+ 
+   yield teardown(firstPanel);
+   ok(nsIProfilerModule.IsActive(),
+     "The built-in profiler module should still be active.");
+ 
+   yield teardown(secondPanel);
+   ok(!nsIProfilerModule.IsActive(),
+     "The built-in profiler module should have been automatically stoped.");
+diff --git a/browser/devtools/performance/test/browser_perf-front.js b/browser/devtools/performance/test/browser_perf-front.js
+index 9ed5a4e..5509471 100644
+--- a/browser/devtools/performance/test/browser_perf-front.js
++++ b/browser/devtools/performance/test/browser_perf-front.js
+@@ -5,67 +5,48 @@
+  * Test basic functionality of PerformanceFront, emitting start and endtime values
+  */
+ 
+ let WAIT_TIME = 1000;
+ 
+ function spawnTest () {
+   let { target, front } = yield initBackend(SIMPLE_URL);
+ 
+-  let {
+-    profilerStartTime,
+-    timelineStartTime,
+-    memoryStartTime
+-  } = yield front.startRecording({
++  let recording = yield front.startRecording({
+     withAllocations: true,
+     allocationsSampleProbability: +Services.prefs.getCharPref(MEMORY_SAMPLE_PROB_PREF),
+     allocationsMaxLogLength: Services.prefs.getIntPref(MEMORY_MAX_LOG_LEN_PREF)
+   });
+ 
+   let allocationsCount = 0;
+-  let allocationsCounter = () => allocationsCount++;
++  let allocationsCounter = (_, type) => type === "allocations" && allocationsCount++;
+ 
+   // Record allocation events to ensure it's called more than once
+   // so we know it's polling
+-  front.on("allocations", allocationsCounter);
++  front.on("timeline-data", allocationsCounter);
+ 
+-  ok(typeof profilerStartTime === "number",
+-    "The front.startRecording() emits a profiler start time.");
+-  ok(typeof timelineStartTime === "number",
+-    "The front.startRecording() emits a timeline start time.");
+-  ok(typeof memoryStartTime === "number",
+-    "The front.startRecording() emits a memory start time.");
++  ok(typeof recording._profilerStartTime === "number",
++    "The front.startRecording() returns a recording model with a profiler start time.");
++  ok(typeof recording._timelineStartTime === "number",
++    "The front.startRecording() returns a recording model with a timeline start time.");
++  ok(typeof recording._memoryStartTime === "number",
++    "The front.startRecording() returns a recording model with a memory start time.");
+ 
+   yield Promise.all([
+     busyWait(WAIT_TIME),
+     waitUntil(() => allocationsCount > 1)
+   ]);
+ 
+-  let {
+-    profilerEndTime,
+-    timelineEndTime,
+-    memoryEndTime
+-  } = yield front.stopRecording({
+-    withAllocations: true
+-  });
+-
+-  front.off("allocations", allocationsCounter);
++  yield front.stopRecording(recording);
+ 
+-  ok(typeof profilerEndTime === "number",
+-    "The front.stopRecording() emits a profiler end time.");
+-  ok(typeof timelineEndTime === "number",
+-    "The front.stopRecording() emits a timeline end time.");
+-  ok(typeof memoryEndTime === "number",
+-    "The front.stopRecording() emits a memory end time.");
++  front.off("timeline-data", allocationsCounter);
+ 
+-  ok(profilerEndTime > profilerStartTime,
+-    "The profilerEndTime is after profilerStartTime.");
+-  ok(timelineEndTime > timelineStartTime,
+-    "The timelineEndTime is after timelineStartTime.");
+-  ok(memoryEndTime > memoryStartTime,
+-    "The memoryEndTime is after memoryStartTime.");
++  ok(typeof recording.getDuration() === "number",
++    "The front.stopRecording() gives the recording model a stop time and duration.");
++  ok(recording.getDuration() > 0,
++    "The front.stopRecording() gives a positive duration amount.");
+ 
+   is((yield front._request("memory", "getState")), "detached",
+     "Memory actor is detached when stopping recording with allocations.");
+ 
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 29f8fc1..e094bc9 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -210,16 +210,63 @@ function initPerformance(aUrl, selectedTool="performance", targetOps={}) {
+     merge(target, targetOps);
+ 
+     let toolbox = yield gDevTools.showToolbox(target, selectedTool);
+     let panel = toolbox.getCurrentPanel();
+     return { target, panel, toolbox };
+   });
+ }
+ 
++/**
++ * Initializes a webconsole panel. Returns a target, panel and toolbox reference.
++ * Also returns a console property that allows calls to `profile` and `profileEnd`.
++ */
++function initConsole(aUrl) {
++  return Task.spawn(function*() {
++    let { target, toolbox, panel } = yield initPerformance(aUrl, "webconsole");
++    let { hud } = panel;
++    hud.jsterm._lazyVariablesView = false;
++    return {
++      target, toolbox, panel, console: {
++        profile: (s) => consoleExecute(hud, "profile", s),
++        profileEnd: (s) => consoleExecute(hud, "profileEnd", s)
++      }
++    };
++  });
++}
++
++function consoleExecute (console, method, val) {
++  let { ui, jsterm } = console;
++  let { promise, resolve } = Promise.defer();
++  let message = `console.${method}("${val}")`;
++
++  ui.on("new-messages", handler);
++  jsterm.execute(message);
++
++  let { console: c } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
++  function handler (event, messages) {
++    for (let msg of messages) {
++      if (msg.response._message === message) {
++        ui.off("new-messages", handler);
++        resolve();
++        return;
++      }
++    }
++  }
++  return promise;
++}
++
++function waitForProfilerConnection() {
++  let profilerConnected = Promise.defer();
++  let profilerConnectionObserver = () => profilerConnected.resolve();
++  Services.obs.addObserver(profilerConnectionObserver, "performance-actors-connection-opened", false);
++  return profilerConnected.promise.then(() =>
++    Services.obs.removeObserver(profilerConnectionObserver, "performance-actors-connection-opened"));
++}
++
+ function* teardown(panel) {
+   info("Destroying the performance tool.");
+ 
+   let tab = panel.target.tab;
+   yield panel._toolbox.destroy();
+   yield removeTab(tab);
+ }
+ 
+@@ -232,29 +279,37 @@ function busyWait(time) {
+   let stack;
+   while (Date.now() - start < time) { stack = Components.stack; }
+ }
+ 
+ function consoleMethod (...args) {
+   if (!mm) {
+     throw new Error("`loadFrameScripts()` must be called before using frame scripts.");
+   }
++  // Terrible ugly hack -- this gets stringified when it uses the
++  // message manager, so an undefined arg in `console.profileEnd()`
++  // turns into a stringified "null", which is terrible. This method is only used
++  // for test helpers, so swap out the argument if its undefined with an empty string.
++  // Differences between empty string and undefined are tested on the front itself.
++  if (args[1] == null) {
++    args[1] = "";
++  }
+   mm.sendAsyncMessage("devtools:test:console", args);
+ }
+ 
+-function* consoleProfile(connection, label) {
+-  let notified = connection.once("profile");
++function* consoleProfile(win, label) {
++  let profileStart = once(win.PerformanceController, win.EVENTS.CONSOLE_RECORDING_STARTED);
+   consoleMethod("profile", label);
+-  yield notified;
++  yield profileStart;
+ }
+ 
+-function* consoleProfileEnd(connection) {
+-  let notified = connection.once("profileEnd");
+-  consoleMethod("profileEnd");
+-  yield notified;
++function* consoleProfileEnd(win, label) {
++  let ended = once(win.PerformanceController, win.EVENTS.CONSOLE_RECORDING_STOPPED);
++  consoleMethod("profileEnd", label);
++  yield ended;
+ }
+ 
+ function command (button) {
+   let ev = button.ownerDocument.createEvent("XULCommandEvent");
+   ev.initCommandEvent("command", true, true, button.ownerDocument.defaultView, 0, false, false, false, false, null);
+   button.dispatchEvent(ev);
+ }
+ 
+diff --git a/browser/devtools/performance/views/details-abstract-subview.js b/browser/devtools/performance/views/details-abstract-subview.js
+index 48a8fd2..c9aeb56 100644
+--- a/browser/devtools/performance/views/details-abstract-subview.js
++++ b/browser/devtools/performance/views/details-abstract-subview.js
+@@ -12,30 +12,32 @@ let DetailsSubview = {
+    */
+   initialize: function () {
+     this._onRecordingStoppedOrSelected = this._onRecordingStoppedOrSelected.bind(this);
+     this._onOverviewRangeChange = this._onOverviewRangeChange.bind(this);
+     this._onDetailsViewSelected = this._onDetailsViewSelected.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+ 
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_SELECTED, this._onOverviewRangeChange);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_CLEARED, this._onOverviewRangeChange);
+     DetailsView.on(EVENTS.DETAILS_VIEW_SELECTED, this._onDetailsViewSelected);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     clearNamedTimeout("range-change-debounce");
+ 
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_SELECTED, this._onOverviewRangeChange);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_CLEARED, this._onOverviewRangeChange);
+     DetailsView.off(EVENTS.DETAILS_VIEW_SELECTED, this._onDetailsViewSelected);
+   },
+ 
+   /**
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+index fc4495b..b8c027f 100644
+--- a/browser/devtools/performance/views/details.js
++++ b/browser/devtools/performance/views/details.js
+@@ -54,16 +54,17 @@ let DetailsView = {
+ 
+     for (let button of $$("toolbarbutton[data-view]", this.toolbar)) {
+       button.addEventListener("command", this._onViewToggle);
+     }
+ 
+     yield this.selectDefaultView();
+     yield this.setAvailableViews();
+ 
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.PREF_CHANGED, this.setAvailableViews);
+   }),
+ 
+   /**
+    * Unbinds events, destroys subviews.
+    */
+@@ -71,16 +72,17 @@ let DetailsView = {
+     for (let button of $$("toolbarbutton[data-view]", this.toolbar)) {
+       button.removeEventListener("command", this._onViewToggle);
+     }
+ 
+     for (let [_, component] of Iterator(this.components)) {
+       component.initialized && (yield component.view.destroy());
+     }
+ 
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.PREF_CHANGED, this.setAvailableViews);
+   }),
+ 
+   /**
+    * Sets the possible views based off of prefs and server actor support by hiding/showing the
+    * buttons that select them and going to default view if currently selected.
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 9d766a9..c5169e4 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -44,16 +44,19 @@ let OverviewView = {
+     $("#time-framerate").hidden = !PerformanceController.getOption("enable-framerate");
+ 
+     PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_WILL_STOP, this._onRecordingWillStop);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: Task.async(function*() {
+     if (this.markersOverview) {
+       yield this.markersOverview.destroy();
+@@ -66,16 +69,19 @@ let OverviewView = {
+     }
+ 
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_WILL_STOP, this._onRecordingWillStop);
+   }),
+ 
+   /**
+    * Disabled in the event we're using a Timeline mock, so we'll have no
+    * markers, ticks or memory data to show, so just block rendering and hide
+    * the panel.
+    */
+   disable: function () {
+@@ -254,17 +260,17 @@ let OverviewView = {
+   }),
+ 
+   /**
+    * Called to refresh the timer to keep firing _onRecordingTick.
+    */
+   _prepareNextTick: function () {
+     // Check here to see if there's still a _timeoutId, incase
+     // `stop` was called before the _prepareNextTick call was executed.
+-    if (this._timeoutId) {
++    if (this.isRendering()) {
+       this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
+     }
+   },
+ 
+   /**
+    * Fired when the graph selection has changed. Called by
+    * mouseup and scroll events.
+    */
+@@ -278,68 +284,110 @@ let OverviewView = {
+     if (interval.endTime - interval.startTime < 1) {
+       this.emit(EVENTS.OVERVIEW_RANGE_CLEARED);
+     } else {
+       this.emit(EVENTS.OVERVIEW_RANGE_SELECTED, interval);
+     }
+   },
+ 
+   /**
+-   * Called when recording will start.
++   * Called when recording will start. No recording because it does not
++   * exist yet, but can just disable from here. This will only trigger for
++   * manual recordings.
+    */
+-  _onRecordingWillStart: Task.async(function* (_, recording) {
+-    yield this._checkSelection(recording);
++  _onRecordingWillStart: Task.async(function* () {
++    this._onRecordingStateChange();
++    yield this._checkSelection();
+     this.markersOverview.dropSelection();
+   }),
+ 
+   /**
+    * Called when recording actually starts.
+    */
+   _onRecordingStarted: function (_, recording) {
+-    this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
++    this._onRecordingStateChange();
+   },
+ 
+   /**
+    * Called when recording will stop.
+    */
+   _onRecordingWillStop: function(_, recording) {
+-    clearTimeout(this._timeoutId);
+-    this._timeoutId = null;
++    this._onRecordingStateChange();
+   },
+ 
+   /**
+    * Called when recording actually stops.
+    */
+   _onRecordingStopped: Task.async(function* (_, recording) {
++    this._onRecordingStateChange();
++    if (recording !== PerformanceController.getCurrentRecording()) {
++      return;
++    }
+     this.render(FRAMERATE_GRAPH_HIGH_RES_INTERVAL);
+     yield this._checkSelection(recording);
+   }),
+ 
+   /**
+    * Called when a new recording is selected.
+    */
+   _onRecordingSelected: Task.async(function* (_, recording) {
+     if (!recording) {
+       return;
+     }
+-    // If timeout exists, we have something recording, so
+-    // this will still tick away at rendering. Otherwise, force a render.
+-    if (!this._timeoutId) {
++    this._onRecordingStateChange();
++    // If this recording is complete, render the high res graph
++    if (!recording.isRecording()) {
+       yield this.render(FRAMERATE_GRAPH_HIGH_RES_INTERVAL);
+     }
+     yield this._checkSelection(recording);
+     this.markersOverview.dropSelection();
+   }),
+ 
+   /**
++   * Called when a recording is starting, stopping, or about to start/stop.
++   * Checks the current recording displayed to determine whether or not
++   * the polling for rendering the overview graph needs to start or stop.
++   */
++  _onRecordingStateChange: function () {
++    let currentRecording = PerformanceController.getCurrentRecording();
++    if (!currentRecording || (this.isRendering() && !currentRecording.isRecording())) {
++      this._stopPolling();
++    } else if (currentRecording.isRecording() && !this.isRendering()) {
++      this._startPolling();
++    }
++  },
++
++  /**
++   * Start the polling for rendering the overview graph.
++   */
++  _startPolling: function () {
++    this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
++  },
++
++  /**
++   * Stop the polling for rendering the overview graph.
++   */
++  _stopPolling: function () {
++    clearTimeout(this._timeoutId);
++    this._timeoutId = null;
++  },
++
++  /**
++   * Whether or not the overview view is in a state of polling rendering.
++   */
++  isRendering: function () {
++    return !!this._timeoutId;
++  },
++
++  /**
+    * Makes sure the selection is enabled or disabled in all the graphs,
+    * based on whether a recording currently exists and is not in progress.
+    */
+   _checkSelection: Task.async(function* (recording) {
+-    let selectionEnabled = !recording.isRecording();
++    let selectionEnabled = recording ? !recording.isRecording() : false;
+ 
+     if (yield this._markersGraphAvailable()) {
+       this.markersOverview.selectionEnabled = selectionEnabled;
+     }
+     if (yield this._memoryGraphAvailable()) {
+       this.memoryOverview.selectionEnabled = selectionEnabled;
+     }
+     if (yield this._framerateGraphAvailable()) {
+diff --git a/browser/devtools/performance/views/recordings.js b/browser/devtools/performance/views/recordings.js
+index 6ef079b..de8d919 100644
+--- a/browser/devtools/performance/views/recordings.js
++++ b/browser/devtools/performance/views/recordings.js
+@@ -19,27 +19,31 @@ let RecordingsView = Heritage.extend(WidgetMethods, {
+     this._onRecordingImported = this._onRecordingImported.bind(this);
+     this._onSaveButtonClick = this._onSaveButtonClick.bind(this);
+     this._onRecordingsCleared = this._onRecordingsCleared.bind(this);
+ 
+     this.emptyText = L10N.getStr("noRecordingsText");
+ 
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
++    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_IMPORTED, this._onRecordingImported);
+     PerformanceController.on(EVENTS.RECORDINGS_CLEARED, this._onRecordingsCleared);
+     this.widget.addEventListener("select", this._onSelect, false);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
++    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_IMPORTED, this._onRecordingImported);
+     PerformanceController.off(EVENTS.RECORDINGS_CLEARED, this._onRecordingsCleared);
+     this.widget.removeEventListener("select", this._onSelect, false);
+   },
+ 
+   /**
+    * Adds an empty recording to this container.
+    *
+@@ -90,67 +94,51 @@ let RecordingsView = Heritage.extend(WidgetMethods, {
+ 
+   /**
+    * Signals that a recording session has started.
+    *
+    * @param RecordingModel recording
+    *        Model of the recording that was started.
+    */
+   _onRecordingStarted: function (_, recording) {
+-    // Insert a "dummy" recording item, to hint that recording has now started.
+-    let recordingItem;
+-
+-    // If a label is specified (e.g due to a call to `console.profile`),
+-    // then try reusing a pre-existing recording item, if there is one.
+-    // This is symmetrical to how `this.handleRecordingEnded` works.
+-    let profileLabel = recording.getLabel();
+-    if (profileLabel) {
+-      recordingItem = this.getItemForAttachment(e => e.getLabel() == profileLabel);
+-    }
+-    // Otherwise, create a new empty recording item.
+-    if (!recordingItem) {
+-      recordingItem = this.addEmptyRecording(recording);
+-    }
++    // TODO bug 1144388
++    // If a label is identical to an existing recording item,
++    // logically group them here.
++    // For now, insert a "dummy" recording item, to hint that recording has now started.
++    let recordingItem = this.addEmptyRecording(recording);
+ 
+     // Mark the corresponding item as being a "record in progress".
+     recordingItem.isRecording = true;
+ 
+-    // If this is a manual recording, immediately select it.
+-    if (!recording.getLabel()) {
++    // If this is a manual recording, immediately select it, or
++    // select a console profile if its the only one
++    if (!recording.isConsole() || this.selectedIndex === -1) {
+       this.selectedItem = recordingItem;
+     }
+   },
+ 
+   /**
+    * Signals that a recording session has ended.
+    *
+    * @param RecordingModel recording
+    *        The model of the recording that just stopped.
+    */
+   _onRecordingStopped: function (_, recording) {
+-    let recordingItem;
+-
+-    // If a label is specified (e.g due to a call to `console.profileEnd`),
+-    // then try reusing a pre-existing recording item, if there is one.
+-    // This is symmetrical to how `this.handleRecordingStarted` works.
+-    let profileLabel = recording.getLabel();
+-    if (profileLabel) {
+-      recordingItem = this.getItemForAttachment(e => e.getLabel() == profileLabel);
+-    }
+-    // Otherwise, just use the first available recording item.
+-    if (!recordingItem) {
+-      recordingItem = this.getItemForPredicate(e => e.isRecording);
+-    }
++    let recordingItem = this.getItemForPredicate(e => e.attachment === recording);
+ 
+     // Mark the corresponding item as being a "finished recording".
+     recordingItem.isRecording = false;
+ 
+     // Render the recording item with finalized information (timing, etc)
+     this.finalizeRecording(recordingItem);
+-    this.forceSelect(recordingItem);
++
++    // Select the recording if it was a manual recording only
++    if (!recording.isConsole()) {
++      this.forceSelect(recordingItem);
++    }
+   },
+ 
+   /**
+    * Signals that a recording has been imported.
+    *
+    * @param RecordingModel model
+    *        The recording model containing data on the recording session.
+    */
+@@ -190,31 +178,21 @@ let RecordingsView = Heritage.extend(WidgetMethods, {
+     durationNode.setAttribute("value",
+       L10N.getFormatStr("recordingsList.durationLabel", durationMillis));
+   },
+ 
+   /**
+    * The select listener for this container.
+    */
+   _onSelect: Task.async(function*({ detail: recordingItem }) {
+-    // TODO 1120699
+-    // show appropriate empty/recording panels for several scenarios below
+     if (!recordingItem) {
+       return;
+     }
+ 
+     let model = recordingItem.attachment;
+-
+-    // If recording, don't abort completely, as we still want to fire an event
+-    // for selection so we can continue repainting the overview graphs.
+-    if (recordingItem.isRecording) {
+-      this.emit(EVENTS.RECORDING_SELECTED, model);
+-      return;
+-    }
+-
+     this.emit(EVENTS.RECORDING_SELECTED, model);
+   }),
+ 
+   /**
+    * The click listener for the "save" button of each item in this container.
+    */
+   _onSaveButtonClick: function (e) {
+     let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.properties b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+index dc965b5..e7c30c4 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+@@ -116,8 +116,12 @@ recordingsList.saveDialogTitle=Save profile…
+ # LOCALIZATION NOTE (recordingsList.saveDialogJSONFilter):
+ # This string is displayed as a filter for saving a recording to disk.
+ recordingsList.saveDialogJSONFilter=JSON Files
+ 
+ # LOCALIZATION NOTE (recordingsList.saveDialogAllFilter):
+ # This string is displayed as a filter for saving a recording to disk.
+ recordingsList.saveDialogAllFilter=All Files
+ 
++# LOCALIZATION NOTE (consoleProfile.recordingNotice/stopCommand):
++# These strings are displayed when a recording is in progress, that was started from the console.
++consoleProfile.recordingNotice=Currently recording profile "%S".
++consoleProfile.stopCommand=Stop profiling by typing \"console.profileEnd(\'%S\')\" into the console.
+-- 
+2.2.1
+
