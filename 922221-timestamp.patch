@@ -1,0 +1,427 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 18 Mar 2015 10:53:30 -0700
+Subject: Bug 899753 - Implement console.timeStamp() to emit TimelineMarkers. r=tromey
+
+diff --git a/docshell/test/browser/browser_timelineMarkers-frame-02.js b/docshell/test/browser/browser_timelineMarkers-frame-02.js
+index 82039c6..fb5e972 100644
+--- a/docshell/test/browser/browser_timelineMarkers-frame-02.js
++++ b/docshell/test/browser/browser_timelineMarkers-frame-02.js
+@@ -85,11 +85,33 @@ let TESTS = [{
+   },
+   check: function(markers) {
+     is(markers.length, 2, "Got 2 markers");
+     is(markers[0].name, "ConsoleTime", "Got first ConsoleTime marker");
+     is(markers[0].causeName, "FOO", "Got ConsoleTime FOO detail");
+     is(markers[1].name, "ConsoleTime", "Got second ConsoleTime marker");
+     is(markers[1].causeName, "BAR", "Got ConsoleTime BAR detail");
+   }
++}, {
++  desc: "Timestamps created by console.timeStamp()",
++  searchFor: "Timestamp",
++  setup: function(docshell) {
++    content.console.timeStamp("rock");
++    let markers = docShell.popProfileTimelineMarkers();
++    is(markers.length, 1, "Got one marker");
++    is(markers[0].name, "Timestamp", "Got Timestamp marker");
++    is(markers[0].causeName, "rock", "Got Timestamp label value");
++    content.console.timeStamp("paper");
++    content.console.timeStamp("scissors");
++    content.console.timeStamp();
++  },
++  check: function (markers) {
++    is(markers.length, 3, "Got 3 markers");
++    is(markers[0].name, "Timestamp", "Got Timestamp marker");
++    is(markers[0].causeName, "paper", "Got Timestamp label value");
++    is(markers[1].name, "Timestamp", "Got Timestamp marker");
++    is(markers[1].causeName, "scissors", "Got Timestamp label value");
++    is(markers[2].name, "Timestamp", "Got empty Timestamp marker");
++    is(markers[2].causeName, void 0, "Got empty Timestamp label value");
++  }
+ }];
+ 
+ timelineContentTest(TESTS);
+diff --git a/dom/base/Console.cpp b/dom/base/Console.cpp
+index c581621..d26d4b5 100644
+--- a/dom/base/Console.cpp
++++ b/dom/base/Console.cpp
+@@ -778,16 +778,29 @@ Console::TimeEnd(JSContext* aCx, const JS::Handle<JS::Value> aTime)
+   if (!aTime.isUndefined()) {
+     data.AppendElement(aTime);
+   }
+ 
+   Method(aCx, MethodTimeEnd, NS_LITERAL_STRING("timeEnd"), data);
+ }
+ 
+ void
++Console::TimeStamp(JSContext* aCx, const JS::Handle<JS::Value> aData)
++{
++  Sequence<JS::Value> data;
++  SequenceRooter<JS::Value> rooter(aCx, &data);
++
++  if (!aData.isUndefined()) {
++    data.AppendElement(aData);
++  }
++
++  Method(aCx, MethodTimeStamp, NS_LITERAL_STRING("timeStamp"), data);
++}
++
++void
+ Console::Profile(JSContext* aCx, const Sequence<JS::Value>& aData)
+ {
+   ProfileMethod(aCx, NS_LITERAL_STRING("profile"), aData);
+ }
+ 
+ void
+ Console::ProfileEnd(JSContext* aCx, const Sequence<JS::Value>& aData)
+ {
+@@ -948,16 +961,34 @@ public:
+     if (GetMetaData() == TRACING_INTERVAL_START) {
+       aMarker.mCauseName.Construct(GetCause());
+     } else {
+       aMarker.mEndStack = GetStack();
+     }
+   }
+ };
+ 
++class TimestampTimelineMarker : public TimelineMarker
++{
++public:
++  TimestampTimelineMarker(nsDocShell* aDocShell,
++                          TracingMetadata aMetaData,
++                          const nsAString& aCause)
++    : TimelineMarker(aDocShell, "Timestamp", aMetaData, aCause)
++  {
++  }
++
++  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) MOZ_OVERRIDE
++  {
++    if (GetMetaData() == TRACING_INTERVAL_START) {
++      aMarker.mCauseName.Construct(GetCause());
++    }
++  }
++};
++
+ // Queue a call to a console method. See the CALL_DELAY constant.
+ void
+ Console::Method(JSContext* aCx, MethodName aMethodName,
+                 const nsAString& aMethodString,
+                 const Sequence<JS::Value>& aData)
+ {
+   nsAutoPtr<ConsoleCallData> callData(new ConsoleCallData());
+ 
+@@ -1023,17 +1054,17 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
+     callData->mReifiedStack.emplace();
+     nsresult rv = ReifyStack(stack, *callData->mReifiedStack);
+     if (NS_WARN_IF(NS_FAILED(rv))) {
+       return;
+     }
+   }
+ 
+   // Monotonic timer for 'time' and 'timeEnd'
+-  if ((aMethodName == MethodTime || aMethodName == MethodTimeEnd)) {
++  if ((aMethodName == MethodTime || aMethodName == MethodTimeEnd || aMethodName == MethodTimeStamp)) {
+     if (mWindow) {
+       nsGlobalWindow *win = static_cast<nsGlobalWindow*>(mWindow.get());
+       MOZ_ASSERT(win);
+ 
+       nsRefPtr<nsPerformance> performance = win->GetPerformance();
+       if (!performance) {
+         return;
+       }
+@@ -1042,17 +1073,35 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
+ 
+       // 'time' and 'timeEnd' are displayed in the devtools timeline if active.
+       bool isTimelineRecording = false;
+       nsDocShell* docShell = static_cast<nsDocShell*>(mWindow->GetDocShell());
+       if (docShell) {
+         docShell->GetRecordProfileTimelineMarkers(&isTimelineRecording);
+       }
+ 
+-      if (isTimelineRecording && aData.Length() == 1) {
++      // 'timeStamp' recordings do not need an argument
++      if (isTimelineRecording && aMethodName == MethodTimeStamp) {
++        if (aData.Length() == 0) {
++          docShell->AddProfileTimelineMarker("Timestamp", TRACING_INTERVAL_START);
++        } else {
++          JS::Rooted<JS::Value> value(aCx, aData[0]);
++          JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, value));
++          if (jsString) {
++            nsAutoJSString key;
++            if (key.init(aCx, jsString)) {
++              mozilla::UniquePtr<TimelineMarker> marker =
++                MakeUnique<TimestampTimelineMarker>(docShell, TRACING_INTERVAL_START, key);
++              docShell->AddProfileTimelineMarker(marker);
++            }
++          }
++        }
++        docShell->AddProfileTimelineMarker("Timestamp", TRACING_INTERVAL_END);
++      }
++      else if (isTimelineRecording && aData.Length() == 1) {
+         JS::Rooted<JS::Value> value(aCx, aData[0]);
+         JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, value));
+         if (jsString) {
+           nsAutoJSString key;
+           if (key.init(aCx, jsString)) {
+             mozilla::UniquePtr<TimelineMarker> marker =
+               MakeUnique<ConsoleTimelineMarker>(docShell,
+                                                 aMethodName == MethodTime ? TRACING_INTERVAL_START : TRACING_INTERVAL_END,
+diff --git a/dom/base/Console.h b/dom/base/Console.h
+index bc09679..9eecabc 100644
+--- a/dom/base/Console.h
++++ b/dom/base/Console.h
+@@ -84,16 +84,19 @@ public:
+ 
+   void
+   Time(JSContext* aCx, const JS::Handle<JS::Value> aTime);
+ 
+   void
+   TimeEnd(JSContext* aCx, const JS::Handle<JS::Value> aTime);
+ 
+   void
++  TimeStamp(JSContext* aCx, const JS::Handle<JS::Value> aData);
++
++  void
+   Profile(JSContext* aCx, const Sequence<JS::Value>& aData);
+ 
+   void
+   ProfileEnd(JSContext* aCx, const Sequence<JS::Value>& aData);
+ 
+   void
+   Assert(JSContext* aCx, bool aCondition, const Sequence<JS::Value>& aData);
+ 
+@@ -115,16 +118,17 @@ private:
+     MethodTable,
+     MethodTrace,
+     MethodDir,
+     MethodGroup,
+     MethodGroupCollapsed,
+     MethodGroupEnd,
+     MethodTime,
+     MethodTimeEnd,
++    MethodTimeStamp,
+     MethodAssert,
+     MethodCount
+   };
+ 
+   void
+   Method(JSContext* aCx, MethodName aName, const nsAString& aString,
+          const Sequence<JS::Value>& aData);
+ 
+diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
+index 845e1c8..d43e15e 100644
+--- a/dom/bindings/Bindings.conf
++++ b/dom/bindings/Bindings.conf
+@@ -257,17 +257,17 @@ DOMInterfaces = {
+ },
+ 
+ 'Clients': {
+     'nativeType': 'mozilla::dom::workers::ServiceWorkerClients',
+     'headerFile': 'mozilla/dom/workers/bindings/ServiceWorkerClients.h',
+ },
+ 
+ 'Console': {
+-    'implicitJSContext': [ 'trace', 'time', 'timeEnd' ],
++    'implicitJSContext': [ 'trace', 'time', 'timeEnd', 'timeStamp' ],
+ },
+ 
+ 'ConvolverNode': {
+     'implicitJSContext': [ 'buffer' ],
+ },
+ 
+ 'Coordinates': {
+     'headerFile': 'nsGeoPosition.h'
+diff --git a/dom/tests/browser/browser_ConsoleAPITests.js b/dom/tests/browser/browser_ConsoleAPITests.js
+index 17ebebc..1a0e28a 100644
+--- a/dom/tests/browser/browser_ConsoleAPITests.js
++++ b/dom/tests/browser/browser_ConsoleAPITests.js
+@@ -320,16 +320,17 @@ function consoleAPISanityTest() {
+   ok(win.console.exception, "console.exception is here");
+   ok(win.console.trace, "console.trace is here");
+   ok(win.console.dir, "console.dir is here");
+   ok(win.console.group, "console.group is here");
+   ok(win.console.groupCollapsed, "console.groupCollapsed is here");
+   ok(win.console.groupEnd, "console.groupEnd is here");
+   ok(win.console.time, "console.time is here");
+   ok(win.console.timeEnd, "console.timeEnd is here");
++  ok(win.console.timeStamp, "console.timeStamp is here");
+   ok(win.console.assert, "console.assert is here");
+   ok(win.console.count, "console.count is here");
+ }
+ 
+ function startTimeTest() {
+   // Reset the observer function to cope with the fabricated test data.
+   ConsoleObserver.observe = function CO_observe(aSubject, aTopic, aData) {
+     try {
+@@ -411,16 +412,95 @@ function testConsoleTimeEnd(aMessageObject) {
+   is(typeof aMessageObject.timer.duration, "number", "timer duration is a number");
+   info("timer duration: " + aMessageObject.timer.duration);
+   ok(aMessageObject.timer.duration >= 0, "timer duration is positive");
+ 
+   gArgs[0].arguments.forEach(function (a, i) {
+     is(aMessageObject.arguments[i], a, "correct arg " + i);
+   });
+ 
++  startTimeStampTest();
++}
++
++function startTimeStampTest() {
++  // Reset the observer function to cope with the fabricated test data.
++  ConsoleObserver.observe = function CO_observe(aSubject, aTopic, aData) {
++    try {
++      testConsoleTimeStamp(aSubject.wrappedJSObject);
++    } catch (ex) {
++      // XXX Bug 906593 - Exceptions in this function currently aren't
++      // reported, because of some XPConnect weirdness, so report them manually
++      ok(false, "Exception thrown in CO_observe: " + ex);
++    }
++  };
++  gLevel = "timeStamp";
++  gArgs = [
++    {filename: TEST_URI, lineNumber: 58, functionName: "timeStamp",
++     arguments: ["!!!"]
++    }
++  ];
++
++  let button = gWindow.document.getElementById("test-timeStamp");
++  ok(button, "found #test-timeStamp button");
++  EventUtils.synthesizeMouseAtCenter(button, {}, gWindow);
++}
++
++function testConsoleTimeStamp(aMessageObject) {
++  let messageWindow = Services.wm.getOuterWindowWithId(aMessageObject.ID);
++  is(messageWindow, gWindow, "found correct window by window ID");
++
++  is(aMessageObject.level, gLevel, "expected level received");
++
++  is(aMessageObject.filename, gArgs[0].filename, "filename matches");
++  is(aMessageObject.lineNumber, gArgs[0].lineNumber, "lineNumber matches");
++  is(aMessageObject.functionName, gArgs[0].functionName, "functionName matches");
++  ok(aMessageObject.timeStamp > 0, "timeStamp is a positive value");
++
++  gArgs[0].arguments.forEach(function (a, i) {
++    is(aMessageObject.arguments[i], a, "correct arg " + i);
++  });
++
++  startEmptyTimeStampTest();
++}
++
++function startEmptyTimeStampTest () {
++  // Reset the observer function to cope with the fabricated test data.
++  ConsoleObserver.observe = function CO_observe(aSubject, aTopic, aData) {
++    try {
++      testEmptyConsoleTimeStamp(aSubject.wrappedJSObject);
++    } catch (ex) {
++      // XXX Bug 906593 - Exceptions in this function currently aren't
++      // reported, because of some XPConnect weirdness, so report them manually
++      ok(false, "Exception thrown in CO_observe: " + ex);
++    }
++  };
++  gLevel = "timeStamp";
++  gArgs = [
++    {filename: TEST_URI, lineNumber: 58, functionName: "timeStamp",
++     arguments: []
++    }
++  ];
++
++  let button = gWindow.document.getElementById("test-emptyTimeStamp");
++  ok(button, "found #test-emptyTimeStamp button");
++  EventUtils.synthesizeMouseAtCenter(button, {}, gWindow);
++}
++
++function testEmptyConsoleTimeStamp(aMessageObject) {
++  let messageWindow = Services.wm.getOuterWindowWithId(aMessageObject.ID);
++  is(messageWindow, gWindow, "found correct window by window ID");
++
++  is(aMessageObject.level, gLevel, "expected level received");
++
++  is(aMessageObject.filename, gArgs[0].filename, "filename matches");
++  is(aMessageObject.lineNumber, gArgs[0].lineNumber, "lineNumber matches");
++  is(aMessageObject.functionName, gArgs[0].functionName, "functionName matches");
++  ok(aMessageObject.timeStamp > 0, "timeStamp is a positive value");
++  is(aMessageObject.arguments.length, 0, "we don't have arguments");
++
+   startEmptyTimerTest();
+ }
+ 
+ function startEmptyTimerTest() {
+   // Reset the observer function to cope with the fabricated test data.
+   ConsoleObserver.observe = function CO_observe(aSubject, aTopic, aData) {
+     try {
+       testEmptyTimer(aSubject.wrappedJSObject);
+diff --git a/dom/tests/browser/test-console-api.html b/dom/tests/browser/test-console-api.html
+index 626860c..4e7d757 100644
+--- a/dom/tests/browser/test-console-api.html
++++ b/dom/tests/browser/test-console-api.html
+@@ -48,22 +48,28 @@
+         console.groupCollapsed("a", "group");
+         console.group("b", "group");
+         console.groupEnd("b", "group");
+       }
+ 
+       function nativeCallback() {
+         new Promise(function(resolve, reject) { resolve(42); }).then(console.log.bind(console));
+       }
++
++      function timeStamp(val) {
++        console.timeStamp(val);
++      }
+     </script>
+   </head>
+   <body>
+     <h1>Console API Test Page</h1>
+     <button onclick="test();">Log stuff</button>
+     <button id="test-trace" onclick="foobar585956a('omg');">Test trace</button>
+     <button id="test-location" onclick="foobar646025('omg');">Test location</button>
+     <button id="test-nativeCallback" onclick="nativeCallback();">Test nativeCallback</button>
+     <button id="test-groups" onclick="testGroups();">Test groups</button>
+     <button id="test-time" onclick="startTimer('foo');">Test time</button>
+     <button id="test-timeEnd" onclick="stopTimer('foo');">Test timeEnd</button>
+     <button id="test-namelessTimer" onclick="namelessTimer();">Test namelessTimer</button>
++    <button id="test-timeStamp" onclick="timeStamp('!!!')">Test timeStamp</button>
++    <button id="test-emptyTimeStamp" onclick="timeStamp();">Test emptyTimeStamp</button>
+   </body>
+ </html>
+diff --git a/dom/webidl/Console.webidl b/dom/webidl/Console.webidl
+index 2eb10aa..ddbc246 100644
+--- a/dom/webidl/Console.webidl
++++ b/dom/webidl/Console.webidl
+@@ -16,16 +16,17 @@ interface Console {
+   void table(any... data);
+   void trace();
+   void dir(any... data);
+   void group(any... data);
+   void groupCollapsed(any... data);
+   void groupEnd(any... data);
+   void time(optional any time);
+   void timeEnd(optional any time);
++  void timeStamp(optional any data);
+ 
+   void profile(any... data);
+   void profileEnd(any... data);
+ 
+   void assert(boolean condition, any... data);
+   void count(any... data);
+ 
+   // No-op methods for compatibility with other browsers.
+@@ -34,18 +35,16 @@ interface Console {
+   [BinaryName="noopMethod"]
+   void dirxml();
+   [BinaryName="noopMethod"]
+   void markTimeline();
+   [BinaryName="noopMethod"]
+   void timeline();
+   [BinaryName="noopMethod"]
+   void timelineEnd();
+-  [BinaryName="noopMethod"]
+-  void timeStamp();
+ };
+ 
+ // This is used to propagate console events to the observers.
+ dictionary ConsoleEvent {
+   (unsigned long or DOMString) ID;
+   (unsigned long or DOMString) innerID;
+   DOMString level = "";
+   DOMString filename = "";
+-- 
+2.2.1
+
