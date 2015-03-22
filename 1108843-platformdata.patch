@@ -1,0 +1,297 @@
+From b836033bcb87610f82a3bc1f127ea80ecf6952ea Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 20 Mar 2015 16:50:43 -0700
+Subject: [PATCH] Bug 1108843 - generalize platform data in call tree view WIP
+
+---
+ .../performance/views/details-js-call-tree.js      |  2 +-
+ browser/devtools/shared/profiler/tree-model.js     | 69 ++++++++++++++++++++--
+ browser/devtools/shared/profiler/tree-view.js      |  8 ++-
+ browser/themes/shared/devtools/performance.inc.css |  5 ++
+ 4 files changed, 77 insertions(+), 7 deletions(-)
+
+diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
+index eab0ccc..8dcf070 100644
+--- a/browser/devtools/performance/views/details-js-call-tree.js
++++ b/browser/devtools/performance/views/details-js-call-tree.js
+@@ -63,17 +63,17 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+    * populate the call tree.
+    */
+   _prepareCallTree: function (profile, { startTime, endTime }, options) {
+     let threadSamples = profile.threads[0].samples;
+     let contentOnly = !PerformanceController.getOption("show-platform-data");
+     let invertTree = PerformanceController.getOption("invert-call-tree");
+ 
+     let threadNode = new ThreadNode(threadSamples,
+-      { startTime, endTime, contentOnly, invertTree });
++      { startTime, endTime, contentOnly, invertTree, generalizePlatformData: true });
+ 
+     // If we have an empty profile (no samples), then don't invert the tree, as
+     // it would hide the root node and a completely blank call tree space can be
+     // mis-interpreted as an error.
+     options.inverted = invertTree && threadNode.samples > 0;
+ 
+     return threadNode;
+   },
+diff --git a/browser/devtools/shared/profiler/tree-model.js b/browser/devtools/shared/profiler/tree-model.js
+index 3a57272..e458568 100644
+--- a/browser/devtools/shared/profiler/tree-model.js
++++ b/browser/devtools/shared/profiler/tree-model.js
+@@ -1,22 +1,27 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
++const {extend} = require("sdk/util/object");
+ 
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_MAPPINGS",
+   "devtools/shared/profiler/global", true);
++loader.lazyRequireGetter(this, "CATEGORIES",
++  "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_JIT",
+   "devtools/shared/profiler/global", true);
++loader.lazyRequireGetter(this, "CATEGORY_OTHER",
++  "devtools/shared/profiler/global", true);
+ 
+ const CHROME_SCHEMES = ["chrome://", "resource://"];
+ const CONTENT_SCHEMES = ["http://", "https://", "file://"];
+ 
+ exports.ThreadNode = ThreadNode;
+ exports.FrameNode = FrameNode;
+ exports.FrameNode.isContent = isContent;
+ 
+@@ -57,16 +62,17 @@ function ThreadNode(threadSamples, options = {}) {
+   this.calls = {};
+   this._previousSampleTime = 0;
+ 
+   for (let sample of threadSamples) {
+     this.insert(sample, options);
+   }
+ }
+ 
++
+ ThreadNode.prototype = {
+   /**
+    * Adds function calls in the tree from a sample's frames.
+    *
+    * @param object sample
+    *        The { frames, time } sample, containing an array of frames and
+    *        the time the sample was taken. This sample is assumed to be older
+    *        than the most recently inserted one.
+@@ -86,17 +92,17 @@ ThreadNode.prototype = {
+     }
+ 
+     let sampleFrames = sample.frames;
+ 
+     // Filter out platform frames if only content-related function calls
+     // should be taken into consideration.
+     if (options.contentOnly) {
+       // The (root) node is not considered a content function, it'll be removed.
+-      sampleFrames = sampleFrames.filter(isContent);
++      sampleFrames = filterPlatformData(sampleFrames, options);
+     } else {
+       // Remove the (root) node manually.
+       sampleFrames = sampleFrames.slice(1);
+     }
+     // If no frames remain after filtering, then this is a leaf node, no need
+     // to continue.
+     if (!sampleFrames.length) {
+       return;
+@@ -137,27 +143,32 @@ ThreadNode.prototype = {
+  * @param number line
+  *        The line number inside the source containing this function call.
+  * @param number column
+  *        The column number inside the source containing this function call.
+  * @param number category
+  *        The category type of this function call ("js", "graphics" etc.).
+  * @param number allocations
+  *        The number of memory allocations performed in this frame.
++ * @param boolean generalize
++ *        Whether or not this (platform only) frame should appear "generalized",
++ *        like just displaying the category name ("GC", "Gecko"), rather than
++ *        a full platform-path, unnecessary for most web developers.
+  */
+-function FrameNode({ location, line, column, category, allocations }) {
++function FrameNode({ location, line, column, category, allocations, generalize }) {
+   this.location = location;
+   this.line = line;
+   this.column = column;
+   this.category = category;
+   this.allocations = allocations || 0;
+   this.sampleTimes = [];
+   this.samples = 0;
+   this.duration = 0;
+   this.calls = {};
++  this.generalize = generalize;
+ }
+ 
+ FrameNode.prototype = {
+   /**
+    * Adds function calls in the tree from a sample's frames. For example, given
+    * the the frames below (which would account for three calls to `insert` on
+    * the root frame), the following tree structure is created:
+    *
+@@ -175,18 +186,21 @@ FrameNode.prototype = {
+    * @param number duration
+    *        The amount of time spent executing all functions on the stack.
+    */
+   insert: function(frames, index, time, duration, _store = this.calls) {
+     let frame = frames[index];
+     if (!frame) {
+       return;
+     }
+-    let location = frame.location;
+-    let child = _store[location] || (_store[location] = new FrameNode(frame));
++    // If platform data is generalized, use the category (GC, Graphics, etc)
++    // to group together frames so they're displayed only once, since we don't
++    // need the location anyway.
++    let key = frame.generalize ? frame.category : frame.location;
++    let child = _store[key] || (_store[key] = new FrameNode(frame));
+     child.sampleTimes.push({ start: time, end: time + duration });
+     child.samples++;
+     child.duration += duration;
+     child.insert(frames, ++index, time, duration);
+   },
+ 
+   /**
+    * Parses the raw location of this function call to retrieve the actual
+@@ -234,17 +248,18 @@ FrameNode.prototype = {
+       nodeType: "Frame",
+       functionName: functionName,
+       fileName: fileName,
+       hostName: hostName,
+       url: url,
+       line: line,
+       column: column,
+       categoryData: categoryData,
+-      isContent: !!isContent(this)
++      isContent: !!isContent(this),
++      generalize: this.generalize
+     };
+   }
+ };
+ 
+ /**
+  * Checks if the specified function represents a chrome or content frame.
+  *
+  * @param object frame
+@@ -274,8 +289,52 @@ function nsIURL(url) {
+     // The passed url string is invalid.
+   }
+   gNSURLStore.set(url, uri);
+   return uri;
+ }
+ 
+ // The cache used in the `nsIURL` function.
+ let gNSURLStore = new Map();
++
++/**
++ * This filters out platform data frames in a sample. With latest performance
++ * tool in Fx40, a new option, `generalizePlatformData` can be added to still
++ * filter out platform frames, except for leaves. We do this because of two
++ * observations:
++ *
++ * 1. The leaf is where time is _actually_ being spent, so we _need_ to show it
++ * to developers in some way to give them accurate profiling data. We decide to
++ * split the platform into various category buckets and just show time spent in
++ * each bucket.
++ *
++ * 2. The calls leading to the leaf _aren't_ where we are spending time, but
++ * _do_ give the developer context for how they got to the leaf where they _are_
++ * spending time. For non-platform hackers, the non-leaf platform frames don't
++ * give any meaningful context, and so we can safely filter them out.
++ *
++ * Example transformations:
++ * Before: PlatformA -> PlatformB -> ContentA -> ContentB
++ * After:  ContentA -> ContentB
++ *
++ * Before: PlatformA -> ContentA -> PlatformB -> PlatformC
++ * After:  ContentA -> Category(PlatformC)
++ */
++function filterPlatformData (frames, { generalizePlatformData }) {
++  let result = [];
++  let last = frames.length - 1;
++  let frame;
++
++  for (let i = 0; i < frames.length; i++) {
++    frame = frames[i];
++    if (isContent(frame)) {
++      result.push(frame);
++    } else if (last === i && generalizePlatformData) {
++      // Extend here so we're not destructively editing
++      // the original profiler data. Set generalize `true`,
++      // and ensure we have a category set by default, because that's how
++      // the generalized frame nodes are organized.
++      result.push(extend({ generalize: true, category: CATEGORY_OTHER }, frame));
++    }
++  }
++
++  return result;
++}
+diff --git a/browser/devtools/shared/profiler/tree-view.js b/browser/devtools/shared/profiler/tree-view.js
+index 16e45b1..2730a9c 100644
+--- a/browser/devtools/shared/profiler/tree-view.js
++++ b/browser/devtools/shared/profiler/tree-view.js
+@@ -300,21 +300,27 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   },
+   _createFunctionCell: function(arrowNode, frameInfo, frameLevel) {
+     let cell = this.document.createElement("hbox");
+     cell.className = "call-tree-cell";
+     cell.style.MozMarginStart = (frameLevel * CALL_TREE_INDENTATION) + "px";
+     cell.setAttribute("type", "function");
+     cell.appendChild(arrowNode);
+ 
++    if (frameInfo.generalize) {
++      cell.classList.add("call-tree-generalized");
++    }
++
+     let nameNode = this.document.createElement("label");
+     nameNode.className = "plain call-tree-name";
+     nameNode.setAttribute("flex", "1");
+     nameNode.setAttribute("crop", "end");
+-    nameNode.setAttribute("value", frameInfo.functionName || "");
++    nameNode.setAttribute("value", frameInfo.generalize ?
++                                   frameInfo.categoryData.label :
++                                   frameInfo.functionName || "");
+     cell.appendChild(nameNode);
+ 
+     let urlNode = this.document.createElement("label");
+     urlNode.className = "plain call-tree-url";
+     urlNode.setAttribute("flex", "1");
+     urlNode.setAttribute("crop", "end");
+     urlNode.setAttribute("value", frameInfo.fileName || "");
+     urlNode.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + frameInfo.url);
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 7bff45b..b86623d 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -255,16 +255,21 @@
+ .call-tree-name[value=""],
+ .call-tree-url[value=""],
+ .call-tree-line[value=""],
+ .call-tree-column[value=""],
+ .call-tree-host[value=""] {
+   display: none;
+ }
+ 
++.call-tree-generalized label:not(.call-tree-name),
++.call-tree-generalized button {
++  display: none;
++}
++
+ .call-tree-zoom {
+   -moz-appearance: none;
+   background-color: transparent;
+   background-position: center;
+   background-repeat: no-repeat;
+   background-size: 11px;
+   min-width: 11px;
+   -moz-margin-start: 8px !important;
+-- 
+2.2.1
+

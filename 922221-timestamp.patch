@@ -1,12 +1,47 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Wed, 18 Mar 2015 10:53:30 -0700
-Subject: Bug 899753 - Implement console.timeStamp() to emit TimelineMarkers. r=tromey
+Date: Fri, 20 Mar 2015 10:28:19 -0700
+Subject: Bug 922221 - Implement console.timeStamp(label) to create and emit ProfileTimelineMarkers. r=khuey
 
+diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
+index 5c85db3..deb2ae7 100644
+--- a/docshell/base/nsDocShell.cpp
++++ b/docshell/base/nsDocShell.cpp
+@@ -2969,16 +2969,30 @@ nsDocShell::PopProfileTimelineMarkers(
+ 
+     bool hasSeenPaintedLayer = false;
+     bool isPaint = strcmp(startMarkerName, "Paint") == 0;
+ 
+     // If we are processing a Paint marker, we append information from
+     // all the embedded Layer markers to this array.
+     dom::Sequence<dom::ProfileTimelineLayerRect> layerRectangles;
+ 
++    // Other than Paint markers, if this marker is a TRACING_EVENT,
++    // there is no corresponding END, as this marker contains only a timestamp,
++    // not a duration.
++    if (!isPaint && startPayload->GetMetaData() == TRACING_EVENT) {
++      mozilla::dom::ProfileTimelineMarker* marker =
++        profileTimelineMarkers.AppendElement();
++
++      marker->mName = NS_ConvertUTF8toUTF16(startPayload->GetName());
++      marker->mStart = startPayload->GetTime();
++      marker->mEnd = startPayload->GetTime();
++      startPayload->AddDetails(*marker);
++      continue;
++    }
++
+     if (startPayload->GetMetaData() == TRACING_INTERVAL_START) {
+       bool hasSeenEnd = false;
+ 
+       // DOM events can be nested, so we must take care when searching
+       // for the matching end.  It doesn't hurt to apply this logic to
+       // all event types.
+       uint32_t markerDepth = 0;
+ 
 diff --git a/docshell/test/browser/browser_timelineMarkers-frame-02.js b/docshell/test/browser/browser_timelineMarkers-frame-02.js
-index 82039c6..fb5e972 100644
+index 82039c6..ac651e5 100644
 --- a/docshell/test/browser/browser_timelineMarkers-frame-02.js
 +++ b/docshell/test/browser/browser_timelineMarkers-frame-02.js
-@@ -85,11 +85,33 @@ let TESTS = [{
+@@ -85,11 +85,38 @@ let TESTS = [{
    },
    check: function(markers) {
      is(markers.length, 2, "Got 2 markers");
@@ -22,26 +57,31 @@ index 82039c6..fb5e972 100644
 +    content.console.timeStamp("rock");
 +    let markers = docShell.popProfileTimelineMarkers();
 +    is(markers.length, 1, "Got one marker");
-+    is(markers[0].name, "Timestamp", "Got Timestamp marker");
++    is(markers[0].name, "TimeStamp", "Got Timestamp marker");
 +    is(markers[0].causeName, "rock", "Got Timestamp label value");
 +    content.console.timeStamp("paper");
 +    content.console.timeStamp("scissors");
 +    content.console.timeStamp();
++    content.console.timeStamp(undefined);
 +  },
 +  check: function (markers) {
-+    is(markers.length, 3, "Got 3 markers");
-+    is(markers[0].name, "Timestamp", "Got Timestamp marker");
++    is(markers.length, 4, "Got 4 markers");
++    is(markers[0].name, "TimeStamp", "Got Timestamp marker");
 +    is(markers[0].causeName, "paper", "Got Timestamp label value");
-+    is(markers[1].name, "Timestamp", "Got Timestamp marker");
++    is(markers[1].name, "TimeStamp", "Got Timestamp marker");
 +    is(markers[1].causeName, "scissors", "Got Timestamp label value");
-+    is(markers[2].name, "Timestamp", "Got empty Timestamp marker");
++    is(markers[2].name, "TimeStamp", "Got empty Timestamp marker when no argument given");
 +    is(markers[2].causeName, void 0, "Got empty Timestamp label value");
++    is(markers[3].name, "TimeStamp", "Got empty Timestamp marker when argument is undefined");
++    is(markers[3].causeName, void 0, "Got empty Timestamp label value");
++    markers.forEach(m => is(m.end, m.start,
++      "All Timestamp markers should have identical start/end times"));
 +  }
  }];
  
  timelineContentTest(TESTS);
 diff --git a/dom/base/Console.cpp b/dom/base/Console.cpp
-index c581621..d26d4b5 100644
+index 2d0e608..c5b7494 100644
 --- a/dom/base/Console.cpp
 +++ b/dom/base/Console.cpp
 @@ -778,16 +778,29 @@ Console::TimeEnd(JSContext* aCx, const JS::Handle<JS::Value> aTime)
@@ -58,7 +98,7 @@ index c581621..d26d4b5 100644
 +  Sequence<JS::Value> data;
 +  SequenceRooter<JS::Value> rooter(aCx, &data);
 +
-+  if (!aData.isUndefined()) {
++  if (aData.isString()) {
 +    data.AppendElement(aData);
 +  }
 +
@@ -74,7 +114,7 @@ index c581621..d26d4b5 100644
  void
  Console::ProfileEnd(JSContext* aCx, const Sequence<JS::Value>& aData)
  {
-@@ -948,16 +961,34 @@ public:
+@@ -948,16 +961,37 @@ public:
      if (GetMetaData() == TRACING_INTERVAL_START) {
        aMarker.mCauseName.Construct(GetCause());
      } else {
@@ -89,15 +129,18 @@ index c581621..d26d4b5 100644
 +  TimestampTimelineMarker(nsDocShell* aDocShell,
 +                          TracingMetadata aMetaData,
 +                          const nsAString& aCause)
-+    : TimelineMarker(aDocShell, "Timestamp", aMetaData, aCause)
++    : TimelineMarker(aDocShell, "TimeStamp", aMetaData, aCause)
 +  {
++    CaptureStack();
++    MOZ_ASSERT(aMetaData == TRACING_EVENT);
 +  }
 +
 +  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) MOZ_OVERRIDE
 +  {
-+    if (GetMetaData() == TRACING_INTERVAL_START) {
++    if (!GetCause().IsEmpty()) {
 +      aMarker.mCauseName.Construct(GetCause());
 +    }
++    aMarker.mEndStack = GetStack();
 +  }
 +};
 +
@@ -109,7 +152,7 @@ index c581621..d26d4b5 100644
  {
    nsAutoPtr<ConsoleCallData> callData(new ConsoleCallData());
  
-@@ -1023,17 +1054,17 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
+@@ -1023,17 +1057,19 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
      callData->mReifiedStack.emplace();
      nsresult rv = ReifyStack(stack, *callData->mReifiedStack);
      if (NS_WARN_IF(NS_FAILED(rv))) {
@@ -119,7 +162,9 @@ index c581621..d26d4b5 100644
  
    // Monotonic timer for 'time' and 'timeEnd'
 -  if ((aMethodName == MethodTime || aMethodName == MethodTimeEnd)) {
-+  if ((aMethodName == MethodTime || aMethodName == MethodTimeEnd || aMethodName == MethodTimeStamp)) {
++  if (aMethodName == MethodTime ||
++      aMethodName == MethodTimeEnd ||
++      aMethodName == MethodTimeStamp) {
      if (mWindow) {
        nsGlobalWindow *win = static_cast<nsGlobalWindow*>(mWindow.get());
        MOZ_ASSERT(win);
@@ -128,7 +173,7 @@ index c581621..d26d4b5 100644
        if (!performance) {
          return;
        }
-@@ -1042,17 +1073,35 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
+@@ -1042,17 +1078,33 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
  
        // 'time' and 'timeEnd' are displayed in the devtools timeline if active.
        bool isTimelineRecording = false;
@@ -138,24 +183,22 @@ index c581621..d26d4b5 100644
        }
  
 -      if (isTimelineRecording && aData.Length() == 1) {
-+      // 'timeStamp' recordings do not need an argument
++      // 'timeStamp' recordings do not need an argument; use empty string
++      // if no arguments passed in
 +      if (isTimelineRecording && aMethodName == MethodTimeStamp) {
-+        if (aData.Length() == 0) {
-+          docShell->AddProfileTimelineMarker("Timestamp", TRACING_INTERVAL_START);
-+        } else {
-+          JS::Rooted<JS::Value> value(aCx, aData[0]);
-+          JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, value));
-+          if (jsString) {
-+            nsAutoJSString key;
-+            if (key.init(aCx, jsString)) {
-+              mozilla::UniquePtr<TimelineMarker> marker =
-+                MakeUnique<TimestampTimelineMarker>(docShell, TRACING_INTERVAL_START, key);
-+              docShell->AddProfileTimelineMarker(marker);
-+            }
-+          }
++        JS::Rooted<JS::Value> value(aCx, aData.Length() == 0 ?
++                                    JS_GetEmptyStringValue(aCx) : aData[0]);
++        JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, value));
++        nsAutoJSString key;
++        if (jsString) {
++          key.init(aCx, jsString);
 +        }
-+        docShell->AddProfileTimelineMarker("Timestamp", TRACING_INTERVAL_END);
++
++        mozilla::UniquePtr<TimelineMarker> marker =
++          MakeUnique<TimestampTimelineMarker>(docShell, TRACING_EVENT, key);
++        docShell->AddProfileTimelineMarker(marker);
 +      }
++      // For `console.time(foo)` and `console.timeEnd(foo)`
 +      else if (isTimelineRecording && aData.Length() == 1) {
          JS::Rooted<JS::Value> value(aCx, aData[0]);
          JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, value));
@@ -208,7 +251,7 @@ index bc09679..9eecabc 100644
           const Sequence<JS::Value>& aData);
  
 diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
-index 845e1c8..d43e15e 100644
+index f5515e4..8dd2097 100644
 --- a/dom/bindings/Bindings.conf
 +++ b/dom/bindings/Bindings.conf
 @@ -257,17 +257,17 @@ DOMInterfaces = {
@@ -382,7 +425,7 @@ index 626860c..4e7d757 100644
    </body>
  </html>
 diff --git a/dom/webidl/Console.webidl b/dom/webidl/Console.webidl
-index 2eb10aa..ddbc246 100644
+index 02342e3..abce15d 100644
 --- a/dom/webidl/Console.webidl
 +++ b/dom/webidl/Console.webidl
 @@ -16,16 +16,17 @@ interface Console {
@@ -418,10 +461,68 @@ index 2eb10aa..ddbc246 100644
  
  // This is used to propagate console events to the observers.
  dictionary ConsoleEvent {
-   (unsigned long or DOMString) ID;
-   (unsigned long or DOMString) innerID;
+   (unsigned long long or DOMString) ID;
+   (unsigned long long or DOMString) innerID;
    DOMString level = "";
    DOMString filename = "";
+diff --git a/dom/webidl/ProfileTimelineMarker.webidl b/dom/webidl/ProfileTimelineMarker.webidl
+index bfa7f01..49aa6f8 100644
+--- a/dom/webidl/ProfileTimelineMarker.webidl
++++ b/dom/webidl/ProfileTimelineMarker.webidl
+@@ -11,17 +11,17 @@ dictionary ProfileTimelineLayerRect {
+   long height = 0;
+ };
+ 
+ dictionary ProfileTimelineMarker {
+   DOMString name = "";
+   DOMHighResTimeStamp start = 0;
+   DOMHighResTimeStamp end = 0;
+   object? stack = null;
+-  /* For ConsoleTime markers.  */
++  /* For ConsoleTime and Timestamp markers.  */
+   DOMString causeName;
+   object? endStack = null;
+   /* For DOMEvent markers.  */
+   DOMString type;
+   unsigned short eventPhase;
+   /* For Paint markers.  */
+   sequence<ProfileTimelineLayerRect> rectangles;
+ };
+diff --git a/dom/workers/test/console_worker.js b/dom/workers/test/console_worker.js
+index 7f4b6a5..6b5f9d8 100644
+--- a/dom/workers/test/console_worker.js
++++ b/dom/workers/test/console_worker.js
+@@ -46,24 +46,30 @@ onmessage = function(event) {
+   function startTimer(timer) {
+     console.time(timer);
+   }
+ 
+   function stopTimer(timer) {
+     console.timeEnd(timer);
+   }
+ 
++  function timeStamp(label) {
++    console.timeStamp(label);
++  }
++
+   function testGroups() {
+     console.groupCollapsed("a", "group");
+     console.group("b", "group");
+     console.groupEnd("b", "group");
+   }
+ 
+   foobar585956a('omg');
+   foobar646025('omg');
++  timeStamp();
++  timeStamp('foo');
+   testGroups();
+   startTimer('foo');
+   setTimeout(function() {
+     stopTimer('foo');
+     nextSteps(event);
+   }, 10);
+ }
+ 
 -- 
 2.2.1
 
