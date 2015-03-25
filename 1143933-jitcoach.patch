@@ -1,0 +1,1997 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 25 Mar 2015 10:08:40 -0700
+Subject: Bug 1143933 - Expose raw JIT optimization information in performance front end. r=vp,shu
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index de2e2d2..cdfbf90 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1442,16 +1442,17 @@ pref("devtools.performance.memory.max-log-length", 2147483647); // Math.pow(2,31
+ pref("devtools.performance.timeline.hidden-markers", "[]");
+ pref("devtools.performance.ui.invert-call-tree", true);
+ pref("devtools.performance.ui.invert-flame-graph", false);
+ pref("devtools.performance.ui.flatten-tree-recursion", true);
+ pref("devtools.performance.ui.show-platform-data", false);
+ pref("devtools.performance.ui.show-idle-blocks", true);
+ pref("devtools.performance.ui.enable-memory", false);
+ pref("devtools.performance.ui.enable-framerate", true);
++pref("devtools.performance.ui.show-jit-optimizations", false);
+ 
+ // The default cache UI setting
+ pref("devtools.cache.disabled", false);
+ 
+ // Enable the Network Monitor
+ pref("devtools.netmonitor.enabled", true);
+ 
+ // The default Network Monitor UI settings
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 53c4d11..79744ea 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -97,16 +97,17 @@ browser.jar:
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/details-subview.js      (performance/views/details-abstract-subview.js)
+     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
+     content/browser/devtools/performance/views/details-js-call-tree.js      (performance/views/details-js-call-tree.js)
+     content/browser/devtools/performance/views/details-js-flamegraph.js     (performance/views/details-js-flamegraph.js)
+     content/browser/devtools/performance/views/details-memory-call-tree.js  (performance/views/details-memory-call-tree.js)
+     content/browser/devtools/performance/views/details-memory-flamegraph.js (performance/views/details-memory-flamegraph.js)
+     content/browser/devtools/performance/views/recordings.js           (performance/views/recordings.js)
++    content/browser/devtools/performance/views/jit-optimizations.js    (performance/views/jit-optimizations.js)
+     content/browser/devtools/responsivedesign/resize-commands.js       (responsivedesign/resize-commands.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+     content/browser/devtools/commandline/commands-index.js             (commandline/commands-index.js)
+     content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+     content/browser/devtools/framework/toolbox-options.js              (framework/toolbox-options.js)
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index b9dcf5d..10da0ab9 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -12,16 +12,18 @@ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+ 
+ devtools.lazyRequireGetter(this, "Services");
+ devtools.lazyRequireGetter(this, "promise");
+ devtools.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ devtools.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ 
++devtools.lazyRequireGetter(this, "TreeWidget",
++  "devtools/shared/widgets/TreeWidget", true);
+ devtools.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/shared/timeline/global", true);
+ devtools.lazyRequireGetter(this, "L10N",
+   "devtools/shared/profiler/global", true);
+ devtools.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/performance/recording-utils", true);
+ devtools.lazyRequireGetter(this, "RecordingModel",
+   "devtools/performance/recording-model", true);
+@@ -34,16 +36,18 @@ devtools.lazyRequireGetter(this, "Waterfall",
+ devtools.lazyRequireGetter(this, "MarkerDetails",
+   "devtools/shared/timeline/marker-details", true);
+ devtools.lazyRequireGetter(this, "CallView",
+   "devtools/shared/profiler/tree-view", true);
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/shared/profiler/tree-model", true);
+ devtools.lazyRequireGetter(this, "FrameNode",
+   "devtools/shared/profiler/tree-model", true);
++devtools.lazyRequireGetter(this, "JITOptimizations",
++  "devtools/shared/profiler/jit", true);
+ devtools.lazyRequireGetter(this, "OptionsView",
+   "devtools/shared/options-view", true);
+ 
+ devtools.lazyImporter(this, "CanvasGraphUtils",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "FlameGraphUtils",
+@@ -92,16 +96,21 @@ const EVENTS = {
+ 
+   // When a recording is imported or exported via the PerformanceController
+   RECORDING_IMPORTED: "Performance:RecordingImported",
+   RECORDING_EXPORTED: "Performance:RecordingExported",
+ 
+   // When the PerformanceController has new recording data
+   TIMELINE_DATA: "Performance:TimelineData",
+ 
++  // Emitted by the JITOptimizationsView when it renders new optimization
++  // data and clears the optimization data
++  OPTIMIZATIONS_RESET: "Performance:UI:OptimizationsReset",
++  OPTIMIZATIONS_RENDERED: "Performance:UI:OptimizationsRendered",
++
+   // Emitted by the OverviewView when more data has been rendered
+   OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
+   FRAMERATE_GRAPH_RENDERED: "Performance:UI:OverviewFramerateRendered",
+   MARKERS_GRAPH_RENDERED: "Performance:UI:OverviewMarkersRendered",
+   MEMORY_GRAPH_RENDERED: "Performance:UI:OverviewMemoryRendered",
+ 
+   // Emitted by the OverviewView when a range has been selected in the graphs
+   OVERVIEW_RANGE_SELECTED: "Performance:UI:OverviewRangeSelected",
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 41ef972..d058f877 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -22,16 +22,17 @@
+   <script type="application/javascript" src="performance/views/details-subview.js"/>
+   <script type="application/javascript" src="performance/views/details-waterfall.js"/>
+   <script type="application/javascript" src="performance/views/details-js-call-tree.js"/>
+   <script type="application/javascript" src="performance/views/details-js-flamegraph.js"/>
+   <script type="application/javascript" src="performance/views/details-memory-call-tree.js"/>
+   <script type="application/javascript" src="performance/views/details-memory-flamegraph.js"/>
+   <script type="application/javascript" src="performance/views/details.js"/>
+   <script type="application/javascript" src="performance/views/recordings.js"/>
++  <script type="application/javascript" src="performance/views/jit-optimizations.js"/>
+ 
+   <popupset id="performance-options-popupset">
+     <menupopup id="performance-filter-menupopup"/>
+     <menupopup id="performance-options-menupopup">
+       <menuitem id="option-show-platform-data"
+                 type="checkbox"
+                 data-pref="show-platform-data"
+                 label="&profilerUI.showPlatformData;"
+@@ -56,16 +57,21 @@
+                 data-pref="invert-flame-graph"
+                 label="&profilerUI.invertFlameGraph;"
+                 tooltiptext="&profilerUI.invertFlameGraph.tooltiptext;"/>
+       <menuitem id="option-flatten-tree-recursion"
+                 type="checkbox"
+                 data-pref="flatten-tree-recursion"
+                 label="&profilerUI.flattenTreeRecursion;"
+                 tooltiptext="&profilerUI.flattenTreeRecursion.tooltiptext;"/>
++      <menuitem id="option-show-jit-optimizations"
++                type="checkbox"
++                data-pref="show-jit-optimizations"
++                label="&profilerUI.showJITOptimizations;"
++                tooltiptext="&profilerUI.showJITOptimizations.tooltiptext;"/>
+     </menupopup>
+   </popupset>
+ 
+   <hbox class="theme-body" flex="1">
+     <vbox id="recordings-pane">
+       <toolbar id="recordings-toolbar"
+                class="devtools-toolbar">
+         <hbox id="recordings-controls"
+@@ -157,45 +163,59 @@
+                 <vbox id="waterfall-breakdown" flex="1" />
+                 <splitter class="devtools-side-splitter"/>
+                 <vbox id="waterfall-details"
+                       class="theme-sidebar"
+                       width="150"
+                       height="150"/>
+               </hbox>
+ 
+-              <vbox id="js-calltree-view" flex="1">
+-                <hbox class="call-tree-headers-container">
+-                  <label class="plain call-tree-header"
+-                         type="duration"
+-                         crop="end"
+-                         value="&profilerUI.table.totalDuration2;"/>
+-                  <label class="plain call-tree-header"
+-                         type="percentage"
+-                         crop="end"
+-                         value="&profilerUI.table.totalPercentage;"/>
+-                  <label class="plain call-tree-header"
+-                         type="self-duration"
+-                         crop="end"
+-                         value="&profilerUI.table.selfDuration2;"/>
+-                  <label class="plain call-tree-header"
+-                         type="self-percentage"
+-                         crop="end"
+-                         value="&profilerUI.table.selfPercentage;"/>
+-                  <label class="plain call-tree-header"
+-                         type="samples"
+-                         crop="end"
+-                         value="&profilerUI.table.samples;"/>
+-                  <label class="plain call-tree-header"
+-                         type="function"
+-                         crop="end"
+-                         value="&profilerUI.table.function;"/>
+-                </hbox>
+-                <vbox class="call-tree-cells-container" flex="1"/>
+-              </vbox>
++              <hbox id="js-calltree-view" flex="1">
++                <vbox flex="1">
++                  <hbox class="call-tree-headers-container">
++                    <label class="plain call-tree-header"
++                           type="duration"
++                           crop="end"
++                           value="&profilerUI.table.totalDuration2;"/>
++                    <label class="plain call-tree-header"
++                           type="percentage"
++                           crop="end"
++                           value="&profilerUI.table.totalPercentage;"/>
++                    <label class="plain call-tree-header"
++                           type="self-duration"
++                           crop="end"
++                           value="&profilerUI.table.selfDuration2;"/>
++                    <label class="plain call-tree-header"
++                           type="self-percentage"
++                           crop="end"
++                           value="&profilerUI.table.selfPercentage;"/>
++                    <label class="plain call-tree-header"
++                           type="samples"
++                           crop="end"
++                           value="&profilerUI.table.samples;"/>
++                    <label class="plain call-tree-header"
++                           type="function"
++                           crop="end"
++                           value="&profilerUI.table.function;"/>
++                  </hbox>
++                  <vbox class="call-tree-cells-container" flex="1"/>
++                </vbox>
++                <splitter id="js-call-tree-splitter" class="devtools-side-splitter"/>
++                <vbox id="jit-optimizations-view" hidden="true">
++                  <toolbar id="jit-optimizations-toolbar" class="devtools-toolbar">
++                    <hbox id="jit-optimizations-header">
++                      <span class="jit-optimizations-title">&profilerUI.JITOptimizationsTitle;</span>
++                      <span class="header-function-name" />
++                      <span class="header-file opt-url debugger-link" />
++                      <span class="header-line opt-line" />
++                    </hbox>
++                  </toolbar>
++                  <vbox id="jit-optimizations-raw-view"></vbox>
++                </vbox>
++              </hbox>
+ 
+               <hbox id="js-flamegraph-view" flex="1">
+               </hbox>
+ 
+               <vbox id="memory-calltree-view" flex="1">
+                 <hbox class="call-tree-headers-container">
+                   <label class="plain call-tree-header"
+                          type="allocations"
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 816cb5b..659b644 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -35,16 +35,19 @@ support-files =
+ #[browser_perf-front-profiler-01.js] bug 1077464
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+ #[browser_perf-front-profiler-06.js]
+ [browser_perf-front-01.js]
+ [browser_perf-front-02.js]
++[browser_perf-jit-view-01.js]
++[browser_perf-jit-model-01.js]
++[browser_perf-jit-model-02.js]
+ [browser_perf-jump-to-debugger-01.js]
+ [browser_perf-jump-to-debugger-02.js]
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-invert-call-tree-01.js]
+ [browser_perf-options-invert-call-tree-02.js]
+ [browser_perf-options-invert-flame-graph-01.js]
+ [browser_perf-options-invert-flame-graph-02.js]
+@@ -88,16 +91,17 @@ support-files =
+ [browser_profiler_tree-abstract-03.js]
+ [browser_profiler_tree-abstract-04.js]
+ [browser_profiler_tree-frame-node.js]
+ [browser_profiler_tree-model-01.js]
+ [browser_profiler_tree-model-02.js]
+ [browser_profiler_tree-model-03.js]
+ [browser_profiler_tree-model-04.js]
+ [browser_profiler_tree-model-05.js]
++[browser_profiler_tree-model-06.js]
+ [browser_profiler_tree-view-01.js]
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
+ [browser_timeline_blueprint.js]
+diff --git a/browser/devtools/performance/test/browser_perf-jit-model-01.js b/browser/devtools/performance/test/browser_perf-jit-model-01.js
+new file mode 100644
+index 0000000..ac6a328
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-jit-model-01.js
+@@ -0,0 +1,70 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that JITOptimizations track optimization sites and create
++ * an OptimizationSiteProfile when adding optimization sites, like from the
++ * FrameNode, and the returning of that data is as expected.
++ */
++
++function test() {
++  let { JITOptimizations } = devtools.require("devtools/shared/profiler/jit");
++
++  let jit = new JITOptimizations({}, gOpts);
++
++  jit.addOptimizationSite(1);
++  jit.addOptimizationSite(1);
++  jit.addOptimizationSite(0);
++  jit.addOptimizationSite(0);
++  jit.addOptimizationSite(1);
++  jit.addOptimizationSite(2);
++
++  let sites = jit.getOptimizationSites();
++
++  let [first, second, third] = sites;
++
++  is(first.id, 1, "Ordered by samples count, descending");
++  is(first.samples, 3, "first OptimizationSiteProfile has correct sample count");
++  is(first.data, gOpts[1], "includes OptimizationSite as reference under `data`");
++  is(second.id, 0, "Ordered by samples count, descending");
++  is(second.samples, 2, "second OptimizationSiteProfile has correct sample count");
++  is(second.data, gOpts[0], "includes OptimizationSite as reference under `data`");
++  is(third.id, 2, "Ordered by samples count, descending");
++  is(third.samples, 1, "third OptimizationSiteProfile has correct sample count");
++  is(third.data, gOpts[2], "includes OptimizationSite as reference under `data`");
++
++  finish();
++}
++
++let gOpts = [{
++  line: 12,
++  column: 2,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Inlined", strategy: "SomeGetter3" },
++  ]
++}, {
++  line: 34,
++  types: [{ mirType: "Int32", site: "Receiver" }], // use no types
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Failure3", strategy: "SomeGetter3" },
++  ]
++}, {
++  line: 78,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "GenericSuccess", strategy: "SomeGetter3" },
++  ]
++}];
+diff --git a/browser/devtools/performance/test/browser_perf-jit-model-02.js b/browser/devtools/performance/test/browser_perf-jit-model-02.js
+new file mode 100644
+index 0000000..a2de2aa
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-jit-model-02.js
+@@ -0,0 +1,77 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that JITOptimizations create OptimizationSites, and the underlying
++ * OptimizationSites methods work as expected.
++ */
++
++function test() {
++  let { JITOptimizations, OptimizationSite } = devtools.require("devtools/shared/profiler/jit");
++
++  let jit = new JITOptimizations({}, gOpts);
++
++  jit.addOptimizationSite(1);
++  jit.addOptimizationSite(1);
++  jit.addOptimizationSite(0);
++  jit.addOptimizationSite(0);
++  jit.addOptimizationSite(1);
++  jit.addOptimizationSite(2);
++
++  let sites = jit.getOptimizationSites();
++
++  let [first, second, third] = sites;
++
++  /* hasSuccessfulOutcome */
++  is(first.hasSuccessfulOutcome(), false, "optSite.hasSuccessfulOutcome() returns expected (1)");
++  is(second.hasSuccessfulOutcome(), true, "optSite.hasSuccessfulOutcome() returns expected (2)");
++  is(third.hasSuccessfulOutcome(), true, "optSite.hasSuccessfulOutcome() returns expected (3)");
++
++  /* getAttempts */
++  is(first.getAttempts().length, 2, "optSite.getAttempts() has the correct amount of attempts (1)");
++  is(second.getAttempts().length, 5, "optSite.getAttempts() has the correct amount of attempts (2)");
++  is(third.getAttempts().length, 3, "optSite.getAttempts() has the correct amount of attempts (3)");
++  
++  /* getIonTypes */
++  is(first.getIonTypes().length, 1, "optSite.getIonTypes() has the correct amount of IonTypes (1)");
++  is(second.getIonTypes().length, 2, "optSite.getIonTypes() has the correct amount of IonTypes (2)");
++  is(third.getIonTypes().length, 1, "optSite.getIonTypes() has the correct amount of IonTypes (3)");
++
++  finish();
++}
++
++let gOpts = [{
++  line: 12,
++  column: 2,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "constructor", location: "A (http://foo/bar/baz:12)" }
++  ]}, { mirType: "Int32", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Inlined", strategy: "SomeGetter3" },
++  ]
++}, {
++  line: 34,
++  types: [{ mirType: "Int32", site: "Receiver" }], // use no types
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++  ]
++}, {
++  line: 78,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "GenericSuccess", strategy: "SomeGetter3" },
++  ]
++}];
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-01.js b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+new file mode 100644
+index 0000000..8b63410
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+@@ -0,0 +1,146 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the JIT Optimizations view renders optimization data
++ * if on, and displays selected frames on focus.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let {
++    EVENTS, $, $$, window, PerformanceController, DetailsView, JITOptimizationsView, JsCallTreeView, RecordingsView
++  } = panel.panelWin;
++
++  let profilerData = { threads: [{samples: gSamples, optimizations: gOpts}] };
++
++  is(Services.prefs.getBoolPref(JIT_PREF), false, "show JIT Optimizations pref off by default");
++
++  // Make two recordings, so we have one to switch to later, as the
++  // second one will have fake sample data
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++  yield DetailsView.selectView("js-calltree");
++  is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel is hidden when pref off.");
++
++  let thread = JsCallTreeView._prepareCallTree(profilerData, { startTime: 0, endTime: 20 }, {});
++  JsCallTreeView._populateCallTree(thread, {});
++  is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel still hidden when rerendered");
++
++  Services.prefs.setBoolPref(JIT_PREF, true);
++  is($("#jit-optimizations-view").hidden, false, "JIT Optimizations should be visible when pref is on");
++
++  ok($("#jit-optimizations-view").classList.contains("empty"),
++    "JIT Optimizations view has empty message when no frames selected.");
++
++  Services.prefs.setBoolPref(JIT_PREF, false);
++
++  // Click the "A" frame
++  let rendered = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RENDERED);
++  mousedown(window, $$(".call-tree-item")[1]);
++  Services.prefs.setBoolPref(JIT_PREF, true);
++  yield rendered;
++  ok(true, "JITOptimizationsView rendered when enabling with the current frame node selected");
++
++  let id = 0;
++  ok($(`.tree-widget-container li[data-id='["${id}","${id}-types","${id}-types-0"]']`),
++    "found an ion type row");
++  is($$(`.tree-widget-container li[data-id='["${id}","${id}-attempts"]'] .tree-widget-children .tree-widget-item`).length, 3,
++    "found 3 attempts");
++  id = 1;
++  ok(!$(`.tree-widget-container li[data-id='["${id}","${id}-types","${id}-types-0"]']`),
++    "only one optimization site");
++  ok(!$("#jit-optimizations-view").classList.contains("empty"),
++    "JIT Optimizations view has no empty message.");
++  ok(!$(`.tree-widget-container .opt-icon[severity=warning]`),
++    "did not find a warning icon for no successful strategies");
++
++  // Click the "B" frame
++  rendered = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RENDERED);
++  mousedown(window, $$(".call-tree-item")[2]);
++  yield rendered;
++  ok(true, "JITOptimizationsView rendered on frame select");
++
++  ok($(`.tree-widget-container li[data-id='["${id}","${id}-types","${id}-types-0"]']`),
++    "found an ion type row");
++  is($$(`.tree-widget-container li[data-id='["${id}","${id}-attempts"]'] .tree-widget-children .tree-widget-item`).length, 3,
++    "found 3 attempts");
++  ok($(`.tree-widget-container .opt-icon[severity=warning]`),
++    "found a warning icon for no successful strategies");
++
++  // Click the "C" frame
++  let reset = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RESET);
++  mousedown(window, $$(".call-tree-item")[3]);
++  yield reset;
++  ok(true, "JITOptimizations view reset when clicking a frame with no opt data.");
++  ok($("#jit-optimizations-view").classList.contains("empty"),
++    "JIT Optimizations view has an empty message when selecting a frame without opt data.");
++
++  let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  reset = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RESET);
++  RecordingsView.selectedIndex = 0;
++  yield Promise.all([select, reset]);
++  ok(true, "JITOptimizations view correctly reset when switching recordings.");
++
++  yield teardown(panel);
++  finish();
++}
++
++let gSamples = [{
++  time: 5,
++  frames: [
++    { category: 8,  location: "(root)" },
++    { category: 8,  location: "A (http://foo/bar/baz:12)", optsIndex: 0 },
++    { category: 16, location: "B (http://foo/bar/baz:34)", optsIndex: 1 },
++    { category: 32, location: "C (http://foo/bar/baz:56)" }
++  ]
++}, {
++  time: 5 + 1,
++  frames: [
++    { category: 8,  location: "(root)" },
++    { category: 8,  location: "A (http://foo/bar/baz:12)" },
++    { category: 16, location: "B (http://foo/bar/baz:34)" },
++    { category: 64, location: "D (http://foo/bar/baz:78)" }
++  ]
++}, {
++  time: 5 + 1 + 2,
++  frames: [
++    { category: 8,  location: "(root)" },
++    { category: 8,  location: "A (http://foo/bar/baz:12)", optsIndex: 0 },
++    { category: 16, location: "B (http://foo/bar/baz:34)" },
++    { category: 64, location: "D (http://foo/bar/baz:78)" }
++  ]
++}, {
++  time: 5 + 1 + 2 + 7,
++  frames: [
++    { category: 8,   location: "(root)" },
++    { category: 8,   location: "A (http://foo/bar/baz:12)", optsIndex: 0 },
++    { category: 128, location: "E (http://foo/bar/baz:90)" },
++    { category: 256, location: "F (http://foo/bar/baz:99)" }
++  ]
++}];
++
++// Array of OptimizationSites
++let gOpts = [{
++  line: 12,
++  column: 2,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Inlined", strategy: "SomeGetter3" },
++  ]
++}, {
++  line: 34,
++  types: [{ mirType: "Int32", site: "Receiver" }], // use no types
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Failure3", strategy: "SomeGetter3" },
++  ]
++}];
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-model-06.js b/browser/devtools/performance/test/browser_profiler_tree-model-06.js
+new file mode 100644
+index 0000000..3a618e4
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_profiler_tree-model-06.js
+@@ -0,0 +1,103 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that when constructing FrameNodes, if optimization data is available,
++ * the FrameNodes have the correct optimization data after iterating over samples.
++ */
++
++let time = 1;
++
++let samples = [{
++  time: time++,
++  frames: [
++    { location: "(root)" },
++    { location: "A", optsIndex: 0 },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: time++,
++  frames: [
++    { location: "(root)" },
++    { location: "A", optsIndex: 0 },
++    { location: "D" },
++    { location: "C" }
++  ]
++}, {
++  time: time++,
++  frames: [
++    { location: "(root)" },
++    { location: "A", optsIndex: 1 },
++    { location: "E", optsIndex: 2 },
++    { location: "C" }
++  ],
++}, {
++  time: time++,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "F" }
++  ]
++}];
++
++// Array of OptimizationSites
++let gOpts = [{
++  line: 12,
++  column: 2,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Inlined", strategy: "SomeGetter3" },
++  ]
++}, {
++  line: 34,
++  types: [{ mirType: "Int32", site: "Receiver" }], // use no types
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Failure3", strategy: "SomeGetter3" },
++  ]
++}, {
++  line: 78,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "GenericSuccess", strategy: "SomeGetter3" },
++  ]
++}];
++
++function test() {
++  let { ThreadNode } = devtools.require("devtools/shared/profiler/tree-model");
++
++  let root = new ThreadNode(samples, { optimizations: gOpts });
++
++  let A = root.calls.A;
++
++  let opts = A.getOptimizations();
++  let sites = opts.getOptimizationSites();
++  is(sites.length, 2, "Frame A has two optimization sites.");
++  is(sites[0].samples, 2, "first opt site has 2 samples.");
++  is(sites[1].samples, 1, "second opt site has 1 sample.");
++
++  let E = A.calls.E;
++  opts = E.getOptimizations();
++  sites = opts.getOptimizationSites();
++  is(sites.length, 1, "Frame E has one optimization site.");
++  is(sites[0].samples, 1, "first opt site has 1 samples.");
++
++  let D = A.calls.D;
++  ok(!D.getOptimizations(),
++    "frames that do not have any opts data do not have JITOptimizations instances.");
++
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 29f8fc1..3075954 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -29,30 +29,32 @@ const MEMORY_MAX_LOG_LEN_PREF = "devtools.performance.memory.max-log-length";
+ const FRAMERATE_PREF = "devtools.performance.ui.enable-framerate";
+ const MEMORY_PREF = "devtools.performance.ui.enable-memory";
+ 
+ const PLATFORM_DATA_PREF = "devtools.performance.ui.show-platform-data";
+ const IDLE_PREF = "devtools.performance.ui.show-idle-blocks";
+ const INVERT_PREF = "devtools.performance.ui.invert-call-tree";
+ const INVERT_FLAME_PREF = "devtools.performance.ui.invert-flame-graph";
+ const FLATTEN_PREF = "devtools.performance.ui.flatten-tree-recursion";
++const JIT_PREF = "devtools.performance.ui.show-jit-optimizations";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ gDevTools.testing = true;
+ 
+ let DEFAULT_PREFS = [
+   "devtools.debugger.log",
+   "devtools.performance.ui.invert-call-tree",
+   "devtools.performance.ui.flatten-tree-recursion",
+   "devtools.performance.ui.show-platform-data",
+   "devtools.performance.ui.show-idle-blocks",
+   "devtools.performance.ui.enable-memory",
+   "devtools.performance.ui.enable-framerate",
++  "devtools.performance.ui.show-jit-optimizations",
+ ].reduce((prefs, pref) => {
+   prefs[pref] = Services.prefs.getBoolPref(pref);
+   return prefs;
+ }, {});
+ 
+ // Enable the new performance panel for all tests.
+ Services.prefs.setBoolPref("devtools.performance.enabled", true);
+ // Enable logging for all the tests. Both the debugger server and frontend will
+diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
+index eab0ccc..16c2f6e 100644
+--- a/browser/devtools/performance/views/details-js-call-tree.js
++++ b/browser/devtools/performance/views/details-js-call-tree.js
+@@ -13,39 +13,47 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+     "show-platform-data"
+   ],
+ 
+   rangeChangeDebounceTime: 50, // ms
+ 
+   /**
+    * Sets up the view with event binding.
+    */
+-  initialize: function () {
++  initialize: Task.async(function*() {
+     DetailsSubview.initialize.call(this);
+ 
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+     this._onLink = this._onLink.bind(this);
+-  },
++
++    this.container = $("#js-calltree-view .call-tree-cells-container");
++
++    yield JITOptimizationsView.initialize();
++  }),
+ 
+   /**
+    * Unbinds events.
+    */
+-  destroy: function () {
++  destroy: Task.async(function *() {
++    this.container = null;
++    yield JITOptimizationsView.destroy();
+     DetailsSubview.destroy.call(this);
+-  },
++  }),
+ 
+   /**
+    * Method for handling all the set up for rendering a new call tree.
+    *
+    * @param object interval [optional]
+    *        The { startTime, endTime }, in milliseconds.
+-   * @param object options [optional]
+-   *        Additional options for new the call tree.
+    */
+-  render: function (interval={}, options={}) {
++  render: function (interval={}) {
++    let options = {
++      contentOnly: !PerformanceController.getOption("show-platform-data"),
++      invertTree: PerformanceController.getOption("invert-call-tree")
++    };
+     let recording = PerformanceController.getCurrentRecording();
+     let profile = recording.getProfile();
+     let threadNode = this._prepareCallTree(profile, interval, options);
+     this._populateCallTree(threadNode, options);
+     this.emit(EVENTS.JS_CALL_TREE_RENDERED);
+   },
+ 
+   /**
+@@ -59,59 +67,61 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+   },
+ 
+   /**
+    * Called when the recording is stopped and prepares data to
+    * populate the call tree.
+    */
+   _prepareCallTree: function (profile, { startTime, endTime }, options) {
+     let threadSamples = profile.threads[0].samples;
+-    let contentOnly = !PerformanceController.getOption("show-platform-data");
+-    let invertTree = PerformanceController.getOption("invert-call-tree");
++    let optimizations = profile.threads[0].optimizations;
++    let { contentOnly, invertTree } = options;
+ 
+     let threadNode = new ThreadNode(threadSamples,
+-      { startTime, endTime, contentOnly, invertTree });
+-
+-    // If we have an empty profile (no samples), then don't invert the tree, as
+-    // it would hide the root node and a completely blank call tree space can be
+-    // mis-interpreted as an error.
+-    options.inverted = invertTree && threadNode.samples > 0;
++      { startTime, endTime, contentOnly, invertTree, optimizations });
+ 
+     return threadNode;
+   },
+ 
+   /**
+    * Renders the call tree.
+    */
+   _populateCallTree: function (frameNode, options={}) {
++    // If we have an empty profile (no samples), then don't invert the tree, as
++    // it would hide the root node and a completely blank call tree space can be
++    // mis-interpreted as an error.
++    let inverted = options.inverted && frameNode.samples > 0;
++
+     let root = new CallView({
+       frame: frameNode,
+-      inverted: options.inverted,
++      inverted: inverted,
+       // Root nodes are hidden in inverted call trees.
+-      hidden: options.inverted,
++      hidden: inverted,
+       // Call trees should only auto-expand when not inverted. Passing undefined
+       // will default to the CALL_TREE_AUTO_EXPAND depth.
+-      autoExpandDepth: options.inverted ? 0 : undefined,
++      autoExpandDepth: inverted ? 0 : undefined
+     });
+ 
+     // Bind events.
+     root.on("link", this._onLink);
+ 
+-    // Pipe "focus" events to the view, mostly for tests
+-    root.on("focus", () => this.emit("focus"));
++    // Pipe "focus" events to the view, used by
++    // tests and JITOptimizationsView.
++    root.on("focus", (_, node) => this.emit("focus", node));
+ 
+     // Clear out other call trees.
+-    let container = $("#js-calltree-view > .call-tree-cells-container");
+-    container.innerHTML = "";
+-    root.attachTo(container);
++    this.container.innerHTML = "";
++    root.attachTo(this.container);
+ 
+     // When platform data isn't shown, hide the cateogry labels, since they're
+     // only available for C++ frames.
+-    let contentOnly = !PerformanceController.getOption("show-platform-data");
+-    root.toggleCategories(!contentOnly);
++    root.toggleCategories(options.contentOnly);
++
++    // Return the CallView for tests
++    return root;
+   },
+ 
+   toString: () => "[object JsCallTreeView]"
+ });
+ 
+ /**
+  * Opens/selects the debugger in this toolbox and jumps to the specified
+  * file name and line number.
+diff --git a/browser/devtools/performance/views/jit-optimizations.js b/browser/devtools/performance/views/jit-optimizations.js
+new file mode 100644
+index 0000000..847ee17
+--- /dev/null
++++ b/browser/devtools/performance/views/jit-optimizations.js
+@@ -0,0 +1,390 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const URL_LABEL_TOOLTIP = L10N.getStr("table.url.tooltiptext");
++const OPTIMIZATION_FAILURE = L10N.getStr("jit.optimizationFailure");
++const JIT_SAMPLES = L10N.getStr("jit.samples");
++const JIT_EMPTY_TEXT = L10N.getStr("jit.empty");
++
++/**
++ * View for rendering JIT Optimization data. The terminology and types
++ * used here can be referenced:
++ * @see browser/devtools/shared/profiler/jit.js
++ */
++
++let JITOptimizationsView = {
++
++  _currentFrame: null,
++
++  /**
++   * Initialization function called when the tool starts up.
++   */
++  initialize: function () {
++    this.reset = this.reset.bind(this);
++    this._onFocusFrame = this._onFocusFrame.bind(this);
++    this._toggleVisibility = this._toggleVisibility.bind(this);
++
++    this.el = $("#jit-optimizations-view");
++
++    this.tree = new TreeWidget($("#jit-optimizations-raw-view"), {
++      sorted: false,
++      emptyText: JIT_EMPTY_TEXT
++    });
++
++    // Start the tree by resetting.
++    this.reset();
++
++    this._toggleVisibility();
++
++    PerformanceController.on(EVENTS.RECORDING_SELECTED, this.reset);
++    PerformanceController.on(EVENTS.PREF_CHANGED, this._toggleVisibility);
++    JsCallTreeView.on("focus", this._onFocusFrame);
++  },
++
++  /**
++   * Destruction function called when the tool cleans up.
++   */
++  destroy: function () {
++    this.tree = null;
++    PerformanceController.off(EVENTS.RECORDING_SELECTED, this.reset);
++    PerformanceController.off(EVENTS.PREF_CHANGED, this._toggleVisibility);
++    JsCallTreeView.off("focus", this._onFocusFrame);
++  },
++
++  /**
++   * Takes a FrameNode, with corresponding optimization data to be displayed
++   * in the view.
++   *
++   * @param {FrameNode} frameNode
++   */
++
++  setCurrentFrame: function (frameNode) {
++    if (frameNode !== this.getCurrentFrame()) {
++      this._currentFrame = frameNode;
++    }
++  },
++
++  /**
++   * Returns the current frame node for this view.
++   *
++   * @return {?FrameNode}
++   */
++
++  getCurrentFrame: function (frameNode) {
++    return this._currentFrame;
++  },
++
++  /**
++   * Clears out data in the tree, sets to an empty state,
++   * and removes current frame.
++   */
++  reset: function () {
++    this.setCurrentFrame(null);
++    this.clear();
++    this.el.classList.add("empty");
++    this.emit(EVENTS.OPTIMIZATIONS_RESET);
++  },
++
++  /**
++   * Clears out data in the tree.
++   */
++  clear: function () {
++    this.tree.clear();
++  },
++
++  /**
++   * Helper to determine whether or not this view should be enabled.
++   */
++  isEnabled: function () {
++    return PerformanceController.getOption("show-jit-optimizations");
++  },
++
++  /**
++   * Takes a JITOptimizations object and builds a view containing all attempted
++   * optimizations for this frame. This view is very verbose and meant for those
++   * who understand JIT compilers.
++   */
++
++  render: function () {
++    let frameNode = this.getCurrentFrame();
++
++    if (!this.isEnabled()) {
++      return;
++    }
++
++    if (!frameNode) {
++      this.reset();
++      return;
++    }
++
++    let view = this.tree;
++    let frameData = frameNode.getInfo();
++    this._setHeaders(frameData);
++    this.clear();
++
++    if (!frameNode.hasOptimizations()) {
++      this.reset();
++      return;
++    }
++    this.el.classList.remove("empty");
++
++    // An array of sorted OptimizationSites.
++    let sites = frameNode.getOptimizations().getOptimizationSites();
++
++    for (let site of sites) {
++      let { id, samples, data: data } = site;
++      let { types, attempts } = data;
++      let siteNode = this._createSiteNode(frameData, site);
++
++      // Cast `id` to a string so TreeWidget doesn't think it does not exist
++      id = id + "";
++
++      view.add([{ id: id, node: siteNode }]);
++
++      // Add types -- Ion types are the parent, with
++      // the observed types as children.
++      view.add([id, { id: `${id}-types`, label: `Types (${types.length})` }]);
++      for (let i = 0; i < types.length; i++) {
++        let ionType = types[i];
++
++        let ionNode = this._createIonNode(ionType);
++        view.add([id, `${id}-types`, { id: `${id}-types-${i}`, node: ionNode }]);
++        for (let observedType of (ionType.types || [])) {
++          let node = this._createObservedTypeNode(observedType);
++          view.add([id, `${id}-types`, `${id}-types-${i}`, { node }]);
++        }
++      }
++
++      // Add attempts
++      view.add([id, { id: `${id}-attempts`, label: `Attempts (${attempts.length})` }]);
++      for (let i = attempts.length - 1; i >= 0; i--) {
++        let node = this._createAttemptNode(attempts[i]);
++        view.add([id, `${id}-attempts`, { node }]);
++      }
++    }
++
++    this.emit(EVENTS.OPTIMIZATIONS_RENDERED, this.getCurrentFrame());
++  },
++
++  /**
++   * Creates an element for insertion in the raw view for an OptimizationSite.
++   */
++
++  _createSiteNode: function (frameData, site) {
++    let node = document.createElement("span");
++    let desc = document.createElement("span");
++    let line = document.createElement("span");
++    let column = document.createElement("span");
++    let urlNode = this._createDebuggerLinkNode(frameData.url, site.data.line);
++
++    let attempts = site.getAttempts();
++    let lastStrategy = attempts[attempts.length - 1].strategy;
++
++    if (!site.hasSuccessfulOutcome()) {
++      let icon = document.createElement("span");
++      icon.setAttribute("tooltiptext", OPTIMIZATION_FAILURE);
++      icon.setAttribute("severity", "warning");
++      icon.className = "opt-icon";
++      node.appendChild(icon);
++    }
++
++    desc.textContent = `${lastStrategy} - (${site.samples} ${JIT_SAMPLES})`;
++    line.textContent = site.data.line;
++    line.className = "opt-line";
++    column.textContent = site.data.column;
++    column.className = "opt-line";
++    node.appendChild(desc);
++    node.appendChild(urlNode);
++    node.appendChild(line);
++    node.appendChild(column);
++
++    return node;
++  },
++
++  /**
++   * Creates an element for insertion in the raw view for an IonType.
++   *
++   * @see browser/devtools/shared/profiler/jit.js
++   * @param {IonType} ionType
++   * @return {Element}
++   */
++
++  _createIonNode: function (ionType) {
++    let node = document.createElement("span");
++    let icon = document.createElement("span");
++    let typeNode = document.createElement("span");
++    let siteNode = document.createElement("span");
++
++    typeNode.textContent = ionType.mirType;
++    typeNode.className = "opt-ion-type";
++    siteNode.textContent = `(${ionType.site})`;
++    siteNode.className = "opt-ion-type-site";
++    node.appendChild(typeNode);
++    node.appendChild(siteNode);
++
++    return node;
++  },
++
++  /**
++   * Creates an element for insertion in the raw view for an ObservedType.
++   *
++   * @see browser/devtools/shared/profiler/jit.js
++   * @param {ObservedType} type
++   * @return {Element}
++   */
++
++  _createObservedTypeNode: function (type) {
++    let node = document.createElement("span");
++    let typeNode = document.createElement("span");
++
++    typeNode.textContent = `${type.keyedBy}` + (type.name ? ` → ${type.name}` : "");
++    typeNode.className = "opt-type";
++    node.appendChild(typeNode);
++
++    // If we have a type and a location, try to make a
++    // link to the debugger
++    if (type.location && type.line) {
++      let urlNode = this._createDebuggerLinkNode(type.location, type.line);
++      node.appendChild(urlNode);
++    }
++    // Otherwise if we just have a location, it could just
++    // be a memory location
++    else if (type.location) {
++      let locNode = document.createElement("span");
++      locNode.textContent = `@${type.location}`;
++      locNode.className = "opt-url";
++      node.appendChild(locNode);
++    }
++
++    if (type.line) {
++      let line = document.createElement("span");
++      line.textContent = type.line;
++      line.className = "opt-line";
++      node.appendChild(line);
++    }
++    return node;
++  },
++
++  /**
++   * Creates an element for insertion in the raw view for an OptimizationAttempt.
++   *
++   * @see browser/devtools/shared/profiler/jit.js
++   * @param {OptimizationAttempt} attempt
++   * @return {Element}
++   */
++
++  _createAttemptNode: function (attempt) {
++    let node = document.createElement("span");
++    let strategyNode = document.createElement("span");
++    let outcomeNode = document.createElement("span");
++
++    strategyNode.textContent = attempt.strategy;
++    strategyNode.className = "opt-strategy";
++    outcomeNode.textContent = attempt.outcome;
++    outcomeNode.className = "opt-outcome";
++    outcomeNode.setAttribute("outcome",
++      JITOptimizations.isSuccessfulOutcome(attempt.outcome) ? "success" : "failure");
++
++    node.appendChild(strategyNode);
++    node.appendChild(outcomeNode);
++    node.className = "opt-attempt";
++    return node;
++  },
++
++  /**
++   * Creates a new element, linking it up to the debugger upon clicking.
++   * Can also optionally pass in an element to modify it rather than
++   * creating a new one.
++   *
++   * @param {String} url
++   * @param {Number} line
++   * @param {?Element} el
++   * @return {Element}
++   */
++
++  _createDebuggerLinkNode: function (url, line, el) {
++    let node = el || document.createElement("span");
++    node.className = "opt-url";
++    let fileName;
++
++    if (this._isLinkableURL(url)) {
++      fileName = url.slice(url.lastIndexOf("/") + 1);
++      node.classList.add("debugger-link");
++      node.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + url);
++      node.addEventListener("click", () => viewSourceInDebugger(url, line));
++    }
++    node.textContent = `@${fileName || url}`;
++    return node;
++  },
++
++  /**
++   * Updates the headers with the current frame's data.
++   */
++
++  _setHeaders: function (frameData) {
++    $("#jit-optimizations-header .header-function-name").textContent = frameData.functionName;
++    this._createDebuggerLinkNode(frameData.url, frameData.line, $("#jit-optimizations-header .header-file"));
++    $("#jit-optimizations-header .header-line").textContent = frameData.line;
++  },
++
++  /**
++   * Takes a string and returns a boolean indicating whether or not
++   * this is a valid url for linking to the debugger.
++   *
++   * @param {String} url
++   * @return {Boolean}
++   */
++
++  _isLinkableURL: function (url) {
++    return url && url.indexOf &&
++       (url.indexOf("http") === 0 ||
++        url.indexOf("resource://") === 0 ||
++        url.indexOf("file://") === 0);
++  },
++
++  /**
++   * Toggles the visibility of the JITOptimizationsView based on the preference
++   * devtools.performance.ui.show-jit-optimizations.
++   */
++
++  _toggleVisibility: function () {
++    let enabled = this.isEnabled();
++    this.el.hidden = !enabled;
++
++    // If view is toggled on, and there's a frame node selected,
++    // attempt to render it
++    if (enabled) {
++      this.render();
++    }
++  },
++
++  /**
++   * Called when the JSCallTreeView focuses on a frame.
++   */
++
++  _onFocusFrame: function (_, view) {
++    if (!view.frame) {
++      return;
++    }
++
++    // Only attempt to rerender if this is new -- focus is called even
++    // when the window removes focus and comes back, so this prevents
++    // repeating rendering of the same frame
++    let shouldRender = this.getCurrentFrame() !== view.frame;
++
++    // Save the frame even if the view is disabled, so we can
++    // render it if it becomes enabled
++    this.setCurrentFrame(view.frame);
++
++    if (shouldRender) {
++      this.render();
++    }
++  },
++
++  toString: () => "[object JITOptimizationsView]"
++
++};
++
++EventEmitter.decorate(JITOptimizationsView);
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index e7f2995..5756479 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -28,16 +28,17 @@ EXTRA_JS_MODULES.devtools += [
+     'widgets/SimpleListWidget.jsm',
+     'widgets/VariablesView.jsm',
+     'widgets/VariablesViewController.jsm',
+     'widgets/ViewHelpers.jsm',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared.profiler += [
+     'profiler/global.js',
++    'profiler/jit.js',
+     'profiler/tree-model.js',
+     'profiler/tree-view.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared.timeline += [
+     'timeline/global.js',
+     'timeline/marker-details.js',
+     'timeline/markers-overview.js',
+diff --git a/browser/devtools/shared/options-view.js b/browser/devtools/shared/options-view.js
+index b6d4f56..a09b091 100644
+--- a/browser/devtools/shared/options-view.js
++++ b/browser/devtools/shared/options-view.js
+@@ -15,17 +15,17 @@ const PREF_CHANGE_EVENT = "pref-changed";
+  * as the second argument in the listener, used for tests mostly.
+  */
+ const OptionsView = function (options={}) {
+   this.branchName = options.branchName;
+   this.menupopup = options.menupopup;
+   this.window = this.menupopup.ownerDocument.defaultView;
+   let { document } = this.window;
+   this.$ = document.querySelector.bind(document);
+-  this.$$ = document.querySelectorAll.bind(document);
++  this.$$ = (selector, parent=document) => parent.querySelectorAll(selector);
+   // Get the corresponding button that opens the popup by looking
+   // for an element with a `popup` attribute matching the menu's ID
+   this.button = this.$(`[popup=${this.menupopup.getAttribute("id")}]`);
+ 
+   this.prefObserver = new PrefObserver(this.branchName);
+ 
+   EventEmitter.decorate(this);
+ };
+diff --git a/browser/devtools/shared/profiler/jit.js b/browser/devtools/shared/profiler/jit.js
+new file mode 100644
+index 0000000..66bad74
+--- /dev/null
++++ b/browser/devtools/shared/profiler/jit.js
+@@ -0,0 +1,209 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++// An outcome of an OptimizationAttempt that is considered successful.
++const SUCCESSFUL_OUTCOMES = [
++  "GenericSuccess", "Inlined", "DOM", "Monomorphic", "Polymorphic"
++];
++
++/**
++ * Model representing JIT optimization sites from the profiler
++ * for a frame (represented by a FrameNode). Requires optimization data from
++ * a profile, which is an array of RawOptimizationSites.
++ *
++ * When the ThreadNode for the profile iterates over the samples' frames, a JITOptimization
++ * model is attached to each frame node, with each sample of the frame, usually with each
++ * sample containing different optimization information for the same frame (one sample may
++ * pick up optimization X on line Y in the frame, with the next sample containing optimization Z
++ * on line W in the same frame, as each frame is only function.
++ *
++ * Each RawOptimizationSite can be sampled multiple times, which multiple calls to
++ * JITOptimizations#addOptimizationSite handles. An OptimizationSite contains
++ * a record of how many times the RawOptimizationSite was sampled, as well as the unique id
++ * based off of the original profiler array, and the RawOptimizationSite itself as a reference.
++ * @see browser/devtools/shared/profiler/tree-model.js
++ *
++ *
++ * @struct RawOptimizationSite
++ * A structure describing a location in a script that was attempted to be optimized.
++ * Contains all the IonTypes observed, and the sequence of OptimizationAttempts that
++ * were attempted, and the line and column in the script. This is retrieved from the
++ * profiler after a recording, and our base data structure. Should always be referenced,
++ * and unmodified.
++ *
++ * @type {Array<IonType>} types
++ * @type {Array<OptimizationAttempt>} attempts
++ * @type {number} line
++ * @type {number} column
++ *
++ *
++ * @struct IonType
++ * IonMonkey attempts to classify each value in an optimization site by some type.
++ * Based off of the observed types for a value (like a variable that could be a
++ * string or an instance of an object), it determines what kind of type it should be classified
++ * as. Each IonType here contains an array of all ObservedTypes under `types`,
++ * the Ion type that IonMonkey decided this value should be (Int32, Object, etc.) as `mirType`,
++ * and the component of this optimization type that this value refers to -- like
++ * a "getter" optimization, `a[b]`, has site `a` (the "Receiver") and `b` (the "Index").
++ *
++ * Generally the more ObservedTypes, the more deoptimized this OptimizationSite is.
++ * There could be no ObservedTypes, in which case `types` is undefined.
++ *
++ * @type {?Array<ObservedType>} types
++ * @type {string} site
++ * @type {string} mirType
++ *
++ *
++ * @struct ObservedType
++ * When IonMonkey attempts to determine what type a value is, it checks on each sample.
++ * The ObservedType can be thought of in more of JavaScripty-terms, rather than C++.
++ * The `keyedBy` property is a high level description of the type, like "primitive",
++ * "constructor", "function", "singleton", "alloc-site" (that one is a bit more weird).
++ * If the `keyedBy` type is a function or constructor, the ObservedType should have a
++ * `name` property, referring to the function or constructor name from the JS source.
++ * If IonMonkey can determine the origin of this type (like where the constructor is defined),
++ * the ObservedType will also have `location` and `line` properties, but `location` can sometimes
++ * be non-URL strings like "self-hosted" or a memory location like "102ca7880", or no location
++ * at all, and maybe `line` is 0 or undefined.
++ *
++ * @type {string} keyedBy
++ * @type {?string} name
++ * @type {?string} location
++ * @type {?string} line
++ *
++ *
++ * @struct OptimizationAttempt
++ * Each RawOptimizationSite contains an array of OptimizationAttempts. Generally, IonMonkey
++ * goes through a series of strategies for each kind of optimization, starting from most-niche
++ * and optimized, to the less-optimized, but more general strategies -- for example, a getter
++ * opt may first try to optimize for the scenario of a getter on an `arguments` object --
++ * that will fail most of the time, as most objects are not arguments objects, but it will attempt
++ * several strategies in order until it finds a strategy that works, or fails. Even in the best
++ * scenarios, some attempts will fail (like the arguments getter example), which is OK,
++ * as long as some attempt succeeds (with the earlier attempts preferred, as those are more optimized).
++ * In an OptimizationAttempt structure, we store just the `strategy` name and `outcome` name,
++ * both from enums in js/public/TrackedOptimizationInfo.h as TRACKED_STRATEGY_LIST and
++ * TRACKED_OUTCOME_LIST, respectively. An array of successful outcome strings are above
++ * in SUCCESSFUL_OUTCOMES.
++ *
++ * @see js/public/TrackedOptimizationInfo.h
++ *
++ * @type {string} strategy
++ * @type {string} outcome
++ */
++
++
++/*
++ * A wrapper around RawOptimizationSite to record sample count and ID (referring to the index
++ * of where this is in the initially seeded optimizations data), so we don't mutate
++ * the original data from the profiler. Provides methods to access the underlying optimization
++ * data easily, so understanding the semantics of JIT data isn't necessary.
++ *
++ * @constructor
++ *
++ * @param {Array<RawOptimizationSite>} optimizations
++ * @param {number} optsIndex
++ *
++ * @type {RawOptimizationSite} data
++ * @type {number} samples
++ * @type {number} id
++ */
++
++const OptimizationSite = exports.OptimizationSite = function (optimizations, optsIndex) {
++  this.id = optsIndex;
++  this.data = optimizations[optsIndex];
++  this.samples = 0;
++};
++
++/**
++ * Returns a boolean indicating if the passed in OptimizationSite
++ * has a "good" outcome at the end of its attempted strategies.
++ *
++ * @return {boolean}
++ */
++
++OptimizationSite.prototype.hasSuccessfulOutcome = function () {
++  let attempts = this.getAttempts();
++  let lastOutcome = attempts[attempts.length - 1].outcome;
++  return OptimizationSite.isSuccessfulOutcome(lastOutcome);
++};
++
++/**
++ * Returns the last attempted OptimizationAttempt for this OptimizationSite.
++ *
++ * @return {Array<OptimizationAttempt>}
++ */
++
++OptimizationSite.prototype.getAttempts = function () {
++  return this.data.attempts;
++};
++
++/**
++ * Returns all IonTypes in this OptimizationSite.
++ *
++ * @return {Array<IonType>}
++ */
++
++OptimizationSite.prototype.getIonTypes = function () {
++  return this.data.types;
++};
++
++
++/**
++ * Constructor for JITOptimizations. A collection of OptimizationSites for a frame.
++ *
++ * @constructor
++ * @param {Object} frameData
++ *        Serialized data from the corresponding FrameNode#getInfo()
++ * @param {Array<RawOptimizationSite>} optimizations
++ *        Array of RawOptimizationSites from the profiler. Do not modify this!
++ */
++
++const JITOptimizations = exports.JITOptimizations = function (frameData, optimizations) {
++  this._frameData = frameData;
++  this._opts = optimizations;
++  // Hash of OptimizationSites observed for this frame.
++  this._optSites = {};
++};
++
++/**
++ * Called when a sample detects an optimization on this frame. Takes an `optsIndex`,
++ * referring to an optimization in the stored `this._opts` array. Creates a histogram
++ * of optimization site data by creating or incrementing an OptimizationSite
++ * for each observed optimization.
++ *
++ * @param {Number} optsIndex
++ */
++
++JITOptimizations.prototype.addOptimizationSite = function (optsIndex) {
++  let op = this._optSites[optsIndex] ||
++           (this._optSites[optsIndex] = new OptimizationSite(this._opts, optsIndex));
++  op.samples++;
++};
++
++/**
++ * Returns an array of OptimizationSites, sorted from most to least times sampled.
++ *
++ * @return {Array<OptimizationSite>}
++ */
++
++JITOptimizations.prototype.getOptimizationSites = function () {
++  let opts = [];
++  for (let opt of Object.keys(this._optSites)) {
++    opts.push(this._optSites[opt]);
++  }
++  return opts.sort((a, b) => b.samples - a.samples);
++};
++
++/**
++ * Takes an "outcome" string from an OptimizationAttempt and returns
++ * a boolean indicating whether or not its a successful outcome.
++ *
++ * @return {boolean}
++ */
++
++OptimizationSite.isSuccessfulOutcome = JITOptimizations.isSuccessfulOutcome = function (outcome) {
++  return !!~SUCCESSFUL_OUTCOMES.indexOf(outcome);
++};
+diff --git a/browser/devtools/shared/profiler/tree-model.js b/browser/devtools/shared/profiler/tree-model.js
+index 3a57272..94c9ae5 100644
+--- a/browser/devtools/shared/profiler/tree-model.js
++++ b/browser/devtools/shared/profiler/tree-model.js
+@@ -7,16 +7,18 @@ const {Cc, Ci, Cu, Cr} = require("chrome");
+ 
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_MAPPINGS",
+   "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_JIT",
+   "devtools/shared/profiler/global", true);
++loader.lazyRequireGetter(this, "JITOptimizations",
++  "devtools/shared/profiler/jit", true);
+ 
+ const CHROME_SCHEMES = ["chrome://", "resource://"];
+ const CONTENT_SCHEMES = ["http://", "https://", "file://"];
+ 
+ exports.ThreadNode = ThreadNode;
+ exports.FrameNode = FrameNode;
+ exports.FrameNode.isContent = isContent;
+ 
+@@ -45,16 +47,18 @@ exports.FrameNode.isContent = isContent;
+  * @param object threadSamples
+  *        The raw samples array received from the backend.
+  * @param object options
+  *        Additional supported options, @see ThreadNode.prototype.insert
+  *          - number startTime [optional]
+  *          - number endTime [optional]
+  *          - boolean contentOnly [optional]
+  *          - boolean invertTree [optional]
++ *          - object optimizations [optional]
++ *            The raw tracked optimizations array received from the backend.
+  */
+ function ThreadNode(threadSamples, options = {}) {
+   this.samples = 0;
+   this.duration = 0;
+   this.calls = {};
+   this._previousSampleTime = 0;
+ 
+   for (let sample of threadSamples) {
+@@ -71,20 +75,22 @@ ThreadNode.prototype = {
+    *        the time the sample was taken. This sample is assumed to be older
+    *        than the most recently inserted one.
+    * @param object options [optional]
+    *        Additional supported options:
+    *          - number startTime: the earliest sample to start at (in milliseconds)
+    *          - number endTime: the latest sample to end at (in milliseconds)
+    *          - boolean contentOnly: if platform frames shouldn't be used
+    *          - boolean invertTree: if the call tree should be inverted
++   *          - object optimizations: The array of all indexable optimizations from the backend.
+    */
+   insert: function(sample, options = {}) {
+     let startTime = options.startTime || 0;
+     let endTime = options.endTime || Infinity;
++    let optimizations = options.optimizations;
+     let sampleTime = sample.time;
+     if (!sampleTime || sampleTime < startTime || sampleTime > endTime) {
+       return;
+     }
+ 
+     let sampleFrames = sample.frames;
+ 
+     // Filter out platform frames if only content-related function calls
+@@ -107,29 +113,42 @@ ThreadNode.prototype = {
+     }
+ 
+     let sampleDuration = sampleTime - this._previousSampleTime;
+     this._previousSampleTime = sampleTime;
+     this.samples++;
+     this.duration += sampleDuration;
+ 
+     FrameNode.prototype.insert(
+-      sampleFrames, 0, sampleTime, sampleDuration, this.calls);
++      sampleFrames, optimizations, 0, sampleTime, sampleDuration, this.calls);
+   },
+ 
+   /**
+    * Gets additional details about this node.
+    * @return object
+    */
+   getInfo: function() {
+     return {
+       nodeType: "Thread",
+       functionName: L10N.getStr("table.root"),
+       categoryData: {}
+     };
++  },
++
++  /**
++   * Mimicks the interface of FrameNode, and a ThreadNode can never have
++   * optimization data (at the moment, anyway), so provide a function
++   * to return null so we don't need to check if a frame node is a thread
++   * or not everytime we fetch optimization data.
++   *
++   * @return {null}
++   */
++
++  hasOptimizations: function () {
++    return null;
+   }
+ };
+ 
+ /**
+  * A function call node in a tree.
+  *
+  * @param string location
+  *        The location of this function call. Note that this isn't sanitized,
+@@ -148,60 +167,80 @@ function FrameNode({ location, line, column, category, allocations }) {
+   this.line = line;
+   this.column = column;
+   this.category = category;
+   this.allocations = allocations || 0;
+   this.sampleTimes = [];
+   this.samples = 0;
+   this.duration = 0;
+   this.calls = {};
++  this._optimizations = null;
++
++  // Cache the parsed location data upfront so we can use it for our
++  // JITOptimizations; we'll need it anyway for the tree-view
++  this._computeInfo();
+ }
+ 
+ FrameNode.prototype = {
+   /**
+    * Adds function calls in the tree from a sample's frames. For example, given
+    * the the frames below (which would account for three calls to `insert` on
+    * the root frame), the following tree structure is created:
+    *
+    *                          A
+    *   A -> B -> C           / \
+    *   A -> B -> D    ~>    B   E
+    *   A -> E -> F         / \   \
+    *                      C   D   F
+    * @param frames
+    *        The sample call stack.
++   * @param optimizations
++   *        The array of indexable optimizations.
+    * @param index
+    *        The index of the call in the stack representing this node.
+    * @param number time
+    *        The delta time (in milliseconds) when the frame was sampled.
+    * @param number duration
+    *        The amount of time spent executing all functions on the stack.
+    */
+-  insert: function(frames, index, time, duration, _store = this.calls) {
++  insert: function(frames, optimizations, index, time, duration, _store = this.calls) {
+     let frame = frames[index];
+     if (!frame) {
+       return;
+     }
+     let location = frame.location;
+     let child = _store[location] || (_store[location] = new FrameNode(frame));
+     child.sampleTimes.push({ start: time, end: time + duration });
+     child.samples++;
+     child.duration += duration;
+-    child.insert(frames, ++index, time, duration);
++    if (optimizations && frame.optsIndex != null) {
++      let opts = child._optimizations ||
++                 (child._optimizations = new JITOptimizations(child._data, optimizations));
++      opts.addOptimizationSite(frame.optsIndex);
++    }
++    child.insert(frames, optimizations, index + 1, time, duration);
+   },
+ 
+   /**
+-   * Parses the raw location of this function call to retrieve the actual
+-   * function name and source url.
++   * Returns the parsed location and additional data describing
++   * this frame. Uses cached data if possible.
+    *
+    * @return object
+    *         The computed { name, file, url, line } properties for this
+    *         function call.
+    */
+   getInfo: function() {
++    return this._data || this._computeInfo();
++  },
++
++  /**
++   * Parses the raw location of this function call to retrieve the actual
++   * function name and source url.
++   */
++  _computeInfo: function() {
+     // "EnterJIT" pseudoframes are special, not actually on the stack.
+     if (this.location == "EnterJIT") {
+       this.category = CATEGORY_JIT;
+     }
+ 
+     // Since only C++ stack frames have associated category information,
+     // default to an "unknown" category otherwise.
+     let categoryData = CATEGORY_MAPPINGS[this.category] || {};
+@@ -225,27 +264,48 @@ FrameNode.prototype = {
+       functionName = this.location.substring(0, firstParenIndex - 1);
+       fileName = (uri.fileName + (uri.ref ? "#" + uri.ref : "")) || "/";
+       hostName = url.indexOf("jar:") == 0 ? "" : uri.host;
+     } else {
+       functionName = this.location;
+       url = null;
+     }
+ 
+-    return {
++    return this._data = {
+       nodeType: "Frame",
+       functionName: functionName,
+       fileName: fileName,
+       hostName: hostName,
+       url: url,
+       line: line,
+       column: column,
+       categoryData: categoryData,
+       isContent: !!isContent(this)
+     };
++  },
++
++  /**
++   * Returns whether or not the frame node has an JITOptimizations model.
++   *
++   * @return {Boolean}
++   */
++
++  hasOptimizations: function () {
++    return !!this._optimizations;
++  },
++
++  /**
++   * Returns the underlying JITOptimizations model representing
++   * the optimization attempts occuring in this frame.
++   *
++   * @return {JITOptimizations|null}
++   */
++
++  getOptimizations: function () {
++    return this._optimizations;
+   }
+ };
+ 
+ /**
+  * Checks if the specified function represents a chrome or content frame.
+  *
+  * @param object frame
+  *        The { category, location } properties of the frame.
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+index 0e1440d..5b1809d 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+@@ -102,8 +102,18 @@
+ <!ENTITY profilerUI.enableMemory             "Record Memory">
+ <!ENTITY profilerUI.enableMemory.tooltiptext "Record memory consumption while profiling.">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.enableFramerate): This string
+   -  is displayed next to a checkbox determining whether or not framerate
+   -  is recorded. -->
+ <!ENTITY profilerUI.enableFramerate             "Record Framerate">
+ <!ENTITY profilerUI.enableFramerate.tooltiptext "Record framerate while profiling.">
++
++<!-- LOCALIZATION NOTE (profilerUI.showJITOptimizations): This string
++  -  is displayed next to a checkbox determining whether or not JIT optimization data
++  -  should be shown. -->
++<!ENTITY profilerUI.showJITOptimizations             "Show JIT Optimizations">
++<!ENTITY profilerUI.showJITOptimizations.tooltiptext "Show JIT optimization data sampled in each frame of the JS call tree.">
++
++<!-- LOCALIZATION NOTE (profilerUI.JITOptimizationsTitle): This string
++  -  is displayed as the title of the JIT Optimizations panel. -->
++<!ENTITY profilerUI.JITOptimizationsTitle "JIT Optimizations">
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.properties b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+index dc965b5..e014c22 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+@@ -116,8 +116,20 @@ recordingsList.saveDialogTitle=Save profile…
+ # LOCALIZATION NOTE (recordingsList.saveDialogJSONFilter):
+ # This string is displayed as a filter for saving a recording to disk.
+ recordingsList.saveDialogJSONFilter=JSON Files
+ 
+ # LOCALIZATION NOTE (recordingsList.saveDialogAllFilter):
+ # This string is displayed as a filter for saving a recording to disk.
+ recordingsList.saveDialogAllFilter=All Files
+ 
++# LOCALIZATION NOTE (jit.optimizationFailure):
++# This string is displayed in a tooltip when no JIT optimizations were detected.
++jit.optimizationFailure=Optimization failed
++
++# LOCALIZATION NOTE (jit.samples):
++# This string is displayed for the unit representing thenumber of times a
++# frame is sampled.
++jit.samples=samples
++
++# LOCALIZATION NOTE (jit.empty):
++# This string is displayed when there are no JIT optimizations to display.
++jit.empty=No JIT optimizations recorded for this frame.
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 7bff45b..17c4e3a 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -219,30 +219,29 @@
+ .call-tree-item:not([origin="content"]) .call-tree-name,
+ .call-tree-item:not([origin="content"]) .call-tree-url,
+ .call-tree-item:not([origin="content"]) .call-tree-line,
+ .call-tree-item:not([origin="content"]) .call-tree-column {
+   /* Style chrome and non-JS nodes differently. */
+   opacity: 0.6;
+ }
+ 
+-.call-tree-url {
++.call-tree-url, .opt-url {
+   -moz-margin-start: 4px !important;
+-  cursor: pointer;
+ }
+ 
+-.call-tree-url:hover {
++.call-tree-url:hover, .opt-url:hover {
+   text-decoration: underline;
+ }
+ 
+-.call-tree-url {
++.call-tree-url, .tree-widget-item:not(.theme-selected) .opt-url {
+   color: var(--theme-highlight-blue);
+ }
+ 
+-.call-tree-line {
++.call-tree-line, .tree-widget-item:not(.theme-selected) .opt-line {
+   color: var(--theme-highlight-orange);
+ }
+ 
+ .call-tree-column {
+   color: var(--theme-highlight-orange);
+   opacity: 0.6;
+ }
+ 
+@@ -471,8 +470,123 @@
+ .recording-item-save {
+   color: var(--theme-body-color-alt);
+ }
+ 
+ #recordings-list .selected label {
+   /* Text inside a selected item should not be custom colored. */
+   color: inherit !important;
+ }
++
++/**
++ * JIT View
++ */
++
++#jit-optimizations-view {
++  width: 300px;
++  overflow-x: hidden;
++  overflow-y: auto;
++  min-width: 500px;
++}
++
++/* override default styles for tree widget */
++#jit-optimizations-view .tree-widget-empty-text {
++  font-size: inherit;
++  padding: 0px;
++  margin: 8px;
++}
++
++#jit-optimizations-view:not(.empty) .tree-widget-empty-text {
++  display: none;
++}
++
++#jit-optimizations-toolbar {
++  height: 18px;
++  min-height: 0px; /* override .devtools-toolbar min-height */
++}
++
++.jit-optimizations-title {
++  margin: 0px 4px;
++  font-weight: 600;
++}
++
++#jit-optimizations-raw-view {
++  font-size: 90%;
++}
++
++/* override default .tree-widget-item line-height */
++#jit-optimizations-raw-view .tree-widget-item {
++  line-height: 20px !important;
++  height: 18px;
++  display: block;
++  overflow: hidden;
++}
++
++#jit-optimizations-raw-view .tree-widget-item[level=1] {
++  font-weight: 600;
++}
++
++#jit-optimizations-view .opt-ion-type-site {
++  -moz-margin-start: 4px !important;
++  opacity: 0.6;
++}
++
++#jit-optimizations-view .opt-outcome::before {
++  content: "→";
++  margin: 4px 0px;
++  color: var(--theme-body-color);
++}
++#jit-optimizations-view .theme-selected .opt-outcome::before {
++  color: var(--theme-selection-color);
++}
++
++#jit-optimizations-view .tree-widget-item:not(.theme-selected) .opt-outcome[outcome=success] {
++  color: var(--theme-highlight-green);
++}
++#jit-optimizations-view .tree-widget-item:not(.theme-selected) .opt-outcome[outcome=failure] {
++  color: var(--theme-highlight-red);
++}
++#jit-optimizations-view .tree-widget-container {
++  -moz-margin-end: 0px;
++}
++#jit-optimizations-view .tree-widget-container > li, #jit-optimizations-view .tree-widget-children > li {
++  overflow: hidden;
++}
++
++.opt-line::before {
++  content: ":";
++  color: var(--theme-highlight-orange);
++}
++.theme-selected .opt-line::before {
++  color: var(--theme-selection-color);
++}
++.opt-line.header-line::before {
++  color: var(--theme-body-color);
++}
++#jit-optimizations-view.empty .opt-line.header-line::before {
++  display: none;
++}
++
++.opt-url.debugger-link {
++  cursor: pointer;
++}
++
++#jit-optimizations-view .opt-icon::before {
++  content: "";
++  background-image: url(chrome://browser/skin/devtools/webconsole.png);
++  background-repeat: no-repeat;
++  background-size: 48px 40px;
++  margin: 5px 6px 0 0;
++  width: 8px;
++  height: 8px;
++  max-height: 8px;
++  display: inline-block;
++}
++
++#jit-optimizations-view .opt-icon[severity=warning]::before {
++  background-position: -16px -16px;
++}
++
++@media (min-resolution: 2dppx) {
++  #jit-optimizations-view .opt-icon::before {
++    background-image: url(chrome://browser/skin/devtools/webconsole@2x.png);
++  }
++}
+-- 
+2.2.1
+

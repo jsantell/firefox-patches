@@ -1,40 +1,238 @@
-From b836033bcb87610f82a3bc1f127ea80ecf6952ea Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
 Date: Fri, 20 Mar 2015 16:50:43 -0700
-Subject: [PATCH] Bug 1108843 - generalize platform data in call tree view WIP
+Subject: Bug 1108843 - generalize platform data in call tree view when platform data is hidden. r=vp
 
----
- .../performance/views/details-js-call-tree.js      |  2 +-
- browser/devtools/shared/profiler/tree-model.js     | 69 ++++++++++++++++++++--
- browser/devtools/shared/profiler/tree-view.js      |  8 ++-
- browser/themes/shared/devtools/performance.inc.css |  5 ++
- 4 files changed, 77 insertions(+), 7 deletions(-)
-
-diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
-index eab0ccc..8dcf070 100644
---- a/browser/devtools/performance/views/details-js-call-tree.js
-+++ b/browser/devtools/performance/views/details-js-call-tree.js
-@@ -63,17 +63,17 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
-    * populate the call tree.
-    */
-   _prepareCallTree: function (profile, { startTime, endTime }, options) {
-     let threadSamples = profile.threads[0].samples;
-     let contentOnly = !PerformanceController.getOption("show-platform-data");
-     let invertTree = PerformanceController.getOption("invert-call-tree");
- 
-     let threadNode = new ThreadNode(threadSamples,
--      { startTime, endTime, contentOnly, invertTree });
-+      { startTime, endTime, contentOnly, invertTree, generalizePlatformData: true });
- 
-     // If we have an empty profile (no samples), then don't invert the tree, as
-     // it would hide the root node and a completely blank call tree space can be
-     // mis-interpreted as an error.
-     options.inverted = invertTree && threadNode.samples > 0;
- 
-     return threadNode;
-   },
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 816cb5b..c339469 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -88,17 +88,19 @@ support-files =
+ [browser_profiler_tree-abstract-03.js]
+ [browser_profiler_tree-abstract-04.js]
+ [browser_profiler_tree-frame-node.js]
+ [browser_profiler_tree-model-01.js]
+ [browser_profiler_tree-model-02.js]
+ [browser_profiler_tree-model-03.js]
+ [browser_profiler_tree-model-04.js]
+ [browser_profiler_tree-model-05.js]
++[browser_profiler_tree-model-07.js]
+ [browser_profiler_tree-view-01.js]
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
++[browser_profiler_tree-view-08.js]
+ [browser_timeline_blueprint.js]
+ [browser_timeline_filters.js]
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-model-07.js b/browser/devtools/performance/test/browser_profiler_tree-model-07.js
+new file mode 100644
+index 0000000..104059e
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_profiler_tree-model-07.js
+@@ -0,0 +1,89 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that when displaying only content nodes, platform nodes are generalized.
++ */
++
++function test() {
++  let { ThreadNode } = devtools.require("devtools/shared/profiler/tree-model");
++  let url = (n) => `http://content/${n}`;
++
++  // Create a root node from a given samples array.
++
++  let root = new ThreadNode(gSamples, { contentOnly: true });
++
++  /*
++   * should have a tree like:
++   * root
++   *   - (JS)
++   *   - A
++   *     - (GC)
++   *     - B
++   *       - C
++   *       - D
++   *     - E
++   *       - F
++   *       - (JS)
++   */
++
++  // Test the root node.
++
++  is(Object.keys(root.calls).length, 2, "root has 2 children");
++  ok(root.calls[url("A")], "root has content child");
++  ok(root.calls["64"], "root has platform generalized child");
++  is(Object.keys(root.calls["64"].calls).length, 0, "platform generalized child is a leaf.");
++
++  ok(root.calls[url("A")].calls["128"], "A has platform generalized child of another type");
++  is(Object.keys(root.calls[url("A")].calls["128"].calls).length, 0, "second generalized type is a leaf.");
++
++  ok(root.calls[url("A")].calls[url("E")].calls[url("F")].calls["64"],
++    "a second leaf of the first generalized type exists deep in the tree.");
++  ok(root.calls[url("A")].calls["128"], "A has platform generalized child of another type");
++
++  is(root.calls["64"].category, root.calls[url("A")].calls[url("E")].calls[url("F")].calls["64"].category,
++    "generalized frames of same type are duplicated in top-down view");
++  finish();
++}
++
++let gSamples = [{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "http://content/B" },
++    { location: "http://content/C" }
++  ]
++}, {
++  time: 5 + 6,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "http://content/B" },
++    { location: "contentY", category: 32 },
++    { location: "http://content/D" }
++  ]
++}, {
++  time: 5 + 6 + 7,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "contentY", category: 32 },
++    { location: "http://content/E" },
++    { location: "http://content/F" },
++    { location: "contentY", category: 64 },
++  ]
++}, {
++  time: 5 + 20,
++  frames: [
++    { location: "(root)" },
++    { location: "contentX", category: 64 },
++  ]
++}, {
++  time: 5 + 25,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "contentZ", category: 128 },
++  ]
++}];
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-08.js b/browser/devtools/performance/test/browser_profiler_tree-view-08.js
+new file mode 100644
+index 0000000..2cd621a
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-08.js
+@@ -0,0 +1,104 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the profiler's tree view renders generalized platform data
++ * when `contentOnly` is on correctly.
++ */
++
++let { CATEGORY_MASK } = devtools.require("devtools/shared/profiler/global");
++
++function test() {
++  let { ThreadNode } = devtools.require("devtools/shared/profiler/tree-model");
++  let { CallView } = devtools.require("devtools/shared/profiler/tree-view");
++
++  /*
++   * should have a tree like:
++   * root
++   *   - A
++   *     - B
++   *       - C
++   *       - D
++   *     - E
++   *       - F
++   *         - (JS)
++   *     - (GC)
++   *   - (JS)
++   */
++
++  let threadNode = new ThreadNode(gSamples, { contentOnly: true });
++  let treeRoot = new CallView({ frame: threadNode, autoExpandDepth: 10 });
++
++  let container = document.createElement("vbox");
++  treeRoot.attachTo(container);
++
++  let A = treeRoot.getChild(0);
++  let JS = treeRoot.getChild(1);
++  let GC = A.getChild(1);
++  let JS2 = A.getChild(2).getChild().getChild();
++
++  is(JS.target.getAttribute("category"), "js",
++    "Generalized JS node has correct category");
++  is(JS.target.getAttribute("tooltiptext"), "JIT",
++    "Generalized JS node has correct category");
++  is(JS.target.querySelector(".call-tree-name").getAttribute("value"), "JIT",
++    "Generalized JS node has correct display value as just the category name.");
++
++  is(JS2.target.getAttribute("category"), "js",
++    "Generalized second JS node has correct category");
++  is(JS2.target.getAttribute("tooltiptext"), "JIT",
++    "Generalized second JS node has correct category");
++  is(JS2.target.querySelector(".call-tree-name").getAttribute("value"), "JIT",
++    "Generalized second JS node has correct display value as just the category name.");
++
++  is(GC.target.getAttribute("category"), "gc",
++    "Generalized GC node has correct category");
++  is(GC.target.getAttribute("tooltiptext"), "GC",
++    "Generalized GC node has correct category");
++  is(GC.target.querySelector(".call-tree-name").getAttribute("value"), "GC",
++    "Generalized GC node has correct display value as just the category name.");
++
++  finish();
++}
++
++let gSamples = [{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "http://content/B" },
++    { location: "http://content/C" }
++  ]
++}, {
++  time: 5 + 6,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "http://content/B" },
++    { location: "contentY", category: 32 },
++    { location: "http://content/D" }
++  ]
++}, {
++  time: 5 + 6 + 7,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "contentY", category: 32 },
++    { location: "http://content/E" },
++    { location: "http://content/F" },
++    { location: "contentY", category: 64 },
++  ]
++}, {
++  time: 5 + 20,
++  frames: [
++    { location: "(root)" },
++    { location: "contentX", category: 64 },
++  ]
++}, {
++  time: 5 + 25,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "contentZ", category: 128 },
++  ]
++}];
 diff --git a/browser/devtools/shared/profiler/tree-model.js b/browser/devtools/shared/profiler/tree-model.js
-index 3a57272..e458568 100644
+index 3a57272..d78d3b5 100644
 --- a/browser/devtools/shared/profiler/tree-model.js
 +++ b/browser/devtools/shared/profiler/tree-model.js
 @@ -1,22 +1,27 @@
@@ -65,25 +263,7 @@ index 3a57272..e458568 100644
  exports.FrameNode = FrameNode;
  exports.FrameNode.isContent = isContent;
  
-@@ -57,16 +62,17 @@ function ThreadNode(threadSamples, options = {}) {
-   this.calls = {};
-   this._previousSampleTime = 0;
- 
-   for (let sample of threadSamples) {
-     this.insert(sample, options);
-   }
- }
- 
-+
- ThreadNode.prototype = {
-   /**
-    * Adds function calls in the tree from a sample's frames.
-    *
-    * @param object sample
-    *        The { frames, time } sample, containing an array of frames and
-    *        the time the sample was taken. This sample is assumed to be older
-    *        than the most recently inserted one.
-@@ -86,17 +92,17 @@ ThreadNode.prototype = {
+@@ -86,17 +91,17 @@ ThreadNode.prototype = {
      }
  
      let sampleFrames = sample.frames;
@@ -93,7 +273,7 @@ index 3a57272..e458568 100644
      if (options.contentOnly) {
        // The (root) node is not considered a content function, it'll be removed.
 -      sampleFrames = sampleFrames.filter(isContent);
-+      sampleFrames = filterPlatformData(sampleFrames, options);
++      sampleFrames = filterPlatformData(sampleFrames);
      } else {
        // Remove the (root) node manually.
        sampleFrames = sampleFrames.slice(1);
@@ -102,7 +282,7 @@ index 3a57272..e458568 100644
      // to continue.
      if (!sampleFrames.length) {
        return;
-@@ -137,27 +143,32 @@ ThreadNode.prototype = {
+@@ -137,27 +142,31 @@ ThreadNode.prototype = {
   * @param number line
   *        The line number inside the source containing this function call.
   * @param number column
@@ -112,9 +292,8 @@ index 3a57272..e458568 100644
   * @param number allocations
   *        The number of memory allocations performed in this frame.
 + * @param boolean generalize
-+ *        Whether or not this (platform only) frame should appear "generalized",
-+ *        like just displaying the category name ("GC", "Gecko"), rather than
-+ *        a full platform-path, unnecessary for most web developers.
++ *        Whether or not this is a platform node that should appear as a
++ *        generalized category or not.
   */
 -function FrameNode({ location, line, column, category, allocations }) {
 +function FrameNode({ location, line, column, category, allocations, generalize }) {
@@ -136,7 +315,7 @@ index 3a57272..e458568 100644
     * the the frames below (which would account for three calls to `insert` on
     * the root frame), the following tree structure is created:
     *
-@@ -175,18 +186,21 @@ FrameNode.prototype = {
+@@ -175,18 +184,22 @@ FrameNode.prototype = {
     * @param number duration
     *        The amount of time spent executing all functions on the stack.
     */
@@ -147,7 +326,8 @@ index 3a57272..e458568 100644
      }
 -    let location = frame.location;
 -    let child = _store[location] || (_store[location] = new FrameNode(frame));
-+    // If platform data is generalized, use the category (GC, Graphics, etc)
++    // If we are only displaying content, then platform data will have
++    // a `generalize` property. Group by category (GC, Graphics, etc.)
 +    // to group together frames so they're displayed only once, since we don't
 +    // need the location anyway.
 +    let key = frame.generalize ? frame.category : frame.location;
@@ -160,7 +340,7 @@ index 3a57272..e458568 100644
  
    /**
     * Parses the raw location of this function call to retrieve the actual
-@@ -234,17 +248,18 @@ FrameNode.prototype = {
+@@ -234,17 +247,18 @@ FrameNode.prototype = {
        nodeType: "Frame",
        functionName: functionName,
        fileName: fileName,
@@ -180,7 +360,7 @@ index 3a57272..e458568 100644
   * Checks if the specified function represents a chrome or content frame.
   *
   * @param object frame
-@@ -274,8 +289,52 @@ function nsIURL(url) {
+@@ -274,8 +288,52 @@ function nsIURL(url) {
      // The passed url string is invalid.
    }
    gNSURLStore.set(url, uri);
@@ -192,8 +372,8 @@ index 3a57272..e458568 100644
 +
 +/**
 + * This filters out platform data frames in a sample. With latest performance
-+ * tool in Fx40, a new option, `generalizePlatformData` can be added to still
-+ * filter out platform frames, except for leaves. We do this because of two
++ * tool in Fx40, when displaying only content, we still filter out all platform data,
++ * except we generalize platform data that are leaves. We do this because of two
 + * observations:
 + *
 + * 1. The leaf is where time is _actually_ being spent, so we _need_ to show it
@@ -213,7 +393,7 @@ index 3a57272..e458568 100644
 + * Before: PlatformA -> ContentA -> PlatformB -> PlatformC
 + * After:  ContentA -> Category(PlatformC)
 + */
-+function filterPlatformData (frames, { generalizePlatformData }) {
++function filterPlatformData (frames) {
 +  let result = [];
 +  let last = frames.length - 1;
 +  let frame;
@@ -222,7 +402,7 @@ index 3a57272..e458568 100644
 +    frame = frames[i];
 +    if (isContent(frame)) {
 +      result.push(frame);
-+    } else if (last === i && generalizePlatformData) {
++    } else if (last === i) {
 +      // Extend here so we're not destructively editing
 +      // the original profiler data. Set generalize `true`,
 +      // and ensure we have a category set by default, because that's how
@@ -234,22 +414,34 @@ index 3a57272..e458568 100644
 +  return result;
 +}
 diff --git a/browser/devtools/shared/profiler/tree-view.js b/browser/devtools/shared/profiler/tree-view.js
-index 16e45b1..2730a9c 100644
+index 16e45b1..541d6cc 100644
 --- a/browser/devtools/shared/profiler/tree-view.js
 +++ b/browser/devtools/shared/profiler/tree-view.js
-@@ -300,21 +300,27 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
-   },
-   _createFunctionCell: function(arrowNode, frameInfo, frameLevel) {
-     let cell = this.document.createElement("hbox");
-     cell.className = "call-tree-cell";
+@@ -182,17 +182,18 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+     if (this.visibleCells.function) {
+       var functionCell = this._createFunctionCell(arrowNode, frameInfo, this.level);
+     }
+ 
+     let targetNode = document.createElement("hbox");
+     targetNode.className = "call-tree-item";
+     targetNode.setAttribute("origin", frameInfo.isContent ? "content" : "chrome");
+     targetNode.setAttribute("category", frameInfo.categoryData.abbrev || "");
+-    targetNode.setAttribute("tooltiptext", this.frame.location || "");
++    targetNode.setAttribute("tooltiptext", frameInfo.generalize ? frameInfo.categoryData.label :
++                                           this.frame.location || "");
+     if (this.hidden) {
+       targetNode.style.display = "none";
+     }
+ 
+     let isRoot = frameInfo.nodeType == "Thread";
+     if (isRoot) {
+       functionCell.querySelector(".call-tree-zoom").hidden = true;
+       functionCell.querySelector(".call-tree-category").hidden = true;
+@@ -304,58 +305,63 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
      cell.style.MozMarginStart = (frameLevel * CALL_TREE_INDENTATION) + "px";
      cell.setAttribute("type", "function");
      cell.appendChild(arrowNode);
  
-+    if (frameInfo.generalize) {
-+      cell.classList.add("call-tree-generalized");
-+    }
-+
      let nameNode = this.document.createElement("label");
      nameNode.className = "plain call-tree-name";
      nameNode.setAttribute("flex", "1");
@@ -260,38 +452,95 @@ index 16e45b1..2730a9c 100644
 +                                   frameInfo.functionName || "");
      cell.appendChild(nameNode);
  
-     let urlNode = this.document.createElement("label");
-     urlNode.className = "plain call-tree-url";
-     urlNode.setAttribute("flex", "1");
-     urlNode.setAttribute("crop", "end");
-     urlNode.setAttribute("value", frameInfo.fileName || "");
-     urlNode.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + frameInfo.url);
-diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
-index 7bff45b..b86623d 100644
---- a/browser/themes/shared/devtools/performance.inc.css
-+++ b/browser/themes/shared/devtools/performance.inc.css
-@@ -255,16 +255,21 @@
- .call-tree-name[value=""],
- .call-tree-url[value=""],
- .call-tree-line[value=""],
- .call-tree-column[value=""],
- .call-tree-host[value=""] {
-   display: none;
- }
- 
-+.call-tree-generalized label:not(.call-tree-name),
-+.call-tree-generalized button {
-+  display: none;
-+}
+-    let urlNode = this.document.createElement("label");
+-    urlNode.className = "plain call-tree-url";
+-    urlNode.setAttribute("flex", "1");
+-    urlNode.setAttribute("crop", "end");
+-    urlNode.setAttribute("value", frameInfo.fileName || "");
+-    urlNode.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + frameInfo.url);
+-    urlNode.addEventListener("mousedown", this._onUrlClick);
+-    cell.appendChild(urlNode);
+-
+-    let lineNode = this.document.createElement("label");
+-    lineNode.className = "plain call-tree-line";
+-    lineNode.setAttribute("value", frameInfo.line ? ":" + frameInfo.line : "");
+-    cell.appendChild(lineNode);
+-
+-    let columnNode = this.document.createElement("label");
+-    columnNode.className = "plain call-tree-column";
+-    columnNode.setAttribute("value", frameInfo.column ? ":" + frameInfo.column : "");
+-    cell.appendChild(columnNode);
+-
+-    let hostNode = this.document.createElement("label");
+-    hostNode.className = "plain call-tree-host";
+-    hostNode.setAttribute("value", frameInfo.hostName || "");
+-    cell.appendChild(hostNode);
+-
+-    let zoomNode = this.document.createElement("button");
+-    zoomNode.className = "plain call-tree-zoom";
+-    zoomNode.setAttribute("tooltiptext", ZOOM_BUTTON_TOOLTIP);
+-    zoomNode.addEventListener("mousedown", this._onZoomClick);
+-    cell.appendChild(zoomNode);
+-
+-    let spacerNode = this.document.createElement("spacer");
+-    spacerNode.setAttribute("flex", "10000");
+-    cell.appendChild(spacerNode);
+-
+-    let categoryNode = this.document.createElement("label");
+-    categoryNode.className = "plain call-tree-category";
+-    categoryNode.style.color = frameInfo.categoryData.color;
+-    categoryNode.setAttribute("value", frameInfo.categoryData.label || "");
+-    cell.appendChild(categoryNode);
++    // Don't render detailed labels for generalized frames
++    if (!frameInfo.generalize) {
++      let urlNode = this.document.createElement("label");
++      urlNode.className = "plain call-tree-url";
++      urlNode.setAttribute("flex", "1");
++      urlNode.setAttribute("crop", "end");
++      urlNode.setAttribute("value", frameInfo.fileName || "");
++      urlNode.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + frameInfo.url);
++      urlNode.addEventListener("mousedown", this._onUrlClick);
++      cell.appendChild(urlNode);
 +
- .call-tree-zoom {
-   -moz-appearance: none;
-   background-color: transparent;
-   background-position: center;
-   background-repeat: no-repeat;
-   background-size: 11px;
-   min-width: 11px;
-   -moz-margin-start: 8px !important;
++      let lineNode = this.document.createElement("label");
++      lineNode.className = "plain call-tree-line";
++      lineNode.setAttribute("value", frameInfo.line ? ":" + frameInfo.line : "");
++      cell.appendChild(lineNode);
++
++      let columnNode = this.document.createElement("label");
++      columnNode.className = "plain call-tree-column";
++      columnNode.setAttribute("value", frameInfo.column ? ":" + frameInfo.column : "");
++      cell.appendChild(columnNode);
++
++      let hostNode = this.document.createElement("label");
++      hostNode.className = "plain call-tree-host";
++      hostNode.setAttribute("value", frameInfo.hostName || "");
++      cell.appendChild(hostNode);
++
++      let zoomNode = this.document.createElement("button");
++      zoomNode.className = "plain call-tree-zoom";
++      zoomNode.setAttribute("tooltiptext", ZOOM_BUTTON_TOOLTIP);
++      zoomNode.addEventListener("mousedown", this._onZoomClick);
++      cell.appendChild(zoomNode);
++
++      let spacerNode = this.document.createElement("spacer");
++      spacerNode.setAttribute("flex", "10000");
++      cell.appendChild(spacerNode);
++
++      let categoryNode = this.document.createElement("label");
++      categoryNode.className = "plain call-tree-category";
++      categoryNode.style.color = frameInfo.categoryData.color;
++      categoryNode.setAttribute("value", frameInfo.categoryData.label || "");
++      cell.appendChild(categoryNode);
++    }
+ 
+     let hasDescendants = Object.keys(this.frame.calls).length > 0;
+     if (hasDescendants == false) {
+       arrowNode.setAttribute("invisible", "");
+     }
+ 
+     return cell;
+   },
 -- 
 2.2.1
 

@@ -1,0 +1,391 @@
+From 4753e026fb7e0426c23180f77e6c7caf1b38e365 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Sun, 22 Mar 2015 23:21:36 -0700
+Subject: Bug 1143933 - Pull out ToggleMixin from web audio editor to sharable ViewHelpers so that performance JIT view can use it. r=vp
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index 53c4d11..bc1a0a6 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -79,17 +79,16 @@ browser.jar:
+     content/browser/devtools/canvasdebugger/snapshotslist.js           (canvasdebugger/snapshotslist.js)
+     content/browser/devtools/canvasdebugger/callslist.js               (canvasdebugger/callslist.js)
+     content/browser/devtools/d3.js                                     (shared/d3.js)
+     content/browser/devtools/webaudioeditor.xul                        (webaudioeditor/webaudioeditor.xul)
+     content/browser/devtools/dagre-d3.js                               (webaudioeditor/lib/dagre-d3.js)
+     content/browser/devtools/webaudioeditor/includes.js                (webaudioeditor/includes.js)
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+-    content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/webaudioeditor/views/properties.js        (webaudioeditor/views/properties.js)
+     content/browser/devtools/webaudioeditor/views/automation.js        (webaudioeditor/views/automation.js)
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+     content/browser/devtools/performance/performance-controller.js     (performance/performance-controller.js)
+     content/browser/devtools/performance/performance-view.js           (performance/performance-view.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
+diff --git a/browser/devtools/shared/widgets/ViewHelpers.jsm b/browser/devtools/shared/widgets/ViewHelpers.jsm
+index 8cd990b..0507b90 100644
+--- a/browser/devtools/shared/widgets/ViewHelpers.jsm
++++ b/browser/devtools/shared/widgets/ViewHelpers.jsm
+@@ -18,16 +18,17 @@ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource://gre/modules/Timer.jsm");
+ Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm");
+ Cu.import("resource://gre/modules/devtools/event-emitter.js");
+ 
+ this.EXPORTED_SYMBOLS = [
+   "Heritage", "ViewHelpers", "WidgetMethods",
+   "setNamedTimeout", "clearNamedTimeout",
+   "setConditionalTimeout", "clearConditionalTimeout",
++  "ToggleMixin"
+ ];
+ 
+ /**
+  * Inheritance helpers from the addon SDK's core/heritage.
+  * Remove these when all devtools are loadered.
+  */
+ this.Heritage = {
+   /**
+@@ -1775,8 +1776,99 @@ this.WidgetMethods = {
+ 
+ /**
+  * A generator-iterator over all the items in this container.
+  */
+ Item.prototype[Symbol.iterator] =
+ WidgetMethods[Symbol.iterator] = function*() {
+   yield* this._itemsByElement.values();
+ };
++
++/**
++ * Object for use with `mix` into a view. To set up events on the toggle button,
++ * call `this.bindToggle()`, and tear down during destruction with `this.unbindToggle()`.
++ *
++ * Must have the following properties defined on the view:
++ * - `el`: element that is to be shown and hidden.
++ * - `button`: button that toggles visibility of the element.
++ *
++ * The following properties are optional.
++ * - `_toggleCallback`: function called after the view closes or opens.
++ * - `_collapseString`: tooltip for the button when clicking will collapse the view
++ * - `_expandString`: tooltip for the button when clicking will expand the view.
++ *
++ * Optional properties on the view can be defined to specify default
++ * visibility options.
++ * - `_animated`
++ * - `_delayed`
++ */
++this.ToggleMixin = {
++
++  bindToggle: function () {
++    this._onToggle = this._onToggle.bind(this);
++    this.button.addEventListener("mousedown", this._onToggle, false);
++  },
++
++  unbindToggle: function () {
++    this.button.removeEventListener("mousedown", this._onToggle);
++  },
++
++  show: function () {
++    this._viewController({ visible: true });
++  },
++
++  hide: function () {
++    this._viewController({ visible: false });
++  },
++
++  hideImmediately: function () {
++    this._viewController({ visible: false, delayed: false, animated: false });
++  },
++
++  /**
++   * Returns a boolean indicating whether or not the view.
++   * is currently being shown.
++   */
++  isVisible: function () {
++    return !this.el.hasAttribute("pane-collapsed");
++  },
++
++  /**
++   * Toggles the visibility of the view.
++   *
++   * @param object visible
++   *        - visible: boolean indicating whether the panel should be shown or not
++   *        - animated: boolean indiciating whether the pane should be animated
++   *        - delayed: boolean indicating whether the pane's opening should wait
++   *                   a few cycles or not
++   */
++  _viewController: function ({ visible, animated, delayed }) {
++    let flags = {
++      visible: visible,
++      animated: animated != null ? animated : !!this._animated,
++      delayed: delayed != null ? delayed : !!this._delayed,
++      callback: () => this._toggleCallback ? this._toggleCallback(visible) : null
++    };
++
++    ViewHelpers.togglePane(flags, this.el);
++
++    if (flags.visible) {
++      this.button.removeAttribute("pane-collapsed");
++      if (this._collapseString) {
++        this.button.setAttribute("tooltiptext", this._collapseString);
++      } else {
++        this.button.removeAttribute("tooltiptext");
++      }
++    }
++    else {
++      this.button.setAttribute("pane-collapsed", "");
++      if (this._expandString) {
++        this.button.setAttribute("tooltiptext", this._expandString);
++      } else {
++        this.button.removeAttribute("tooltiptext");
++      }
++    }
++  },
++
++  _onToggle: function () {
++    this._viewController({ visible: !this.isVisible() });
++  }
++}
+diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
+index 2e6b8ec..7e63f9e 100644
+--- a/browser/devtools/webaudioeditor/includes.js
++++ b/browser/devtools/webaudioeditor/includes.js
+@@ -13,16 +13,17 @@ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ const devtools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
+ const { require } = devtools;
+ 
+ let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ let { EventTarget } = require("sdk/event/target");
+ 
+ const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ const { Class } = require("sdk/core/heritage");
++const { extend } = require("sdk/util/object");
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const STRINGS_URI = "chrome://browser/locale/devtools/webaudioeditor.properties"
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const Telemetry = require("devtools/shared/telemetry");
+ const telemetry = new Telemetry();
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
+ 
+@@ -101,12 +102,27 @@ function findWhere (collection, attrs) {
+   for (let model of collection) {
+     if (keys.every(key => model[key] === attrs[key])) {
+       return model;
+     }
+   }
+   return void 0;
+ }
+ 
+-function mixin (source, ...args) {
+-  args.forEach(obj => Object.keys(obj).forEach(prop => source[prop] = obj[prop]));
+-  return source;
++/**
++ * Takes an element in an SVG graph and iterates over
++ * ancestors until it finds the graph node container. If not found,
++ * returns null.
++ */
++
++function findGraphNodeParent (el) {
++  // Some targets may not contain `classList` property
++  if (!el.classList)
++    return null;
++
++  while (!el.classList.contains("nodes")) {
++    if (el.classList.contains("audionode"))
++      return el;
++    else
++      el = el.parentNode;
++  }
++  return null;
+ }
+diff --git a/browser/devtools/webaudioeditor/views/inspector.js b/browser/devtools/webaudioeditor/views/inspector.js
+index 38e94f4..17c81e8 100644
+--- a/browser/devtools/webaudioeditor/views/inspector.js
++++ b/browser/devtools/webaudioeditor/views/inspector.js
+@@ -8,36 +8,35 @@ const MIN_INSPECTOR_WIDTH = 300;
+ // Strings for rendering
+ const EXPAND_INSPECTOR_STRING = L10N.getStr("expandInspector");
+ const COLLAPSE_INSPECTOR_STRING = L10N.getStr("collapseInspector");
+ 
+ /**
+  * Functions handling the audio node inspector UI.
+  */
+ 
+-let InspectorView = {
++let InspectorView = extend({
+   _currentNode: null,
+ 
+-  // Set up config for view toggling
++  // Set up config for view toggling via ToggleMixin
+   _collapseString: COLLAPSE_INSPECTOR_STRING,
+   _expandString: EXPAND_INSPECTOR_STRING,
+-  _toggleEvent: EVENTS.UI_INSPECTOR_TOGGLED,
++  _toggleCallback: (visible) => window.emit(EVENTS.UI_INSPECTOR_TOGGLED, visible),
+   _animated: true,
+   _delayed: true,
+ 
+   /**
+    * Initialization function called when the tool starts up.
+    */
+   initialize: function () {
+     // Set up view controller
+     this.el = $("#web-audio-inspector");
+     this.splitter = $("#inspector-splitter");
+     this.el.setAttribute("width", Services.prefs.getIntPref("devtools.webaudioeditor.inspectorWidth"));
+     this.button = $("#inspector-pane-toggle");
+-    mixin(this, ToggleMixin);
+     this.bindToggle();
+ 
+     // Hide inspector view on startup
+     this.hideImmediately();
+ 
+     this._onNodeSelect = this._onNodeSelect.bind(this);
+     this._onDestroyNode = this._onDestroyNode.bind(this);
+     this._onResize = this._onResize.bind(this);
+@@ -179,9 +178,9 @@ let InspectorView = {
+         button.removeAttribute("checked");
+         node.bypass(true);
+       } else {
+         button.setAttribute("checked", true);
+         node.bypass(false);
+       }
+     }
+   }
+-};
++}, ToggleMixin);
+diff --git a/browser/devtools/webaudioeditor/views/utils.js b/browser/devtools/webaudioeditor/views/utils.js
+deleted file mode 100644
+index c397a16..0000000
+--- a/browser/devtools/webaudioeditor/views/utils.js
++++ /dev/null
+@@ -1,103 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-/**
+- * Takes an element in an SVG graph and iterates over
+- * ancestors until it finds the graph node container. If not found,
+- * returns null.
+- */
+-
+-function findGraphNodeParent (el) {
+-  // Some targets may not contain `classList` property
+-  if (!el.classList)
+-    return null;
+-
+-  while (!el.classList.contains("nodes")) {
+-    if (el.classList.contains("audionode"))
+-      return el;
+-    else
+-      el = el.parentNode;
+-  }
+-  return null;
+-}
+-
+-/**
+- * Object for use with `mix` into a view.
+- * Must have the following properties defined on the view:
+- * - `el`
+- * - `button`
+- * - `_collapseString`
+- * - `_expandString`
+- * - `_toggleEvent`
+- *
+- * Optional properties on the view can be defined to specify default
+- * visibility options.
+- * - `_animated`
+- * - `_delayed`
+- */
+-let ToggleMixin = {
+-
+-  bindToggle: function () {
+-    this._onToggle = this._onToggle.bind(this);
+-    this.button.addEventListener("mousedown", this._onToggle, false);
+-  },
+-
+-  unbindToggle: function () {
+-    this.button.removeEventListener("mousedown", this._onToggle);
+-  },
+-
+-  show: function () {
+-    this._viewController({ visible: true });
+-  },
+-
+-  hide: function () {
+-    this._viewController({ visible: false });
+-  },
+-
+-  hideImmediately: function () {
+-    this._viewController({ visible: false, delayed: false, animated: false });
+-  },
+-
+-  /**
+-   * Returns a boolean indicating whether or not the view.
+-   * is currently being shown.
+-   */
+-  isVisible: function () {
+-    return !this.el.hasAttribute("pane-collapsed");
+-  },
+-
+-  /**
+-   * Toggles the visibility of the view.
+-   *
+-   * @param object visible
+-   *        - visible: boolean indicating whether the panel should be shown or not
+-   *        - animated: boolean indiciating whether the pane should be animated
+-   *        - delayed: boolean indicating whether the pane's opening should wait
+-   *                   a few cycles or not
+-   */
+-  _viewController: function ({ visible, animated, delayed }) {
+-    let flags = {
+-      visible: visible,
+-      animated: animated != null ? animated : !!this._animated,
+-      delayed: delayed != null ? delayed : !!this._delayed,
+-      callback: () => window.emit(this._toggleEvent, visible)
+-    };
+-
+-    ViewHelpers.togglePane(flags, this.el);
+-
+-    if (flags.visible) {
+-      this.button.removeAttribute("pane-collapsed");
+-      this.button.setAttribute("tooltiptext", this._collapseString);
+-    }
+-    else {
+-      this.button.setAttribute("pane-collapsed", "");
+-      this.button.setAttribute("tooltiptext", this._expandString);
+-    }
+-  },
+-
+-  _onToggle: function () {
+-    this._viewController({ visible: !this.isVisible() });
+-  }
+-}
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor.xul b/browser/devtools/webaudioeditor/webaudioeditor.xul
+index e0af48b..dad9a56 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor.xul
++++ b/browser/devtools/webaudioeditor/webaudioeditor.xul
+@@ -17,17 +17,16 @@
+   <script type="application/javascript;version=1.8"
+           src="chrome://browser/content/devtools/theme-switching.js"/>
+ 
+   <script type="application/javascript" src="chrome://browser/content/devtools/d3.js"/>
+   <script type="application/javascript" src="dagre-d3.js"/>
+   <script type="application/javascript" src="webaudioeditor/includes.js"/>
+   <script type="application/javascript" src="webaudioeditor/models.js"/>
+   <script type="application/javascript" src="webaudioeditor/controller.js"/>
+-  <script type="application/javascript" src="webaudioeditor/views/utils.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/context.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/inspector.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/properties.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/automation.js"/>
+ 
+   <vbox class="theme-body" flex="1">
+     <hbox id="reload-notice"
+           class="notice-container"
+-- 
+2.2.1
+
