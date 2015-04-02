@@ -1,0 +1,183 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 30 Mar 2015 14:08:01 -0700
+Subject: Bug 1147945 - Profiler buffer size should be a configurable pref. r=vp
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index c4fcd0c..7a6ecf3 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1453,16 +1453,17 @@ pref("devtools.timeline.hiddenMarkers", "[]");
+ pref("devtools.profiler.ui.flatten-tree-recursion", true);
+ pref("devtools.profiler.ui.show-platform-data", false);
+ pref("devtools.profiler.ui.show-idle-blocks", true);
+ 
+ // The default Performance UI settings
+ pref("devtools.performance.memory.sample-probability", "0.05");
+ pref("devtools.performance.memory.max-log-length", 2147483647); // Math.pow(2,31) - 1
+ pref("devtools.performance.timeline.hidden-markers", "[]");
++pref("devtools.performance.profiler.buffer-size", 10000000);
+ pref("devtools.performance.ui.invert-call-tree", true);
+ pref("devtools.performance.ui.invert-flame-graph", false);
+ pref("devtools.performance.ui.flatten-tree-recursion", true);
+ pref("devtools.performance.ui.show-platform-data", false);
+ pref("devtools.performance.ui.show-idle-blocks", true);
+ pref("devtools.performance.ui.enable-memory", false);
+ pref("devtools.performance.ui.enable-framerate", true);
+ 
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index 221a05f..c720ad7 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -242,17 +242,17 @@ PerformanceFront.prototype = {
+    *        An options object to pass to the actors. Supported properties are
+    *        `withTicks`, `withMemory` and `withAllocations`.
+    * @return object
+    *         A promise that is resolved once recording has started.
+    */
+   startRecording: Task.async(function*(options = {}) {
+     // All actors are started asynchronously over the remote debugging protocol.
+     // Get the corresponding start times from each one of them.
+-    let profilerStartTime = yield this._startProfiler();
++    let profilerStartTime = yield this._startProfiler(options);
+     let timelineStartTime = yield this._startTimeline(options);
+     let memoryStartTime = yield this._startMemory(options);
+ 
+     return {
+       profilerStartTime,
+       timelineStartTime,
+       memoryStartTime
+     };
+@@ -281,31 +281,34 @@ PerformanceFront.prototype = {
+       timelineEndTime: timelineEndTime,
+       memoryEndTime: memoryEndTime
+     };
+   }),
+ 
+   /**
+    * Starts the profiler actor, if necessary.
+    */
+-  _startProfiler: Task.async(function *() {
++  _startProfiler: Task.async(function *(options={}) {
+     // Start the profiler only if it wasn't already active. The built-in
+     // nsIPerformance module will be kept recording, because it's the same instance
+     // for all targets and interacts with the whole platform, so we don't want
+     // to affect other clients by stopping (or restarting) it.
+     let profilerStatus = yield this._request("profiler", "isActive");
+     if (profilerStatus.isActive) {
+       this.emit("profiler-already-active");
+       return profilerStatus.currentTime;
+     }
+ 
+-    // If this._customProfilerOptions is defined, use those to pass in
+-    // to the profiler actor. The profiler actor handles all the defaults
+-    // now, so this should only be used for tests.
+-    let profilerOptions = this._customProfilerOptions || {};
++    // Translate options from the recording model into profiler-specific
++    // options for the nsIProfiler
++    let profilerOptions = {};
++    if (options.bufferSize) {
++      profilerOptions.entries = options.bufferSize;
++    }
++
+     yield this._request("profiler", "startProfiler", profilerOptions);
+ 
+     this.emit("profiler-activated");
+     return 0;
+   }),
+ 
+   /**
+    * Starts the timeline actor.
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index 9aa9002..129bcf7 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -21,17 +21,18 @@ const RecordingModel = function (options={}) {
+   this._performance = options.performance;
+   this._label = options.label || "";
+ 
+   this._configuration = {
+     withTicks: options.withTicks || false,
+     withMemory: options.withMemory || false,
+     withAllocations: options.withAllocations || false,
+     allocationsSampleProbability: options.allocationsSampleProbability || 0,
+-    allocationsMaxLogLength: options.allocationsMaxLogLength || 0
++    allocationsMaxLogLength: options.allocationsMaxLogLength || 0,
++    bufferSize: options.bufferSize || 0
+   };
+ };
+ 
+ RecordingModel.prototype = {
+   // Private fields, only needed when a recording is started or stopped.
+   _imported: false,
+   _recording: false,
+   _profilerStartTime: 0,
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index b9dcf5d..043dfbd 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -179,17 +179,18 @@ let PerformanceController = {
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+ 
+     // All boolean prefs should be handled via the OptionsView in the
+     // ToolbarView, so that they may be accessible via the "gear" menu.
+     // Every other pref should be registered here.
+     this._nonBooleanPrefs = new ViewHelpers.Prefs("devtools.performance", {
+       "hidden-markers": ["Json", "timeline.hidden-markers"],
+       "memory-sample-probability": ["Float", "memory.sample-probability"],
+-      "memory-max-log-length": ["Int", "memory.max-log-length"]
++      "memory-max-log-length": ["Int", "memory.max-log-length"],
++      "profiler-buffer-size": ["Int", "profiler.buffer-size"]
+     });
+ 
+     this._nonBooleanPrefs.registerObserver();
+     this._nonBooleanPrefs.on("pref-changed", this._onPrefChanged);
+ 
+     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+@@ -261,17 +262,18 @@ let PerformanceController = {
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+     let recording = this._createRecording({
+       withMemory: this.getOption("enable-memory"),
+       withTicks: this.getOption("enable-framerate"),
+       withAllocations: this.getOption("enable-memory"),
+       allocationsSampleProbability: this.getPref("memory-sample-probability"),
+-      allocationsMaxLogLength: this.getPref("memory-max-log-length")
++      allocationsMaxLogLength: this.getPref("memory-max-log-length"),
++      bufferSize: this.getPref("profiler-buffer-size")
+     });
+ 
+     this.emit(EVENTS.RECORDING_WILL_START, recording);
+     yield recording.startRecording();
+     this.emit(EVENTS.RECORDING_STARTED, recording);
+ 
+     this.setCurrentRecording(recording);
+   }),
+diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
+index 8720ae1..907e9ba 100644
+--- a/toolkit/devtools/server/actors/profiler.js
++++ b/toolkit/devtools/server/actors/profiler.js
+@@ -2,17 +2,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ const Services = require("Services");
+ const DevToolsUtils = require("devtools/toolkit/DevToolsUtils.js");
+ 
+-let DEFAULT_PROFILER_ENTRIES = 10000000;
++let DEFAULT_PROFILER_ENTRIES = Math.pow(10, 7);
+ let DEFAULT_PROFILER_INTERVAL = 1;
+ let DEFAULT_PROFILER_FEATURES = ["js"];
+ let DEFAULT_PROFILER_THREADFILTERS = ["GeckoMain"];
+ 
+ /**
+  * The nsIProfiler is target agnostic and interacts with the whole platform.
+  * Therefore, special care needs to be given to make sure different actor
+  * consumers (i.e. "toolboxes") don't interfere with each other.
+-- 
+2.2.1
+

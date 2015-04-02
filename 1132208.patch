@@ -1,0 +1,234 @@
+# HG changeset patch
+# User Wasiur Rahman <wrahman0@gmail.com>
+# Parent  e730012260a437b2aa0a018f99f70de682d58f66
+
+diff --git a/browser/devtools/shared/widgets/GraphsWorker.js b/browser/devtools/shared/widgets/GraphsWorker.js
+--- a/browser/devtools/shared/widgets/GraphsWorker.js
++++ b/browser/devtools/shared/widgets/GraphsWorker.js
+@@ -51,19 +51,16 @@ function getMinMaxSum(source) {
+ 
+   return { minValue, maxValue, avgValue };
+ }
+ 
+ /**
+  * Takes a list of numbers and plots them on a line graph representing
+  * the rate of occurences in a specified interval.
+  *
+- * XXX: Copied almost verbatim from toolkit/devtools/server/actors/framerate.js
+- * Remove that dead code after the Performance panel lands, bug 1075567.
+- *
+  * @param array timestamps
+  *        A list of numbers representing time, ordered ascending. For example,
+  *        this can be the raw data received from the framerate actor, which
+  *        represents the elapsed time on each refresh driver tick.
+  * @param number interval
+  *        The maximum amount of time to wait between calculations.
+  * @param number clamp
+  *        The maximum allowed value.
+diff --git a/toolkit/devtools/server/actors/framerate.js b/toolkit/devtools/server/actors/framerate.js
+--- a/toolkit/devtools/server/actors/framerate.js
++++ b/toolkit/devtools/server/actors/framerate.js
+@@ -135,57 +135,8 @@ let FramerateActor = exports.FramerateAc
+  * The corresponding Front object for the FramerateActor.
+  */
+ let FramerateFront = exports.FramerateFront = protocol.FrontClass(FramerateActor, {
+   initialize: function(client, { framerateActor }) {
+     protocol.Front.prototype.initialize.call(this, client, { actor: framerateActor });
+     this.manage(this);
+   }
+ });
+-
+-/**
+- * Plots the frames per second on a timeline.
+- *
+- * @param array ticks
+- *        The raw data received from the framerate actor, which represents
+- *        the elapsed time on each refresh driver tick.
+- * @param number interval
+- *        The maximum amount of time to wait between calculations.
+- * @param number clamp
+- *        The maximum allowed framerate value.
+- * @return array
+- *         A collection of { delta, value } objects representing the
+- *         framerate value at every delta time.
+- */
+-FramerateFront.plotFPS = function(ticks, interval = 100, clamp = 60) {
+-  let timeline = [];
+-  let totalTicks = ticks.length;
+-
+-  // If the refresh driver didn't get a chance to tick before the
+-  // recording was stopped, assume framerate was 0.
+-  if (totalTicks == 0) {
+-    timeline.push({ delta: 0, value: 0 });
+-    timeline.push({ delta: interval, value: 0 });
+-    return timeline;
+-  }
+-
+-  let frameCount = 0;
+-  let prevTime = ticks[0];
+-
+-  for (let i = 1; i < totalTicks; i++) {
+-    let currTime = ticks[i];
+-    frameCount++;
+-
+-    let elapsedTime = currTime - prevTime;
+-    if (elapsedTime < interval) {
+-      continue;
+-    }
+-
+-    let framerate = Math.min(1000 / (elapsedTime / frameCount), clamp);
+-    timeline.push({ delta: prevTime, value: framerate });
+-    timeline.push({ delta: currTime, value: framerate });
+-
+-    frameCount = 0;
+-    prevTime = currTime;
+-  }
+-
+-  return timeline;
+-};
+diff --git a/toolkit/devtools/server/tests/mochitest/test_framerate_01.html b/toolkit/devtools/server/tests/mochitest/test_framerate_01.html
+--- a/toolkit/devtools/server/tests/mochitest/test_framerate_01.html
++++ b/toolkit/devtools/server/tests/mochitest/test_framerate_01.html
+@@ -29,16 +29,51 @@ window.onload = function() {
+   Cu.import("resource://gre/modules/devtools/Loader.jsm");
+   Cu.import("resource://gre/modules/devtools/dbg-client.jsm");
+   Cu.import("resource://gre/modules/devtools/dbg-server.jsm");
+ 
+   SimpleTest.waitForExplicitFinish();
+ 
+   var {FramerateFront} = devtools.require("devtools/server/actors/framerate");
+ 
++  function plotFPS(ticks, interval = 100, clamp = 60) {
++    var timeline = [];
++    var totalTicks = ticks.length;
++
++    // If the refresh driver didn't get a chance to tick before the
++    // recording was stopped, assume framerate was 0.
++    if (totalTicks == 0) {
++      timeline.push({ delta: 0, value: 0 });
++      timeline.push({ delta: interval, value: 0 });
++      return timeline;
++    }
++
++    var frameCount = 0;
++    var prevTime = ticks[0];
++
++    for (var i = 1; i < totalTicks; i++) {
++      var currTime = ticks[i];
++      frameCount++;
++
++      var elapsedTime = currTime - prevTime;
++      if (elapsedTime < interval) {
++        continue;
++      }
++
++      var framerate = Math.min(1000 / (elapsedTime / frameCount), clamp);
++      timeline.push({ delta: prevTime, value: framerate });
++      timeline.push({ delta: currTime, value: framerate });
++
++      frameCount = 0;
++      prevTime = currTime;
++    }
++
++    return timeline;
++  };
++
+   if (!DebuggerServer.initialized) {
+     DebuggerServer.init();
+     DebuggerServer.addBrowserActors();
+   }
+ 
+   var client = new DebuggerClient(DebuggerServer.connectPipe());
+   client.connect(function onConnect() {
+     client.listTabs(function onListTabs(aResponse) {
+@@ -55,17 +90,17 @@ window.onload = function() {
+         });
+       }, 1000);
+     });
+   });
+ 
+   function onRecordingStopped(front, rawData) {
+     ok(rawData, "There should be a recording available.");
+ 
+-    var timeline = FramerateFront.plotFPS(rawData);
++    var timeline = plotFPS(rawData);
+     ok(timeline.length >= 2,
+       "There should be at least one measurement available, with two entries.");
+ 
+     var prevTimeStart = timeline[0].delta;
+ 
+     for (var i = 0; i < timeline.length; i += 2) {
+       var currTimeStart = timeline[i].delta;
+       var currTimeEnd = timeline[i + 1].delta;
+diff --git a/toolkit/devtools/server/tests/mochitest/test_framerate_02.html b/toolkit/devtools/server/tests/mochitest/test_framerate_02.html
+--- a/toolkit/devtools/server/tests/mochitest/test_framerate_02.html
++++ b/toolkit/devtools/server/tests/mochitest/test_framerate_02.html
+@@ -29,32 +29,67 @@ window.onload = function() {
+   Cu.import("resource://gre/modules/devtools/Loader.jsm");
+   Cu.import("resource://gre/modules/devtools/dbg-client.jsm");
+   Cu.import("resource://gre/modules/devtools/dbg-server.jsm");
+ 
+   SimpleTest.waitForExplicitFinish();
+ 
+   var {FramerateFront} = devtools.require("devtools/server/actors/framerate");
+ 
++  function plotFPS(ticks, interval = 100, clamp = 60) {
++    var timeline = [];
++    var totalTicks = ticks.length;
++
++    // If the refresh driver didn't get a chance to tick before the
++    // recording was stopped, assume framerate was 0.
++    if (totalTicks == 0) {
++      timeline.push({ delta: 0, value: 0 });
++      timeline.push({ delta: interval, value: 0 });
++      return timeline;
++    }
++
++    var frameCount = 0;
++    var prevTime = ticks[0];
++
++    for (var i = 1; i < totalTicks; i++) {
++      var currTime = ticks[i];
++      frameCount++;
++
++      var elapsedTime = currTime - prevTime;
++      if (elapsedTime < interval) {
++        continue;
++      }
++
++      var framerate = Math.min(1000 / (elapsedTime / frameCount), clamp);
++      timeline.push({ delta: prevTime, value: framerate });
++      timeline.push({ delta: currTime, value: framerate });
++
++      frameCount = 0;
++      prevTime = currTime;
++    }
++
++    return timeline;
++  };
++
+   if (!DebuggerServer.initialized) {
+     DebuggerServer.init();
+     DebuggerServer.addBrowserActors();
+   }
+ 
+   var client = new DebuggerClient(DebuggerServer.connectPipe());
+   client.connect(function onConnect() {
+     client.listTabs(function onListTabs(aResponse) {
+       var form = aResponse.tabs[aResponse.selected];
+       var front = FramerateFront(client, form);
+ 
+       front.stopRecording().then(rawData => {
+         ok(rawData, "There should be a recording available.");
+         is(rawData.length, 0, "...but it should be empty.");
+ 
+-        var timeline = FramerateFront.plotFPS(rawData);
++        var timeline = plotFPS(rawData);
+         is(timeline.length, 2,
+           "There should be one measurement plotted, with two entries.");
+ 
+         info("The framerate should be assumed to be 0 if the recording is empty.");
+ 
+         is(timeline[0].delta, 0,
+           "The first time delta should be 0.");
+         is(timeline[0].value, 0,

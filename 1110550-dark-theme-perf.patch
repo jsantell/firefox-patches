@@ -1,0 +1,430 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 27 Mar 2015 16:29:09 -0700
+Subject: Bug 1110550 - Enable performance overview graphs to rerender and change on devtools theme switch. r=vp
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index b9dcf5d..ee374f7 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -55,16 +55,19 @@ devtools.lazyImporter(this, "SideMenuWidget",
+ 
+ const BRANCH_NAME = "devtools.performance.ui.";
+ 
+ // Events emitted by various objects in the panel.
+ const EVENTS = {
+   // Fired by the PerformanceController and OptionsView when a pref changes.
+   PREF_CHANGED: "Performance:PrefChanged",
+ 
++  // Fired by the PerformanceController when the devtools theme changes.
++  THEME_CHANGED: "Performance:ThemeChanged",
++
+   // Emitted by the PerformanceView when the state (display mode) changes,
+   // for example when switching between "empty", "recording" or "recorded".
+   // This causes certain panels to be hidden or visible.
+   UI_STATE_CHANGED: "Performance:UI:StateChanged",
+ 
+   // Emitted by the PerformanceView on clear button click
+   UI_CLEAR_RECORDINGS: "Performance:UI:ClearRecordings",
+ 
+@@ -172,16 +175,17 @@ let PerformanceController = {
+     this.startRecording = this.startRecording.bind(this);
+     this.stopRecording = this.stopRecording.bind(this);
+     this.importRecording = this.importRecording.bind(this);
+     this.exportRecording = this.exportRecording.bind(this);
+     this.clearRecordings = this.clearRecordings.bind(this);
+     this._onTimelineData = this._onTimelineData.bind(this);
+     this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
++    this._onThemeChanged = this._onThemeChanged.bind(this);
+ 
+     // All boolean prefs should be handled via the OptionsView in the
+     // ToolbarView, so that they may be accessible via the "gear" menu.
+     // Every other pref should be registered here.
+     this._nonBooleanPrefs = new ViewHelpers.Prefs("devtools.performance", {
+       "hidden-markers": ["Json", "timeline.hidden-markers"],
+       "memory-sample-probability": ["Float", "memory.sample-probability"],
+       "memory-max-log-length": ["Int", "memory.max-log-length"]
+@@ -193,16 +197,17 @@ let PerformanceController = {
+     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.on(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.on(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
++    gDevTools.on("pref-changed", this._onThemeChanged);
+     gFront.on("markers", this._onTimelineData); // timeline markers
+     gFront.on("frames", this._onTimelineData); // stack frames
+     gFront.on("memory", this._onTimelineData); // memory measurements
+     gFront.on("ticks", this._onTimelineData); // framerate
+     gFront.on("allocations", this._onTimelineData); // memory allocations
+   }),
+ 
+   /**
+@@ -215,24 +220,32 @@ let PerformanceController = {
+     ToolbarView.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.off(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.off(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
++    gDevTools.off("pref-changed", this._onThemeChanged);
+     gFront.off("markers", this._onTimelineData);
+     gFront.off("frames", this._onTimelineData);
+     gFront.off("memory", this._onTimelineData);
+     gFront.off("ticks", this._onTimelineData);
+     gFront.off("allocations", this._onTimelineData);
+   },
+ 
+   /**
++   * Returns the current devtools theme.
++   */
++  getTheme: function () {
++    return Services.prefs.getCharPref("devtools.theme");
++  },
++
++  /**
+    * Get a boolean preference setting from `prefName` via the underlying
+    * OptionsView in the ToolbarView.
+    *
+    * @param string prefName
+    * @return boolean
+    */
+   getOption: function (prefName) {
+     return ToolbarView.optionsView.getPref(prefName);
+@@ -409,16 +422,29 @@ let PerformanceController = {
+   /**
+    * Fired when the ToolbarView fires a PREF_CHANGED event.
+    * with the value.
+    */
+   _onPrefChanged: function (_, prefName, prefValue) {
+     this.emit(EVENTS.PREF_CHANGED, prefName, prefValue);
+   },
+ 
++  /*
++   * Called when the developer tools theme changes.
++   */
++  _onThemeChanged: function (_, data) {
++    // Right now, gDevTools only emits `pref-changed` for the theme,
++    // but this could change in the future.
++    if (data.pref !== "devtools.theme") {
++      return;
++    }
++
++    this.emit(EVENTS.THEME_CHANGED, data.newValue);
++  },
++
+   toString: () => "[object PerformanceController]"
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 816cb5b..09d39ec 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -76,16 +76,17 @@ support-files =
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
+ [browser_perf-range-changed-render.js]
+ [browser_perf-recording-selected-01.js]
+ [browser_perf-recording-selected-02.js]
+ [browser_perf-recording-selected-03.js]
+ [browser_perf-recording-selected-04.js]
++[browser_perf-theme-toggle-01.js]
+ [browser_profiler_categories.js]
+ [browser_profiler_content-check.js]
+ [browser_profiler_tree-abstract-01.js]
+ [browser_profiler_tree-abstract-02.js]
+ [browser_profiler_tree-abstract-03.js]
+ [browser_profiler_tree-abstract-04.js]
+ [browser_profiler_tree-frame-node.js]
+ [browser_profiler_tree-model-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-theme-toggle-01.js b/browser/devtools/performance/test/browser_perf-theme-toggle-01.js
+new file mode 100644
+index 0000000..03b9896
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-theme-toggle-01.js
+@@ -0,0 +1,86 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the markers and memory overviews render with the correct
++ * theme on load, and rerenders when changed.
++ */
++
++const LIGHT_BG = "#fcfcfc";
++const DARK_BG = "#14171a";
++
++setTheme("dark");
++Services.prefs.setBoolPref(MEMORY_PREF, false);
++
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, $, OverviewView, document: doc } = panel.panelWin;
++
++  yield startRecording(panel);
++  is(OverviewView.markersOverview.backgroundColor, DARK_BG,
++    "correct theme on load for markers.");
++  yield stopRecording(panel);
++
++  let refreshed = once(OverviewView.markersOverview, "refresh");
++  setTheme("light");
++  yield refreshed;
++
++  ok(true, "markers were rerendered after theme change.");
++  is(OverviewView.markersOverview.backgroundColor, LIGHT_BG,
++    "correct theme on after toggle for markers.");
++
++  // reset back to dark
++  refreshed = once(OverviewView.markersOverview, "refresh");
++  setTheme("dark");
++  yield refreshed;
++
++  info("Testing with memory overview");
++
++  Services.prefs.setBoolPref(MEMORY_PREF, true);
++
++  yield startRecording(panel);
++  is(OverviewView.memoryOverview.backgroundColor, DARK_BG,
++    "correct theme on load for memory.");
++  yield stopRecording(panel);
++
++  refreshed = Promise.all([
++    once(OverviewView.markersOverview, "refresh"),
++    once(OverviewView.memoryOverview, "refresh"),
++  ]);
++  setTheme("light");
++  yield refreshed;
++
++  ok(true, "Both memory and markers were rerendered after theme change.");
++  is(OverviewView.markersOverview.backgroundColor, LIGHT_BG,
++    "correct theme on after toggle for markers.");
++  is(OverviewView.memoryOverview.backgroundColor, LIGHT_BG,
++    "correct theme on after toggle for memory.");
++
++  refreshed = Promise.all([
++    once(OverviewView.markersOverview, "refresh"),
++    once(OverviewView.memoryOverview, "refresh"),
++  ]);
++
++  // Set theme back to light
++  setTheme("light");
++  yield refreshed;
++
++  yield teardown(panel);
++  finish();
++}
++
++/**
++ * Mimics selecting the theme selector in the toolbox;
++ * sets the preference and emits an event on gDevTools to trigger
++ * the themeing.
++ */
++function setTheme (newTheme) {
++  let oldTheme = Services.prefs.getCharPref("devtools.theme");
++  info("Setting `devtools.theme` to \"" + newTheme + "\"");
++  Services.prefs.setCharPref("devtools.theme", newTheme);
++  gDevTools.emit("pref-changed", {
++    pref: "devtools.theme",
++    newValue: newTheme,
++    oldValue: oldTheme
++  });
++}
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index a6b5b81..9d320f9 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -32,23 +32,25 @@ let OverviewView = {
+     this._onRecordingWillStart = this._onRecordingWillStart.bind(this);
+     this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingWillStop = this._onRecordingWillStop.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
+     this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onRecordingTick = this._onRecordingTick.bind(this);
+     this._onGraphSelecting = this._onGraphSelecting.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
++    this._onThemeChanged = this._onThemeChanged.bind(this);
+ 
+     // Toggle the initial visibility of memory and framerate graph containers
+     // based off of prefs.
+     $("#memory-overview").hidden = !PerformanceController.getOption("enable-memory");
+     $("#time-framerate").hidden = !PerformanceController.getOption("enable-framerate");
+ 
+     PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
++    PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+   },
+ 
+   /**
+@@ -61,16 +63,17 @@ let OverviewView = {
+     if (this.memoryOverview) {
+       yield this.memoryOverview.destroy();
+     }
+     if (this.framerateGraph) {
+       yield this.framerateGraph.destroy();
+     }
+ 
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
++    PerformanceController.off(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+   }),
+ 
+   /**
+@@ -88,16 +91,33 @@ let OverviewView = {
+    *
+    * @return boolean
+    */
+   isDisabled: function () {
+     return this._disabled;
+   },
+ 
+   /**
++   * Sets the theme for the markers overview and memory overview.
++   */
++  setTheme: function (options={}) {
++    let theme = options.theme || PerformanceController.getTheme();
++
++    if (this.markersOverview) {
++      this.markersOverview.setTheme(theme);
++      this.markersOverview.refresh({ force: options.redraw });
++    }
++
++    if (this.memoryOverview) {
++      this.memoryOverview.setTheme(theme);
++      this.memoryOverview.refresh({ force: options.redraw });
++    }
++  },
++
++  /**
+    * Sets the time interval selection for all graphs in this overview.
+    *
+    * @param object interval
+    *        The { startTime, endTime }, in milliseconds.
+    */
+   setTimeInterval: function(interval, options = {}) {
+     let recording = PerformanceController.getCurrentRecording();
+     if (recording == null) {
+@@ -147,16 +167,17 @@ let OverviewView = {
+     }
+     let blueprint = PerformanceController.getTimelineBlueprint();
+     this.markersOverview = new MarkersOverview($("#markers-overview"), blueprint);
+     this.markersOverview.headerHeight = MARKERS_GRAPH_HEADER_HEIGHT;
+     this.markersOverview.rowHeight = MARKERS_GRAPH_ROW_HEIGHT;
+     this.markersOverview.groupPadding = MARKERS_GROUP_VERTICAL_PADDING;
+     this.markersOverview.on("selecting", this._onGraphSelecting);
+     yield this.markersOverview.ready();
++    this.setTheme();
+     return true;
+   }),
+ 
+   /**
+    * Sets up the memory overview graph, if allowed and needed.
+    *
+    * @return object
+    *         A promise resolved to `true` if the graph was initialized and is
+@@ -168,16 +189,17 @@ let OverviewView = {
+     }
+     if (this.memoryOverview) {
+       yield this.memoryOverview.ready();
+       return true;
+     }
+     this.memoryOverview = new MemoryOverview($("#memory-overview"));
+     this.memoryOverview.fixedHeight = MEMORY_GRAPH_HEIGHT;
+     yield this.memoryOverview.ready();
++    this.setTheme();
+ 
+     CanvasGraphUtils.linkAnimation(this.markersOverview, this.memoryOverview);
+     CanvasGraphUtils.linkSelection(this.markersOverview, this.memoryOverview);
+     return true;
+   }),
+ 
+   /**
+    * Sets up the framerate graph, if allowed and needed.
+@@ -364,13 +386,20 @@ let OverviewView = {
+           this.markersOverview.setBlueprint(blueprint);
+           this.markersOverview.refresh({ force: true });
+         }
+         break;
+       }
+     }
+   }),
+ 
++  /**
++   * Called when `devtools.theme` changes.
++   */
++  _onThemeChanged: function (_, theme) {
++    this.setTheme({ theme, redraw: true });
++  },
++
+   toString: () => "[object OverviewView]"
+ };
+ 
+ // Decorates the OverviewView as an EventEmitter
+ EventEmitter.decorate(OverviewView);
+diff --git a/browser/devtools/shared/timeline/memory-overview.js b/browser/devtools/shared/timeline/memory-overview.js
+index 7e097c4..6b59ee5 100644
+--- a/browser/devtools/shared/timeline/memory-overview.js
++++ b/browser/devtools/shared/timeline/memory-overview.js
+@@ -64,17 +64,17 @@ MemoryOverview.prototype = Heritage.extend(LineGraphWidget.prototype, {
+   /**
+    * Sets the theme via `theme` to either "light" or "dark",
+    * and updates the internal styling to match. Requires a redraw
+    * to see the effects.
+    */
+   setTheme: function (theme) {
+     theme = theme || "light";
+     this.backgroundColor = getColor("body-background", theme);
+-    this.backgroundGradientStart = setAlpha(getColor("highlight-blue", theme), 0.1);
+-    this.backgroundGradientEnd = setAlpha(getColor("highlight-blue", theme), 0);
++    this.backgroundGradientStart = setAlpha(getColor("highlight-blue", theme), 0.2);
++    this.backgroundGradientEnd = setAlpha(getColor("highlight-blue", theme), 0.05);
+     this.strokeColor = getColor("highlight-blue", theme);
+     this.selectionBackgroundColor = setAlpha(getColor("selection-background", theme), 0.25);
+     this.selectionStripesColor = "rgba(255, 255, 255, 0.1)";
+   }
+ });
+ 
+ exports.MemoryOverview = MemoryOverview;
+diff --git a/browser/themes/shared/devtools/widgets.inc.css b/browser/themes/shared/devtools/widgets.inc.css
+index 1bdd308..754136b 100644
+--- a/browser/themes/shared/devtools/widgets.inc.css
++++ b/browser/themes/shared/devtools/widgets.inc.css
+@@ -904,17 +904,17 @@
+ }
+ 
+ .line-graph-widget-gutter-line[type=average] {
+   border-color: #d97e00;
+ }
+ 
+ .line-graph-widget-tooltip {
+   position: absolute;
+-  background: rgba(255,255,255,0.75);
++  background: rgba(255,255,255,0.9);
+   border-radius: 2px;
+   line-height: 15px;
+   -moz-padding-start: 6px;
+   -moz-padding-end: 6px;
+   transform: translateY(-50%);
+   font-size: 80%;
+   z-index: 1;
+   pointer-events: none;
+-- 
+2.2.1
+

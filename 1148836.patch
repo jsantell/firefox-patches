@@ -1,0 +1,231 @@
+From 4e06ffa3b1d137903d2c6fd6062aa4942cd52015 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Sat, 28 Mar 2015 15:15:36 -0700
+Subject: allocations hack
+
+---
+ .../performance/modules/recording-model.js         | 17 +++++++++++++
+ .../devtools/performance/performance-controller.js |  2 ++
+ browser/devtools/performance/performance.xul       |  1 +
+ browser/devtools/performance/views/overview.js     | 28 ++++++++++++++++++++++
+ 4 files changed, 48 insertions(+)
+
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index 9aa9002..adabb6c 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -96,16 +96,17 @@ RecordingModel.prototype = {
+     this._memoryStartTime = info.memoryStartTime;
+     this._recording = true;
+ 
+     this._markers = [];
+     this._frames = [];
+     this._memory = [];
+     this._ticks = [];
+     this._allocations = { sites: [], timestamps: [], frames: [], counts: [] };
++    this._allocationPressure = [];
+   }),
+ 
+   /**
+    * Stops recording with the PerformanceFront.
+    */
+   stopRecording: Task.async(function *() {
+     let info = yield this._front.stopRecording(this.getConfiguration());
+     this._profile = info.profile;
+@@ -174,16 +175,20 @@ RecordingModel.prototype = {
+   /**
+    * Gets the accumulated memory measurements in this recording.
+    * @return array
+    */
+   getMemory: function() {
+     return this._memory;
+   },
+ 
++  getPressure: function() {
++    return this._allocationPressure;
++  },
++
+   /**
+    * Gets the accumulated refresh driver ticks in this recording.
+    * @return array
+    */
+   getTicks: function() {
+     return this._ticks;
+   },
+ 
+@@ -274,15 +279,27 @@ RecordingModel.prototype = {
+         let [{ sites, timestamps, frames, counts }] = data;
+         let timeOffset = this._memoryStartTime * 1000;
+         let timeScale = 1000;
+         RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
+         Array.prototype.push.apply(this._allocations.sites, sites);
+         Array.prototype.push.apply(this._allocations.timestamps, timestamps);
+         Array.prototype.push.apply(this._allocations.frames, frames);
+         Array.prototype.push.apply(this._allocations.counts, counts);
++
++        // Use the scaled timestamp value of the first allocation, since we want
++        // to group the allocation count on every poll interval. Using `timestamp.length`
++        // is the same as adding up all values in `counts` compared to previous frame.
++        let allocationCount = timestamps.length;
++        // Use `getDuration()` since we want to push empty values when no allocations occur.
++        // Use timestamp values when possible.
++        this._allocationPressure.push({
++          delta: timestamps[0] || this.getDuration(),
++          values: [allocationCount]
++        });
++
+         break;
+       }
+     }
+   }
+ };
+ 
+ exports.RecordingModel = RecordingModel;
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index b9dcf5d..3a29f6b 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -41,16 +41,18 @@ devtools.lazyRequireGetter(this, "FrameNode",
+   "devtools/shared/profiler/tree-model", true);
+ devtools.lazyRequireGetter(this, "OptionsView",
+   "devtools/shared/options-view", true);
+ 
+ devtools.lazyImporter(this, "CanvasGraphUtils",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "LineGraphWidget",
+   "resource:///modules/devtools/Graphs.jsm");
++devtools.lazyImporter(this, "BarGraphWidget",
++  "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "FlameGraphUtils",
+   "resource:///modules/devtools/FlameGraph.jsm");
+ devtools.lazyImporter(this, "FlameGraph",
+   "resource:///modules/devtools/FlameGraph.jsm");
+ devtools.lazyImporter(this, "SideMenuWidget",
+   "resource:///modules/devtools/SideMenuWidget.jsm");
+ 
+ const BRANCH_NAME = "devtools.performance.ui.";
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 41ef972..b27001b 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -133,16 +133,17 @@
+           <button class="devtools-toolbarbutton record-button"
+                   standalone="true" />
+           <label value="&profilerUI.emptyNotice2;"/>
+         </hbox>
+         <vbox id="performance-view-content" flex="1">
+           <vbox id="overview-pane">
+             <hbox id="markers-overview"/>
+             <hbox id="memory-overview"/>
++            <hbox id="allocations-overview"/>
+             <hbox id="time-framerate"/>
+           </vbox>
+           <deck id="details-pane-container" flex="1">
+             <hbox id="recording-notice"
+                   class="notice-container"
+                   align="center"
+                   pack="center"
+                   flex="1">
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index a6b5b81..4e29621 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -174,16 +174,35 @@ let OverviewView = {
+     this.memoryOverview.fixedHeight = MEMORY_GRAPH_HEIGHT;
+     yield this.memoryOverview.ready();
+ 
+     CanvasGraphUtils.linkAnimation(this.markersOverview, this.memoryOverview);
+     CanvasGraphUtils.linkSelection(this.markersOverview, this.memoryOverview);
+     return true;
+   }),
+ 
++  _allocationsGraphAvailable: Task.async(function *() {
++    if (!PerformanceController.getOption("enable-memory")) {
++      return false;
++    }
++    if (this.allocationsOverview) {
++      yield this.allocationsOverview.ready();
++      return true;
++    }
++    this.allocationsOverview = new BarGraphWidget($("#allocations-overview"));
++    this.allocationsOverview.fixedHeight = MEMORY_GRAPH_HEIGHT;
++    this.allocationsOverview.minBarsWidth = 5;
++    this.allocationsOverview.format = [{ ordinal: 0, color: "#bf5656", abbrev: "allocs", label: "Allocations" }];
++    yield this.allocationsOverview.ready();
++
++    CanvasGraphUtils.linkAnimation(this.markersOverview, this.allocationsOverview);
++    CanvasGraphUtils.linkSelection(this.markersOverview, this.allocationsOverview);
++    return true;
++  }),
++
+   /**
+    * Sets up the framerate graph, if allowed and needed.
+    *
+    * @return object
+    *         A promise resolved to `true` if the graph was initialized and is
+    *         ready to use, `false` if the graph is disabled.
+    */
+   _framerateGraphAvailable: Task.async(function *() {
+@@ -213,16 +232,17 @@ let OverviewView = {
+   render: Task.async(function *(resolution) {
+     if (this.isDisabled()) {
+       return;
+     }
+     let recording = PerformanceController.getCurrentRecording();
+     let duration = recording.getDuration();
+     let markers = recording.getMarkers();
+     let memory = recording.getMemory();
++    let pressure = recording.getPressure();
+     let timestamps = recording.getTicks();
+ 
+     // Empty or older recordings might yield no markers, memory or timestamps.
+     if (markers && (yield this._markersGraphAvailable())) {
+       this.markersOverview.setData({ markers, duration });
+       this.emit(EVENTS.MARKERS_GRAPH_RENDERED);
+     }
+     if (memory && (yield this._memoryGraphAvailable())) {
+@@ -230,16 +250,21 @@ let OverviewView = {
+       this.memoryOverview.setData(memory);
+       this.emit(EVENTS.MEMORY_GRAPH_RENDERED);
+     }
+     if (timestamps && (yield this._framerateGraphAvailable())) {
+       this.framerateGraph.dataDuration = duration;
+       yield this.framerateGraph.setDataFromTimestamps(timestamps, resolution);
+       this.emit(EVENTS.FRAMERATE_GRAPH_RENDERED);
+     }
++    if (pressure && pressure.length && (yield this._allocationsGraphAvailable())) {
++      this.allocationsOverview.dataDuration = duration;
++      yield this.allocationsOverview.setData(pressure);
++      this.emit("PRESSURERENDERED");
++    }
+ 
+     // Finished rendering all graphs in this overview.
+     this.emit(EVENTS.OVERVIEW_RENDERED);
+   }),
+ 
+   /**
+    * Called at most every OVERVIEW_UPDATE_INTERVAL milliseconds
+    * and uses data fetched from the controller to render
+@@ -337,16 +362,19 @@ let OverviewView = {
+       this.markersOverview.selectionEnabled = selectionEnabled;
+     }
+     if (yield this._memoryGraphAvailable()) {
+       this.memoryOverview.selectionEnabled = selectionEnabled;
+     }
+     if (yield this._framerateGraphAvailable()) {
+       this.framerateGraph.selectionEnabled = selectionEnabled;
+     }
++    if (yield this._allocationsGraphAvailable()) {
++      this.allocationsOverview.selectionEnabled = selectionEnabled;
++    }
+   }),
+ 
+   /**
+    * Called whenever a preference in `devtools.performance.ui.` changes. Used
+    * to toggle the visibility of memory and framerate graphs.
+    */
+   _onPrefChanged: Task.async(function* (_, prefName, prefValue) {
+     switch (prefName) {
+-- 
+2.2.1
+

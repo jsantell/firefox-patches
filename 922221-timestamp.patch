@@ -1,24 +1,30 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Fri, 20 Mar 2015 10:28:19 -0700
-Subject: Bug 922221 - Implement console.timeStamp(label) to create and emit ProfileTimelineMarkers. r=khuey
+Date: Sat, 28 Mar 2015 14:32:15 -0700
+Subject: Bug 922221 - implement console.timeStamp(label) to create profile timeline markers. r=khuey
 
 diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
-index 5c85db3..deb2ae7 100644
+index cd9dcb1..cbb9e82 100644
 --- a/docshell/base/nsDocShell.cpp
 +++ b/docshell/base/nsDocShell.cpp
-@@ -2969,16 +2969,30 @@ nsDocShell::PopProfileTimelineMarkers(
+@@ -2980,21 +2980,36 @@ nsDocShell::PopProfileTimelineMarkers(
+   nsTArray<UniquePtr<TimelineMarker>> keptMarkers;
+ 
+   for (uint32_t i = 0; i < mProfileTimelineMarkers.Length(); ++i) {
+     UniquePtr<TimelineMarker>& startPayload = mProfileTimelineMarkers[i];
+     const char* startMarkerName = startPayload->GetName();
  
      bool hasSeenPaintedLayer = false;
      bool isPaint = strcmp(startMarkerName, "Paint") == 0;
++    bool isLayer = strcmp(startMarkerName, "Layer") == 0;
  
      // If we are processing a Paint marker, we append information from
      // all the embedded Layer markers to this array.
      dom::Sequence<dom::ProfileTimelineLayerRect> layerRectangles;
  
-+    // Other than Paint markers, if this marker is a TRACING_EVENT,
++    // Other than Paint and Layer markers, if this marker is a TRACING_EVENT,
 +    // there is no corresponding END, as this marker contains only a timestamp,
 +    // not a duration.
-+    if (!isPaint && startPayload->GetMetaData() == TRACING_EVENT) {
++    if (!isPaint && !isLayer && startPayload->GetMetaData() == TRACING_EVENT) {
 +      mozilla::dom::ProfileTimelineMarker* marker =
 +        profileTimelineMarkers.AppendElement();
 +
@@ -81,7 +87,7 @@ index 82039c6..ac651e5 100644
  
  timelineContentTest(TESTS);
 diff --git a/dom/base/Console.cpp b/dom/base/Console.cpp
-index 2d0e608..c5b7494 100644
+index caa9de3..f4ab984 100644
 --- a/dom/base/Console.cpp
 +++ b/dom/base/Console.cpp
 @@ -778,16 +778,29 @@ Console::TimeEnd(JSContext* aCx, const JS::Handle<JS::Value> aTime)
@@ -135,7 +141,7 @@ index 2d0e608..c5b7494 100644
 +    MOZ_ASSERT(aMetaData == TRACING_EVENT);
 +  }
 +
-+  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) MOZ_OVERRIDE
++  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) override
 +  {
 +    if (!GetCause().IsEmpty()) {
 +      aMarker.mCauseName.Construct(GetCause());
@@ -196,7 +202,7 @@ index 2d0e608..c5b7494 100644
 +
 +        mozilla::UniquePtr<TimelineMarker> marker =
 +          MakeUnique<TimestampTimelineMarker>(docShell, TRACING_EVENT, key);
-+        docShell->AddProfileTimelineMarker(marker);
++        docShell->AddProfileTimelineMarker(Move(marker));
 +      }
 +      // For `console.time(foo)` and `console.timeEnd(foo)`
 +      else if (isTimelineRecording && aData.Length() == 1) {
@@ -209,7 +215,7 @@ index 2d0e608..c5b7494 100644
                MakeUnique<ConsoleTimelineMarker>(docShell,
                                                  aMethodName == MethodTime ? TRACING_INTERVAL_START : TRACING_INTERVAL_END,
 diff --git a/dom/base/Console.h b/dom/base/Console.h
-index bc09679..9eecabc 100644
+index 0c0a356..94f6021 100644
 --- a/dom/base/Console.h
 +++ b/dom/base/Console.h
 @@ -84,16 +84,19 @@ public:
@@ -251,10 +257,10 @@ index bc09679..9eecabc 100644
           const Sequence<JS::Value>& aData);
  
 diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
-index f5515e4..8dd2097 100644
+index a4e2650..d5106f9 100644
 --- a/dom/bindings/Bindings.conf
 +++ b/dom/bindings/Bindings.conf
-@@ -257,17 +257,17 @@ DOMInterfaces = {
+@@ -269,17 +269,17 @@ DOMInterfaces = {
  },
  
  'Clients': {
@@ -274,7 +280,7 @@ index f5515e4..8dd2097 100644
  'Coordinates': {
      'headerFile': 'nsGeoPosition.h'
 diff --git a/dom/tests/browser/browser_ConsoleAPITests.js b/dom/tests/browser/browser_ConsoleAPITests.js
-index 17ebebc..1a0e28a 100644
+index 0268d2a..44a14ab 100644
 --- a/dom/tests/browser/browser_ConsoleAPITests.js
 +++ b/dom/tests/browser/browser_ConsoleAPITests.js
 @@ -320,16 +320,17 @@ function consoleAPISanityTest() {
