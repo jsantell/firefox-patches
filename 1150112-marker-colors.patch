@@ -3,6 +3,59 @@ Date: Thu, 2 Apr 2015 10:30:12 -0700
 Subject: Bug 1150112 markers overview should react to theme change,
  and other marker views now use CSS to automatically use theme change. r=vp
 
+diff --git a/browser/devtools/performance/test/browser_timeline_blueprint.js b/browser/devtools/performance/test/browser_timeline_blueprint.js
+index 81ea630..6381054 100644
+--- a/browser/devtools/performance/test/browser_timeline_blueprint.js
++++ b/browser/devtools/performance/test/browser_timeline_blueprint.js
+@@ -12,16 +12,14 @@ function spawnTest () {
+     "A timeline blueprint should be available.");
+ 
+   ok(Object.keys(TIMELINE_BLUEPRINT).length,
+     "The timeline blueprint has at least one entry.");
+ 
+   for (let [key, value] of Iterator(TIMELINE_BLUEPRINT)) {
+     ok("group" in value,
+       "Each entry in the timeline blueprint contains a `group` key.");
+-    ok("fill" in value,
+-      "Each entry in the timeline blueprint contains a `fill` key.");
+-    ok("stroke" in value,
+-      "Each entry in the timeline blueprint contains a `stroke` key.");
++    ok("colorName" in value,
++      "Each entry in the timeline blueprint contains a `colorName` key.");
+     ok("label" in value,
+       "Each entry in the timeline blueprint contains a `label` key.");
+   }
+ }
+diff --git a/browser/devtools/performance/views/toolbar.js b/browser/devtools/performance/views/toolbar.js
+index 63e6e92..4df1322 100644
+--- a/browser/devtools/performance/views/toolbar.js
++++ b/browser/devtools/performance/views/toolbar.js
+@@ -48,24 +48,20 @@ let ToolbarView = {
+     for (let [markerName, markerDetails] of Iterator(TIMELINE_BLUEPRINT)) {
+       let menuitem = document.createElement("menuitem");
+       menuitem.setAttribute("closemenu", "none");
+       menuitem.setAttribute("type", "checkbox");
+       menuitem.setAttribute("align", "center");
+       menuitem.setAttribute("flex", "1");
+       menuitem.setAttribute("label", markerDetails.label);
+       menuitem.setAttribute("marker-type", markerName);
++      menuitem.className = markerDetails.colorName;
+ 
+       menuitem.addEventListener("command", this._onHiddenMarkersChanged);
+ 
+-      // Style used by pseudo element ::before in performance.inc.css
+-      let bulletStyle = `--bullet-bg: ${markerDetails.fill};`
+-      bulletStyle += `--bullet-border: ${markerDetails.stroke}`;
+-      menuitem.setAttribute("style", bulletStyle);
+-
+       $("#performance-filter-menupopup").appendChild(menuitem);
+     }
+   },
+ 
+   /**
+    * Updates the menu items checked state in the timeline markers filter popup.
+    */
+   _updateHiddenMarkersPopup: function() {
 diff --git a/browser/devtools/shared/timeline/global.js b/browser/devtools/shared/timeline/global.js
 index 913a37a..24f94a3 100644
 --- a/browser/devtools/shared/timeline/global.js
@@ -101,10 +154,10 @@ index 5e3b64d..7e9dff5 100644
      hbox.appendChild(label);
  
 diff --git a/browser/devtools/shared/timeline/markers-overview.js b/browser/devtools/shared/timeline/markers-overview.js
-index a333f54..67b909f 100644
+index a333f54..0df40ba 100644
 --- a/browser/devtools/shared/timeline/markers-overview.js
 +++ b/browser/devtools/shared/timeline/markers-overview.js
-@@ -164,22 +164,19 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -164,22 +164,18 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
      ctx.stroke();
  
      // Draw the timeline markers.
@@ -120,7 +173,6 @@ index a333f54..67b909f 100644
 -      gradient.addColorStop(OVERVIEW_MARKERS_COLOR_STOPS[3], style.stroke);
 -      ctx.fillStyle = gradient;
 +      let color = getColor(style.colorName, this.theme);
-+
 +      ctx.fillStyle = color;
        ctx.beginPath();
  
@@ -130,7 +182,7 @@ index a333f54..67b909f 100644
          ctx.rect(left, top, width, height);
        }
  
-@@ -221,17 +218,17 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -221,17 +217,17 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
    },
  
    /**
@@ -150,10 +202,10 @@ index a333f54..67b909f 100644
      this.alternatingBackgroundColor = setAlpha(getColor("body-color", theme), 0.05);
    }
 diff --git a/browser/devtools/shared/timeline/waterfall.js b/browser/devtools/shared/timeline/waterfall.js
-index a74569a..17505a8 100644
+index a74569a..2335d411 100644
 --- a/browser/devtools/shared/timeline/waterfall.js
 +++ b/browser/devtools/shared/timeline/waterfall.js
-@@ -427,19 +427,18 @@ Waterfall.prototype = {
+@@ -427,19 +427,17 @@ Waterfall.prototype = {
      let blueprint = this._blueprint[marker.name];
  
      let sidebar = this._document.createElement("hbox");
@@ -165,7 +217,6 @@ index a74569a..17505a8 100644
 -    bullet.className = "waterfall-marker-bullet";
 -    bullet.style.backgroundColor = blueprint.fill;
 -    bullet.style.borderColor = blueprint.stroke;
-+
 +    bullet.className = `waterfall-marker-bullet ${blueprint.colorName}`;
      bullet.setAttribute("type", marker.name);
      sidebar.appendChild(bullet);
@@ -175,7 +226,7 @@ index a74569a..17505a8 100644
      name.setAttribute("flex", "1");
      name.className = "plain waterfall-marker-name";
  
-@@ -478,22 +477,18 @@ Waterfall.prototype = {
+@@ -478,22 +476,18 @@ Waterfall.prototype = {
      waterfall.setAttribute("align", "center");
      waterfall.setAttribute("flex", "1");
  
@@ -200,57 +251,118 @@ index a74569a..17505a8 100644
  
    /**
 diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
-index 7bff45b..f3ff832 100644
+index 34313ee..1b87a5d8 100644
 --- a/browser/themes/shared/devtools/performance.inc.css
 +++ b/browser/themes/shared/devtools/performance.inc.css
-@@ -425,16 +425,47 @@
+@@ -52,20 +52,16 @@
+ }
+ 
+ #performance-filter-menupopup > menuitem:before {
+   content: "";
+   display: block;
+   width: 8px;
+   height: 8px;
+   margin: 0 8px;
+-  border: 1px solid;
+-  border-radius: 1px;
+-  background-color: var(--bullet-bg);
+-  border-color: var(--bullet-border);
+ }
+ 
+ /* Recording Notice */
+ 
+ #performance-view .notice-container {
+   font-size: 120%;
+   background-color: var(--theme-toolbar-background);
+   color: var(--theme-body-color);
+@@ -375,43 +371,34 @@
+   -moz-margin-start: -100px !important; /* Don't affect layout. */
+ }
+ 
+ .waterfall-marker-bullet {
+   width: 8px;
+   height: 8px;
+   -moz-margin-start: 8px;
+   -moz-margin-end: 6px;
+-  border: 1px solid;
+-  border-radius: 1px;
+ }
+ 
+ .waterfall-marker-name {
+   font-size: 95%;
+   padding-bottom: 1px !important;
+ }
+ 
+ .waterfall-marker-bar {
+   height: 9px;
+-  border: 1px solid;
+-  border-radius: 1px;
+   transform-origin: left center;
+ }
+ 
+ .waterfall-marker-container.selected > .waterfall-sidebar,
+ .waterfall-marker-container.selected > .waterfall-marker-item {
+   background-color: var(--theme-selection-background);
+   color: var(--theme-selection-color);
+ }
+ 
+-.waterfall-marker-container.selected .waterfall-marker-bullet,
+-.waterfall-marker-container.selected .waterfall-marker-bar {
+-  border-color: initial !important;
+-}
+-
+ .waterfall-marker-location {
+    color: -moz-nativehyperlinktext;
+ }
+ 
+ .waterfall-marker-location:hover,
+ .waterfall-marker-location:focus {
+    text-decoration: underline;
+ }
+@@ -421,18 +408,41 @@
+   -moz-padding-end: 8px;
+   padding-top: 2vh;
+   overflow: auto;
+ }
  
  .marker-details-bullet {
    width: 8px;
    height: 8px;
-   border: 1px solid;
-   border-radius: 1px;
- }
- 
+-  border: 1px solid;
+-  border-radius: 1px;
++}
++
++#performance-filter-menupopup > menuitem.highlight-pink:before,
 +.marker-details-bullet.highlight-pink,
 +.waterfall-marker-bar.highlight-pink,
 +.waterfall-marker-bullet.highlight-pink {
 +  background-color: var(--theme-highlight-pink);
-+  border-color: var(--theme-highlight-pink);
 +}
++#performance-filter-menupopup > menuitem.highlight-bluegrey:before,
 +.marker-details-bullet.highlight-bluegrey,
 +.waterfall-marker-bar.highlight-bluegrey,
 +.waterfall-marker-bullet.highlight-bluegrey {
 +  background-color: var(--theme-highlight-bluegrey);
-+  border-color: var(--theme-highlight-bluegrey);
 +}
++#performance-filter-menupopup > menuitem.highlight-green:before,
 +.marker-details-bullet.highlight-green,
 +.waterfall-marker-bar.highlight-green,
 +.waterfall-marker-bullet.highlight-green {
 +  background-color: var(--theme-highlight-green);
-+  border-color: var(--theme-highlight-green);
 +}
-+.marker-details-bullet.highlight-green,
-+.waterfall-marker-bar.highlight-green,
-+.waterfall-marker-bullet.highlight-green {
-+  background-color: var(--theme-highlight-green);
-+  border-color: var(--theme-highlight-green);
-+}
++#performance-filter-menupopup > menuitem.highlight-lightorange:before,
 +.marker-details-bullet.highlight-lightorange,
 +.waterfall-marker-bar.highlight-lightorange,
 +.waterfall-marker-bullet.highlight-lightorange {
 +  background-color: var(--theme-highlight-lightorange);
-+  border-color: var(--theme-highlight-lightorange);
-+}
-+
+ }
+ 
  #waterfall-details > * {
    padding-top: 3px;
  }
  
  .marker-details-labelname {
    -moz-padding-end: 4px;
- }
- 
 -- 
 2.2.1
 
