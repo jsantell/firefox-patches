@@ -1,13 +1,13 @@
 From: Jordan Santell <jsantell@gmail.com>
 Date: Fri, 20 Mar 2015 16:50:43 -0700
-Subject: Bug 1108843 - generalize platform data in call tree view when platform data is hidden. r=vp
+Subject: Bug 1108843 - generalize platform data in call tree view when
+ platform data is hidden. r=vp
 
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 816cb5b..c339469 100644
+index ab202744..53258b7 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -88,17 +88,19 @@ support-files =
- [browser_profiler_tree-abstract-03.js]
+@@ -94,17 +94,19 @@ support-files =
  [browser_profiler_tree-abstract-04.js]
  [browser_profiler_tree-frame-node.js]
  [browser_profiler_tree-model-01.js]
@@ -15,6 +15,7 @@ index 816cb5b..c339469 100644
  [browser_profiler_tree-model-03.js]
  [browser_profiler_tree-model-04.js]
  [browser_profiler_tree-model-05.js]
+ [browser_profiler_tree-model-06.js]
 +[browser_profiler_tree-model-07.js]
  [browser_profiler_tree-view-01.js]
  [browser_profiler_tree-view-02.js]
@@ -28,16 +29,18 @@ index 816cb5b..c339469 100644
  [browser_timeline_filters.js]
 diff --git a/browser/devtools/performance/test/browser_profiler_tree-model-07.js b/browser/devtools/performance/test/browser_profiler_tree-model-07.js
 new file mode 100644
-index 0000000..104059e
+index 0000000..5896093
 --- /dev/null
 +++ b/browser/devtools/performance/test/browser_profiler_tree-model-07.js
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,91 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
 +/**
 + * Tests that when displaying only content nodes, platform nodes are generalized.
 + */
++
++let { CATEGORY_MASK } = devtools.require("devtools/shared/profiler/global");
 +
 +function test() {
 +  let { ThreadNode } = devtools.require("devtools/shared/profiler/tree-model");
@@ -94,7 +97,7 @@ index 0000000..104059e
 +    { location: "(root)" },
 +    { location: "http://content/A" },
 +    { location: "http://content/B" },
-+    { location: "contentY", category: 32 },
++    { location: "contentY", category: CATEGORY_MASK("css") },
 +    { location: "http://content/D" }
 +  ]
 +}, {
@@ -102,28 +105,28 @@ index 0000000..104059e
 +  frames: [
 +    { location: "(root)" },
 +    { location: "http://content/A" },
-+    { location: "contentY", category: 32 },
++    { location: "contentY", category: CATEGORY_MASK("css") },
 +    { location: "http://content/E" },
 +    { location: "http://content/F" },
-+    { location: "contentY", category: 64 },
++    { location: "contentY", category: CATEGORY_MASK("js") },
 +  ]
 +}, {
 +  time: 5 + 20,
 +  frames: [
 +    { location: "(root)" },
-+    { location: "contentX", category: 64 },
++    { location: "contentX", category: CATEGORY_MASK("js") },
 +  ]
 +}, {
 +  time: 5 + 25,
 +  frames: [
 +    { location: "(root)" },
 +    { location: "http://content/A" },
-+    { location: "contentZ", category: 128 },
++    { location: "contentZ", category: CATEGORY_MASK("gc", 1) },
 +  ]
 +}];
 diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-08.js b/browser/devtools/performance/test/browser_profiler_tree-view-08.js
 new file mode 100644
-index 0000000..2cd621a
+index 0000000..7403d28
 --- /dev/null
 +++ b/browser/devtools/performance/test/browser_profiler_tree-view-08.js
 @@ -0,0 +1,104 @@
@@ -204,7 +207,7 @@ index 0000000..2cd621a
 +    { location: "(root)" },
 +    { location: "http://content/A" },
 +    { location: "http://content/B" },
-+    { location: "contentY", category: 32 },
++    { location: "contentY", category: CATEGORY_MASK("css") },
 +    { location: "http://content/D" }
 +  ]
 +}, {
@@ -212,30 +215,30 @@ index 0000000..2cd621a
 +  frames: [
 +    { location: "(root)" },
 +    { location: "http://content/A" },
-+    { location: "contentY", category: 32 },
++    { location: "contentY", category: CATEGORY_MASK("css") },
 +    { location: "http://content/E" },
 +    { location: "http://content/F" },
-+    { location: "contentY", category: 64 },
++    { location: "contentY", category: CATEGORY_MASK("js") },
 +  ]
 +}, {
 +  time: 5 + 20,
 +  frames: [
 +    { location: "(root)" },
-+    { location: "contentX", category: 64 },
++    { location: "contentX", category: CATEGORY_MASK("js") },
 +  ]
 +}, {
 +  time: 5 + 25,
 +  frames: [
 +    { location: "(root)" },
 +    { location: "http://content/A" },
-+    { location: "contentZ", category: 128 },
++    { location: "contentZ", category: CATEGORY_MASK("gc", 1) },
 +  ]
 +}];
 diff --git a/browser/devtools/shared/profiler/tree-model.js b/browser/devtools/shared/profiler/tree-model.js
-index 3a57272..d78d3b5 100644
+index 1b79dca..7f87874 100644
 --- a/browser/devtools/shared/profiler/tree-model.js
 +++ b/browser/devtools/shared/profiler/tree-model.js
-@@ -1,22 +1,27 @@
+@@ -1,24 +1,29 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -253,17 +256,19 @@ index 3a57272..d78d3b5 100644
 +  "devtools/shared/profiler/global", true);
  loader.lazyRequireGetter(this, "CATEGORY_JIT",
    "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/shared/profiler/jit", true);
 +loader.lazyRequireGetter(this, "CATEGORY_OTHER",
 +  "devtools/shared/profiler/global", true);
  
- const CHROME_SCHEMES = ["chrome://", "resource://"];
- const CONTENT_SCHEMES = ["http://", "https://", "file://"];
+ const CHROME_SCHEMES = ["chrome://", "resource://", "jar:file://"];
+ const CONTENT_SCHEMES = ["http://", "https://", "file://", "app://"];
  
  exports.ThreadNode = ThreadNode;
  exports.FrameNode = FrameNode;
  exports.FrameNode.isContent = isContent;
  
-@@ -86,17 +91,17 @@ ThreadNode.prototype = {
+@@ -92,17 +97,17 @@ ThreadNode.prototype = {
      }
  
      let sampleFrames = sample.frames;
@@ -282,7 +287,7 @@ index 3a57272..d78d3b5 100644
      // to continue.
      if (!sampleFrames.length) {
        return;
-@@ -137,27 +142,31 @@ ThreadNode.prototype = {
+@@ -156,28 +161,32 @@ ThreadNode.prototype = {
   * @param number line
   *        The line number inside the source containing this function call.
   * @param number column
@@ -291,12 +296,12 @@ index 3a57272..d78d3b5 100644
   *        The category type of this function call ("js", "graphics" etc.).
   * @param number allocations
   *        The number of memory allocations performed in this frame.
-+ * @param boolean generalize
++ * @param boolean isMetaCategory
 + *        Whether or not this is a platform node that should appear as a
-+ *        generalized category or not.
++ *        generalized meta category or not.
   */
 -function FrameNode({ location, line, column, category, allocations }) {
-+function FrameNode({ location, line, column, category, allocations, generalize }) {
++function FrameNode({ location, line, column, category, allocations, isMetaCategory }) {
    this.location = location;
    this.line = line;
    this.column = column;
@@ -306,7 +311,8 @@ index 3a57272..d78d3b5 100644
    this.samples = 0;
    this.duration = 0;
    this.calls = {};
-+  this.generalize = generalize;
+   this._optimizations = null;
++  this.isMetaCategory = isMetaCategory;
  }
  
  FrameNode.prototype = {
@@ -315,11 +321,11 @@ index 3a57272..d78d3b5 100644
     * the the frames below (which would account for three calls to `insert` on
     * the root frame), the following tree structure is created:
     *
-@@ -175,18 +184,22 @@ FrameNode.prototype = {
+@@ -197,18 +206,22 @@ FrameNode.prototype = {
     * @param number duration
     *        The amount of time spent executing all functions on the stack.
     */
-   insert: function(frames, index, time, duration, _store = this.calls) {
+   insert: function(frames, optimizations, index, time, duration, _store = this.calls) {
      let frame = frames[index];
      if (!frame) {
        return;
@@ -327,20 +333,20 @@ index 3a57272..d78d3b5 100644
 -    let location = frame.location;
 -    let child = _store[location] || (_store[location] = new FrameNode(frame));
 +    // If we are only displaying content, then platform data will have
-+    // a `generalize` property. Group by category (GC, Graphics, etc.)
++    // a `isMetaCategory` property. Group by category (GC, Graphics, etc.)
 +    // to group together frames so they're displayed only once, since we don't
 +    // need the location anyway.
-+    let key = frame.generalize ? frame.category : frame.location;
++    let key = frame.isMetaCategory ? frame.category : frame.location;
 +    let child = _store[key] || (_store[key] = new FrameNode(frame));
      child.sampleTimes.push({ start: time, end: time + duration });
      child.samples++;
      child.duration += duration;
-     child.insert(frames, ++index, time, duration);
-   },
- 
-   /**
-    * Parses the raw location of this function call to retrieve the actual
-@@ -234,17 +247,18 @@ FrameNode.prototype = {
+     if (optimizations && frame.optsIndex != null) {
+       let opts = child._optimizations || (child._optimizations = new JITOptimizations(optimizations));
+       opts.addOptimizationSite(frame.optsIndex);
+     }
+     child.insert(frames, optimizations, index + 1, time, duration);
+@@ -268,17 +281,18 @@ FrameNode.prototype = {
        nodeType: "Frame",
        functionName: functionName,
        fileName: fileName,
@@ -351,16 +357,16 @@ index 3a57272..d78d3b5 100644
        categoryData: categoryData,
 -      isContent: !!isContent(this)
 +      isContent: !!isContent(this),
-+      generalize: this.generalize
++      isMetaCategory: this.isMetaCategory
      };
-   }
- };
+   },
  
- /**
-  * Checks if the specified function represents a chrome or content frame.
-  *
-  * @param object frame
-@@ -274,8 +288,52 @@ function nsIURL(url) {
+   /**
+    * Returns whether or not the frame node has an JITOptimizations model.
+    *
+    * @return {Boolean}
+    */
+@@ -327,8 +341,52 @@ function nsIURL(url) {
      // The passed url string is invalid.
    }
    gNSURLStore.set(url, uri);
@@ -404,17 +410,17 @@ index 3a57272..d78d3b5 100644
 +      result.push(frame);
 +    } else if (last === i) {
 +      // Extend here so we're not destructively editing
-+      // the original profiler data. Set generalize `true`,
++      // the original profiler data. Set isMetaCategory `true`,
 +      // and ensure we have a category set by default, because that's how
 +      // the generalized frame nodes are organized.
-+      result.push(extend({ generalize: true, category: CATEGORY_OTHER }, frame));
++      result.push(extend({ isMetaCategory: true, category: CATEGORY_OTHER }, frame));
 +    }
 +  }
 +
 +  return result;
 +}
 diff --git a/browser/devtools/shared/profiler/tree-view.js b/browser/devtools/shared/profiler/tree-view.js
-index 16e45b1..541d6cc 100644
+index 16e45b1..eb67806 100644
 --- a/browser/devtools/shared/profiler/tree-view.js
 +++ b/browser/devtools/shared/profiler/tree-view.js
 @@ -182,17 +182,18 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
@@ -427,7 +433,7 @@ index 16e45b1..541d6cc 100644
      targetNode.setAttribute("origin", frameInfo.isContent ? "content" : "chrome");
      targetNode.setAttribute("category", frameInfo.categoryData.abbrev || "");
 -    targetNode.setAttribute("tooltiptext", this.frame.location || "");
-+    targetNode.setAttribute("tooltiptext", frameInfo.generalize ? frameInfo.categoryData.label :
++    targetNode.setAttribute("tooltiptext", frameInfo.isMetaCategory ? frameInfo.categoryData.label :
 +                                           this.frame.location || "");
      if (this.hidden) {
        targetNode.style.display = "none";
@@ -447,9 +453,9 @@ index 16e45b1..541d6cc 100644
      nameNode.setAttribute("flex", "1");
      nameNode.setAttribute("crop", "end");
 -    nameNode.setAttribute("value", frameInfo.functionName || "");
-+    nameNode.setAttribute("value", frameInfo.generalize ?
-+                                   frameInfo.categoryData.label :
-+                                   frameInfo.functionName || "");
++    nameNode.setAttribute("value", frameInfo.isMetaCategory
++                                     ? frameInfo.categoryData.label
++                                     : frameInfo.functionName || "");
      cell.appendChild(nameNode);
  
 -    let urlNode = this.document.createElement("label");
@@ -491,8 +497,8 @@ index 16e45b1..541d6cc 100644
 -    categoryNode.style.color = frameInfo.categoryData.color;
 -    categoryNode.setAttribute("value", frameInfo.categoryData.label || "");
 -    cell.appendChild(categoryNode);
-+    // Don't render detailed labels for generalized frames
-+    if (!frameInfo.generalize) {
++    // Don't render detailed labels for meta category frames
++    if (!frameInfo.isMetaCategory) {
 +      let urlNode = this.document.createElement("label");
 +      urlNode.className = "plain call-tree-url";
 +      urlNode.setAttribute("flex", "1");

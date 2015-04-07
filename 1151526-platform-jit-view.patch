@@ -1,0 +1,389 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 6 Apr 2015 18:02:03 -0700
+Subject: Bug 1151526 - Do not display optimization data for meta-platform frames in the profiler. r=vp
+
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 53258b7..25b7c6f 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -37,16 +37,17 @@ support-files =
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+ #[browser_perf-front-profiler-06.js]
+ [browser_perf-front-01.js]
+ [browser_perf-front-02.js]
+ [browser_perf-jit-view-01.js]
++[browser_perf-jit-view-02.js]
+ [browser_perf-jit-model-01.js]
+ [browser_perf-jit-model-02.js]
+ [browser_perf-jump-to-debugger-01.js]
+ [browser_perf-jump-to-debugger-02.js]
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-invert-call-tree-01.js]
+ [browser_perf-options-invert-call-tree-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-01.js b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+index 7f952d5..7540687 100644
+--- a/browser/devtools/performance/test/browser_perf-jit-view-01.js
++++ b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+@@ -25,17 +25,17 @@ function spawnTest () {
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   yield DetailsView.selectView("js-calltree");
+ 
+   yield injectAndRenderProfilerData();
+ 
+   yield checkFrame(1, [0, 1]);
+-  yield checkFrame(2, [1]);
++  yield checkFrame(2, [2]);
+   yield checkFrame(3);
+ 
+   let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
+   let reset = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RESET);
+   RecordingsView.selectedIndex = 0;
+   yield Promise.all([select, reset]);
+   ok(true, "JITOptimizations view correctly reset when switching recordings.");
+ 
+@@ -75,88 +75,111 @@ function spawnTest () {
+     let isEmpty = $("#jit-optimizations-view").classList.contains("empty");
+     if (expectedOptsIndex.length === 0) {
+       ok(isEmpty, "JIT Optimizations view has an empty message when selecting a frame without opt data.");
+       return;
+     } else {
+       ok(!isEmpty, "JIT Optimizations view has no empty message.");
+     }
+ 
++    // Get the frame info for the first opt site, since all opt sites
++    // share the same frame info
++    let frameInfo = gOpts[expectedOptsIndex[0]]._testFrameInfo;
++
++    let { $headerName, $headerLine, $headerFile } = JITOptimizationsView;
++    ok(!$headerName.hidden, "header function name should be shown");
++    ok(!$headerLine.hidden, "header line should be shown");
++    ok(!$headerFile.hidden, "header file should be shown");
++    is($headerName.textContent, frameInfo.name, "correct header function name.");
++    is($headerLine.textContent, frameInfo.line, "correct header line");
++    is($headerFile.textContent, frameInfo.file, "correct header file");
++
+     // Need the value of the optimizations in its array, as its
+     // an index used internally by the view to uniquely ID the opt
+     for (let i of expectedOptsIndex) {
+       let opt = gOpts[i];
+       let { types: ionTypes, attempts } = opt;
+ 
+       // Check attempts
+       is($$(`.tree-widget-container li[data-id='["${i}","${i}-attempts"]'] .tree-widget-children .tree-widget-item`).length, attempts.length,
+         `found ${attempts.length} attempts`);
+ 
+       for (let j = 0; j < ionTypes.length; j++) {
+         ok($(`.tree-widget-container li[data-id='["${i}","${i}-types","${i}-types-${j}"]']`),
+           "found an ion type row");
+       }
+ 
+-      // The second optimization should display optimization failures.
++      // The second and third optimization should display optimization failures.
+       let warningIcon = $(`.tree-widget-container li[data-id='["${i}"]'] .opt-icon[severity=warning]`);
+-      if (i === 1) {
++      if (i === 1 || i === 2) {
+         ok(warningIcon, "did find a warning icon for all strategies failing.");
+       } else {
+         ok(!warningIcon, "did not find a warning icon for no successful strategies");
+       }
+     }
+   }
+ }
+ 
+ let gSamples = [{
+   time: 5,
+   frames: [
+     { location: "(root)" },
+     { location: "A (http://foo/bar/baz:12)", optsIndex: 0 },
+-    { location: "B (http://foo/bar/baz:34)", optsIndex: 1 },
++    { location: "B (http://foo/bar/boo:34)", optsIndex: 2 },
+     { location: "C (http://foo/bar/baz:56)" }
+   ]
+ }, {
+   time: 5 + 1,
+   frames: [
+     { location: "(root)" },
+     { location: "A (http://foo/bar/baz:12)" },
+-    { location: "B (http://foo/bar/baz:34)" },
++    { location: "B (http://foo/bar/boo:34)" },
+   ]
+ }, {
+   time: 5 + 1 + 2,
+   frames: [
+     { location: "(root)" },
+     { location: "A (http://foo/bar/baz:12)", optsIndex: 1 },
+-    { location: "B (http://foo/bar/baz:34)" },
++    { location: "B (http://foo/bar/boo:34)" },
+   ]
+ }, {
+   time: 5 + 1 + 2 + 7,
+   frames: [
+     { location: "(root)" },
+     { location: "A (http://foo/bar/baz:12)", optsIndex: 0 },
+     { location: "E (http://foo/bar/baz:90)" },
+     { location: "F (http://foo/bar/baz:99)" }
+   ]
+ }];
+ 
+ // Array of OptimizationSites
+ let gOpts = [{
++  _testFrameInfo: { name: "A", line: "12", file: "@baz" },
+   line: 12,
+   column: 2,
+   types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
+     { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
+     { keyedBy: "primitive", location: "self-hosted" }
+   ]}],
+   attempts: [
+     { outcome: "Failure1", strategy: "SomeGetter1" },
+     { outcome: "Failure2", strategy: "SomeGetter2" },
+     { outcome: "Inlined", strategy: "SomeGetter3" },
+   ]
+ }, {
++  _testFrameInfo: { name: "A", line: "12", file: "@baz" },
++  line: 12,
++  types: [{ mirType: "Int32", site: "Receiver" }], // use no types
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Failure3", strategy: "SomeGetter3" },
++  ]
++}, {
++  _testFrameInfo: { name: "B", line: "34", file: "@boo" },
+   line: 34,
+   types: [{ mirType: "Int32", site: "Receiver" }], // use no types
+   attempts: [
+     { outcome: "Failure1", strategy: "SomeGetter1" },
+     { outcome: "Failure2", strategy: "SomeGetter2" },
+     { outcome: "Failure3", strategy: "SomeGetter3" },
+   ]
+ }];
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-02.js b/browser/devtools/performance/test/browser_perf-jit-view-02.js
+new file mode 100644
+index 0000000..39dbf8d
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-jit-view-02.js
+@@ -0,0 +1,109 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the JIT Optimizations view does not display information
++ * for meta nodes when viewing "content only".
++ */
++
++let { CATEGORY_MASK } = devtools.require("devtools/shared/profiler/global");
++Services.prefs.setBoolPref(INVERT_PREF, false);
++Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
++
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, $, $$, window, PerformanceController } = panel.panelWin;
++  let { OverviewView, DetailsView, JITOptimizationsView, JsCallTreeView, RecordingsView } = panel.panelWin;
++
++  let profilerData = { threads: [{samples: gSamples, optimizations: gOpts}] };
++
++  is(Services.prefs.getBoolPref(JIT_PREF), false, "show JIT Optimizations pref off by default");
++
++  // Make two recordings, so we have one to switch to later, as the
++  // second one will have fake sample data
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield DetailsView.selectView("js-calltree");
++
++  yield injectAndRenderProfilerData();
++
++  Services.prefs.setBoolPref(JIT_PREF, true);
++  // Click the frame
++  let rendered = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RENDERED);
++  mousedown(window, $$(".call-tree-item")[2]);
++  yield rendered;
++
++  ok($("#jit-optimizations-view").classList.contains("empty"),
++    "platform meta frame shows as empty");
++
++  let { $headerName, $headerLine, $headerFile } = JITOptimizationsView;
++  ok(!$headerName.hidden, "header function name should be shown");
++  ok($headerLine.hidden, "header line should be hidden");
++  ok($headerFile.hidden, "header file should be hidden");
++  is($headerName.textContent, "JIT", "correct header function name.");
++  is($headerLine.textContent, "", "correct header line (empty string).");
++  is($headerFile.textContent, "", "correct header file (empty string).");
++
++  yield teardown(panel);
++  finish();
++
++  function *injectAndRenderProfilerData() {
++    // Get current recording and inject our mock data
++    info("Injecting mock profile data");
++    let recording = PerformanceController.getCurrentRecording();
++    recording._profile = profilerData;
++
++    // Force a rerender
++    let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++    JsCallTreeView.render();
++    yield rendered;
++
++    Services.prefs.setBoolPref(JIT_PREF, true);
++    ok($("#jit-optimizations-view").classList.contains("empty"),
++      "JIT Optimizations view has empty message when no frames selected.");
++
++     Services.prefs.setBoolPref(JIT_PREF, false);
++  }
++}
++
++let gSamples = [{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "A (http://foo/bar/baz:12)", optsIndex: 0 }
++  ]
++}, {
++  time: 5 + 1,
++  frames: [
++    { location: "(root)" },
++    { location: "A (http://foo/bar/baz:12)", optsIndex: 0 },
++    { location: "JS", optsIndex: 1, category: CATEGORY_MASK("js") },
++  ]
++}];
++
++// Array of OptimizationSites
++let gOpts = [{
++  line: 12,
++  column: 2,
++  types: [{ mirType: "Object", site: "A (http://foo/bar/bar:12)", types: [
++    { keyedBy: "constructor", name: "Foo", location: "A (http://foo/bar/baz:12)" },
++    { keyedBy: "primitive", location: "self-hosted" }
++  ]}],
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Inlined", strategy: "SomeGetter3" },
++  ]
++}, {
++  line: 22,
++  types: [{ mirType: "Int32", site: "Receiver" }], // use no types
++  attempts: [
++    { outcome: "Failure1", strategy: "SomeGetter1" },
++    { outcome: "Failure2", strategy: "SomeGetter2" },
++    { outcome: "Failure3", strategy: "SomeGetter3" },
++  ]
++}];
+diff --git a/browser/devtools/performance/views/jit-optimizations.js b/browser/devtools/performance/views/jit-optimizations.js
+index 6bc68cd..ff08646 100644
+--- a/browser/devtools/performance/views/jit-optimizations.js
++++ b/browser/devtools/performance/views/jit-optimizations.js
+@@ -22,16 +22,19 @@ let JITOptimizationsView = {
+    * Initialization function called when the tool starts up.
+    */
+   initialize: function () {
+     this.reset = this.reset.bind(this);
+     this._onFocusFrame = this._onFocusFrame.bind(this);
+     this._toggleVisibility = this._toggleVisibility.bind(this);
+ 
+     this.el = $("#jit-optimizations-view");
++    this.$headerName = $("#jit-optimizations-header .header-function-name");
++    this.$headerFile = $("#jit-optimizations-header .header-file");
++    this.$headerLine = $("#jit-optimizations-header .header-line");
+ 
+     this.tree = new TreeWidget($("#jit-optimizations-raw-view"), {
+       sorted: false,
+       emptyText: JIT_EMPTY_TEXT
+     });
+ 
+     // Start the tree by resetting.
+     this.reset();
+@@ -43,16 +46,17 @@ let JITOptimizationsView = {
+     JsCallTreeView.on("focus", this._onFocusFrame);
+   },
+ 
+   /**
+    * Destruction function called when the tool cleans up.
+    */
+   destroy: function () {
+     this.tree = null;
++    this.$headerName = this.$headerFile = this.$headerLine = this.el = null;
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this.reset);
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._toggleVisibility);
+     JsCallTreeView.off("focus", this._onFocusFrame);
+   },
+ 
+   /**
+    * Takes a FrameNode, with corresponding optimization data to be displayed
+    * in the view.
+@@ -120,17 +124,19 @@ let JITOptimizationsView = {
+     let view = this.tree;
+ 
+     // Set header information, even if the frame node
+     // does not have any optimization data
+     let frameData = frameNode.getInfo();
+     this._setHeaders(frameData);
+     this.clear();
+ 
+-    if (!frameNode.hasOptimizations()) {
++    // If this frame node does not have optimizations, or if its a meta node in the
++    // case of only showing content, reset the view.
++    if (!frameNode.hasOptimizations() || frameNode.isMetaCategory) {
+       this.reset();
+       return;
+     }
+     this.el.classList.remove("empty");
+ 
+     // An array of sorted OptimizationSites.
+     let sites = frameNode.getOptimizations().getOptimizationSites();
+ 
+@@ -330,28 +336,37 @@ let JITOptimizationsView = {
+     let fileName;
+ 
+     if (this._isLinkableURL(url)) {
+       fileName = url.slice(url.lastIndexOf("/") + 1);
+       node.classList.add("debugger-link");
+       node.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + url);
+       node.addEventListener("click", () => viewSourceInDebugger(url, line));
+     }
+-    node.textContent = `@${fileName || url}`;
++    fileName = fileName || url || "";
++    node.textContent = fileName ? `@${fileName}` : "";
+     return node;
+   },
+ 
+   /**
+    * Updates the headers with the current frame's data.
+    */
+ 
+   _setHeaders: function (frameData) {
+-    $("#jit-optimizations-header .header-function-name").textContent = frameData.functionName;
+-    this._createDebuggerLinkNode(frameData.url, frameData.line, $("#jit-optimizations-header .header-file"));
+-    $("#jit-optimizations-header .header-line").textContent = frameData.line;
++    let isMeta = frameData.isMetaCategory;
++    let name = isMeta ? frameData.categoryData.label : frameData.functionName;
++    let url = isMeta ? "" : frameData.url;
++    let line = isMeta ? "" : frameData.line;
++
++    this.$headerName.textContent = name;
++    this.$headerLine.textContent = line;
++    this._createDebuggerLinkNode(url, line, this.$headerFile);
++
++    this.$headerLine.hidden = isMeta;
++    this.$headerFile.hidden = isMeta;
+   },
+ 
+   /**
+    * Takes a string and returns a boolean indicating whether or not
+    * this is a valid url for linking to the debugger.
+    *
+    * @param {String} url
+    * @return {Boolean}
+-- 
+2.2.1
+

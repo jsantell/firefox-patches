@@ -1,0 +1,376 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 3 Apr 2015 13:16:31 -0700
+Subject: Bug 1121180 - Display only function name and file,
+ instead of full url, in flame graphs. r=vp
+
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index dedc1a3..fa70b05 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -26,16 +26,17 @@ EXTRA_JS_MODULES.devtools += [
+     'widgets/SideMenuWidget.jsm',
+     'widgets/SimpleListWidget.jsm',
+     'widgets/VariablesView.jsm',
+     'widgets/VariablesViewController.jsm',
+     'widgets/ViewHelpers.jsm',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared.profiler += [
++    'profiler/frame-utils.js',
+     'profiler/global.js',
+     'profiler/jit.js',
+     'profiler/tree-model.js',
+     'profiler/tree-view.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared.timeline += [
+     'timeline/global.js',
+diff --git a/browser/devtools/shared/profiler/frame-utils.js b/browser/devtools/shared/profiler/frame-utils.js
+new file mode 100644
+index 0000000..9bd5ec1
+--- /dev/null
++++ b/browser/devtools/shared/profiler/frame-utils.js
+@@ -0,0 +1,84 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Ci } = require("chrome");
++loader.lazyRequireGetter(this, "Services");
++
++// The cache used in the `nsIURL` function.
++const gNSURLStore = new Map();
++const CHROME_SCHEMES = ["chrome://", "resource://", "jar:file://"];
++const CONTENT_SCHEMES = ["http://", "https://", "file://", "app://"];
++
++/**
++ * Parses the raw location of this function call to retrieve the actual
++ * function name, source url, host name, line and column.
++ */
++exports.parseLocation = function parseLocation (frame) {
++  // Parse the `location` for the function name, source url, line, column etc.
++  let lineAndColumn = frame.location.match(/((:\d+)*)\)?$/)[1];
++  let [, line, column] = lineAndColumn.split(":");
++  line = line || frame.line;
++  column = column || frame.column;
++
++  let firstParenIndex = frame.location.indexOf("(");
++  let lineAndColumnIndex = frame.location.indexOf(lineAndColumn);
++  let resource = frame.location.substring(firstParenIndex + 1, lineAndColumnIndex);
++
++  let url = resource.split(" -> ").pop();
++  let uri = nsIURL(url);
++  let functionName, fileName, hostName;
++
++  // If the URI digged out from the `location` is valid, this is a JS frame.
++  if (uri) {
++    functionName = frame.location.substring(0, firstParenIndex - 1);
++    fileName = (uri.fileName + (uri.ref ? "#" + uri.ref : "")) || "/";
++    hostName = url.indexOf("jar:") == 0 ? "" : uri.host;
++  } else {
++    functionName = frame.location;
++    url = null;
++  }
++
++  return {
++    functionName: functionName,
++    fileName: fileName,
++    hostName: hostName,
++    url: url,
++    line: line,
++    column: column
++  };
++},
++
++/**
++* Checks if the specified function represents a chrome or content frame.
++*
++* @param object frame
++*        The { category, location } properties of the frame.
++* @return boolean
++*         True if a content frame, false if a chrome frame.
++*/
++exports.isContent = function isContent ({ category, location }) {
++  // Only C++ stack frames have associated category information.
++  return !!(!category &&
++    !CHROME_SCHEMES.find(e => location.contains(e)) &&
++    CONTENT_SCHEMES.find(e => location.contains(e)));
++}
++
++/**
++ * Helper for getting an nsIURL instance out of a string.
++ */
++function nsIURL(url) {
++  let cached = gNSURLStore.get(url);
++  if (cached) {
++    return cached;
++  }
++  let uri = null;
++  try {
++    uri = Services.io.newURI(url, null, null).QueryInterface(Ci.nsIURL);
++  } catch(e) {
++    // The passed url string is invalid.
++  }
++  gNSURLStore.set(url, uri);
++  return uri;
++}
+diff --git a/browser/devtools/shared/profiler/tree-model.js b/browser/devtools/shared/profiler/tree-model.js
+index 1b79dca..6a772d5 100644
+--- a/browser/devtools/shared/profiler/tree-model.js
++++ b/browser/devtools/shared/profiler/tree-model.js
+@@ -1,31 +1,29 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+ 
+-loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_MAPPINGS",
+   "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_JIT",
+   "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/shared/profiler/jit", true);
+-
+-const CHROME_SCHEMES = ["chrome://", "resource://", "jar:file://"];
+-const CONTENT_SCHEMES = ["http://", "https://", "file://", "app://"];
++loader.lazyRequireGetter(this, "FrameUtils",
++  "devtools/shared/profiler/frame-utils");
+ 
+ exports.ThreadNode = ThreadNode;
+ exports.FrameNode = FrameNode;
+-exports.FrameNode.isContent = isContent;
++exports.FrameNode.isContent = FrameUtils.isContent;
+ 
+ /**
+  * A call tree for a thread. This is essentially a linkage between all frames
+  * of all samples into a single tree structure, with additional information
+  * on each node, like the time spent (in milliseconds) and samples count.
+  *
+  * Example:
+  * {
+@@ -92,17 +90,17 @@ ThreadNode.prototype = {
+     }
+ 
+     let sampleFrames = sample.frames;
+ 
+     // Filter out platform frames if only content-related function calls
+     // should be taken into consideration.
+     if (options.contentOnly) {
+       // The (root) node is not considered a content function, it'll be removed.
+-      sampleFrames = sampleFrames.filter(isContent);
++      sampleFrames = sampleFrames.filter(FrameUtils.isContent);
+     } else {
+       // Remove the (root) node manually.
+       sampleFrames = sampleFrames.slice(1);
+     }
+     // If no frames remain after filtering, then this is a leaf node, no need
+     // to continue.
+     if (!sampleFrames.length) {
+       return;
+@@ -235,51 +233,22 @@ FrameNode.prototype = {
+     if (this.location == "EnterJIT") {
+       this.category = CATEGORY_JIT;
+     }
+ 
+     // Since only C++ stack frames have associated category information,
+     // default to an "unknown" category otherwise.
+     let categoryData = CATEGORY_MAPPINGS[this.category] || {};
+ 
+-    // Parse the `location` for the function name, source url, line, column etc.
+-    let lineAndColumn = this.location.match(/((:\d+)*)\)?$/)[1];
+-    let [, line, column] = lineAndColumn.split(":");
+-    line = line || this.line;
+-    column = column || this.column;
+-
+-    let firstParenIndex = this.location.indexOf("(");
+-    let lineAndColumnIndex = this.location.indexOf(lineAndColumn);
+-    let resource = this.location.substring(firstParenIndex + 1, lineAndColumnIndex);
+-
+-    let url = resource.split(" -> ").pop();
+-    let uri = nsIURL(url);
+-    let functionName, fileName, hostName;
+-
+-    // If the URI digged out from the `location` is valid, this is a JS frame.
+-    if (uri) {
+-      functionName = this.location.substring(0, firstParenIndex - 1);
+-      fileName = (uri.fileName + (uri.ref ? "#" + uri.ref : "")) || "/";
+-      hostName = url.indexOf("jar:") == 0 ? "" : uri.host;
+-    } else {
+-      functionName = this.location;
+-      url = null;
+-    }
++    let parsedData = FrameUtils.parseLocation(this);
++    parsedData.nodeType = "Frame";
++    parsedData.categoryData = categoryData;
++    parsedData.isContent = FrameUtils.isContent(this);
+ 
+-    return this._data = {
+-      nodeType: "Frame",
+-      functionName: functionName,
+-      fileName: fileName,
+-      hostName: hostName,
+-      url: url,
+-      line: line,
+-      column: column,
+-      categoryData: categoryData,
+-      isContent: !!isContent(this)
+-    };
++    return this._data = parsedData;
+   },
+ 
+   /**
+    * Returns whether or not the frame node has an JITOptimizations model.
+    *
+    * @return {Boolean}
+    */
+   hasOptimizations: function () {
+@@ -291,44 +260,8 @@ FrameNode.prototype = {
+    * the optimization attempts occuring in this frame.
+    *
+    * @return {JITOptimizations|null}
+    */
+   getOptimizations: function () {
+     return this._optimizations;
+   }
+ };
+-
+-/**
+- * Checks if the specified function represents a chrome or content frame.
+- *
+- * @param object frame
+- *        The { category, location } properties of the frame.
+- * @return boolean
+- *         True if a content frame, false if a chrome frame.
+- */
+-function isContent({ category, location }) {
+-  // Only C++ stack frames have associated category information.
+-  return !category &&
+-    !CHROME_SCHEMES.find(e => location.contains(e)) &&
+-    CONTENT_SCHEMES.find(e => location.contains(e));
+-}
+-
+-/**
+- * Helper for getting an nsIURL instance out of a string.
+- */
+-function nsIURL(url) {
+-  let cached = gNSURLStore.get(url);
+-  if (cached) {
+-    return cached;
+-  }
+-  let uri = null;
+-  try {
+-    uri = Services.io.newURI(url, null, null).QueryInterface(Ci.nsIURL);
+-  } catch(e) {
+-    // The passed url string is invalid.
+-  }
+-  gNSURLStore.set(url, uri);
+-  return uri;
+-}
+-
+-// The cache used in the `nsIURL` function.
+-let gNSURLStore = new Map();
+diff --git a/browser/devtools/shared/widgets/FlameGraph.js b/browser/devtools/shared/widgets/FlameGraph.js
+index bbcc918..09e88dd 100644
+--- a/browser/devtools/shared/widgets/FlameGraph.js
++++ b/browser/devtools/shared/widgets/FlameGraph.js
+@@ -4,16 +4,17 @@
+ "use strict";
+ 
+ const { ViewHelpers } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ const { Graphs } = require("resource:///modules/devtools/Graphs.jsm");
+ const { Promise } = require("resource://gre/modules/Promise.jsm");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { getColor } = require("devtools/shared/theme");
+ const EventEmitter = require("devtools/toolkit/event-emitter");
++const FrameUtils = require("devtools/shared/profiler/frame-utils");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ const GRAPH_SRC = "chrome://browser/content/devtools/graphs-frame.xhtml";
+ const L10N = new ViewHelpers.L10N();
+ 
+ const GRAPH_RESIZE_EVENTS_DRAIN = 100; // ms
+ 
+ const GRAPH_WHEEL_ZOOM_SENSITIVITY = 0.00035;
+@@ -1016,20 +1017,21 @@ let FlameGraphUtils = {
+ 
+       // Invert the stack if preferred, reversing the frames array in place.
+       if (options.invertStack) {
+         frames.reverse();
+       }
+ 
+       // If no frames are available, add a pseudo "idle" block in between.
+       if (options.showIdleBlocks && frames.length == 0) {
+-        frames = [{ location: options.showIdleBlocks || "" }];
++        frames = [{ location: options.showIdleBlocks || "", idle: true }];
+       }
+ 
+-      for (let { location } of frames) {
++      for (let frame of frames) {
++        let { location } = frame;
+         let prevFrame = prevFrames[frameIndex];
+ 
+         // Frames at the same location and the same depth will be reused.
+         // If there is a block already created, change its width.
+         if (prevFrame && prevFrame.srcData.rawLocation == location) {
+           prevFrame.width = (time - prevFrame.srcData.startTime);
+         }
+         // Otherwise, create a new block for this frame at this depth,
+@@ -1040,17 +1042,17 @@ let FlameGraphUtils = {
+           let bucket = buckets.get(color);
+ 
+           bucket.push(prevFrames[frameIndex] = {
+             srcData: { startTime: prevTime, rawLocation: location },
+             x: prevTime,
+             y: frameIndex * FLAME_GRAPH_BLOCK_HEIGHT,
+             width: time - prevTime,
+             height: FLAME_GRAPH_BLOCK_HEIGHT,
+-            text: location
++            text: this._formatLabel(frame)
+           });
+         }
+ 
+         frameIndex++;
+       }
+ 
+       // Previous frames at stack depths greater than the current sample's
+       // maximum need to be nullified. It's nonsensical to reuse them.
+@@ -1110,13 +1112,30 @@ let FlameGraphUtils = {
+       hash += input.charCodeAt(i);
+ 
+       if (hash > Number.MAX_SAFE_INTEGER / STRING_HASH_PRIME2) {
+         return hash;
+       }
+     }
+ 
+     return hash;
++  },
++
++  /**
++   * Takes a FrameNode and returns a string that should be displayed
++   * in its flame block.
++   *
++   * @param FrameNode frame
++   * @return string
++   */
++  _formatLabel: function (frame) {
++    // If an idle block, just return the location which will just be "(idle)" text
++    // anyway.
++    if (frame.idle) {
++      return frame.location;
++    }
++    let { functionName, fileName, line } = FrameUtils.parseLocation(frame);
++    return `${functionName} (${fileName}:${line})`;
+   }
+ };
+ 
+ exports.FlameGraph = FlameGraph;
+ exports.FlameGraphUtils = FlameGraphUtils;
+-- 
+2.2.1
+

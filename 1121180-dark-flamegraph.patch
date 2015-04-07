@@ -1,0 +1,1055 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 3 Apr 2015 12:10:31 -0700
+Subject: Bug 1121180 - Support dark theme in flamecharts for the performance tool. r=vp
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 3f9f186..8dfe9b0 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -42,23 +42,23 @@ devtools.lazyRequireGetter(this, "CallView",
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/shared/profiler/tree-model", true);
+ devtools.lazyRequireGetter(this, "FrameNode",
+   "devtools/shared/profiler/tree-model", true);
+ devtools.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/shared/profiler/jit", true);
+ devtools.lazyRequireGetter(this, "OptionsView",
+   "devtools/shared/options-view", true);
++devtools.lazyRequireGetter(this, "FlameGraphUtils",
++  "devtools/shared/widgets/FlameGraph", true);
++devtools.lazyRequireGetter(this, "FlameGraph",
++  "devtools/shared/widgets/FlameGraph", true);
+ 
+ devtools.lazyImporter(this, "CanvasGraphUtils",
+   "resource:///modules/devtools/Graphs.jsm");
+-devtools.lazyImporter(this, "FlameGraphUtils",
+-  "resource:///modules/devtools/FlameGraph.jsm");
+-devtools.lazyImporter(this, "FlameGraph",
+-  "resource:///modules/devtools/FlameGraph.jsm");
+ devtools.lazyImporter(this, "SideMenuWidget",
+   "resource:///modules/devtools/SideMenuWidget.jsm");
+ devtools.lazyImporter(this, "PluralForm",
+   "resource://gre/modules/PluralForm.jsm");
+ 
+ const BRANCH_NAME = "devtools.performance.ui.";
+ 
+ // Events emitted by various objects in the panel.
+diff --git a/browser/devtools/performance/views/details-js-flamegraph.js b/browser/devtools/performance/views/details-js-flamegraph.js
+index c4ee13e..8c1a7dc 100644
+--- a/browser/devtools/performance/views/details-js-flamegraph.js
++++ b/browser/devtools/performance/views/details-js-flamegraph.js
+@@ -19,29 +19,33 @@ let JsFlameGraphView = Heritage.extend(DetailsSubview, {
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: Task.async(function* () {
+     DetailsSubview.initialize.call(this);
+ 
+     this.graph = new FlameGraph($("#js-flamegraph-view"));
+     this.graph.timelineTickUnits = L10N.getStr("graphs.ms");
++    this.graph.setTheme(PerformanceController.getTheme());
+     yield this.graph.ready();
+ 
+     this._onRangeChangeInGraph = this._onRangeChangeInGraph.bind(this);
++    this._onThemeChanged = this._onThemeChanged.bind(this);
+ 
++    PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     this.graph.on("selecting", this._onRangeChangeInGraph);
+   }),
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: Task.async(function* () {
+     DetailsSubview.destroy.call(this);
+ 
++    PerformanceController.off(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     this.graph.off("selecting", this._onRangeChangeInGraph);
+ 
+     yield this.graph.destroy();
+   }),
+ 
+   /**
+    * Method for handling all the set up for rendering a new flamegraph.
+    *
+@@ -88,10 +92,18 @@ let JsFlameGraphView = Heritage.extend(DetailsSubview, {
+    */
+   _onRerenderPrefChanged: function() {
+     let recording = PerformanceController.getCurrentRecording();
+     let profile = recording.getProfile();
+     let samples = profile.threads[0].samples;
+     FlameGraphUtils.removeFromCache(samples);
+   },
+ 
++  /**
++   * Called when `devtools.theme` changes.
++   */
++  _onThemeChanged: function (_, theme) {
++    this.graph.setTheme(theme);
++    this.graph.refresh({ force: true });
++  },
++
+   toString: () => "[object JsFlameGraphView]"
+ });
+diff --git a/browser/devtools/performance/views/details-memory-flamegraph.js b/browser/devtools/performance/views/details-memory-flamegraph.js
+index 10a3173..6619012 100644
+--- a/browser/devtools/performance/views/details-memory-flamegraph.js
++++ b/browser/devtools/performance/views/details-memory-flamegraph.js
+@@ -18,29 +18,33 @@ let MemoryFlameGraphView = Heritage.extend(DetailsSubview, {
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: Task.async(function* () {
+     DetailsSubview.initialize.call(this);
+ 
+     this.graph = new FlameGraph($("#memory-flamegraph-view"));
+     this.graph.timelineTickUnits = L10N.getStr("graphs.ms");
++    this.graph.setTheme(PerformanceController.getTheme());
+     yield this.graph.ready();
+ 
+     this._onRangeChangeInGraph = this._onRangeChangeInGraph.bind(this);
++    this._onThemeChanged = this._onThemeChanged.bind(this);
+ 
++    PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     this.graph.on("selecting", this._onRangeChangeInGraph);
+   }),
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: Task.async(function* () {
+     DetailsSubview.destroy.call(this);
+ 
++    PerformanceController.off(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     this.graph.off("selecting", this._onRangeChangeInGraph);
+ 
+     yield this.graph.destroy();
+   }),
+ 
+   /**
+    * Method for handling all the set up for rendering a new flamegraph.
+    *
+@@ -86,10 +90,18 @@ let MemoryFlameGraphView = Heritage.extend(DetailsSubview, {
+    */
+   _onRerenderPrefChanged: function() {
+     let recording = PerformanceController.getCurrentRecording();
+     let allocations = recording.getAllocations();
+     let samples = RecordingUtils.getSamplesFromAllocations(allocations);
+     FlameGraphUtils.removeFromCache(samples);
+   },
+ 
++  /**
++   * Called when `devtools.theme` changes.
++   */
++  _onThemeChanged: function (_, theme) {
++    this.graph.setTheme(theme);
++    this.graph.refresh({ force: true });
++  },
++
+   toString: () => "[object MemoryFlameGraphView]"
+ });
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index 552c634..6be46f0 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -16,17 +16,16 @@ EXTRA_JS_MODULES.devtools += [
+     'Parser.jsm',
+     'SplitView.jsm',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools += [
+     'widgets/AbstractTreeItem.jsm',
+     'widgets/BreadcrumbsWidget.jsm',
+     'widgets/Chart.jsm',
+-    'widgets/FlameGraph.jsm',
+     'widgets/Graphs.jsm',
+     'widgets/GraphsWorker.js',
+     'widgets/SideMenuWidget.jsm',
+     'widgets/SimpleListWidget.jsm',
+     'widgets/VariablesView.jsm',
+     'widgets/VariablesViewController.jsm',
+     'widgets/ViewHelpers.jsm',
+ ]
+@@ -60,13 +59,14 @@ EXTRA_JS_MODULES.devtools.shared += [
+     'theme.js',
+     'undo.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared.widgets += [
+     'widgets/CubicBezierPresets.js',
+     'widgets/CubicBezierWidget.js',
+     'widgets/FastListWidget.js',
++    'widgets/FlameGraph.js',
+     'widgets/Spectrum.js',
+     'widgets/TableWidget.js',
+     'widgets/Tooltip.js',
+     'widgets/TreeWidget.js',
+ ]
+diff --git a/browser/devtools/shared/test/browser_flame-graph-01.js b/browser/devtools/shared/test/browser_flame-graph-01.js
+index 44013e2..a17736b 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-01.js
++++ b/browser/devtools/shared/test/browser_flame-graph-01.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests that flame graph widget works properly.
+ 
+-let {FlameGraph} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraph} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {Promise} = devtools.require("resource://gre/modules/Promise.jsm");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+diff --git a/browser/devtools/shared/test/browser_flame-graph-02.js b/browser/devtools/shared/test/browser_flame-graph-02.js
+index 3f776f6..4fb113d 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-02.js
++++ b/browser/devtools/shared/test/browser_flame-graph-02.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests that flame graph widgets may have a fixed width or height.
+ 
+-let {FlameGraph} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraph} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {Promise} = devtools.require("resource://gre/modules/Promise.jsm");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+diff --git a/browser/devtools/shared/test/browser_flame-graph-03a.js b/browser/devtools/shared/test/browser_flame-graph-03a.js
+index 117413f..1eab126 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-03a.js
++++ b/browser/devtools/shared/test/browser_flame-graph-03a.js
+@@ -3,17 +3,17 @@
+ 
+ // Tests that selections in the flame graph widget work properly.
+ 
+ let TEST_DATA = [{ color: "#f00", blocks: [{ x: 0, y: 0, width: 50, height: 20, text: "FOO" }, { x: 50, y: 0, width: 100, height: 20, text: "BAR" }] }, { color: "#00f", blocks: [{ x: 0, y: 30, width: 30, height: 20, text: "BAZ" }] }];
+ let TEST_BOUNDS = { startTime: 0, endTime: 150 };
+ let TEST_WIDTH = 200;
+ let TEST_HEIGHT = 100;
+ 
+-let {FlameGraph} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraph} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {Promise} = devtools.require("resource://gre/modules/Promise.jsm");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+diff --git a/browser/devtools/shared/test/browser_flame-graph-03b.js b/browser/devtools/shared/test/browser_flame-graph-03b.js
+index ab04fa1..e1ccffd 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-03b.js
++++ b/browser/devtools/shared/test/browser_flame-graph-03b.js
+@@ -4,17 +4,17 @@
+ // Tests that selections in the flame graph widget work properly on HiDPI.
+ 
+ let TEST_DATA = [{ color: "#f00", blocks: [{ x: 0, y: 0, width: 50, height: 20, text: "FOO" }, { x: 50, y: 0, width: 100, height: 20, text: "BAR" }] }, { color: "#00f", blocks: [{ x: 0, y: 30, width: 30, height: 20, text: "BAZ" }] }];
+ let TEST_BOUNDS = { startTime: 0, endTime: 150 };
+ let TEST_WIDTH = 200;
+ let TEST_HEIGHT = 100;
+ let TEST_DPI_DENSITIY = 2;
+ 
+-let {FlameGraph} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraph} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {Promise} = devtools.require("resource://gre/modules/Promise.jsm");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+diff --git a/browser/devtools/shared/test/browser_flame-graph-03c.js b/browser/devtools/shared/test/browser_flame-graph-03c.js
+index 120de00..68f7267 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-03c.js
++++ b/browser/devtools/shared/test/browser_flame-graph-03c.js
+@@ -4,17 +4,17 @@
+ // Tests that vertical panning in the flame graph widget works properly.
+ 
+ let TEST_DATA = [{ color: "#f00", blocks: [{ x: 0, y: 0, width: 50, height: 20, text: "FOO" }, { x: 50, y: 0, width: 100, height: 20, text: "BAR" }] }, { color: "#00f", blocks: [{ x: 0, y: 30, width: 30, height: 20, text: "BAZ" }] }];
+ let TEST_BOUNDS = { startTime: 0, endTime: 150 };
+ let TEST_WIDTH = 200;
+ let TEST_HEIGHT = 100;
+ let TEST_DPI_DENSITIY = 2;
+ 
+-let {FlameGraph} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraph} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {Promise} = devtools.require("resource://gre/modules/Promise.jsm");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+diff --git a/browser/devtools/shared/test/browser_flame-graph-04.js b/browser/devtools/shared/test/browser_flame-graph-04.js
+index 9dc698c..75465f4 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-04.js
++++ b/browser/devtools/shared/test/browser_flame-graph-04.js
+@@ -1,18 +1,18 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests that text metrics in the flame graph widget work properly.
+ 
+ let HTML_NS = "http://www.w3.org/1999/xhtml";
+-let FLAME_GRAPH_BLOCK_TEXT_FONT_SIZE = 8; // px
++let FLAME_GRAPH_BLOCK_TEXT_FONT_SIZE = 9; // px
+ let FLAME_GRAPH_BLOCK_TEXT_FONT_FAMILY = "sans-serif";
+ let {ViewHelpers} = Cu.import("resource:///modules/devtools/ViewHelpers.jsm", {});
+-let {FlameGraph} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraph} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {Promise} = devtools.require("resource://gre/modules/Promise.jsm");
+ 
+ let L10N = new ViewHelpers.L10N();
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-01.js b/browser/devtools/shared/test/browser_flame-graph-utils-01.js
+index e31341d..657bf15 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-01.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-01.js
+@@ -1,15 +1,15 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests that text metrics and data conversion from profiler samples
+ // widget work properly in the flame graph.
+ 
+-let {FlameGraphUtils} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraphUtils, FLAME_GRAPH_BLOCK_HEIGHT} = devtools.require("devtools/shared/widgets/FlameGraph");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+ function* performTest() {
+@@ -106,156 +106,156 @@ let EXPECTED_OUTPUT = [{
+   blocks: [{
+     srcData: {
+       startTime: 50,
+       rawLocation: "A"
+     },
+     x: 50,
+     y: 0,
+     width: 410,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "A"
+   }]
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 50,
+       rawLocation: "B"
+     },
+     x: 50,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 160,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "B"
+   }, {
+     srcData: {
+       startTime: 330,
+       rawLocation: "B"
+     },
+     x: 330,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 130,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "B"
+   }]
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "M"
+     },
+     x: 0,
+     y: 0,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "M"
+   }, {
+     srcData: {
+       startTime: 50,
+       rawLocation: "C"
+     },
+     x: 50,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "C"
+   }, {
+     srcData: {
+       startTime: 330,
+       rawLocation: "C"
+     },
+     x: 330,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 130,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "C"
+   }]
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "N"
+     },
+     x: 0,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "N"
+   }, {
+     srcData: {
+       startTime: 100,
+       rawLocation: "D"
+     },
+     x: 100,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 110,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "D"
+   }, {
+     srcData: {
+       startTime: 460,
+       rawLocation: "X"
+     },
+     x: 460,
+     y: 0,
+     width: 40,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "X"
+   }]
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 210,
+       rawLocation: "E"
+     },
+     x: 210,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 120,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "E"
+   }, {
+     srcData: {
+       startTime: 460,
+       rawLocation: "Y"
+     },
+     x: 460,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 40,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "Y"
+   }]
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "P"
+     },
+     x: 0,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "P"
+   }, {
+     srcData: {
+       startTime: 210,
+       rawLocation: "F"
+     },
+     x: 210,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 120,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "F"
+   }, {
+     srcData: {
+       startTime: 460,
+       rawLocation: "Z"
+     },
+     x: 460,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 40,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "Z"
+   }]
+ }, {
+   blocks: []
+ }, {
+   blocks: []
+ }];
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-02.js b/browser/devtools/shared/test/browser_flame-graph-utils-02.js
+index 2104b87..e68b497 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-02.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-02.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests consecutive duplicate frames are removed from the flame graph data.
+ 
+-let {FlameGraphUtils} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraphUtils, FLAME_GRAPH_BLOCK_HEIGHT} = devtools.require("devtools/shared/widgets/FlameGraph");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+ function* performTest() {
+@@ -68,29 +68,29 @@ let EXPECTED_OUTPUT = [{
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "A"
+     },
+     x: 0,
+     y: 0,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "A"
+   }]
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "B"
+     },
+     x: 0,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "B"
+   }]
+ }, {
+   blocks: []
+ }, {
+   blocks: []
+ }, {
+   blocks: []
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-03.js b/browser/devtools/shared/test/browser_flame-graph-utils-03.js
+index 562236d..3596ce6 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-03.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-03.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests if platform frames are removed from the flame graph data.
+ 
+-let {FlameGraphUtils} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraphUtils, FLAME_GRAPH_BLOCK_HEIGHT} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {FrameNode} = devtools.require("devtools/shared/profiler/tree-model");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+@@ -67,27 +67,27 @@ let EXPECTED_OUTPUT = [{
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "http://A"
+     },
+     x: 0,
+     y: 0,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "http://A"
+   }, {
+     srcData: {
+       startTime: 0,
+       rawLocation: "file://C"
+     },
+     x: 0,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "file://C"
+   }]
+ }, {
+   blocks: []
+ }, {
+   blocks: []
+ }, {
+   blocks: []
+@@ -97,16 +97,16 @@ let EXPECTED_OUTPUT = [{
+   blocks: []
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "https://B"
+     },
+     x: 0,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "https://B"
+   }]
+ }, {
+   blocks: []
+ }];
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-04.js b/browser/devtools/shared/test/browser_flame-graph-utils-04.js
+index 907f85c..5f93b64 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-04.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-04.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests if (idle) nodes are added when necessary in the flame graph data.
+ 
+-let {FlameGraphUtils} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraphUtils, FLAME_GRAPH_BLOCK_HEIGHT} = devtools.require("devtools/shared/widgets/FlameGraph");
+ let {FrameNode} = devtools.require("devtools/shared/profiler/tree-model");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+@@ -91,49 +91,49 @@ let EXPECTED_OUTPUT = [{
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "http://A"
+     },
+     x: 0,
+     y: 0,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "http://A"
+   }, {
+     srcData: {
+       startTime: 0,
+       rawLocation: "file://C"
+     },
+     x: 0,
+-    y: 22,
++    y: FLAME_GRAPH_BLOCK_HEIGHT * 2,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "file://C"
+   }, {
+     srcData: {
+       startTime: 100,
+       rawLocation: "http://A"
+     },
+     x: 100,
+     y: 0,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "http://A"
+   }]
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 50,
+       rawLocation: "\m/"
+     },
+     x: 50,
+     y: 0,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "\m/"
+   }]
+ }, {
+   blocks: []
+ }, {
+   blocks: []
+ }, {
+   blocks: []
+@@ -141,26 +141,26 @@ let EXPECTED_OUTPUT = [{
+   blocks: []
+ }, {
+   blocks: [{
+     srcData: {
+       startTime: 0,
+       rawLocation: "https://B"
+     },
+     x: 0,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "https://B"
+   }, {
+     srcData: {
+       startTime: 100,
+       rawLocation: "https://B"
+     },
+     x: 100,
+-    y: 11,
++    y: FLAME_GRAPH_BLOCK_HEIGHT,
+     width: 50,
+-    height: 11,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
+     text: "https://B"
+   }]
+ }, {
+   blocks: []
+ }];
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-05.js b/browser/devtools/shared/test/browser_flame-graph-utils-05.js
+index ca65f25..3786d50 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-05.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-05.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests that flame graph data is cached, and that the cache may be cleared.
+ 
+-let {FlameGraphUtils} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraphUtils} = devtools.require("devtools/shared/widgets/FlameGraph");
+ 
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+ function* performTest() {
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-hash.js b/browser/devtools/shared/test/browser_flame-graph-utils-hash.js
+index e5509e4..ce78898 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-hash.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-hash.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ // Tests if (idle) nodes are added when necessary in the flame graph data.
+ 
+-let {FlameGraphUtils} = Cu.import("resource:///modules/devtools/FlameGraph.jsm", {});
++let {FlameGraphUtils} = devtools.require("devtools/shared/widgets/FlameGraph");
+ 
+ let test = Task.async(function*() {
+   let hash1 = FlameGraphUtils._getStringHash("abc");
+   let hash2 = FlameGraphUtils._getStringHash("acb");
+   let hash3 = FlameGraphUtils._getStringHash(Array.from(Array(100000)).join("a"));
+   let hash4 = FlameGraphUtils._getStringHash(Array.from(Array(100000)).join("b"));
+ 
+   isnot(hash1, hash2, "The hashes should not be equal (1).");
+diff --git a/browser/devtools/shared/widgets/FlameGraph.jsm b/browser/devtools/shared/widgets/FlameGraph.js
+similarity index 95%
+rename from browser/devtools/shared/widgets/FlameGraph.jsm
+rename to browser/devtools/shared/widgets/FlameGraph.js
+index 233c142..0e3bf5f 100644
+--- a/browser/devtools/shared/widgets/FlameGraph.jsm
++++ b/browser/devtools/shared/widgets/FlameGraph.js
+@@ -1,25 +1,19 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const Cu = Components.utils;
+-
+-Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+-Cu.import("resource:///modules/devtools/Graphs.jsm");
+-const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
+-const {Task} = Cu.import("resource://gre/modules/Task.jsm", {});
+-const {EventEmitter} = Cu.import("resource://gre/modules/devtools/event-emitter.js", {});
+-
+-this.EXPORTED_SYMBOLS = [
+-  "FlameGraph",
+-  "FlameGraphUtils"
+-];
++const { ViewHelpers } = require("resource:///modules/devtools/ViewHelpers.jsm");
++const { AbstractCanvasGraph, GraphArea, GraphAreaDragger } = require("resource:///modules/devtools/Graphs.jsm");
++const { Promise } = require("resource://gre/modules/Promise.jsm");
++const { Task } = require("resource://gre/modules/Task.jsm");
++const { getColor } = require("devtools/shared/theme");
++const EventEmitter = require("devtools/toolkit/event-emitter");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ const GRAPH_SRC = "chrome://browser/content/devtools/graphs-frame.xhtml";
+ const L10N = new ViewHelpers.L10N();
+ 
+ const GRAPH_RESIZE_EVENTS_DRAIN = 100; // ms
+ 
+ const GRAPH_WHEEL_ZOOM_SENSITIVITY = 0.00035;
+@@ -29,27 +23,24 @@ const GRAPH_MIN_SELECTION_WIDTH = 0.001; // ms
+ const GRAPH_HORIZONTAL_PAN_THRESHOLD = 10; // px
+ const GRAPH_VERTICAL_PAN_THRESHOLD = 30; // px
+ 
+ const FIND_OPTIMAL_TICK_INTERVAL_MAX_ITERS = 100;
+ const TIMELINE_TICKS_MULTIPLE = 5; // ms
+ const TIMELINE_TICKS_SPACING_MIN = 75; // px
+ 
+ const OVERVIEW_HEADER_HEIGHT = 16; // px
+-const OVERVIEW_HEADER_BACKGROUND = "rgba(255,255,255,0.7)";
+-const OVERVIEW_HEADER_TEXT_COLOR = "#18191a";
+ const OVERVIEW_HEADER_TEXT_FONT_SIZE = 9; // px
+ const OVERVIEW_HEADER_TEXT_FONT_FAMILY = "sans-serif";
+ const OVERVIEW_HEADER_TEXT_PADDING_LEFT = 6; // px
+ const OVERVIEW_HEADER_TEXT_PADDING_TOP = 5; // px
+-const OVERVIEW_TIMELINE_STROKES = "#ddd";
++const OVERVIEW_HEADER_TIMELINE_STROKE_COLOR = "rgba(128, 128, 128, 0.5)";
+ 
+ const FLAME_GRAPH_BLOCK_BORDER = 1; // px
+-const FLAME_GRAPH_BLOCK_TEXT_COLOR = "#000";
+-const FLAME_GRAPH_BLOCK_TEXT_FONT_SIZE = 8; // px
++const FLAME_GRAPH_BLOCK_TEXT_FONT_SIZE = 9; // px
+ const FLAME_GRAPH_BLOCK_TEXT_FONT_FAMILY = "sans-serif";
+ const FLAME_GRAPH_BLOCK_TEXT_PADDING_TOP = 0; // px
+ const FLAME_GRAPH_BLOCK_TEXT_PADDING_LEFT = 3; // px
+ const FLAME_GRAPH_BLOCK_TEXT_PADDING_RIGHT = 3; // px
+ 
+ /**
+  * A flamegraph visualization. This implementation is responsable only with
+  * drawing the graph, using a data source consisting of rectangles and
+@@ -96,17 +87,19 @@ const FLAME_GRAPH_BLOCK_TEXT_PADDING_RIGHT = 3; // px
+  *        The parent node holding the graph.
+  * @param number sharpness [optional]
+  *        Defaults to the current device pixel ratio.
+  */
+ function FlameGraph(parent, sharpness) {
+   EventEmitter.decorate(this);
+ 
+   this._parent = parent;
+-  this._ready = promise.defer();
++  this._ready = Promise.defer();
++
++  this.setTheme();
+ 
+   AbstractCanvasGraph.createIframe(GRAPH_SRC, parent, iframe => {
+     this._iframe = iframe;
+     this._window = iframe.contentWindow;
+     this._document = iframe.contentDocument;
+     this._pixelRatio = sharpness || this._window.devicePixelRatio;
+ 
+     let container = this._container = this._document.getElementById("graph-container");
+@@ -211,24 +204,16 @@ FlameGraph.prototype = {
+     this._textWidthsCache = null;
+ 
+     this._data = null;
+ 
+     this.emit("destroyed");
+   }),
+ 
+   /**
+-   * Rendering options. Subclasses should override these.
+-   */
+-  overviewHeaderBackgroundColor: OVERVIEW_HEADER_BACKGROUND,
+-  overviewHeaderTextColor: OVERVIEW_HEADER_TEXT_COLOR,
+-  overviewTimelineStrokes: OVERVIEW_TIMELINE_STROKES,
+-  blockTextColor: FLAME_GRAPH_BLOCK_TEXT_COLOR,
+-
+-  /**
+    * Makes sure the canvas graph is of the specified width or height, and
+    * doesn't flex to fit all the available space.
+    */
+   fixedWidth: null,
+   fixedHeight: null,
+ 
+   /**
+    * How much preliminar drag is necessary to determine the panning direction.
+@@ -325,24 +310,29 @@ FlameGraph.prototype = {
+       startTime: this._selection.start / this._pixelRatio,
+       endTime: this._selection.end / this._pixelRatio,
+       verticalOffset: this._verticalOffset / this._pixelRatio
+     };
+   },
+ 
+   /**
+    * Updates this graph to reflect the new dimensions of the parent node.
++   *
++   * @param boolean options.force
++   *        Force redraw everything.
+    */
+-  refresh: function() {
++  refresh: function(options={}) {
+     let bounds = this._parent.getBoundingClientRect();
+     let newWidth = this.fixedWidth || bounds.width;
+     let newHeight = this.fixedHeight || bounds.height;
+ 
+-    // Prevent redrawing everything if the graph's width & height won't change.
+-    if (this._width == newWidth * this._pixelRatio &&
++    // Prevent redrawing everything if the graph's width & height won't change,
++    // except if force=true.
++    if (!options.force &&
++        this._width == newWidth * this._pixelRatio &&
+         this._height == newHeight * this._pixelRatio) {
+       this.emit("refresh-cancelled");
+       return;
+     }
+ 
+     bounds.width = newWidth;
+     bounds.height = newHeight;
+     this._iframe.setAttribute("width", bounds.width);
+@@ -350,16 +340,29 @@ FlameGraph.prototype = {
+     this._width = this._canvas.width = bounds.width * this._pixelRatio;
+     this._height = this._canvas.height = bounds.height * this._pixelRatio;
+ 
+     this._shouldRedraw = true;
+     this.emit("refresh");
+   },
+ 
+   /**
++   * Sets the theme via `theme` to either "light" or "dark",
++   * and updates the internal styling to match. Requires a redraw
++   * to see the effects.
++   */
++  setTheme: function (theme) {
++    theme = theme || "light";
++    this.overviewHeaderBackgroundColor = getColor("body-background", theme);
++    this.overviewHeaderTextColor = getColor("body-color", theme);
++    // Hard to get a color that is readable across both themes for the text on the flames
++    this.blockTextColor = getColor(theme === "dark" ? "selection-color" : "body-color", theme);
++  },
++
++  /**
+    * The contents of this graph are redrawn only when something changed,
+    * like the data source, or the selection bounds etc. This flag tracks
+    * if the rendering is "dirty" and needs to be refreshed.
+    */
+   _shouldRedraw: false,
+ 
+   /**
+    * Animation frame callback, invoked on each tick of the refresh driver.
+@@ -380,18 +383,18 @@ FlameGraph.prototype = {
+     let ctx = this._ctx;
+     let canvasWidth = this._width;
+     let canvasHeight = this._height;
+     ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+ 
+     let selection = this._selection;
+     let selectionWidth = selection.end - selection.start;
+     let selectionScale = canvasWidth / selectionWidth;
+-    this._drawPyramid(this._data, this._verticalOffset, selection.start, selectionScale);
+     this._drawTicks(selection.start, selectionScale);
++    this._drawPyramid(this._data, this._verticalOffset, selection.start, selectionScale);
+ 
+     this._shouldRedraw = false;
+   },
+ 
+   /**
+    * Draws the overhead ticks in this graph.
+    *
+    * @param number dataOffset, dataScale
+@@ -411,17 +414,17 @@ FlameGraph.prototype = {
+     let fontFamily = OVERVIEW_HEADER_TEXT_FONT_FAMILY;
+     let textPaddingLeft = OVERVIEW_HEADER_TEXT_PADDING_LEFT * this._pixelRatio;
+     let textPaddingTop = OVERVIEW_HEADER_TEXT_PADDING_TOP * this._pixelRatio;
+     let tickInterval = this._findOptimalTickInterval(dataScale);
+ 
+     ctx.textBaseline = "top";
+     ctx.font = fontSize + "px " + fontFamily;
+     ctx.fillStyle = this.overviewHeaderTextColor;
+-    ctx.strokeStyle = this.overviewTimelineStrokes;
++    ctx.strokeStyle = OVERVIEW_HEADER_TIMELINE_STROKE_COLOR;
+     ctx.beginPath();
+ 
+     for (let x = -scaledOffset % tickInterval; x < canvasWidth; x += tickInterval) {
+       let lineLeft = x;
+       let textLeft = lineLeft + textPaddingLeft;
+       let time = Math.round((x / dataScale + dataOffset) / this._pixelRatio);
+       let label = time + " " + this.timelineTickUnits;
+       ctx.fillText(label, textLeft, textPaddingTop);
+@@ -921,24 +924,24 @@ FlameGraph.prototype = {
+    */
+   _onResize: function() {
+     if (this.hasData()) {
+       setNamedTimeout(this._uid, GRAPH_RESIZE_EVENTS_DRAIN, this.refresh);
+     }
+   }
+ };
+ 
+-const FLAME_GRAPH_BLOCK_HEIGHT = 11; // px
++const FLAME_GRAPH_BLOCK_HEIGHT = 12; // px
+ 
+ const PALLETTE_SIZE = 10;
+ const PALLETTE_HUE_OFFSET = Math.random() * 90;
+ const PALLETTE_HUE_RANGE = 270;
+-const PALLETTE_SATURATION = 60;
+-const PALLETTE_BRIGHTNESS = 75;
+-const PALLETTE_OPACITY = 0.7;
++const PALLETTE_SATURATION = 100;
++const PALLETTE_BRIGHTNESS = 65;
++const PALLETTE_OPACITY = 0.55;
+ 
+ const COLOR_PALLETTE = Array.from(Array(PALLETTE_SIZE)).map((_, i) => "hsla" +
+   "(" + ((PALLETTE_HUE_OFFSET + (i / PALLETTE_SIZE * PALLETTE_HUE_RANGE))|0 % 360) +
+   "," + PALLETTE_SATURATION + "%" +
+   "," + PALLETTE_BRIGHTNESS + "%" +
+   "," + PALLETTE_OPACITY +
+   ")"
+ );
+@@ -1109,8 +1112,12 @@ let FlameGraphUtils = {
+       if (hash > Number.MAX_SAFE_INTEGER / STRING_HASH_PRIME2) {
+         return hash;
+       }
+     }
+ 
+     return hash;
+   }
+ };
++
++exports.FlameGraph = FlameGraph;
++exports.FlameGraphUtils = FlameGraphUtils;
++exports.FLAME_GRAPH_BLOCK_HEIGHT = FLAME_GRAPH_BLOCK_HEIGHT;
+-- 
+2.2.1
+

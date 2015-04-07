@@ -1,21 +1,22 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 30 Mar 2015 14:08:01 -0700
-Subject: Bug 1147945 - Profiler buffer size should be a configurable pref. r=vp
+Date: Sat, 4 Apr 2015 12:25:43 -0700
+Subject: Bug 1147945 - Let the profiler's buffer size and sample rate be configurable via prefs. r=vp
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
-index c4fcd0c..7a6ecf3 100644
+index 2951ad7..09c91f7 100644
 --- a/browser/app/profile/firefox.js
 +++ b/browser/app/profile/firefox.js
-@@ -1453,16 +1453,17 @@ pref("devtools.timeline.hiddenMarkers", "[]");
- pref("devtools.profiler.ui.flatten-tree-recursion", true);
- pref("devtools.profiler.ui.show-platform-data", false);
- pref("devtools.profiler.ui.show-idle-blocks", true);
+@@ -1429,16 +1429,18 @@ pref("devtools.debugger.ui.variables-searchbox-visible", false);
+ 
+ // Enable the Performance tools
+ pref("devtools.performance.enabled", true);
  
  // The default Performance UI settings
  pref("devtools.performance.memory.sample-probability", "0.05");
  pref("devtools.performance.memory.max-log-length", 2147483647); // Math.pow(2,31) - 1
  pref("devtools.performance.timeline.hidden-markers", "[]");
 +pref("devtools.performance.profiler.buffer-size", 10000000);
++pref("devtools.performance.profiler.sample-frequency-khz", 1);
  pref("devtools.performance.ui.invert-call-tree", true);
  pref("devtools.performance.ui.invert-flame-graph", false);
  pref("devtools.performance.ui.flatten-tree-recursion", true);
@@ -23,9 +24,9 @@ index c4fcd0c..7a6ecf3 100644
  pref("devtools.performance.ui.show-idle-blocks", true);
  pref("devtools.performance.ui.enable-memory", false);
  pref("devtools.performance.ui.enable-framerate", true);
- 
+ pref("devtools.performance.ui.show-jit-optimizations", false);
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index 221a05f..c720ad7 100644
+index 221a05f..956b67d 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
 @@ -242,17 +242,17 @@ PerformanceFront.prototype = {
@@ -74,10 +75,10 @@ index 221a05f..c720ad7 100644
 -    let profilerOptions = this._customProfilerOptions || {};
 +    // Translate options from the recording model into profiler-specific
 +    // options for the nsIProfiler
-+    let profilerOptions = {};
-+    if (options.bufferSize) {
-+      profilerOptions.entries = options.bufferSize;
-+    }
++    let profilerOptions = {
++      entries: options.bufferSize,
++      interval: options.sampleInterval
++    };
 +
      yield this._request("profiler", "startProfiler", profilerOptions);
  
@@ -88,10 +89,10 @@ index 221a05f..c720ad7 100644
    /**
     * Starts the timeline actor.
 diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
-index 9aa9002..129bcf7 100644
+index 9aa9002..c5e9176 100644
 --- a/browser/devtools/performance/modules/recording-model.js
 +++ b/browser/devtools/performance/modules/recording-model.js
-@@ -21,17 +21,18 @@ const RecordingModel = function (options={}) {
+@@ -21,17 +21,19 @@ const RecordingModel = function (options={}) {
    this._performance = options.performance;
    this._label = options.label || "";
  
@@ -102,7 +103,8 @@ index 9aa9002..129bcf7 100644
      allocationsSampleProbability: options.allocationsSampleProbability || 0,
 -    allocationsMaxLogLength: options.allocationsMaxLogLength || 0
 +    allocationsMaxLogLength: options.allocationsMaxLogLength || 0,
-+    bufferSize: options.bufferSize || 0
++    bufferSize: options.bufferSize || 0,
++    sampleInterval: options.sampleInterval || 1
    };
  };
  
@@ -112,11 +114,11 @@ index 9aa9002..129bcf7 100644
    _recording: false,
    _profilerStartTime: 0,
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index b9dcf5d..043dfbd 100644
+index a3e52bd..02d5558 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
-@@ -179,17 +179,18 @@ let PerformanceController = {
-     this._onPrefChanged = this._onPrefChanged.bind(this);
+@@ -192,17 +192,19 @@ let PerformanceController = {
+     this._onThemeChanged = this._onThemeChanged.bind(this);
  
      // All boolean prefs should be handled via the OptionsView in the
      // ToolbarView, so that they may be accessible via the "gear" menu.
@@ -126,7 +128,8 @@ index b9dcf5d..043dfbd 100644
        "memory-sample-probability": ["Float", "memory.sample-probability"],
 -      "memory-max-log-length": ["Int", "memory.max-log-length"]
 +      "memory-max-log-length": ["Int", "memory.max-log-length"],
-+      "profiler-buffer-size": ["Int", "profiler.buffer-size"]
++      "profiler-buffer-size": ["Int", "profiler.buffer-size"],
++      "profiler-sample-frequency": ["Int", "profiler.sample-frequency-khz"]
      });
  
      this._nonBooleanPrefs.registerObserver();
@@ -135,7 +138,7 @@ index b9dcf5d..043dfbd 100644
      ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
      PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
      PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
-@@ -261,17 +262,18 @@ let PerformanceController = {
+@@ -283,17 +285,19 @@ let PerformanceController = {
     * when the front has started to record.
     */
    startRecording: Task.async(function *() {
@@ -146,7 +149,8 @@ index b9dcf5d..043dfbd 100644
        allocationsSampleProbability: this.getPref("memory-sample-probability"),
 -      allocationsMaxLogLength: this.getPref("memory-max-log-length")
 +      allocationsMaxLogLength: this.getPref("memory-max-log-length"),
-+      bufferSize: this.getPref("profiler-buffer-size")
++      bufferSize: this.getPref("profiler-buffer-size"),
++      sampleInterval: 1 / (this.getPref("profiler-sample-frequency") || 1)
      });
  
      this.emit(EVENTS.RECORDING_WILL_START, recording);
@@ -155,11 +159,152 @@ index b9dcf5d..043dfbd 100644
  
      this.setCurrentRecording(recording);
    }),
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index ab202744..ff394ac 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -57,16 +57,17 @@ support-files =
+ [browser_perf-options-show-platform-data-01.js]
+ [browser_perf-options-show-platform-data-02.js]
+ [browser_perf-options-show-idle-blocks-01.js]
+ [browser_perf-options-show-idle-blocks-02.js]
+ [browser_perf-options-enable-memory-01.js]
+ [browser_perf-options-enable-memory-02.js]
+ [browser_perf-options-enable-framerate.js]
+ [browser_perf-options-allocations.js]
++[browser_perf-options-profiler.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
+ [browser_perf-overview-render-03.js]
+ [browser_perf-overview-selection-01.js]
+ [browser_perf-overview-selection-02.js]
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-overview-time-interval.js]
+ [browser_perf-shared-connection-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-options-profiler.js b/browser/devtools/performance/test/browser_perf-options-profiler.js
+new file mode 100644
+index 0000000..e74c8c4
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-options-profiler.js
+@@ -0,0 +1,29 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++
++/**
++ * Tests that setting the `devtools.performance.profiler.` prefs propagate to the profiler actor.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { gFront } = panel.panelWin;
++
++  ok(!nsIProfilerModule.IsActive(),
++    "ensure profiler is stopped.");
++
++  Services.prefs.setIntPref(PROFILER_BUFFER_SIZE_PREF, 1000);
++  Services.prefs.setIntPref(PROFILER_SAMPLE_RATE_PREF, 2);
++
++  yield startRecording(panel);
++
++  let { entries, interval } = yield gFront._request("profiler", "getStartOptions");
++
++  yield stopRecording(panel);
++
++  is(entries, 1000, "profiler entries option is set on profiler");
++  is(interval, 0.5, "profiler interval option is set on profiler");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 3075954..f9de433 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -1,16 +1,16 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+-
++let { Preferences } = Cu.import("resource://gre/modules/Preferences.jsm", {});
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
+ let { merge } = devtools.require("sdk/util/object");
+ let { getPerformanceActorsConnection, PerformanceFront } = devtools.require("devtools/performance/front");
+@@ -20,16 +20,18 @@ let TargetFactory = devtools.TargetFactory;
+ let mm = null;
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
+ const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
+ 
+ const MEMORY_SAMPLE_PROB_PREF = "devtools.performance.memory.sample-probability";
+ const MEMORY_MAX_LOG_LEN_PREF = "devtools.performance.memory.max-log-length";
++const PROFILER_BUFFER_SIZE_PREF = "devtools.performance.profiler.buffer-size";
++const PROFILER_SAMPLE_RATE_PREF = "devtools.performance.profiler.sample-frequency-khz";
+ 
+ const FRAMERATE_PREF = "devtools.performance.ui.enable-framerate";
+ const MEMORY_PREF = "devtools.performance.ui.enable-memory";
+ 
+ const PLATFORM_DATA_PREF = "devtools.performance.ui.show-platform-data";
+ const IDLE_PREF = "devtools.performance.ui.show-idle-blocks";
+ const INVERT_PREF = "devtools.performance.ui.invert-call-tree";
+ const INVERT_FLAME_PREF = "devtools.performance.ui.invert-flame-graph";
+@@ -45,18 +47,22 @@ let DEFAULT_PREFS = [
+   "devtools.debugger.log",
+   "devtools.performance.ui.invert-call-tree",
+   "devtools.performance.ui.flatten-tree-recursion",
+   "devtools.performance.ui.show-platform-data",
+   "devtools.performance.ui.show-idle-blocks",
+   "devtools.performance.ui.enable-memory",
+   "devtools.performance.ui.enable-framerate",
+   "devtools.performance.ui.show-jit-optimizations",
++  "devtools.performance.memory.sample-probability",
++  "devtools.performance.memory.max-log-length",
++  "devtools.performance.profiler.buffer-size",
++  "devtools.performance.profiler.sample-frequency-khz",
+ ].reduce((prefs, pref) => {
+-  prefs[pref] = Services.prefs.getBoolPref(pref);
++  prefs[pref] = Preferences.get(pref);
+   return prefs;
+ }, {});
+ 
+ // Enable the new performance panel for all tests.
+ Services.prefs.setBoolPref("devtools.performance.enabled", true);
+ // Enable logging for all the tests. Both the debugger server and frontend will
+ // be affected by this pref.
+ Services.prefs.setBoolPref("devtools.debugger.log", false);
+@@ -73,17 +79,17 @@ function loadFrameScripts () {
+ }
+ 
+ registerCleanupFunction(() => {
+   gDevTools.testing = false;
+   info("finish() was called, cleaning up...");
+ 
+   // Rollback any pref changes
+   Object.keys(DEFAULT_PREFS).forEach(pref => {
+-    Services.prefs.setBoolPref(pref, DEFAULT_PREFS[pref]);
++    Preferences.set(pref, DEFAULT_PREFS[pref]);
+   });
+ 
+   // Make sure the profiler module is stopped when the test finishes.
+   nsIProfilerModule.StopProfiler();
+ 
+   Cu.forceGC();
+ });
+ 
 diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
-index 8720ae1..907e9ba 100644
+index 8720ae1..07c3a95 100644
 --- a/toolkit/devtools/server/actors/profiler.js
 +++ b/toolkit/devtools/server/actors/profiler.js
-@@ -2,17 +2,17 @@
+@@ -2,20 +2,26 @@
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
@@ -169,15 +314,95 @@ index 8720ae1..907e9ba 100644
  const DevToolsUtils = require("devtools/toolkit/DevToolsUtils.js");
  
 -let DEFAULT_PROFILER_ENTRIES = 10000000;
-+let DEFAULT_PROFILER_ENTRIES = Math.pow(10, 7);
- let DEFAULT_PROFILER_INTERVAL = 1;
- let DEFAULT_PROFILER_FEATURES = ["js"];
- let DEFAULT_PROFILER_THREADFILTERS = ["GeckoMain"];
+-let DEFAULT_PROFILER_INTERVAL = 1;
+-let DEFAULT_PROFILER_FEATURES = ["js"];
+-let DEFAULT_PROFILER_THREADFILTERS = ["GeckoMain"];
++let DEFAULT_PROFILER_BUFFER_SIZE = Services.prefs.getIntPref("devtools.performance.profiler.buffer-size");
++let DEFAULT_PROFILER_FREQ_KHZ = Services.prefs.getIntPref("devtools.performance.profiler.sample-frequency-khz");
++let DEFAULT_PROFILER_INTERVAL = 1 / (DEFAULT_PROFILER_FREQ_KHZ || 1);
++
++let DEFAULT_PROFILER_OPTIONS = {
++  entries: DEFAULT_PROFILER_BUFFER_SIZE,
++  interval: DEFAULT_PROFILER_INTERVAL,
++  features: ["js"],
++  threadFilters: ["GeckoMain"]
++};
  
  /**
   * The nsIProfiler is target agnostic and interacts with the whole platform.
   * Therefore, special care needs to be given to make sure different actor
   * consumers (i.e. "toolboxes") don't interfere with each other.
+  */
+ let gProfilerConsumers = 0;
+ let gProfilingStartTime = -1;
+@@ -52,32 +58,48 @@ ProfilerActor.prototype = {
+    * that are available on this platform. Can be called while the profiler
+    * is stopped.
+    */
+   onGetFeatures: function() {
+     return { features: nsIProfilerModule.GetFeatures([]) };
+   },
+ 
+   /**
++   * Returns the configuration used that was originally passed in to start up the
++   * profiler. Used for tests, and does not account for others using nsIProfiler.
++   */
++  onGetStartOptions: function() {
++    return this._profilerStartOptions || {};
++  },
++
++  /**
+    * Starts the nsIProfiler module. Doing so will discard any samples
+    * that might have been accumulated so far.
+    *
+    * @param number entries [optional]
+    * @param number interval [optional]
+    * @param array:string features [optional]
+    * @param array:string threadFilters [description]
+    */
+   onStartProfiler: function(request = {}) {
++    let options = this._profilerStartOptions = {
++      entries: request.entries || DEFAULT_PROFILER_OPTIONS.entries,
++      interval: request.interval || DEFAULT_PROFILER_OPTIONS.interval,
++      features: request.features || DEFAULT_PROFILER_OPTIONS.features,
++      threadFilters: request.threadFilters || DEFAULT_PROFILER_OPTIONS.threadFilters,
++    };
++
+     nsIProfilerModule.StartProfiler(
+-      (request.entries || DEFAULT_PROFILER_ENTRIES),
+-      (request.interval || DEFAULT_PROFILER_INTERVAL),
+-      (request.features || DEFAULT_PROFILER_FEATURES),
+-      (request.features || DEFAULT_PROFILER_FEATURES).length,
+-      (request.threadFilters || DEFAULT_PROFILER_THREADFILTERS),
+-      (request.threadFilters || DEFAULT_PROFILER_THREADFILTERS).length);
++      options.entries,
++      options.interval,
++      options.features,
++      options.features.length,
++      options.threadFilters,
++      options.threadFilters.length
++    );
+ 
+     return { started: true };
+   },
+ 
+   /**
+    * Stops the nsIProfiler module, if no other client is using it.
+    */
+   onStopProfiler: function() {
+@@ -326,10 +348,11 @@ function checkProfilerConsumers() {
+ ProfilerActor.prototype.requestTypes = {
+   "getFeatures": ProfilerActor.prototype.onGetFeatures,
+   "startProfiler": ProfilerActor.prototype.onStartProfiler,
+   "stopProfiler": ProfilerActor.prototype.onStopProfiler,
+   "isActive": ProfilerActor.prototype.onIsActive,
+   "getSharedLibraryInformation": ProfilerActor.prototype.onGetSharedLibraryInformation,
+   "getProfile": ProfilerActor.prototype.onGetProfile,
+   "registerEventNotifications": ProfilerActor.prototype.onRegisterEventNotifications,
+-  "unregisterEventNotifications": ProfilerActor.prototype.onUnregisterEventNotifications
++  "unregisterEventNotifications": ProfilerActor.prototype.onUnregisterEventNotifications,
++  "getStartOptions": ProfilerActor.prototype.onGetStartOptions
+ };
 -- 
 2.2.1
 
