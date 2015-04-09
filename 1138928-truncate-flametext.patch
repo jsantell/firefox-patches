@@ -1,10 +1,9 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Fri, 3 Apr 2015 13:16:31 -0700
-Subject: Bug 1121180 - Display only function name and file,
- instead of full url, in flame graphs. r=vp
+Date: Tue, 7 Apr 2015 13:59:10 -0700
+Subject: Bug 1138928 - Display only function name and file, instead of full url, in flame graphs. r=vp
 
 diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
-index dedc1a3..fa70b05 100644
+index 6be46f0..516c118 100644
 --- a/browser/devtools/shared/moz.build
 +++ b/browser/devtools/shared/moz.build
 @@ -26,16 +26,17 @@ EXTRA_JS_MODULES.devtools += [
@@ -27,17 +26,20 @@ index dedc1a3..fa70b05 100644
      'timeline/global.js',
 diff --git a/browser/devtools/shared/profiler/frame-utils.js b/browser/devtools/shared/profiler/frame-utils.js
 new file mode 100644
-index 0000000..9bd5ec1
+index 0000000..e2065ba
 --- /dev/null
 +++ b/browser/devtools/shared/profiler/frame-utils.js
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,131 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +"use strict";
 +
 +const { Ci } = require("chrome");
++const { extend } = require("sdk/util/object");
 +loader.lazyRequireGetter(this, "Services");
++loader.lazyRequireGetter(this, "CATEGORY_OTHER",
++  "devtools/shared/profiler/global", true);
 +
 +// The cache used in the `nsIURL` function.
 +const gNSURLStore = new Map();
@@ -99,6 +101,50 @@ index 0000000..9bd5ec1
 +}
 +
 +/**
++ * This filters out platform data frames in a sample. With latest performance
++ * tool in Fx40, when displaying only content, we still filter out all platform data,
++ * except we generalize platform data that are leaves. We do this because of two
++ * observations:
++ *
++ * 1. The leaf is where time is _actually_ being spent, so we _need_ to show it
++ * to developers in some way to give them accurate profiling data. We decide to
++ * split the platform into various category buckets and just show time spent in
++ * each bucket.
++ *
++ * 2. The calls leading to the leaf _aren't_ where we are spending time, but
++ * _do_ give the developer context for how they got to the leaf where they _are_
++ * spending time. For non-platform hackers, the non-leaf platform frames don't
++ * give any meaningful context, and so we can safely filter them out.
++ *
++ * Example transformations:
++ * Before: PlatformA -> PlatformB -> ContentA -> ContentB
++ * After:  ContentA -> ContentB
++ *
++ * Before: PlatformA -> ContentA -> PlatformB -> PlatformC
++ * After:  ContentA -> Category(PlatformC)
++ */
++exports.filterPlatformData = function filterPlatformData (frames) {
++  let result = [];
++  let last = frames.length - 1;
++  let frame;
++
++  for (let i = 0; i < frames.length; i++) {
++    frame = frames[i];
++    if (exports.isContent(frame)) {
++      result.push(frame);
++    } else if (last === i) {
++      // Extend here so we're not destructively editing
++      // the original profiler data. Set isMetaCategory `true`,
++      // and ensure we have a category set by default, because that's how
++      // the generalized frame nodes are organized.
++      result.push(extend({ isMetaCategory: true, category: CATEGORY_OTHER }, frame));
++    }
++  }
++
++  return result;
++}
++
++/**
 + * Helper for getting an nsIURL instance out of a string.
 + */
 +function nsIURL(url) {
@@ -116,26 +162,31 @@ index 0000000..9bd5ec1
 +  return uri;
 +}
 diff --git a/browser/devtools/shared/profiler/tree-model.js b/browser/devtools/shared/profiler/tree-model.js
-index 1b79dca..6a772d5 100644
+index 7f87874..f194424 100644
 --- a/browser/devtools/shared/profiler/tree-model.js
 +++ b/browser/devtools/shared/profiler/tree-model.js
-@@ -1,31 +1,29 @@
+@@ -1,36 +1,31 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
  
  const {Cc, Ci, Cu, Cr} = require("chrome");
+-const {extend} = require("sdk/util/object");
  
 -loader.lazyRequireGetter(this, "Services");
  loader.lazyRequireGetter(this, "L10N",
    "devtools/shared/profiler/global", true);
  loader.lazyRequireGetter(this, "CATEGORY_MAPPINGS",
    "devtools/shared/profiler/global", true);
+ loader.lazyRequireGetter(this, "CATEGORIES",
+   "devtools/shared/profiler/global", true);
  loader.lazyRequireGetter(this, "CATEGORY_JIT",
    "devtools/shared/profiler/global", true);
  loader.lazyRequireGetter(this, "JITOptimizations",
    "devtools/shared/profiler/jit", true);
+-loader.lazyRequireGetter(this, "CATEGORY_OTHER",
+-  "devtools/shared/profiler/global", true);
 -
 -const CHROME_SCHEMES = ["chrome://", "resource://", "jar:file://"];
 -const CONTENT_SCHEMES = ["http://", "https://", "file://", "app://"];
@@ -154,7 +205,7 @@ index 1b79dca..6a772d5 100644
   *
   * Example:
   * {
-@@ -92,17 +90,17 @@ ThreadNode.prototype = {
+@@ -97,17 +92,17 @@ ThreadNode.prototype = {
      }
  
      let sampleFrames = sample.frames;
@@ -163,8 +214,8 @@ index 1b79dca..6a772d5 100644
      // should be taken into consideration.
      if (options.contentOnly) {
        // The (root) node is not considered a content function, it'll be removed.
--      sampleFrames = sampleFrames.filter(isContent);
-+      sampleFrames = sampleFrames.filter(FrameUtils.isContent);
+-      sampleFrames = filterPlatformData(sampleFrames);
++      sampleFrames = FrameUtils.filterPlatformData(sampleFrames);
      } else {
        // Remove the (root) node manually.
        sampleFrames = sampleFrames.slice(1);
@@ -173,7 +224,7 @@ index 1b79dca..6a772d5 100644
      // to continue.
      if (!sampleFrames.length) {
        return;
-@@ -235,51 +233,22 @@ FrameNode.prototype = {
+@@ -248,52 +243,23 @@ FrameNode.prototype = {
      if (this.location == "EnterJIT") {
        this.category = CATEGORY_JIT;
      }
@@ -195,7 +246,12 @@ index 1b79dca..6a772d5 100644
 -    let url = resource.split(" -> ").pop();
 -    let uri = nsIURL(url);
 -    let functionName, fileName, hostName;
--
++    let parsedData = FrameUtils.parseLocation(this);
++    parsedData.nodeType = "Frame";
++    parsedData.categoryData = categoryData;
++    parsedData.isContent = FrameUtils.isContent(this);
++    parsedData.isMetaCategory = this.isMetaCategory;
+ 
 -    // If the URI digged out from the `location` is valid, this is a JS frame.
 -    if (uri) {
 -      functionName = this.location.substring(0, firstParenIndex - 1);
@@ -205,11 +261,7 @@ index 1b79dca..6a772d5 100644
 -      functionName = this.location;
 -      url = null;
 -    }
-+    let parsedData = FrameUtils.parseLocation(this);
-+    parsedData.nodeType = "Frame";
-+    parsedData.categoryData = categoryData;
-+    parsedData.isContent = FrameUtils.isContent(this);
- 
+-
 -    return this._data = {
 -      nodeType: "Frame",
 -      functionName: functionName,
@@ -219,7 +271,8 @@ index 1b79dca..6a772d5 100644
 -      line: line,
 -      column: column,
 -      categoryData: categoryData,
--      isContent: !!isContent(this)
+-      isContent: !!isContent(this),
+-      isMetaCategory: this.isMetaCategory
 -    };
 +    return this._data = parsedData;
    },
@@ -230,7 +283,7 @@ index 1b79dca..6a772d5 100644
     * @return {Boolean}
     */
    hasOptimizations: function () {
-@@ -291,44 +260,8 @@ FrameNode.prototype = {
+@@ -305,88 +271,8 @@ FrameNode.prototype = {
     * the optimization attempts occuring in this frame.
     *
     * @return {JITOptimizations|null}
@@ -275,15 +328,173 @@ index 1b79dca..6a772d5 100644
 -
 -// The cache used in the `nsIURL` function.
 -let gNSURLStore = new Map();
+-
+-/**
+- * This filters out platform data frames in a sample. With latest performance
+- * tool in Fx40, when displaying only content, we still filter out all platform data,
+- * except we generalize platform data that are leaves. We do this because of two
+- * observations:
+- *
+- * 1. The leaf is where time is _actually_ being spent, so we _need_ to show it
+- * to developers in some way to give them accurate profiling data. We decide to
+- * split the platform into various category buckets and just show time spent in
+- * each bucket.
+- *
+- * 2. The calls leading to the leaf _aren't_ where we are spending time, but
+- * _do_ give the developer context for how they got to the leaf where they _are_
+- * spending time. For non-platform hackers, the non-leaf platform frames don't
+- * give any meaningful context, and so we can safely filter them out.
+- *
+- * Example transformations:
+- * Before: PlatformA -> PlatformB -> ContentA -> ContentB
+- * After:  ContentA -> ContentB
+- *
+- * Before: PlatformA -> ContentA -> PlatformB -> PlatformC
+- * After:  ContentA -> Category(PlatformC)
+- */
+-function filterPlatformData (frames) {
+-  let result = [];
+-  let last = frames.length - 1;
+-  let frame;
+-
+-  for (let i = 0; i < frames.length; i++) {
+-    frame = frames[i];
+-    if (isContent(frame)) {
+-      result.push(frame);
+-    } else if (last === i) {
+-      // Extend here so we're not destructively editing
+-      // the original profiler data. Set isMetaCategory `true`,
+-      // and ensure we have a category set by default, because that's how
+-      // the generalized frame nodes are organized.
+-      result.push(extend({ isMetaCategory: true, category: CATEGORY_OTHER }, frame));
+-    }
+-  }
+-
+-  return result;
+-}
+diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
+index 06d80f2..fb95ea4 100644
+--- a/browser/devtools/shared/test/browser.ini
++++ b/browser/devtools/shared/test/browser.ini
+@@ -26,16 +26,17 @@ support-files =
+ [browser_flame-graph-03b.js]
+ [browser_flame-graph-03c.js]
+ [browser_flame-graph-04.js]
+ [browser_flame-graph-utils-01.js]
+ [browser_flame-graph-utils-02.js]
+ [browser_flame-graph-utils-03.js]
+ [browser_flame-graph-utils-04.js]
+ [browser_flame-graph-utils-05.js]
++[browser_flame-graph-utils-06.js]
+ [browser_flame-graph-utils-hash.js]
+ [browser_graphs-01.js]
+ [browser_graphs-02.js]
+ [browser_graphs-03.js]
+ [browser_graphs-04.js]
+ [browser_graphs-05.js]
+ [browser_graphs-06.js]
+ [browser_graphs-07a.js]
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-06.js b/browser/devtools/shared/test/browser_flame-graph-utils-06.js
+new file mode 100644
+index 0000000..357f8b9
+--- /dev/null
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-06.js
+@@ -0,0 +1,86 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Tests that the text displayed is the function name, file name and line number
++// if applicable.
++
++let {FlameGraphUtils, FLAME_GRAPH_BLOCK_HEIGHT} = devtools.require("devtools/shared/widgets/FlameGraph");
++
++add_task(function*() {
++  yield promiseTab("about:blank");
++  yield performTest();
++  gBrowser.removeCurrentTab();
++});
++
++function* performTest() {
++  let out = FlameGraphUtils.createFlameGraphDataFromSamples(TEST_DATA, {
++    flattenRecursion: true
++  });
++
++  ok(out, "Some data was outputted properly");
++  is(out.length, 10, "The outputted length is correct.");
++
++  info("Got flame graph data:\n" + out.toSource() + "\n");
++
++  for (let i = 0; i < out.length; i++) {
++    let found = out[i];
++    let expected = EXPECTED_OUTPUT[i];
++
++    is(found.blocks.length, expected.blocks.length,
++      "The correct number of blocks were found in this bucket.");
++
++    for (let j = 0; j < found.blocks.length; j++) {
++      is(found.blocks[j].x, expected.blocks[j].x,
++        "The expected block X position is correct for this frame.");
++      is(found.blocks[j].y, expected.blocks[j].y,
++        "The expected block Y position is correct for this frame.");
++      is(found.blocks[j].width, expected.blocks[j].width,
++        "The expected block width is correct for this frame.");
++      is(found.blocks[j].height, expected.blocks[j].height,
++        "The expected block height is correct for this frame.");
++      is(found.blocks[j].text, expected.blocks[j].text,
++        "The expected block text is correct for this frame.");
++    }
++  }
++}
++
++let TEST_DATA = [{
++  frames: [{
++    location: "A (http://path/to/file.js:10:5"
++  }, {
++    location: "B (http://path/to/file.js:100:5"
++  }],
++  time: 50,
++}];
++
++let EXPECTED_OUTPUT = [{
++  blocks: []
++}, {
++  blocks: []
++}, {
++  blocks: []
++}, {
++  blocks: []
++}, {
++  blocks: [{
++    srcData: {
++      startTime: 0,
++      rawLocation: "A (http://path/to/file.js:10:5)"
++    },
++    x: 0,
++    y: 0,
++    width: 50,
++    height: FLAME_GRAPH_BLOCK_HEIGHT,
++    text: "A (file.js:10)"
++  }]
++}, {
++  blocks: []
++}, {
++  blocks: []
++}, {
++  blocks: []
++}, {
++  blocks: []
++}, {
++  blocks: []
++}];
 diff --git a/browser/devtools/shared/widgets/FlameGraph.js b/browser/devtools/shared/widgets/FlameGraph.js
-index bbcc918..09e88dd 100644
+index 0e3bf5f..6655c21 100644
 --- a/browser/devtools/shared/widgets/FlameGraph.js
 +++ b/browser/devtools/shared/widgets/FlameGraph.js
 @@ -4,16 +4,17 @@
  "use strict";
  
  const { ViewHelpers } = require("resource:///modules/devtools/ViewHelpers.jsm");
- const { Graphs } = require("resource:///modules/devtools/Graphs.jsm");
+ const { AbstractCanvasGraph, GraphArea, GraphAreaDragger } = require("resource:///modules/devtools/Graphs.jsm");
  const { Promise } = require("resource://gre/modules/Promise.jsm");
  const { Task } = require("resource://gre/modules/Task.jsm");
  const { getColor } = require("devtools/shared/theme");
@@ -340,7 +551,7 @@ index bbcc918..09e88dd 100644
  
        // Previous frames at stack depths greater than the current sample's
        // maximum need to be nullified. It's nonsensical to reuse them.
-@@ -1110,13 +1112,30 @@ let FlameGraphUtils = {
+@@ -1110,14 +1112,38 @@ let FlameGraphUtils = {
        hash += input.charCodeAt(i);
  
        if (hash > Number.MAX_SAFE_INTEGER / STRING_HASH_PRIME2) {
@@ -364,13 +575,21 @@ index bbcc918..09e88dd 100644
 +    if (frame.idle) {
 +      return frame.location;
 +    }
++
 +    let { functionName, fileName, line } = FrameUtils.parseLocation(frame);
-+    return `${functionName} (${fileName}:${line})`;
++    let label = functionName;
++
++    if (fileName) {
++      label += ` (${fileName}${line != null ? (":" + line) : ""})`;
++    }
++
++    return label;
    }
  };
  
  exports.FlameGraph = FlameGraph;
  exports.FlameGraphUtils = FlameGraphUtils;
+ exports.FLAME_GRAPH_BLOCK_HEIGHT = FLAME_GRAPH_BLOCK_HEIGHT;
 -- 
 2.2.1
 

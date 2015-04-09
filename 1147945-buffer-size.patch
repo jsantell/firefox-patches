@@ -1,12 +1,12 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Sat, 4 Apr 2015 12:25:43 -0700
+Date: Tue, 7 Apr 2015 21:46:31 -0700
 Subject: Bug 1147945 - Let the profiler's buffer size and sample rate be configurable via prefs. r=vp
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
-index 2951ad7..09c91f7 100644
+index 2e8218c..6d4a44b 100644
 --- a/browser/app/profile/firefox.js
 +++ b/browser/app/profile/firefox.js
-@@ -1429,16 +1429,18 @@ pref("devtools.debugger.ui.variables-searchbox-visible", false);
+@@ -1433,16 +1433,18 @@ pref("devtools.debugger.ui.variables-searchbox-visible", false);
  
  // Enable the Performance tools
  pref("devtools.performance.enabled", true);
@@ -25,8 +25,94 @@ index 2951ad7..09c91f7 100644
  pref("devtools.performance.ui.enable-memory", false);
  pref("devtools.performance.ui.enable-framerate", true);
  pref("devtools.performance.ui.show-jit-optimizations", false);
+diff --git a/browser/devtools/framework/gDevTools.jsm b/browser/devtools/framework/gDevTools.jsm
+index 413a995..d36c6a5 100644
+--- a/browser/devtools/framework/gDevTools.jsm
++++ b/browser/devtools/framework/gDevTools.jsm
+@@ -6,30 +6,31 @@
+ 
+ this.EXPORTED_SYMBOLS = [ "gDevTools", "DevTools", "gDevToolsBrowser" ];
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu } = Components;
+ 
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/devtools/Loader.jsm");
+-
+ XPCOMUtils.defineLazyModuleGetter(this, "promise",
+                                   "resource://gre/modules/Promise.jsm", "Promise");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "console",
+                                   "resource://gre/modules/devtools/Console.jsm");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "CustomizableUI",
+                                   "resource:///modules/CustomizableUI.jsm");
+ XPCOMUtils.defineLazyModuleGetter(this, "DebuggerServer",
+                                   "resource://gre/modules/devtools/dbg-server.jsm");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "DebuggerClient",
+                                   "resource://gre/modules/devtools/dbg-client.jsm");
++XPCOMUtils.defineLazyModuleGetter(this, "Task",
++                                  "resource://gre/modules/Task.jsm");
+ 
+ const EventEmitter = devtools.require("devtools/toolkit/event-emitter");
+ const Telemetry = devtools.require("devtools/shared/telemetry");
+ 
+ const TABS_OPEN_PEAK_HISTOGRAM = "DEVTOOLS_TABS_OPEN_PEAK_LINEAR";
+ const TABS_OPEN_AVG_HISTOGRAM = "DEVTOOLS_TABS_OPEN_AVERAGE_LINEAR";
+ const TABS_PINNED_PEAK_HISTOGRAM = "DEVTOOLS_TABS_PINNED_PEAK_LINEAR";
+ const TABS_PINNED_AVG_HISTOGRAM = "DEVTOOLS_TABS_PINNED_AVERAGE_LINEAR";
+@@ -1213,18 +1214,18 @@ let gDevToolsBrowser = {
+   },
+ 
+   /**
+    * Connects to the SPS profiler when the developer tools are open. This is
+    * necessary because of the WebConsole's `profile` and `profileEnd` methods.
+    */
+   _connectToProfiler: function DT_connectToProfiler(event, toolbox) {
+     let SharedPerformanceUtils = devtools.require("devtools/performance/front");
+-    let connection = SharedPerformanceUtils.getPerformanceActorsConnection(toolbox.target);
+-    connection.open();
++    this._performanceConnection = SharedPerformanceUtils.getPerformanceActorsConnection(toolbox.target);
++    this._performanceConnection.open();
+   },
+ 
+   /**
+    * Remove the menuitem for a tool to all open browser windows.
+    *
+    * @param {string} toolId
+    *        id of the tool to remove
+    */
+@@ -1324,21 +1325,25 @@ let gDevToolsBrowser = {
+       case "TabSelect":
+         gDevToolsBrowser._updateMenuCheckbox();
+     }
+   },
+ 
+   /**
+    * All browser windows have been closed, tidy up remaining objects.
+    */
+-  destroy: function() {
++  destroy: Task.async(function*() {
+     gDevTools.off("toolbox-ready", gDevToolsBrowser._connectToProfiler);
+     Services.prefs.removeObserver("devtools.", gDevToolsBrowser);
+     Services.obs.removeObserver(gDevToolsBrowser.destroy, "quit-application");
+-  },
++
++    if (this._performanceConnection) {
++      yield this._performanceConnection.destroy();
++    }
++  }),
+ }
+ 
+ this.gDevToolsBrowser = gDevToolsBrowser;
+ 
+ gDevTools.on("tool-registered", function(ev, toolId) {
+   let toolDefinition = gDevTools._tools.get(toolId);
+   gDevToolsBrowser._addToolToWindows(toolDefinition);
+ });
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index 221a05f..956b67d 100644
+index 221a05f..4eb9d5c 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
 @@ -242,17 +242,17 @@ PerformanceFront.prototype = {
@@ -77,7 +163,7 @@ index 221a05f..956b67d 100644
 +    // options for the nsIProfiler
 +    let profilerOptions = {
 +      entries: options.bufferSize,
-+      interval: options.sampleInterval
++      interval: options.sampleFrequency ? (1000 / (options.sampleFrequency * 1000)) : void 0
 +    };
 +
      yield this._request("profiler", "startProfiler", profilerOptions);
@@ -89,7 +175,7 @@ index 221a05f..956b67d 100644
    /**
     * Starts the timeline actor.
 diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
-index 9aa9002..c5e9176 100644
+index 9aa9002..a246f35 100644
 --- a/browser/devtools/performance/modules/recording-model.js
 +++ b/browser/devtools/performance/modules/recording-model.js
 @@ -21,17 +21,19 @@ const RecordingModel = function (options={}) {
@@ -104,7 +190,7 @@ index 9aa9002..c5e9176 100644
 -    allocationsMaxLogLength: options.allocationsMaxLogLength || 0
 +    allocationsMaxLogLength: options.allocationsMaxLogLength || 0,
 +    bufferSize: options.bufferSize || 0,
-+    sampleInterval: options.sampleInterval || 1
++    sampleFrequency: options.sampleFrequency || 1
    };
  };
  
@@ -114,10 +200,10 @@ index 9aa9002..c5e9176 100644
    _recording: false,
    _profilerStartTime: 0,
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index a3e52bd..02d5558 100644
+index 8dfe9b0..cc9642e 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
-@@ -192,17 +192,19 @@ let PerformanceController = {
+@@ -194,17 +194,19 @@ let PerformanceController = {
      this._onThemeChanged = this._onThemeChanged.bind(this);
  
      // All boolean prefs should be handled via the OptionsView in the
@@ -138,7 +224,7 @@ index a3e52bd..02d5558 100644
      ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
      PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
      PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
-@@ -283,17 +285,19 @@ let PerformanceController = {
+@@ -285,17 +287,19 @@ let PerformanceController = {
     * when the front has started to record.
     */
    startRecording: Task.async(function *() {
@@ -150,7 +236,7 @@ index a3e52bd..02d5558 100644
 -      allocationsMaxLogLength: this.getPref("memory-max-log-length")
 +      allocationsMaxLogLength: this.getPref("memory-max-log-length"),
 +      bufferSize: this.getPref("profiler-buffer-size"),
-+      sampleInterval: 1 / (this.getPref("profiler-sample-frequency") || 1)
++      sampleFrequency: this.getPref("profiler-sample-frequency")
      });
  
      this.emit(EVENTS.RECORDING_WILL_START, recording);
@@ -160,10 +246,10 @@ index a3e52bd..02d5558 100644
      this.setCurrentRecording(recording);
    }),
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index ab202744..ff394ac 100644
+index 25b7c6f..e1ed0fb 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -57,16 +57,17 @@ support-files =
+@@ -58,16 +58,17 @@ support-files =
  [browser_perf-options-show-platform-data-01.js]
  [browser_perf-options-show-platform-data-02.js]
  [browser_perf-options-show-idle-blocks-01.js]
@@ -183,10 +269,10 @@ index ab202744..ff394ac 100644
  [browser_perf-shared-connection-02.js]
 diff --git a/browser/devtools/performance/test/browser_perf-options-profiler.js b/browser/devtools/performance/test/browser_perf-options-profiler.js
 new file mode 100644
-index 0000000..e74c8c4
+index 0000000..48d3968
 --- /dev/null
 +++ b/browser/devtools/performance/test/browser_perf-options-profiler.js
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,26 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -197,9 +283,6 @@ index 0000000..e74c8c4
 +function spawnTest () {
 +  let { panel } = yield initPerformance(SIMPLE_URL);
 +  let { gFront } = panel.panelWin;
-+
-+  ok(!nsIProfilerModule.IsActive(),
-+    "ensure profiler is stopped.");
 +
 +  Services.prefs.setIntPref(PROFILER_BUFFER_SIZE_PREF, 1000);
 +  Services.prefs.setIntPref(PROFILER_SAMPLE_RATE_PREF, 2);
@@ -301,7 +384,7 @@ index 3075954..f9de433 100644
  });
  
 diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
-index 8720ae1..07c3a95 100644
+index 8720ae1..80a2e80 100644
 --- a/toolkit/devtools/server/actors/profiler.js
 +++ b/toolkit/devtools/server/actors/profiler.js
 @@ -2,20 +2,26 @@
@@ -317,13 +400,13 @@ index 8720ae1..07c3a95 100644
 -let DEFAULT_PROFILER_INTERVAL = 1;
 -let DEFAULT_PROFILER_FEATURES = ["js"];
 -let DEFAULT_PROFILER_THREADFILTERS = ["GeckoMain"];
-+let DEFAULT_PROFILER_BUFFER_SIZE = Services.prefs.getIntPref("devtools.performance.profiler.buffer-size");
-+let DEFAULT_PROFILER_FREQ_KHZ = Services.prefs.getIntPref("devtools.performance.profiler.sample-frequency-khz");
-+let DEFAULT_PROFILER_INTERVAL = 1 / (DEFAULT_PROFILER_FREQ_KHZ || 1);
-+
 +let DEFAULT_PROFILER_OPTIONS = {
-+  entries: DEFAULT_PROFILER_BUFFER_SIZE,
-+  interval: DEFAULT_PROFILER_INTERVAL,
++  // When using the DevTools Performance Tools, this will be overridden
++  // by the pref `devtools.performance.profiler.buffer-size`.
++  entries: Math.pow(10, 7),
++  // When using the DevTools Performance Tools, this will be overridden
++  // by the pref `devtools.performance.profiler.sample-rate-khz`.
++  interval: 1,
 +  features: ["js"],
 +  threadFilters: ["GeckoMain"]
 +};
