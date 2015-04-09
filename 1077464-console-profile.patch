@@ -1,38 +1,356 @@
 From: Jordan Santell <jsantell@gmail.com>
 Date: Fri, 13 Mar 2015 15:42:18 -0700
-Subject: Bug 1077464 - Wire console.profile/profileEnd to the new
- performance tool. Move most of the recording-model logic from the front end
- into the PerformanceFront and PerformanceActorConnection so it can manage
- recordings without the front end being viewed. r=vp
+Subject: Bug 1077464 - Wire console.profile/profileEnd to the new performance tool. Move most of the recording-model logic from the front end into the PerformanceFront and PerformanceActorConnection so it can manage recordings without the front end being viewed. r=vp
 
 diff --git a/browser/devtools/framework/gDevTools.jsm b/browser/devtools/framework/gDevTools.jsm
-index 413a995..4a5f270 100644
+index 413a995..1ef53f5 100644
 --- a/browser/devtools/framework/gDevTools.jsm
 +++ b/browser/devtools/framework/gDevTools.jsm
-@@ -1212,16 +1212,21 @@ let gDevToolsBrowser = {
+@@ -9,25 +9,22 @@ this.EXPORTED_SYMBOLS = [ "gDevTools", "DevTools", "gDevToolsBrowser" ];
+ const { classes: Cc, interfaces: Ci, utils: Cu } = Components;
+ 
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://gre/modules/devtools/Loader.jsm");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "promise",
+                                   "resource://gre/modules/Promise.jsm", "Promise");
+-
+ XPCOMUtils.defineLazyModuleGetter(this, "console",
+                                   "resource://gre/modules/devtools/Console.jsm");
+-
+ XPCOMUtils.defineLazyModuleGetter(this, "CustomizableUI",
+                                   "resource:///modules/CustomizableUI.jsm");
+ XPCOMUtils.defineLazyModuleGetter(this, "DebuggerServer",
+                                   "resource://gre/modules/devtools/dbg-server.jsm");
+-
+ XPCOMUtils.defineLazyModuleGetter(this, "DebuggerClient",
+                                   "resource://gre/modules/devtools/dbg-client.jsm");
+ 
+ const EventEmitter = devtools.require("devtools/toolkit/event-emitter");
+ const Telemetry = devtools.require("devtools/shared/telemetry");
+ 
+ const TABS_OPEN_PEAK_HISTOGRAM = "DEVTOOLS_TABS_OPEN_PEAK_LINEAR";
+ const TABS_OPEN_AVG_HISTOGRAM = "DEVTOOLS_TABS_OPEN_AVERAGE_LINEAR";
+@@ -1208,26 +1205,16 @@ let gDevToolsBrowser = {
+         broadcaster.setAttribute("checked", "true");
+       } else {
+         broadcaster.removeAttribute("checked");
+       }
      }
    },
  
    /**
-    * Connects to the SPS profiler when the developer tools are open. This is
-    * necessary because of the WebConsole's `profile` and `profileEnd` methods.
+-   * Connects to the SPS profiler when the developer tools are open. This is
+-   * necessary because of the WebConsole's `profile` and `profileEnd` methods.
+-   */
+-  _connectToProfiler: function DT_connectToProfiler(event, toolbox) {
+-    let SharedPerformanceUtils = devtools.require("devtools/performance/front");
+-    let connection = SharedPerformanceUtils.getPerformanceActorsConnection(toolbox.target);
+-    connection.open();
+-  },
+-
+-  /**
+    * Remove the menuitem for a tool to all open browser windows.
+    *
+    * @param {string} toolId
+    *        id of the tool to remove
     */
-   _connectToProfiler: function DT_connectToProfiler(event, toolbox) {
-+    // If target does not have profiler actor (addons), do not
-+    // even register the shared performance connection.
-+    if (!toolbox.target.hasActor("profiler")) {
-+      return;
-+    }
-     let SharedPerformanceUtils = devtools.require("devtools/performance/front");
-     let connection = SharedPerformanceUtils.getPerformanceActorsConnection(toolbox.target);
-     connection.open();
+   _removeToolFromWindows: function DT_removeToolFromWindows(toolId) {
+     for (let win of gDevToolsBrowser._trackedBrowserWindows) {
+       gDevToolsBrowser._removeToolFromMenu(toolId, win.document);
+@@ -1325,17 +1312,16 @@ let gDevToolsBrowser = {
+         gDevToolsBrowser._updateMenuCheckbox();
+     }
    },
  
    /**
-    * Remove the menuitem for a tool to all open browser windows.
-    *
+    * All browser windows have been closed, tidy up remaining objects.
+    */
+   destroy: function() {
+-    gDevTools.off("toolbox-ready", gDevToolsBrowser._connectToProfiler);
+     Services.prefs.removeObserver("devtools.", gDevToolsBrowser);
+     Services.obs.removeObserver(gDevToolsBrowser.destroy, "quit-application");
+   },
+ }
+ 
+ this.gDevToolsBrowser = gDevToolsBrowser;
+ 
+ gDevTools.on("tool-registered", function(ev, toolId) {
+@@ -1346,15 +1332,14 @@ gDevTools.on("tool-registered", function(ev, toolId) {
+ gDevTools.on("tool-unregistered", function(ev, toolId) {
+   if (typeof toolId != "string") {
+     toolId = toolId.id;
+   }
+   gDevToolsBrowser._removeToolFromWindows(toolId);
+ });
+ 
+ gDevTools.on("toolbox-ready", gDevToolsBrowser._updateMenuCheckbox);
+-gDevTools.on("toolbox-ready", gDevToolsBrowser._connectToProfiler);
+ gDevTools.on("toolbox-destroyed", gDevToolsBrowser._updateMenuCheckbox);
+ 
+ Services.obs.addObserver(gDevToolsBrowser.destroy, "quit-application", false);
+ 
+ // Load the browser devtools main module as the loader's main module.
+ devtools.main("main");
+diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
+index f74471e..94dceea 100644
+--- a/browser/devtools/framework/toolbox.js
++++ b/browser/devtools/framework/toolbox.js
+@@ -46,16 +46,17 @@ loader.lazyGetter(this, "toolboxStrings", () => {
+       return null;
+     }
+   };
+ });
+ 
+ loader.lazyGetter(this, "Selection", () => require("devtools/framework/selection").Selection);
+ loader.lazyGetter(this, "InspectorFront", () => require("devtools/server/actors/inspector").InspectorFront);
+ loader.lazyRequireGetter(this, "DevToolsUtils", "devtools/toolkit/DevToolsUtils");
++loader.lazyRequireGetter(this, "getPerformanceActorsConnection", "devtools/performance/front", true);
+ 
+ XPCOMUtils.defineLazyGetter(this, "screenManager", () => {
+   return Cc["@mozilla.org/gfx/screenmanager;1"].getService(Ci.nsIScreenManager);
+ });
+ 
+ XPCOMUtils.defineLazyGetter(this, "oscpu", () => {
+   return Cc["@mozilla.org/network/protocol;1?name=http"]
+            .getService(Ci.nsIHttpProtocolHandler).oscpu;
+@@ -305,90 +306,90 @@ Toolbox.prototype = {
+    */
+   get splitConsole() {
+     return this._splitConsole;
+   },
+ 
+   /**
+    * Open the toolbox
+    */
+-  open: function() {
+-    let deferred = promise.defer();
++  open: function () {
++    return Task.spawn(function*() {
++      let iframe = yield this._host.create();
++      let domReady = promise.defer();
+ 
+-    return this._host.create().then(iframe => {
+-      let deferred = promise.defer();
++      // Load the toolbox-level actor fronts and utilities now
++      yield this._target.makeRemote();
++      iframe.setAttribute("src", this._URL);
++      iframe.setAttribute("aria-label", toolboxStrings("toolbox.label"));
++      let domHelper = new DOMHelpers(iframe.contentWindow);
++      domHelper.onceDOMReady(() => domReady.resolve());
+ 
+-      let domReady = () => {
+-        this.isReady = true;
++      yield domReady.promise;
+ 
+-        let framesPromise = this._listFrames();
++      this.isReady = true;
++      let framesPromise = this._listFrames();
+ 
+-        this.closeButton = this.doc.getElementById("toolbox-close");
+-        this.closeButton.addEventListener("command", this.destroy, true);
++      this.closeButton = this.doc.getElementById("toolbox-close");
++      this.closeButton.addEventListener("command", this.destroy, true);
+ 
+-        gDevTools.on("pref-changed", this._prefChanged);
++      gDevTools.on("pref-changed", this._prefChanged);
+ 
+-        let framesMenu = this.doc.getElementById("command-button-frames");
+-        framesMenu.addEventListener("command", this.selectFrame, true);
++      let framesMenu = this.doc.getElementById("command-button-frames");
++      framesMenu.addEventListener("command", this.selectFrame, true);
+ 
+-        this._buildDockButtons();
+-        this._buildOptions();
+-        this._buildTabs();
+-        this._applyCacheSettings();
+-        this._applyServiceWorkersTestingSettings();
+-        this._addKeysToWindow();
+-        this._addReloadKeys();
+-        this._addHostListeners();
+-        if (this._hostOptions && this._hostOptions.zoom === false) {
+-          this._disableZoomKeys();
+-        } else {
+-          this._addZoomKeys();
+-          this._loadInitialZoom();
+-        }
++      this._buildDockButtons();
++      this._buildOptions();
++      this._buildTabs();
++      this._applyCacheSettings();
++      this._applyServiceWorkersTestingSettings();
++      this._addKeysToWindow();
++      this._addReloadKeys();
++      this._addHostListeners();
++      if (this._hostOptions && this._hostOptions.zoom === false) {
++        this._disableZoomKeys();
++      } else {
++        this._addZoomKeys();
++        this._loadInitialZoom();
++      }
+ 
+-        this.webconsolePanel = this.doc.querySelector("#toolbox-panel-webconsole");
+-        this.webconsolePanel.height =
+-          Services.prefs.getIntPref(SPLITCONSOLE_HEIGHT_PREF);
+-        this.webconsolePanel.addEventListener("resize",
+-          this._saveSplitConsoleHeight);
++      this.webconsolePanel = this.doc.querySelector("#toolbox-panel-webconsole");
++      this.webconsolePanel.height = Services.prefs.getIntPref(SPLITCONSOLE_HEIGHT_PREF);
++      this.webconsolePanel.addEventListener("resize", this._saveSplitConsoleHeight);
+ 
+-        let buttonsPromise = this._buildButtons();
++      let buttonsPromise = this._buildButtons();
+ 
+-        this._pingTelemetry();
++      this._pingTelemetry();
+ 
+-        this.selectTool(this._defaultToolId).then(panel => {
++      let panel = yield this.selectTool(this._defaultToolId);
+ 
+-          // Wait until the original tool is selected so that the split
+-          // console input will receive focus.
+-          let splitConsolePromise = promise.resolve();
+-          if (Services.prefs.getBoolPref(SPLITCONSOLE_ENABLED_PREF)) {
+-            splitConsolePromise = this.openSplitConsole();
+-          }
++      // Wait until the original tool is selected so that the split
++      // console input will receive focus.
++      let splitConsolePromise = promise.resolve();
++      if (Services.prefs.getBoolPref(SPLITCONSOLE_ENABLED_PREF)) {
++        splitConsolePromise = this.openSplitConsole();
++      }
+ 
+-          promise.all([
+-            splitConsolePromise,
+-            buttonsPromise,
+-            framesPromise
+-          ]).then(() => {
+-            this.emit("ready");
+-            deferred.resolve();
+-          }, deferred.reject);
+-        });
+-      };
++      yield promise.all([
++        splitConsolePromise,
++        buttonsPromise,
++        framesPromise
++      ]);
+ 
+-      // Load the toolbox-level actor fronts and utilities now
+-      this._target.makeRemote().then(() => {
+-        iframe.setAttribute("src", this._URL);
+-        iframe.setAttribute("aria-label", toolboxStrings("toolbox.label"));
+-        let domHelper = new DOMHelpers(iframe.contentWindow);
+-        domHelper.onceDOMReady(domReady);
+-      });
++      let profilerReady = this._connectProfiler();
+ 
+-      return deferred.promise;
+-    }).then(null, console.error.bind(console));
++      // Only wait for the profiler initialization during tests. Otherwise,
++      // lazily load this. This is to intercept console.profile calls; the performance
++      // tools will explicitly wait for the connection opening when opened.
++      if (gDevTools.testing) {
++        yield profilerReady;
++      }
++
++      this.emit("ready");
++    }.bind(this)).then(null, console.error.bind(console));
+   },
+ 
+   _pingTelemetry: function() {
+     this._telemetry.toolOpened("toolbox");
+ 
+     this._telemetry.logOncePerBrowserVersion(OS_HISTOGRAM,
+                                              this._getOsCpu());
+     this._telemetry.logOncePerBrowserVersion(OS_IS_64_BITS, is64Bit ? 1 : 0);
+@@ -1685,16 +1686,17 @@ Toolbox.prototype = {
+     }
+ 
+     this.emit("destroy");
+ 
+     this._target.off("navigate", this._refreshHostTitle);
+     this._target.off("frame-update", this._updateFrames);
+     this.off("select", this._refreshHostTitle);
+     this.off("host-changed", this._refreshHostTitle);
++    this.off("ready", this._showDevEditionPromo);
+ 
+     gDevTools.off("tool-registered", this._toolRegistered);
+     gDevTools.off("tool-unregistered", this._toolUnregistered);
+ 
+     gDevTools.off("pref-changed", this._prefChanged);
+ 
+     this._lastFocusedElement = null;
+     if (this.webconsolePanel) {
+@@ -1730,16 +1732,19 @@ Toolbox.prototype = {
+     outstanding.push(this.destroyInspector().then(() => {
+       // Removing buttons
+       if (this._pickerButton) {
+         this._pickerButton.removeEventListener("command", this._togglePicker, false);
+         this._pickerButton = null;
+       }
+     }));
+ 
++    // Destroy the profiler connection
++    outstanding.push(this._disconnectProfiler());
++
+     // We need to grab a reference to win before this._host is destroyed.
+     let win = this.frame.ownerGlobal;
+ 
+     if (this._requisition) {
+       this._requisition.destroy();
+     }
+     this._telemetry.toolClosed("toolbox");
+     this._telemetry.destroy();
+@@ -1810,10 +1815,44 @@ Toolbox.prototype = {
+    */
+   _showDevEditionPromo: function() {
+     // Do not display in browser toolbox
+     if (this.target.chrome) {
+       return;
+     }
+     let window = this.frame.contentWindow;
+     showDoorhanger({ window, type: "deveditionpromo" });
+-  }
++  },
++
++  getPerformanceActorsConnection: function() {
++    if (!this._performanceConnection) {
++      this._performanceConnection = getPerformanceActorsConnection(this.target);
++    }
++    return this._performanceConnection;
++  },
++
++  /**
++   * Connects to the SPS profiler when the developer tools are open. This is
++   * necessary because of the WebConsole's `profile` and `profileEnd` methods.
++   */
++  _connectProfiler: Task.async(function*() {
++    // If target does not have profiler actor (addons), do not
++    // even register the shared performance connection.
++    if (!this.target.hasActor("profiler")) {
++      return;
++    }
++
++    yield this.getPerformanceActorsConnection().open();
++    // Emit an event when connected, but don't wait on startup for this.
++    this.emit("profiler-connected");
++  }),
++
++  /**
++   * Disconnects the underlying Performance Actor Connection.
++   */
++  _disconnectProfiler: Task.async(function*() {
++    if (!this._performanceConnection) {
++      return;
++    }
++    yield this._performanceConnection.destroy();
++    this._performanceConnection = null;
++  }),
+ };
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index 221a05f..6f73eb2 100644
+index 221a05f..0ec23f6 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
 @@ -1,16 +1,17 @@
@@ -53,11 +371,18 @@ index 221a05f..6f73eb2 100644
  loader.lazyRequireGetter(this, "TimelineFront",
    "devtools/server/actors/timeline", true);
  loader.lazyRequireGetter(this, "MemoryFront",
-@@ -25,16 +26,25 @@ loader.lazyImporter(this, "gDevTools",
+@@ -21,20 +22,32 @@ loader.lazyRequireGetter(this, "compatibility",
+   "devtools/performance/compatibility");
+ 
+ loader.lazyImporter(this, "gDevTools",
+   "resource:///modules/devtools/gDevTools.jsm");
  loader.lazyImporter(this, "setTimeout",
    "resource://gre/modules/Timer.jsm");
  loader.lazyImporter(this, "clearTimeout",
    "resource://gre/modules/Timer.jsm");
++loader.lazyImporter(this, "Promise",
++  "resource://gre/modules/Promise.jsm");
++
  
  // How often do we pull allocation sites from the memory actor.
  const DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT = 200; // ms
@@ -79,16 +404,13 @@ index 221a05f..6f73eb2 100644
  
  /**
   * Instantiates a shared PerformanceActorsConnection for the specified target.
-@@ -64,18 +74,29 @@ SharedPerformanceActors.forTarget = function(target) {
-  *
-  * @param Target target
+@@ -66,16 +79,26 @@ SharedPerformanceActors.forTarget = function(target) {
   *        The target owning this connection.
   */
  function PerformanceActorsConnection(target) {
    EventEmitter.decorate(this);
  
    this._target = target;
-+  this._toolbox = gDevTools.getToolbox(target);
    this._client = this._target.client;
    this._request = this._request.bind(this);
 +  this._pendingConsoleRecordings = [];
@@ -109,7 +431,28 @@ index 221a05f..6f73eb2 100644
  
    // Properties set when mocks are being used
    _usingMockMemory: false,
-@@ -99,26 +120,31 @@ PerformanceActorsConnection.prototype = {
+@@ -84,41 +107,51 @@ PerformanceActorsConnection.prototype = {
+   /**
+    * Initializes a connection to the profiler and other miscellaneous actors.
+    * If in the process of opening, or already open, nothing happens.
+    *
+    * @return object
+    *         A promise that is resolved once the connection is established.
+    */
+   open: Task.async(function*() {
+-    if (this._connected) {
+-      return;
++    if (this._connecting) {
++      return this._connecting.promise;
+     }
+ 
++    // Create a promise that gets resolved upon connecting, so that
++    // other attempts to open the connection use the same resolution promise
++    this._connecting = Promise.defer();
++
+     // Local debugging needs to make the target remote.
+     yield this._target.makeRemote();
+ 
      // Sets `this._profiler`, `this._timeline` and `this._memory`.
      // Only initialize the timeline and memory fronts if the respective actors
      // are available. Older Gecko versions don't have existing implementations,
@@ -122,6 +465,7 @@ index 221a05f..6f73eb2 100644
 +
      this._connected = true;
  
++    this._connecting.resolve();
      Services.obs.notifyObservers(null, "performance-actors-connection-opened", null);
    }),
  
@@ -132,7 +476,7 @@ index 221a05f..6f73eb2 100644
 +    yield this._unregisterListeners();
      yield this._disconnectActors();
 +
-+    this._memory = this._timeline = this._profiler = this._target = this._toolbox = this._client = null;
++    this._memory = this._timeline = this._profiler = this._target = this._client = null;
      this._connected = false;
    }),
  
@@ -141,7 +485,7 @@ index 221a05f..6f73eb2 100644
     */
    _connectProfilerActor: Task.async(function*() {
      // Chrome and content process targets already have obtained a reference
-@@ -159,16 +185,45 @@ PerformanceActorsConnection.prototype = {
+@@ -159,16 +192,45 @@ PerformanceActorsConnection.prototype = {
        this._memory = new MemoryFront(this._target.client, this._target.form);
      } else {
        this._usingMockMemory = true;
@@ -187,7 +531,7 @@ index 221a05f..6f73eb2 100644
    }),
  
    /**
-@@ -199,96 +254,229 @@ PerformanceActorsConnection.prototype = {
+@@ -199,96 +261,229 @@ PerformanceActorsConnection.prototype = {
      if (actor == "timeline") {
        return this._timeline[method].apply(this._timeline, args);
      }
@@ -268,7 +612,7 @@ index 221a05f..6f73eb2 100644
 +    // Slight performance overhead for this, should research some more.
 +    // This is to ensure that there is a front to receive the events for
 +    // the console profiles.
-+    yield this._toolbox.loadTool("performance");
++    yield gDevTools.getToolbox(this._target).loadTool("performance");
 +
 +    let model = yield this.startRecording(extend(getRecordingModelPrefs(), {
 +      console: true,
@@ -277,8 +621,9 @@ index 221a05f..6f73eb2 100644
 +
 +    this.emit("console-profile-start", model);
 +  }),
-+
-+  /**
+ 
+   /**
+-   * Manually begins a recording session.
 +   * Invoked whenever `console.profileEnd` is called.
 +   *
 +   * @param object profilerData
@@ -321,9 +666,8 @@ index 221a05f..6f73eb2 100644
 +  _onTimelineFrames: function (delta, frames) { this._onTimelineData("frames", delta, frames); },
 +  _onTimelineMemory: function (delta, measurement) { this._onTimelineData("memory", delta, measurement); },
 +  _onTimelineTicks: function (delta, timestamps) { this._onTimelineData("ticks", delta, timestamps); },
- 
-   /**
--   * Manually begins a recording session.
++
++  /**
 +   * Called whenever there is timeline data of any of the following types:
 +   * - markers
 +   * - frames
@@ -455,7 +799,7 @@ index 221a05f..6f73eb2 100644
      // for all targets and interacts with the whole platform, so we don't want
      // to affect other clients by stopping (or restarting) it.
      let profilerStatus = yield this._request("profiler", "isActive");
-@@ -384,29 +572,84 @@ PerformanceFront.prototype = {
+@@ -384,29 +579,84 @@ PerformanceFront.prototype = {
  
      let isDetached = (yield this._request("memory", "getState")) !== "attached";
      if (isDetached) {
@@ -541,7 +885,7 @@ index 221a05f..6f73eb2 100644
        memory: this._usingMockMemory,
        timeline: this._usingMockTimeline
      };
-@@ -418,10 +661,23 @@ PerformanceFront.prototype = {
+@@ -418,10 +668,23 @@ PerformanceFront.prototype = {
   * provided thread client.
   */
  function listTabs(client) {
@@ -719,18 +1063,81 @@ index 9aa9002..2d5292b 100644
  
    /**
     * Fired whenever the PerformanceFront emits markers, memory or ticks.
+diff --git a/browser/devtools/performance/panel.js b/browser/devtools/performance/panel.js
+index be5166a..af65dfe 100644
+--- a/browser/devtools/performance/panel.js
++++ b/browser/devtools/performance/panel.js
+@@ -1,17 +1,17 @@
+ /* -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const {Cc, Ci, Cu, Cr} = require("chrome");
+-const { PerformanceFront, getPerformanceActorsConnection } = require("devtools/performance/front");
++const { PerformanceFront } = require("devtools/performance/front");
+ 
+ Cu.import("resource://gre/modules/Task.jsm");
+ 
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ 
+ function PerformancePanel(iframeWindow, toolbox) {
+@@ -30,17 +30,21 @@ PerformancePanel.prototype = {
+    * @return object
+    *         A promise that is resolved when the Performance tool
+    *         completes opening.
+    */
+   open: Task.async(function*() {
+     this.panelWin.gToolbox = this._toolbox;
+     this.panelWin.gTarget = this.target;
+ 
+-    this._connection = getPerformanceActorsConnection(this.target);
++    // Connection is already created in the toolbox; reuse
++    // the same connection.
++    this._connection = this.panelWin.gToolbox.getPerformanceActorsConnection();
++    // The toolbox will also open the connection, but attempt to open it again
++    // incase it's still in the process of opening.
+     yield this._connection.open();
+ 
+     this.panelWin.gFront = new PerformanceFront(this._connection);
+ 
+     yield this.panelWin.startupPerformance();
+ 
+     this.isReady = true;
+     this.emit("ready");
+@@ -52,16 +56,13 @@ PerformancePanel.prototype = {
+   get target() this._toolbox.target,
+ 
+   destroy: Task.async(function*() {
+     // Make sure this panel is not already destroyed.
+     if (this._destroyed) {
+       return;
+     }
+ 
+-    // Destroy the connection to ensure packet handlers are removed from client.
+-    yield this._connection.destroy();
+-
+     yield this.panelWin.shutdownPerformance();
+     this.emit("destroyed");
+     this._destroyed = true;
+   })
+ };
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index b9dcf5d..7c300f8 100644
+index 8dfe9b0..fc7b83b 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
-@@ -55,16 +55,23 @@ devtools.lazyImporter(this, "SideMenuWidget",
- 
- const BRANCH_NAME = "devtools.performance.ui.";
- 
+@@ -64,16 +64,23 @@ const BRANCH_NAME = "devtools.performance.ui.";
  // Events emitted by various objects in the panel.
  const EVENTS = {
    // Fired by the PerformanceController and OptionsView when a pref changes.
    PREF_CHANGED: "Performance:PrefChanged",
+ 
+   // Fired by the PerformanceController when the devtools theme changes.
+   THEME_CHANGED: "Performance:ThemeChanged",
  
 +  // When the SharedPerformanceConnection handles profiles created via `console.profile()`,
 +  // the controller handles those events and emits the below events for consumption
@@ -747,7 +1154,7 @@ index b9dcf5d..7c300f8 100644
    // Emitted by the PerformanceView on clear button click
    UI_CLEAR_RECORDINGS: "Performance:UI:ClearRecordings",
  
-@@ -89,18 +96,16 @@ const EVENTS = {
+@@ -98,18 +105,16 @@ const EVENTS = {
  
    // When recordings have been cleared out
    RECORDINGS_CLEARED: "Performance:RecordingsCleared",
@@ -759,14 +1166,14 @@ index b9dcf5d..7c300f8 100644
 -  // When the PerformanceController has new recording data
 -  TIMELINE_DATA: "Performance:TimelineData",
  
+   // Emitted by the JITOptimizationsView when it renders new optimization
+   // data and clears the optimization data
+   OPTIMIZATIONS_RESET: "Performance:UI:OptimizationsReset",
+   OPTIMIZATIONS_RENDERED: "Performance:UI:OptimizationsRendered",
+ 
    // Emitted by the OverviewView when more data has been rendered
    OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
-   FRAMERATE_GRAPH_RENDERED: "Performance:UI:OverviewFramerateRendered",
-   MARKERS_GRAPH_RENDERED: "Performance:UI:OverviewMarkersRendered",
-   MEMORY_GRAPH_RENDERED: "Performance:UI:OverviewMemoryRendered",
- 
-   // Emitted by the OverviewView when a range has been selected in the graphs
-@@ -169,67 +174,63 @@ let PerformanceController = {
+@@ -183,70 +188,68 @@ let PerformanceController = {
     * main UI events.
     */
    initialize: Task.async(function* () {
@@ -778,6 +1185,7 @@ index b9dcf5d..7c300f8 100644
 -    this._onTimelineData = this._onTimelineData.bind(this);
      this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
      this._onPrefChanged = this._onPrefChanged.bind(this);
+     this._onThemeChanged = this._onThemeChanged.bind(this);
 +    this._onConsoleProfileStart = this._onConsoleProfileStart.bind(this);
 +    this._onConsoleProfileEnd = this._onConsoleProfileEnd.bind(this);
 +    this._onConsoleProfileEnding = this._onConsoleProfileEnding.bind(this);
@@ -804,7 +1212,8 @@ index b9dcf5d..7c300f8 100644
      PerformanceView.on(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
      RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
      RecordingsView.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
--
+ 
+     gDevTools.on("pref-changed", this._onThemeChanged);
 -    gFront.on("markers", this._onTimelineData); // timeline markers
 -    gFront.on("frames", this._onTimelineData); // stack frames
 -    gFront.on("memory", this._onTimelineData); // memory measurements
@@ -829,7 +1238,8 @@ index b9dcf5d..7c300f8 100644
      PerformanceView.off(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
      RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
      RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
--
+ 
+     gDevTools.off("pref-changed", this._onThemeChanged);
 -    gFront.off("markers", this._onTimelineData);
 -    gFront.off("frames", this._onTimelineData);
 -    gFront.off("memory", this._onTimelineData);
@@ -838,12 +1248,12 @@ index b9dcf5d..7c300f8 100644
    },
  
    /**
-    * Get a boolean preference setting from `prefName` via the underlying
-    * OptionsView in the ToolbarView.
-    *
-    * @param string prefName
-    * @return boolean
-@@ -256,40 +257,41 @@ let PerformanceController = {
+    * Returns the current devtools theme.
+    */
+   getTheme: function () {
+     return Services.prefs.getCharPref("devtools.theme");
+   },
+@@ -280,40 +283,41 @@ let PerformanceController = {
      this._nonBooleanPrefs[prefName] = prefValue;
    },
  
@@ -893,7 +1303,7 @@ index b9dcf5d..7c300f8 100644
     * when the file was saved.
     *
     * @param RecordingModel recording
-@@ -302,17 +304,17 @@ let PerformanceController = {
+@@ -326,17 +330,17 @@ let PerformanceController = {
      this.emit(EVENTS.RECORDING_EXPORTED, recording);
    }),
  
@@ -912,7 +1322,7 @@ index b9dcf5d..7c300f8 100644
      this._recordings.length = 0;
      this.setCurrentRecording(null);
      this.emit(EVENTS.RECORDINGS_CLEARED);
-@@ -321,42 +323,27 @@ let PerformanceController = {
+@@ -345,42 +349,27 @@ let PerformanceController = {
    /**
     * Loads a recording from a file, adding it to the recordings list. Emits
     * `EVENTS.RECORDING_IMPORTED` when the file was loaded.
@@ -960,7 +1370,7 @@ index b9dcf5d..7c300f8 100644
        this.emit(EVENTS.RECORDING_SELECTED, recording);
      }
    },
-@@ -368,57 +355,79 @@ let PerformanceController = {
+@@ -392,42 +381,37 @@ let PerformanceController = {
    getCurrentRecording: function () {
      return this._currentRecording;
    },
@@ -1008,11 +1418,13 @@ index b9dcf5d..7c300f8 100644
    },
  
    /**
-    * Fired when the ToolbarView fires a PREF_CHANGED event.
-    * with the value.
-    */
-   _onPrefChanged: function (_, prefName, prefValue) {
-     this.emit(EVENTS.PREF_CHANGED, prefName, prefValue);
+@@ -446,16 +430,47 @@ let PerformanceController = {
+     // but this could change in the future.
+     if (data.pref !== "devtools.theme") {
+       return;
+     }
+ 
+     this.emit(EVENTS.THEME_CHANGED, data.newValue);
    },
  
 +  /**
@@ -1023,6 +1435,10 @@ index b9dcf5d..7c300f8 100644
 +    this.emit(EVENTS.CONSOLE_RECORDING_STARTED, recording);
 +  },
 +
++  /**
++   * Fired when `console.profileEnd()` is executed, and the profile
++   * is stopping soon, as it fetches profiler data.
++   */
 +  _onConsoleProfileEnding: function (_, recording) {
 +    this.emit(EVENTS.CONSOLE_RECORDING_WILL_STOP, recording);
 +  },
@@ -1190,10 +1606,10 @@ index 3959d6c..91b1198 100644
  
    toString: () => "[object PerformanceView]"
 diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
-index 41ef972..9237956 100644
+index 24bac6d..f2a9b47 100644
 --- a/browser/devtools/performance/performance.xul
 +++ b/browser/devtools/performance/performance.xul
-@@ -147,16 +147,26 @@
+@@ -153,16 +153,26 @@
                    pack="center"
                    flex="1">
                <label value="&profilerUI.stopNotice1;"/>
@@ -1221,10 +1637,10 @@ index 41ef972..9237956 100644
                        width="150"
                        height="150"/>
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 816cb5b..72f50e7 100644
+index 25b7c6f..5d74425 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -13,16 +13,24 @@ support-files =
+@@ -14,16 +14,24 @@ support-files =
  [browser_perf-compatibility-01.js]
  [browser_perf-compatibility-02.js]
  [browser_perf-compatibility-03.js]
@@ -2268,10 +2684,10 @@ index 29535c0..470fb5a 100644
    ok(!nsIProfilerModule.IsActive(),
      "The built-in profiler module should have been automatically stoped.");
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 29f8fc1..b1b9be6 100644
+index 3075954..0b98f9ce 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
-@@ -178,18 +178,16 @@ function initBackend(aUrl, targetOps={}) {
+@@ -180,18 +180,16 @@ function initBackend(aUrl, targetOps={}) {
  
      // Attach addition options to `target`. This is used to force mock fronts
      // to smokescreen test different servers where memory or timeline actors
@@ -2290,7 +2706,7 @@ index 29f8fc1..b1b9be6 100644
    });
  }
  
-@@ -210,16 +208,61 @@ function initPerformance(aUrl, selectedTool="performance", targetOps={}) {
+@@ -212,16 +210,61 @@ function initPerformance(aUrl, selectedTool="performance", targetOps={}) {
      merge(target, targetOps);
  
      let toolbox = yield gDevTools.showToolbox(target, selectedTool);
@@ -2352,7 +2768,7 @@ index 29f8fc1..b1b9be6 100644
    yield removeTab(tab);
  }
  
-@@ -232,29 +275,37 @@ function busyWait(time) {
+@@ -234,29 +277,37 @@ function busyWait(time) {
    let stack;
    while (Date.now() - start < time) { stack = Components.stack; }
  }
@@ -2435,7 +2851,7 @@ index 48a8fd2..c9aeb56 100644
  
    /**
 diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
-index fc4495b..b8c027f 100644
+index fd49603..791e16b 100644
 --- a/browser/devtools/performance/views/details.js
 +++ b/browser/devtools/performance/views/details.js
 @@ -54,16 +54,17 @@ let DetailsView = {
@@ -2475,13 +2891,13 @@ index fc4495b..b8c027f 100644
     * Sets the possible views based off of prefs and server actor support by hiding/showing the
     * buttons that select them and going to default view if currently selected.
 diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
-index a6b5b81..406a458 100644
+index cb70473..4714ec3 100644
 --- a/browser/devtools/performance/views/overview.js
 +++ b/browser/devtools/performance/views/overview.js
 @@ -44,16 +44,19 @@ let OverviewView = {
-     $("#time-framerate").hidden = !PerformanceController.getOption("enable-framerate");
  
      PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
      PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
      PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
      PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
@@ -2498,10 +2914,10 @@ index a6b5b81..406a458 100644
    destroy: Task.async(function*() {
      if (this.markersOverview) {
        yield this.markersOverview.destroy();
-@@ -66,16 +69,19 @@ let OverviewView = {
-     }
+@@ -67,16 +70,19 @@ let OverviewView = {
  
      PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.off(EVENTS.THEME_CHANGED, this._onThemeChanged);
      PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
      PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
      PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
@@ -2518,7 +2934,7 @@ index a6b5b81..406a458 100644
     * the panel.
     */
    disable: function () {
-@@ -251,17 +257,17 @@ let OverviewView = {
+@@ -274,17 +280,17 @@ let OverviewView = {
    }),
  
    /**
@@ -2537,7 +2953,7 @@ index a6b5b81..406a458 100644
     * Fired when the graph selection has changed. Called by
     * mouseup and scroll events.
     */
-@@ -275,68 +281,115 @@ let OverviewView = {
+@@ -298,68 +304,115 @@ let OverviewView = {
      if (interval.endTime - interval.startTime < 1) {
        this.emit(EVENTS.OVERVIEW_RANGE_CLEARED);
      } else {
@@ -2814,27 +3230,28 @@ index 6ef079b..de8d919 100644
    _onSaveButtonClick: function (e) {
      let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
 diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.properties b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
-index dc965b5..e7c30c4 100644
+index 7622b99..b6fb786 100644
 --- a/browser/locales/en-US/chrome/browser/devtools/profiler.properties
 +++ b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
-@@ -116,8 +116,12 @@ recordingsList.saveDialogTitle=Save profile…
- # LOCALIZATION NOTE (recordingsList.saveDialogJSONFilter):
- # This string is displayed as a filter for saving a recording to disk.
- recordingsList.saveDialogJSONFilter=JSON Files
+@@ -131,8 +131,13 @@ jit.optimizationFailure=Optimization failed
+ # frame is sampled.
+ # "#1" represents the number of samples
+ # example: 30 samples
+ jit.samples2=#1 sample;#1 samples
  
- # LOCALIZATION NOTE (recordingsList.saveDialogAllFilter):
- # This string is displayed as a filter for saving a recording to disk.
- recordingsList.saveDialogAllFilter=All Files
- 
+ # LOCALIZATION NOTE (jit.empty):
+ # This string is displayed when there are no JIT optimizations to display.
+ jit.empty=No JIT optimizations recorded for this frame.
++
 +# LOCALIZATION NOTE (consoleProfile.recordingNotice/stopCommand):
 +# These strings are displayed when a recording is in progress, that was started from the console.
 +consoleProfile.recordingNotice=Currently recording profile "%S".
 +consoleProfile.stopCommand=Stop profiling by typing \"console.profileEnd(\'%S\')\" into the console.
 diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
-index 7bff45b..395c428 100644
+index d6ee24f..7f0a4bc 100644
 --- a/browser/themes/shared/devtools/performance.inc.css
 +++ b/browser/themes/shared/devtools/performance.inc.css
-@@ -73,16 +73,20 @@
+@@ -70,16 +70,20 @@
  }
  
  #performance-view .notice-container button {
