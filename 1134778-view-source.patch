@@ -3,7 +3,7 @@ Date: Thu, 9 Apr 2015 00:57:38 -0700
 Subject: Bug 1134778 - Consolidate usages of view sourcing in tools with a source-utils module. r=vp,jryans
 
 diff --git a/browser/devtools/canvasdebugger/callslist.js b/browser/devtools/canvasdebugger/callslist.js
-index 96a9385..f1733e0 100644
+index 96a9385..d8acca2 100644
 --- a/browser/devtools/canvasdebugger/callslist.js
 +++ b/browser/devtools/canvasdebugger/callslist.js
 @@ -379,17 +379,17 @@ let CallsListView = Heritage.extend(WidgetMethods, {
@@ -68,7 +68,7 @@ index 96a9385..f1733e0 100644
 +   * Opens the specified file and line in the debugger. Falls back to Firefox's View Source.
 +   */
 +  _viewSourceInDebugger: function (file, line) {
-+    sourceUtils.viewSourceInDebugger(gTarget, file, line).then(success => {
++    gToolbox.viewSourceInDebugger(file, line).then(success => {
 +      if (success) {
 +        window.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER);
 +      } else {
@@ -78,10 +78,10 @@ index 96a9385..f1733e0 100644
    }
  });
 diff --git a/browser/devtools/canvasdebugger/canvasdebugger.js b/browser/devtools/canvasdebugger/canvasdebugger.js
-index aaa9ae0..d074664 100644
+index aaa9ae0..ab769c6 100644
 --- a/browser/devtools/canvasdebugger/canvasdebugger.js
 +++ b/browser/devtools/canvasdebugger/canvasdebugger.js
-@@ -7,21 +7,25 @@ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+@@ -7,21 +7,23 @@ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
  
  Cu.import("resource://gre/modules/Services.jsm");
  Cu.import("resource://gre/modules/XPCOMUtils.jsm");
@@ -97,8 +97,6 @@ index aaa9ae0..d074664 100644
  const EventEmitter = require("devtools/toolkit/event-emitter");
  const { CallWatcherFront } = require("devtools/server/actors/call-watcher");
  const { CanvasFront } = require("devtools/server/actors/canvas");
-+devtools.lazyRequireGetter(this, "sourceUtils",
-+  "devtools/shared/source-utils");
 +
  const Telemetry = require("devtools/shared/telemetry");
  const telemetry = new Telemetry();
@@ -108,7 +106,7 @@ index aaa9ae0..d074664 100644
  XPCOMUtils.defineLazyModuleGetter(this, "Task",
    "resource://gre/modules/Task.jsm");
  
-@@ -349,37 +353,8 @@ function getThumbnailForCall(thumbnails, index) {
+@@ -349,37 +351,8 @@ function getThumbnailForCall(thumbnails, index) {
    for (let i = thumbnails.length - 1; i >= 0; i--) {
      let thumbnail = thumbnails[i];
      if (thumbnail.index <= index) {
@@ -146,11 +144,416 @@ index aaa9ae0..d074664 100644
 -    }
 -  });
 -}
+diff --git a/browser/devtools/framework/test/browser.ini b/browser/devtools/framework/test/browser.ini
+index 3a6b7a1..b41e0c2 100644
+--- a/browser/devtools/framework/test/browser.ini
++++ b/browser/devtools/framework/test/browser.ini
+@@ -1,19 +1,21 @@
+ [DEFAULT]
+ tags = devtools
+ subsuite = devtools
+ support-files =
+   browser_toolbox_options_disable_js.html
+   browser_toolbox_options_disable_js_iframe.html
+   browser_toolbox_options_disable_cache.sjs
+   browser_toolbox_sidebar_tool.xul
++  code_math.js
+   head.js
+   helper_disable_cache.js
+   doc_theme.css
++  doc_viewsource.html
+   browser_toolbox_options_enable_serviceworkers_testing.html
+   serviceworker.js
+ 
+ [browser_devtools_api.js]
+ [browser_devtools_api_destroy.js]
+ [browser_dynamic_tool_enabling.js]
+ [browser_keybindings.js]
+ [browser_new_activation_workflow.js]
+@@ -42,21 +44,26 @@ skip-if = e10s # Bug 1069044 - destroyInspector may hang during shutdown
+ [browser_toolbox_sidebar.js]
+ [browser_toolbox_sidebar_events.js]
+ [browser_toolbox_sidebar_existing_tabs.js]
+ [browser_toolbox_sidebar_overflow_menu.js]
+ [browser_toolbox_tabsswitch_shortcuts.js]
+ [browser_toolbox_tool_ready.js]
+ [browser_toolbox_tool_remote_reopen.js]
+ [browser_toolbox_transport_events.js]
++[browser_toolbox_view_source_01.js]
++[browser_toolbox_view_source_02.js]
++[browser_toolbox_view_source_03.js]
++[browser_toolbox_view_source_04.js]
++[browser_toolbox_view_source_05.js]
+ [browser_toolbox_window_reload_target.js]
+ [browser_toolbox_window_shortcuts.js]
+ skip-if = os == "mac" && os_version == "10.8" || os == "win" && os_version == "5.1" # Bug 851129 - Re-enable browser_toolbox_window_shortcuts.js test after leaks are fixed
+ [browser_toolbox_window_title_changes.js]
+ [browser_toolbox_zoom.js]
+ [browser_toolbox_custom_host.js]
+ [browser_toolbox_theme_registration.js]
+ [browser_toolbox_options_enable_serviceworkers_testing.js]
+-skip-if = e10s # Bug 1030318
++skip-if = true # Bug 1153407 - this test breaks subsequent tests and is not e10s compatible
+ 
+ # We want this test to run for mochitest-dt as well, so we include it here:
+ [../../../base/content/test/general/browser_parsable_css.js]
+ 
+diff --git a/browser/devtools/framework/test/browser_toolbox_view_source_01.js b/browser/devtools/framework/test/browser_toolbox_view_source_01.js
+new file mode 100644
+index 0000000..667f6f5
+--- /dev/null
++++ b/browser/devtools/framework/test/browser_toolbox_view_source_01.js
+@@ -0,0 +1,38 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that Toolbox#viewSourceInDebugger works when debugger is not
++ * yet opened.
++ */
++
++let URL = `${URL_ROOT}doc_viewsource.html`;
++let JS_URL = `${URL_ROOT}code_math.js`;
++
++function *viewSource() {
++  let toolbox = yield loadToolbox(URL);
++
++  yield toolbox.viewSourceInDebugger(JS_URL, 2);
++
++  let debuggerPanel = toolbox.getPanel("jsdebugger");
++  ok(debuggerPanel, "The debugger panel was opened.");
++  is(toolbox.currentToolId, "jsdebugger", "The debugger panel was selected.");
++
++  let { DebuggerView } = debuggerPanel.panelWin;
++  let Sources = DebuggerView.Sources;
++
++  is(Sources.selectedValue, getSourceActor(Sources, JS_URL),
++    "The correct source is shown in the debugger.");
++  is(DebuggerView.editor.getCursor().line + 1, 2,
++    "The correct line is highlighted in the debugger's source editor.");
++
++  yield unloadToolbox(toolbox);
++  finish();
++}
++
++function test () {
++  Task.spawn(viewSource).then(finish, (aError) => {
++    ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++    finish();
++  });
++}
+diff --git a/browser/devtools/framework/test/browser_toolbox_view_source_02.js b/browser/devtools/framework/test/browser_toolbox_view_source_02.js
+new file mode 100644
+index 0000000..e2779fc
+--- /dev/null
++++ b/browser/devtools/framework/test/browser_toolbox_view_source_02.js
+@@ -0,0 +1,46 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that Toolbox#viewSourceInDebugger works when debugger is already loaded.
++ */
++
++let URL = `${URL_ROOT}doc_viewsource.html`;
++let JS_URL = `${URL_ROOT}code_math.js`;
++
++function *viewSource() {
++  let toolbox = yield loadToolbox(URL);
++  let { panelWin: debuggerWin } = yield toolbox.selectTool("jsdebugger");
++  let debuggerEvents = debuggerWin.EVENTS;
++  let { DebuggerView } = debuggerWin;
++  let Sources = DebuggerView.Sources;
++
++  yield debuggerWin.once(debuggerEvents.SOURCE_SHOWN);
++  ok("A source was shown in the debugger.");
++
++  is(Sources.selectedValue, getSourceActor(Sources, JS_URL),
++    "The correct source is initially shown in the debugger.");
++  is(DebuggerView.editor.getCursor().line, 0,
++    "The correct line is initially highlighted in the debugger's source editor.");
++
++  yield toolbox.viewSourceInDebugger(JS_URL, 2);
++
++  let debuggerPanel = toolbox.getPanel("jsdebugger");
++  ok(debuggerPanel, "The debugger panel was opened.");
++  is(toolbox.currentToolId, "jsdebugger", "The debugger panel was selected.");
++
++  is(Sources.selectedValue, getSourceActor(Sources, JS_URL),
++    "The correct source is shown in the debugger.");
++  is(DebuggerView.editor.getCursor().line + 1, 2,
++    "The correct line is highlighted in the debugger's source editor.");
++
++  yield unloadToolbox(toolbox);
++  finish();
++}
++
++function test () {
++  Task.spawn(viewSource).then(finish, (aError) => {
++    ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++    finish();
++  });
++}
+diff --git a/browser/devtools/framework/test/browser_toolbox_view_source_03.js b/browser/devtools/framework/test/browser_toolbox_view_source_03.js
+new file mode 100644
+index 0000000..611f75a
+--- /dev/null
++++ b/browser/devtools/framework/test/browser_toolbox_view_source_03.js
+@@ -0,0 +1,38 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that Toolbox#viewSourceInStyleEditor works when style editor is not
++ * yet opened.
++ */
++
++let URL = `${URL_ROOT}doc_viewsource.html`;
++let CSS_URL = `${URL_ROOT}doc_theme.css`;
++
++function *viewSource() {
++  let toolbox = yield loadToolbox(URL);
++
++  let fileFound = yield toolbox.viewSourceInStyleEditor(CSS_URL, 2);
++  ok(fileFound, "viewSourceInStyleEditor should resolve to true if source found.");
++
++  let stylePanel = toolbox.getPanel("styleeditor");
++  ok(stylePanel, "The style editor panel was opened.");
++  is(toolbox.currentToolId, "styleeditor", "The style editor panel was selected.");
++
++  let { UI } = stylePanel;
++
++  is(UI.selectedEditor.styleSheet.href, CSS_URL,
++    "The correct source is shown in the style editor.");
++  is(UI.selectedEditor.sourceEditor.getCursor().line + 1, 2,
++    "The correct line is highlighted in the style editor's source editor.");
++
++  yield unloadToolbox(toolbox);
++  finish();
++}
++
++function test () {
++  Task.spawn(viewSource).then(finish, (aError) => {
++    ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++    finish();
++  });
++}
+diff --git a/browser/devtools/framework/test/browser_toolbox_view_source_04.js b/browser/devtools/framework/test/browser_toolbox_view_source_04.js
+new file mode 100644
+index 0000000..53eae75
+--- /dev/null
++++ b/browser/devtools/framework/test/browser_toolbox_view_source_04.js
+@@ -0,0 +1,38 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that Toolbox#viewSourceInStyleEditor works when style editor is already loaded.
++ */
++
++let URL = `${URL_ROOT}doc_viewsource.html`;
++let CSS_URL = `${URL_ROOT}doc_theme.css`;
++
++function *viewSource() {
++  let toolbox = yield loadToolbox(URL);
++
++  yield toolbox.loadTool("styleeditor");
++  let fileFound = yield toolbox.viewSourceInStyleEditor(CSS_URL, 2);
++  ok(fileFound, "viewSourceInStyleEditor should resolve to true if source found.");
++
++  let stylePanel = toolbox.getPanel("styleeditor");
++  ok(stylePanel, "The style editor panel was opened.");
++  is(toolbox.currentToolId, "styleeditor", "The style editor panel was selected.");
++
++  let { UI } = stylePanel;
++
++  is(UI.selectedEditor.styleSheet.href, CSS_URL,
++    "The correct source is shown in the style editor.");
++  is(UI.selectedEditor.sourceEditor.getCursor().line + 1, 2,
++    "The correct line is highlighted in the style editor's source editor.");
++
++  yield unloadToolbox(toolbox);
++  finish();
++}
++
++function test () {
++  Task.spawn(viewSource).then(finish, (aError) => {
++    ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++    finish();
++  });
++}
+diff --git a/browser/devtools/framework/test/browser_toolbox_view_source_05.js b/browser/devtools/framework/test/browser_toolbox_view_source_05.js
+new file mode 100644
+index 0000000..aefab0b
+--- /dev/null
++++ b/browser/devtools/framework/test/browser_toolbox_view_source_05.js
+@@ -0,0 +1,37 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that Toolbox#viewSourceInScratchpad works.
++ */
++
++let URL = `${URL_ROOT}doc_viewsource.html`;
++
++function *viewSource() {
++  let toolbox = yield loadToolbox(URL);
++  let win = yield openScratchpadWindow();
++  let { Scratchpad: scratchpad } = win;
++
++  // Brahm's Cello Sonata No.1, Op.38 now in the scratchpad
++  scratchpad.setText("E G B C B\nA B A G A B\nG E");
++  let scratchpadURL = scratchpad.uniqueName;
++
++  // Now select another tool for focus
++  yield toolbox.selectTool("webconsole");
++
++  yield toolbox.viewSourceInScratchpad(scratchpadURL, 2);
++
++  is(scratchpad.editor.getCursor().line, 2,
++    "The correct line is highlighted in scratchpad's editor.");
++
++  win.close();
++  yield unloadToolbox(toolbox);
++  finish();
++}
++
++function test () {
++  Task.spawn(viewSource).then(finish, (aError) => {
++    ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
++    finish();
++  });
++}
+diff --git a/browser/devtools/framework/test/code_math.js b/browser/devtools/framework/test/code_math.js
+new file mode 100644
+index 0000000..97c2894
+--- /dev/null
++++ b/browser/devtools/framework/test/code_math.js
+@@ -0,0 +1,4 @@
++function add(a, b, k) {
++  var result = a + b;
++  return k(result);
++}
+diff --git a/browser/devtools/framework/test/doc_viewsource.html b/browser/devtools/framework/test/doc_viewsource.html
+new file mode 100644
+index 0000000..7094eb8
+--- /dev/null
++++ b/browser/devtools/framework/test/doc_viewsource.html
+@@ -0,0 +1,13 @@
++<!DOCTYPE HTML>
++<html>
++  <head>
++    <meta charset="UTF-8">
++    <title>Toolbox test for View Source methods</title>
++    <!-- Any copyright is dedicated to the Public Domain.
++         http://creativecommons.org/publicdomain/zero/1.0/ -->
++    <link charset="UTF-8" rel="stylesheet" href="doc_theme.css" />
++    <script src="code_math.js"></script>
++  </head>
++  <body>
++  </body>
++</html>
+diff --git a/browser/devtools/framework/test/head.js b/browser/devtools/framework/test/head.js
+index 56f0132..dea8445 100644
+--- a/browser/devtools/framework/test/head.js
++++ b/browser/devtools/framework/test/head.js
+@@ -2,16 +2,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ let TargetFactory = gDevTools.TargetFactory;
+ 
+ const { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
++const { ScratchpadManager } = Cu.import("resource:///modules/devtools/scratchpad-manager.jsm", {});
+ 
+ const URL_ROOT = "http://example.com/browser/browser/devtools/framework/test/";
+ const CHROME_URL_ROOT = "chrome://mochitests/content/browser/browser/devtools/framework/test/";
+ 
+ let TargetFactory = devtools.TargetFactory;
+ 
+ // All test are asynchronous
+ waitForExplicitFinish();
+@@ -170,8 +171,54 @@ function getChromeActors(callback)
+       callback(client, response.form);
+     });
+   });
+ 
+   SimpleTest.registerCleanupFunction(() => {
+     DebuggerServer.destroy();
+   });
+ }
++
++function loadToolbox (url) {
++  let { promise: p, resolve } = promise.defer();
++  gBrowser.selectedTab = gBrowser.addTab();
++  let target = TargetFactory.forTab(gBrowser.selectedTab);
++
++  gBrowser.selectedBrowser.addEventListener("load", function onLoad(evt) {
++    gBrowser.selectedBrowser.removeEventListener(evt.type, onLoad, true);
++    gDevTools.showToolbox(target).then(resolve);
++  }, true);
++
++  content.location = url;
++  return p;
++}
++
++function unloadToolbox (toolbox) {
++  return toolbox.destroy().then(function() {
++    gBrowser.removeCurrentTab();
++  });
++}
++
++function getSourceActor(aSources, aURL) {
++  let item = aSources.getItemForAttachment(a => a.source.url === aURL);
++  return item && item.value;
++}
++
++/**
++ * Open a Scratchpad window.
++ *
++ * @return nsIDOMWindow
++ *         The new window object that holds Scratchpad.
++ */
++function *openScratchpadWindow () {
++  let { promise: p, resolve } = promise.defer();
++  let win = ScratchpadManager.openScratchpad();
++
++  yield once(win, "load");
++
++  win.Scratchpad.addObserver({
++    onReady: function () {
++      win.Scratchpad.removeObserver(this);
++      resolve(win);
++    }
++  });
++  return p;
++}
 diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
-index f74471e..08a7e0b 100644
+index f74471e..6dea29d 100644
 --- a/browser/devtools/framework/toolbox.js
 +++ b/browser/devtools/framework/toolbox.js
-@@ -160,16 +160,18 @@ exports.Toolbox = Toolbox;
+@@ -16,16 +16,17 @@ const SCREENSIZE_HISTOGRAM = "DEVTOOLS_SCREEN_RESOLUTION_ENUMERATED_PER_USER";
+ 
+ let {Cc, Ci, Cu} = require("chrome");
+ let {Promise: promise} = require("resource://gre/modules/Promise.jsm");
+ let EventEmitter = require("devtools/toolkit/event-emitter");
+ let Telemetry = require("devtools/shared/telemetry");
+ let {getHighlighterUtils} = require("devtools/framework/toolbox-highlighter-utils");
+ let HUDService = require("devtools/webconsole/hudservice");
+ let {showDoorhanger} = require("devtools/shared/doorhanger");
++let sourceUtils = require("devtools/shared/source-utils");
+ 
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource:///modules/devtools/gDevTools.jsm");
+ Cu.import("resource:///modules/devtools/scratchpad-manager.jsm");
+ Cu.import("resource:///modules/devtools/DOMHelpers.jsm");
+ Cu.import("resource://gre/modules/Task.jsm");
+ 
+@@ -160,16 +161,18 @@ exports.Toolbox = Toolbox;
  Toolbox.HostType = {
    BOTTOM: "bottom",
    SIDE: "side",
@@ -169,7 +572,7 @@ index f74471e..08a7e0b 100644
      SIDE_ENABLED: "devtools.toolbox.sideEnabled"
    },
  
-@@ -1691,17 +1693,19 @@ Toolbox.prototype = {
+@@ -1691,17 +1694,19 @@ Toolbox.prototype = {
      this.off("select", this._refreshHostTitle);
      this.off("host-changed", this._refreshHostTitle);
  
@@ -189,7 +592,7 @@ index f74471e..08a7e0b 100644
      this.closeButton.removeEventListener("command", this.destroy, true);
  
      let outstanding = [];
-@@ -1810,10 +1814,21 @@ Toolbox.prototype = {
+@@ -1810,10 +1815,55 @@ Toolbox.prototype = {
     */
    _showDevEditionPromo: function() {
      // Do not display in browser toolbox
@@ -204,97 +607,258 @@ index f74471e..08a7e0b 100644
 +  /**
 +   * Returns gViewSourceUtils for viewing source.
 +   */
-+  getViewSourceUtils: Task.async(function*() {
-+    if (this._gViewSourceUtils) {
-+      return this._gViewSourceUtils;
-+    }
-+    let inspectorPanel = yield this.loadTool("inspector");
-+    return this._gViewSourceUtils = inspectorPanel.viewSourceUtils;
-+  })
- };
-diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index 8dfe9b0..fb506bf9 100644
---- a/browser/devtools/performance/performance-controller.js
-+++ b/browser/devtools/performance/performance-controller.js
-@@ -46,16 +46,18 @@ devtools.lazyRequireGetter(this, "FrameNode",
- devtools.lazyRequireGetter(this, "JITOptimizations",
-   "devtools/shared/profiler/jit", true);
- devtools.lazyRequireGetter(this, "OptionsView",
-   "devtools/shared/options-view", true);
- devtools.lazyRequireGetter(this, "FlameGraphUtils",
-   "devtools/shared/widgets/FlameGraph", true);
- devtools.lazyRequireGetter(this, "FlameGraph",
-   "devtools/shared/widgets/FlameGraph", true);
-+devtools.lazyRequireGetter(this, "sourceUtils",
-+  "devtools/shared/source-utils");
- 
- devtools.lazyImporter(this, "CanvasGraphUtils",
-   "resource:///modules/devtools/Graphs.jsm");
- devtools.lazyImporter(this, "SideMenuWidget",
-   "resource:///modules/devtools/SideMenuWidget.jsm");
- devtools.lazyImporter(this, "PluralForm",
-   "resource://gre/modules/PluralForm.jsm");
- 
-diff --git a/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js b/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js
-index 8e967fe..232ebda 100644
---- a/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js
-+++ b/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js
-@@ -2,19 +2,19 @@
-    http://creativecommons.org/publicdomain/zero/1.0/ */
- 
- /**
-  * Tests if the performance tool can jump to the debugger.
-  */
- 
- function spawnTest () {
-   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
--  let { viewSourceInDebugger } = panel.panelWin;
-+  let { sourceUtils: { viewSourceInDebugger }} = panel.panelWin;
- 
--  yield viewSourceInDebugger(SIMPLE_URL, 14);
-+  yield viewSourceInDebugger(panel.panelWin.gTarget, SIMPLE_URL, 14);
- 
-   let debuggerPanel = toolbox.getPanel("jsdebugger");
-   ok(debuggerPanel, "The debugger panel was opened.");
- 
-   let { DebuggerView } = debuggerPanel.panelWin;
-   let Sources = DebuggerView.Sources;
- 
-   is(Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
-diff --git a/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js b/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js
-index 6553eb7..a202969 100644
---- a/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js
-+++ b/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js
-@@ -17,21 +17,22 @@ function spawnTest() {
-   ok("A source was shown in the debugger.");
- 
-   is(Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
-     "The correct source is initially shown in the debugger.");
-   is(DebuggerView.editor.getCursor().line, 0,
-     "The correct line is initially highlighted in the debugger's source editor.");
- 
-   yield toolbox.selectTool("performance");
++  get gViewSourceUtils() {
++    return this.frame.contentWindow.gViewSourceUtils;
++  },
 +
-   let perfPanel = toolbox.getCurrentPanel();
-   let perfWin = perfPanel.panelWin;
--  let { viewSourceInDebugger } = perfWin;
-+  let { sourceUtils: { viewSourceInDebugger }} = perfWin;
++  /**
++   * Opens source in style editor. Falls back to plain "view-source:".
++   * @see browser/devtools/shared/source-utils.js
++   */
++  viewSourceInStyleEditor: function (sourceURL, sourceLine) {
++    return sourceUtils.viewSourceInStyleEditor(this, sourceURL, sourceLine);
++  },
++
++  /**
++   * Opens source in debugger. Falls back to plain "view-source:".
++   * @see browser/devtools/shared/source-utils.js
++   */
++  viewSourceInDebugger: function (sourceURL, sourceLine) {
++    return sourceUtils.viewSourceInDebugger(this, sourceURL, sourceLine);
++  },
++
++  /**
++   * Opens source in scratchpad. Falls back to plain "view-source:".
++   * TODO The `sourceURL` for scratchpad instances are like `Scratchpad/1`.
++   * If instances are scoped one-per-browser-window, then we should be able
++   * to infer the URL from this toolbox, or use the built in scratchpad IN
++   * the toolbox.
++   *
++   * @see browser/devtools/shared/source-utils.js
++   */
++  viewSourceInScratchpad: function (sourceURL, sourceLine) {
++    return sourceUtils.viewSourceInScratchpad(sourceURL, sourceLine);
++  },
++
++  /**
++   * Opens source in plain "view-source:".
++   * @see browser/devtools/shared/source-utils.js
++   */
++  viewSource: function (sourceURL, sourceLine) {
++    return sourceUtils.viewSource(this, sourceURL, sourceLine);
++  },
++
+ };
+diff --git a/browser/devtools/framework/toolbox.xul b/browser/devtools/framework/toolbox.xul
+index 1af0f15..20c160e 100644
+--- a/browser/devtools/framework/toolbox.xul
++++ b/browser/devtools/framework/toolbox.xul
+@@ -9,16 +9,19 @@
+ <?xml-stylesheet href="chrome://browser/skin/" type="text/css"?>
+ <?xml-stylesheet href="chrome://browser/skin/devtools/common.css" type="text/css"?>
+ <?xul-overlay href="chrome://global/content/editMenuOverlay.xul"?>
  
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+ 
+   <script type="application/javascript;version=1.8"
+           src="chrome://browser/content/devtools/theme-switching.js"/>
++  <script type="application/javascript"
++          src="chrome://global/content/viewSourceUtils.js"/>
++
+   <script type="application/javascript" src="chrome://global/content/globalOverlay.js"/>
+ 
+   <commandset id="editMenuCommands"/>
+   <keyset id="editMenuKeys"/>
+   <keyset id="toolbox-keyset">
+     <key id="toolbox-options-key"
+          key="&toolboxOptionsButton.key;"
+          oncommand="void(0);"
+diff --git a/browser/devtools/inspector/inspector-panel.js b/browser/devtools/inspector/inspector-panel.js
+index 7d187a7..b12f310 100644
+--- a/browser/devtools/inspector/inspector-panel.js
++++ b/browser/devtools/inspector/inspector-panel.js
+@@ -279,23 +279,16 @@ InspectorPanel.prototype = {
+   /**
+    * Target setter.
+    */
+   set target(value) {
+     this._target = value;
+   },
+ 
+   /**
+-   * Expose gViewSourceUtils so that other tools can make use of them.
+-   */
+-  get viewSourceUtils() {
+-    return this.panelWin.gViewSourceUtils;
+-  },
+-
+-  /**
+    * Indicate that a tool has modified the state of the page.  Used to
+    * decide whether to show the "are you sure you want to navigate"
+    * notification.
+    */
+   markDirty: function InspectorPanel_markDirty() {
+     this.isDirty = true;
+   },
+ 
+diff --git a/browser/devtools/inspector/inspector.xul b/browser/devtools/inspector/inspector.xul
+index 92c4ab0..1c7d1cb 100644
+--- a/browser/devtools/inspector/inspector.xul
++++ b/browser/devtools/inspector/inspector.xul
+@@ -13,19 +13,16 @@
+    %inspectorDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+ 
+   <script type="application/javascript;version=1.8"
+           src="chrome://browser/content/devtools/theme-switching.js"/>
+ 
+-  <script type="application/javascript"
+-          src="chrome://global/content/viewSourceUtils.js"/>
+-
+   <commandset>
+     <command id="nodeSearchCommand"
+       oncommand="inspector.searchBox.focus()"/>
+   </commandset>
+ 
+   <keyset>
+     <key id="nodeSearchKey"
+       key="&inspectorSearchHTML.key;"
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index b01869a..ff01bff 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -44,18 +44,16 @@ support-files =
+ #[browser_perf-front-profiler-05.js] bug 1077464
+ #[browser_perf-front-profiler-06.js]
+ [browser_perf-front-01.js]
+ [browser_perf-front-02.js]
+ [browser_perf-jit-view-01.js]
+ [browser_perf-jit-view-02.js]
+ [browser_perf-jit-model-01.js]
+ [browser_perf-jit-model-02.js]
+-[browser_perf-jump-to-debugger-01.js]
+-[browser_perf-jump-to-debugger-02.js]
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-invert-call-tree-01.js]
+ [browser_perf-options-invert-call-tree-02.js]
+ [browser_perf-options-invert-flame-graph-01.js]
+ [browser_perf-options-invert-flame-graph-02.js]
+ [browser_perf-options-flatten-tree-recursion-01.js]
+ [browser_perf-options-flatten-tree-recursion-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js b/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js
+deleted file mode 100644
+index 8e967fe..0000000
+--- a/browser/devtools/performance/test/browser_perf-jump-to-debugger-01.js
++++ /dev/null
+@@ -1,27 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the performance tool can jump to the debugger.
+- */
+-
+-function spawnTest () {
+-  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+-  let { viewSourceInDebugger } = panel.panelWin;
+-
 -  yield viewSourceInDebugger(SIMPLE_URL, 14);
-+  yield viewSourceInDebugger(perfWin.gTarget, SIMPLE_URL, 14);
+-
+-  let debuggerPanel = toolbox.getPanel("jsdebugger");
+-  ok(debuggerPanel, "The debugger panel was opened.");
+-
+-  let { DebuggerView } = debuggerPanel.panelWin;
+-  let Sources = DebuggerView.Sources;
+-
+-  is(Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
+-    "The correct source is shown in the debugger.");
+-  is(DebuggerView.editor.getCursor().line + 1, 14,
+-    "The correct line is highlighted in the debugger's source editor.");
+-
+-  yield teardown(panel);
+-  finish();
+-}
+diff --git a/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js b/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js
+deleted file mode 100644
+index 6553eb7..0000000
+--- a/browser/devtools/performance/test/browser_perf-jump-to-debugger-02.js
++++ /dev/null
+@@ -1,41 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the performance tool can jump to the debugger, when the source was
+- * already loaded in that tool.
+- */
+-
+-function spawnTest() {
+-  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL, "jsdebugger");
+-  let debuggerWin = panel.panelWin;
+-  let debuggerEvents = debuggerWin.EVENTS;
+-  let { DebuggerView } = debuggerWin;
+-  let Sources = DebuggerView.Sources;
+-
+-  yield debuggerWin.once(debuggerEvents.SOURCE_SHOWN);
+-  ok("A source was shown in the debugger.");
+-
+-  is(Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
+-    "The correct source is initially shown in the debugger.");
+-  is(DebuggerView.editor.getCursor().line, 0,
+-    "The correct line is initially highlighted in the debugger's source editor.");
+-
+-  yield toolbox.selectTool("performance");
+-  let perfPanel = toolbox.getCurrentPanel();
+-  let perfWin = perfPanel.panelWin;
+-  let { viewSourceInDebugger } = perfWin;
+-
+-  yield viewSourceInDebugger(SIMPLE_URL, 14);
+-
+-  panel = toolbox.getPanel("jsdebugger");
+-  ok(panel, "The debugger panel was reselected.");
+-
+-  is(DebuggerView.Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
+-    "The correct source is still shown in the debugger.");
+-  is(DebuggerView.editor.getCursor().line + 1, 14,
+-    "The correct line is now highlighted in the debugger's source editor.");
+-
+-  yield teardown(perfPanel);
+-  finish();
+-}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 3075954..9b20a55 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -417,21 +417,16 @@ function dragStop(graph, x, y = 1) {
+   graph._onMouseUp({ clientX: x, clientY: y });
+ }
  
-   panel = toolbox.getPanel("jsdebugger");
-   ok(panel, "The debugger panel was reselected.");
+ function dropSelection(graph) {
+   graph.dropSelection();
+   graph.emit("selecting");
+ }
  
-   is(DebuggerView.Sources.selectedValue, getSourceActor(Sources, SIMPLE_URL),
-     "The correct source is still shown in the debugger.");
-   is(DebuggerView.editor.getCursor().line + 1, 14,
-     "The correct line is now highlighted in the debugger's source editor.");
+-function getSourceActor(aSources, aURL) {
+-  let item = aSources.getItemForAttachment(a => a.source.url === aURL);
+-  return item && item.value;
+-}
+-
+ /**
+  * Fires a key event, like "VK_UP", "VK_DOWN", etc.
+  */
+ function fireKey (e) {
+   EventUtils.synthesizeKey(e, {});
+ }
+ 
+ function reload (aTarget, aEvent = "navigate") {
 diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
-index 8cece2a..244a4cf 100644
+index 8cece2a..bc9e968 100644
 --- a/browser/devtools/performance/views/details-js-call-tree.js
 +++ b/browser/devtools/performance/views/details-js-call-tree.js
-@@ -56,17 +56,17 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+@@ -56,19 +56,23 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
      this.emit(EVENTS.JS_CALL_TREE_RENDERED);
    },
  
@@ -304,16 +868,24 @@ index 8cece2a..244a4cf 100644
    _onLink: function (_, treeItem) {
      let { url, line } = treeItem.frame.getInfo();
 -    viewSourceInDebugger(url, line).then(
-+    sourceUtils.viewSourceInDebugger(gTarget, url, line).then(
-       () => this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER),
-       () => this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER));
+-      () => this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER),
+-      () => this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER));
++    gToolbox.viewSourceInDebugger(file, line).then(success => {
++      if (success) {
++        this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER);
++      } else {
++        this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER);
++      }
++    });
    },
  
    /**
     * Called when the recording is stopped and prepares data to
     * populate the call tree.
     */
-@@ -116,36 +116,8 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+   _prepareCallTree: function (profile, { startTime, endTime }, options) {
+     let threadSamples = profile.threads[0].samples;
+@@ -116,36 +120,8 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
      root.toggleCategories(options.contentOnly);
  
      // Return the CallView for tests
@@ -351,10 +923,10 @@ index 8cece2a..244a4cf 100644
 -  return Promise.reject("Couldn't find the specified source in the debugger.");
 -});
 diff --git a/browser/devtools/performance/views/details-memory-call-tree.js b/browser/devtools/performance/views/details-memory-call-tree.js
-index c80d2ab..9a8f919 100644
+index c80d2ab..cdcdb2e 100644
 --- a/browser/devtools/performance/views/details-memory-call-tree.js
 +++ b/browser/devtools/performance/views/details-memory-call-tree.js
-@@ -46,17 +46,17 @@ let MemoryCallTreeView = Heritage.extend(DetailsSubview, {
+@@ -46,19 +46,23 @@ let MemoryCallTreeView = Heritage.extend(DetailsSubview, {
      this.emit(EVENTS.MEMORY_CALL_TREE_RENDERED);
    },
  
@@ -364,20 +936,89 @@ index c80d2ab..9a8f919 100644
    _onLink: function (_, treeItem) {
      let { url, line } = treeItem.frame.getInfo();
 -    viewSourceInDebugger(url, line).then(
-+    sourceUtils.viewSourceInDebugger(gTarget, url, line).then(
-       () => this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER),
-       () => this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER));
+-      () => this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER),
+-      () => this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER));
++    gToolbox.viewSourceInDebugger(file, line).then(success => {
++      if (success) {
++        this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER);
++      } else {
++        this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER);
++      }
++    });
    },
  
    /**
     * Called when the recording is stopped and prepares data to
     * populate the call tree.
     */
+   _prepareCallTree: function (allocations, { startTime, endTime }, options) {
+     let samples = RecordingUtils.getSamplesFromAllocations(allocations);
+diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
+index 10ed9a2..2126131 100644
+--- a/browser/devtools/performance/views/details-waterfall.js
++++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -24,35 +24,38 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+   initialize: function () {
+     DetailsSubview.initialize.call(this);
+ 
+     this.waterfall = new Waterfall($("#waterfall-breakdown"), $("#waterfall-view"));
+     this.details = new MarkerDetails($("#waterfall-details"), $("#waterfall-view > splitter"));
+ 
+     this._onMarkerSelected = this._onMarkerSelected.bind(this);
+     this._onResize = this._onResize.bind(this);
++    this._onViewSource = this._onViewSource.bind(this);
+ 
+     this.waterfall.on("selected", this._onMarkerSelected);
+     this.waterfall.on("unselected", this._onMarkerSelected);
+     this.details.on("resize", this._onResize);
++    this.details.on("view-source", this._onViewSource);
+ 
+     let blueprint = PerformanceController.getTimelineBlueprint();
+     this.waterfall.setBlueprint(blueprint);
+     this.waterfall.recalculateBounds();
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     DetailsSubview.destroy.call(this);
+ 
+     this.waterfall.off("selected", this._onMarkerSelected);
+     this.waterfall.off("unselected", this._onMarkerSelected);
+     this.details.off("resize", this._onResize);
++    this.details.off("view-source", this._onViewSource);
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering a new waterfall.
+    *
+    * @param object interval [optional]
+    *        The { startTime, endTime }, in milliseconds.
+    */
+@@ -92,10 +95,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+   /**
+    * Called whenever an observed pref is changed.
+    */
+   _onObservedPrefChange: function(_, prefName) {
+     let blueprint = PerformanceController.getTimelineBlueprint();
+     this.waterfall.setBlueprint(blueprint);
+   },
+ 
++  /**
++   * Called when MarkerDetails view emits an event to view source.
++   */
++  _onViewSource: function (_, file, line) {
++    gToolbox.viewSourceInDebugger(file, line);
++  },
++
+   toString: () => "[object WaterfallView]"
+ });
 diff --git a/browser/devtools/performance/views/jit-optimizations.js b/browser/devtools/performance/views/jit-optimizations.js
-index ff08646..99e46b2 100644
+index 11d08f7..6141b8d 100644
 --- a/browser/devtools/performance/views/jit-optimizations.js
 +++ b/browser/devtools/performance/views/jit-optimizations.js
-@@ -334,17 +334,17 @@ let JITOptimizationsView = {
+@@ -345,17 +345,17 @@ let JITOptimizationsView = {
      let node = el || document.createElement("span");
      node.className = "opt-url";
      let fileName;
@@ -387,7 +1028,7 @@ index ff08646..99e46b2 100644
        node.classList.add("debugger-link");
        node.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + url);
 -      node.addEventListener("click", () => viewSourceInDebugger(url, line));
-+      node.addEventListener("click", () => sourceUtils.viewSourceInDebugger(gTarget, url, line));
++      node.addEventListener("click", () => gToolbox.viewSourceInDebugger(url, line));
      }
      fileName = fileName || url || "";
      node.textContent = fileName ? `@${fileName}` : "";
@@ -397,10 +1038,10 @@ index ff08646..99e46b2 100644
    /**
     * Updates the headers with the current frame's data.
 diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
-index 28916c4..23afd20 100644
+index b558e78..ca7bf01 100644
 --- a/browser/devtools/shared/moz.build
 +++ b/browser/devtools/shared/moz.build
-@@ -48,16 +48,17 @@ EXTRA_JS_MODULES.devtools.shared += [
+@@ -49,16 +49,17 @@ EXTRA_JS_MODULES.devtools.shared += [
      'autocomplete-popup.js',
      'devices.js',
      'doorhanger.js',
@@ -420,7 +1061,7 @@ index 28916c4..23afd20 100644
      'widgets/CubicBezierPresets.js',
 diff --git a/browser/devtools/shared/source-utils.js b/browser/devtools/shared/source-utils.js
 new file mode 100644
-index 0000000..f4b9578
+index 0000000..2397a75
 --- /dev/null
 +++ b/browser/devtools/shared/source-utils.js
 @@ -0,0 +1,130 @@
@@ -441,19 +1082,23 @@ index 0000000..f4b9578
 + * the source was able to be displayed in the StyleEditor, as the built-in Firefox
 + * View Source is the fallback.
 + *
-+ * @param {TabTarget} target
++ * @param {Toolbox} toolbox
 + * @param {string} sourceURL
 + * @param {number} sourceLine
 + *
 + * @return {Promise<boolean>}
 + */
-+exports.viewSourceInStyleEditor = Task.async(function *(target, sourceURL, sourceLine) {
-+  let toolbox = yield gDevTools.showToolbox(target, "styleeditor");
++exports.viewSourceInStyleEditor = Task.async(function *(toolbox, sourceURL, sourceLine) {
++  let panel = yield toolbox.loadTool("styleeditor");
++
 +  try {
-+    toolbox.getCurrentPanel().selectStyleSheet(sourceURL, sourceLine);
++    let selected = panel.UI.once("editor-selected");
++    yield panel.selectStyleSheet(sourceURL, sourceLine);
++    yield toolbox.selectTool("styleeditor");
++    yield selected;
 +    return true;
 +  } catch (e) {
-+    exports.viewSource(target, sourceURL, sourceLine);
++    exports.viewSource(toolbox, sourceURL, sourceLine);
 +    return false;
 +  }
 +});
@@ -465,25 +1110,18 @@ index 0000000..f4b9578
 + * the source was able to be displayed in the Debugger, as the built-in Firefox
 + * View Source is the fallback.
 + *
-+ * @param {TabTarget} target
++ * @param {Toolbox} toolbox
 + * @param {string} sourceURL
 + * @param {number} sourceLine
 + *
 + * @return {Promise<boolean>}
 + */
-+exports.viewSourceInDebugger = Task.async(function *(target, sourceURL, sourceLine) {
-+  let toolbox = gDevTools.getToolbox(target);
-+
-+  if (!toolbox) {
-+    exports.viewSource(target, sourceURL, sourceLine);
-+    return false;
-+  }
-+
++exports.viewSourceInDebugger = Task.async(function *(toolbox, sourceURL, sourceLine) {
 +  // If the Debugger was already open, switch to it and try to show the
 +  // source immediately. Otherwise, initialize it and wait for the sources
 +  // to be added first.
 +  let debuggerAlreadyOpen = toolbox.getPanel("jsdebugger");
-+  let { panelWin: dbg } = yield toolbox.selectTool("jsdebugger");
++  let { panelWin: dbg } = yield toolbox.loadTool("jsdebugger");
 +
 +  if (!debuggerAlreadyOpen) {
 +    yield dbg.once(dbg.EVENTS.SOURCES_ADDED);
@@ -494,24 +1132,25 @@ index 0000000..f4b9578
 +
 +  let item = Sources.getItemForAttachment(a => a.source.url === sourceURL);
 +  if (item) {
++    yield toolbox.selectTool("jsdebugger");
 +    yield DebuggerView.setEditorLocation(item.attachment.source.actor, sourceLine, { noDebug: true });
 +    return true;
 +  }
 +
 +  // If not found, still attempt to open in View Source
-+  exports.viewSource(target, sourceURL, sourceLine);
++  exports.viewSource(toolbox, sourceURL, sourceLine);
 +  return false;
 +});
 +
 +/**
 + * Tries to open a JavaScript file in the corresponding Scratchpad.
 + *
-+ * @param {TabTarget} target
 + * @param {string} sourceURL
++ * @param {number} sourceLine
 + *
 + * @return {Promise}
 + */
-+exports.viewSourceInScratchpad = Task.async(function *(target, sourceURL) {
++exports.viewSourceInScratchpad = Task.async(function *(sourceURL, sourceLine) {
 +  // Check for matching top level scratchpad window.
 +  let wins = Services.wm.getEnumerator("devtools:scratchpad");
 +
@@ -520,10 +1159,12 @@ index 0000000..f4b9578
 +
 +    if (!win.closed && win.Scratchpad.uniqueName === sourceURL) {
 +      win.focus();
++      win.Scratchpad.editor.setCursor({ line: sourceLine, ch: 0 });
 +      return;
 +    }
 +  }
 +
++  // For scratchpads within toolbox
 +  for (let [, toolbox] of gDevTools) {
 +    let scratchpadPanel = toolbox.getPanel("scratchpad");
 +    if (scratchpadPanel) {
@@ -532,6 +1173,7 @@ index 0000000..f4b9578
 +        toolbox.selectTool("scratchpad");
 +        toolbox.raise();
 +        scratchpad.editor.focus();
++        scratchpad.editor.setCursor({ line: sourceLine, ch: 0 });
 +        return;
 +      }
 +    }
@@ -541,21 +1183,20 @@ index 0000000..f4b9578
 +/**
 + * Open a link in Firefox's View Source.
 + *
-+ * @param {TabTarget} target
++ * @param {Toolbox} toolbox
 + * @param {string} sourceURL
 + * @param {number} sourceLine
 + *
 + * @return {Promise}
 + */
-+exports.viewSource = Task.async(function *(target, sourceURL, sourceLine) {
-+  let toolbox = gDevTools.getToolbox(target);
-+  let utils = yield toolbox.getViewSourceUtils();
++exports.viewSource = Task.async(function *(toolbox, sourceURL, sourceLine) {
++  let utils = toolbox.gViewSourceUtils;
 +  // XXX does it matter what document we use for this?
 +  // Looks like it's only used for character set.
-+  utils.viewSource(sourceURL, null, target.doc, sourceLine || 0); 
++  utils.viewSource(sourceURL, null, toolbox.doc, sourceLine || 0);
 +});
 diff --git a/browser/devtools/shared/timeline/marker-details.js b/browser/devtools/shared/timeline/marker-details.js
-index 7e9dff5..1e73330c 100644
+index 7e9dff5..4f6a2e6 100644
 --- a/browser/devtools/shared/timeline/marker-details.js
 +++ b/browser/devtools/shared/timeline/marker-details.js
 @@ -214,17 +214,17 @@ MarkerDetails.prototype = {
@@ -568,7 +1209,7 @@ index 7e9dff5..1e73330c 100644
          aNode.addEventListener("click", (event) => {
            event.preventDefault();
 -          viewSourceInDebugger(toolbox, url, line);
-+          sourceUtils.viewSourceInDebugger(gTarget, url, line);
++          this.emit("view-source", url, line);
          });
        }
  
@@ -618,29 +1259,10 @@ index 7e9dff5..1e73330c 100644
 -
  exports.MarkerDetails = MarkerDetails;
 diff --git a/browser/devtools/styleinspector/computed-view.js b/browser/devtools/styleinspector/computed-view.js
-index 6ab6a03..457d078 100644
+index 6ab6a03..b1d4c2f 100644
 --- a/browser/devtools/styleinspector/computed-view.js
 +++ b/browser/devtools/styleinspector/computed-view.js
-@@ -10,16 +10,18 @@ const ToolDefinitions = require("main").Tools;
- const {CssLogic} = require("devtools/styleinspector/css-logic");
- const {ELEMENT_STYLE} = require("devtools/server/actors/styles");
- const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
- const {EventEmitter} = require("devtools/toolkit/event-emitter");
- const {OutputParser} = require("devtools/output-parser");
- const {PrefObserver, PREF_ORIG_SOURCES} = require("devtools/styleeditor/utils");
- const {gDevTools} = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
- const overlays = require("devtools/styleinspector/style-inspector-overlays");
-+loader.lazyRequireGetter(this, "sourceUtils",
-+  "devtools/shared/source-utils");
- 
- Cu.import("resource://gre/modules/Services.jsm");
- Cu.import("resource://gre/modules/XPCOMUtils.jsm");
- Cu.import("resource://gre/modules/devtools/Templater.jsm");
- 
- XPCOMUtils.defineLazyModuleGetter(this, "PluralForm",
-                                   "resource://gre/modules/PluralForm.jsm");
- 
-@@ -1467,18 +1469,17 @@ SelectorView.prototype = {
+@@ -1467,18 +1467,18 @@ SelectorView.prototype = {
      if (!sheet || sheet.isSystem) {
        let contentDoc = null;
        if (this.tree.viewedElement.isLocal_toBeDeprecated()) {
@@ -651,7 +1273,8 @@ index 6ab6a03..457d078 100644
        }
 -      let viewSourceUtils = inspector.viewSourceUtils;
 -      viewSourceUtils.viewSource(rule.href, null, contentDoc, rule.line);
-+      sourceUtils.viewSource(inspector.target, rule.href, rule.line);
++      let toolbox = gDevTools.getToolbox(inspector.target);
++      toolbox.viewSource(rule.href, rule.line);
        return;
      }
  
@@ -661,29 +1284,10 @@ index 6ab6a03..457d078 100644
      }
      location.then(({source, href, line, column}) => {
 diff --git a/browser/devtools/styleinspector/style-inspector.js b/browser/devtools/styleinspector/style-inspector.js
-index cb967c2..ab559bc 100644
+index cb967c2..5fd5eb3 100644
 --- a/browser/devtools/styleinspector/style-inspector.js
 +++ b/browser/devtools/styleinspector/style-inspector.js
-@@ -8,16 +8,18 @@ const {Cc, Cu, Ci} = require("chrome");
- const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
- const {Tools} = require("main");
- Cu.import("resource://gre/modules/Services.jsm");
- const {PREF_ORIG_SOURCES} = require("devtools/styleeditor/utils");
- 
- loader.lazyGetter(this, "gDevTools", () => Cu.import("resource:///modules/devtools/gDevTools.jsm", {}).gDevTools);
- loader.lazyGetter(this, "RuleView", () => require("devtools/styleinspector/rule-view"));
- loader.lazyGetter(this, "ComputedView", () => require("devtools/styleinspector/computed-view"));
-+loader.lazyRequireGetter(this, "sourceUtils",
-+  "devtools/shared/source-utils");
- loader.lazyGetter(this, "_strings", () => Services.strings
-   .createBundle("chrome://global/locale/devtools/styleinspector.properties"));
- 
- // This module doesn't currently export any symbols directly, it only
- // registers inspector tools.
- 
- function RuleViewTool(inspector, window, iframe) {
-   this.inspector = inspector;
-@@ -106,19 +108,18 @@ RuleViewTool.prototype = {
+@@ -106,19 +106,19 @@ RuleViewTool.prototype = {
  
    onLinkClicked: function(e, rule) {
      let sheet = rule.parentStyleSheet;
@@ -695,7 +1299,8 @@ index cb967c2..ab559bc 100644
 -      let viewSourceUtils = this.inspector.viewSourceUtils;
        let href = rule.nodeHref || rule.href;
 -      viewSourceUtils.viewSource(href, null, contentDoc, rule.line || 0);
-+      sourceUtils.viewSource(this.inspector.target, href, rule.line);
++      let toolbox = gDevTools.getToolbox(this.inspector.target);
++      toolbox.viewSource(href, rule.line);
        return;
      }
  
@@ -705,7 +1310,7 @@ index cb967c2..ab559bc 100644
      }
      location.then(({ source, href, line, column }) => {
 diff --git a/browser/devtools/webconsole/hudservice.js b/browser/devtools/webconsole/hudservice.js
-index 1b207e7..ff9686a 100644
+index 1b207e7..756b4a80 100644
 --- a/browser/devtools/webconsole/hudservice.js
 +++ b/browser/devtools/webconsole/hudservice.js
 @@ -15,16 +15,17 @@ loader.lazyGetter(this, "Telemetry", () => require("devtools/shared/telemetry"))
@@ -726,7 +1331,7 @@ index 1b207e7..ff9686a 100644
  
  // The preference prefix for all of the Browser Console filters.
  const BROWSER_CONSOLE_FILTER_PREFS_PREFIX = "devtools.browserconsole.filter.";
-@@ -427,135 +428,59 @@ WebConsole.prototype = {
+@@ -427,135 +428,73 @@ WebConsole.prototype = {
    /**
     * Open a link in Firefox's view source.
     *
@@ -740,7 +1345,7 @@ index 1b207e7..ff9686a 100644
 -    this.gViewSourceUtils.viewSource(aSourceURL, null,
 -                                     this.iframeWindow.document, aSourceLine);
 +  viewSource: function WC_viewSource(aSourceURL, aSourceLine) {
-+    sourceUtils.viewSource(this.target, aSourceURL, aSourceLine);
++    this.gViewSourceUtils.viewSource(aSourceURL, null, this.iframeWindow.document, aSourceLine || 0);
    },
  
    /**
@@ -748,6 +1353,8 @@ index 1b207e7..ff9686a 100644
     * instance in the Style Editor. If the file is not found, it is opened in
     * source view instead.
     *
++   * Manually handle the case where toolbox does not exist (Browser Console).
++   *
     * @param string aSourceURL
     *        The URL of the file.
     * @param integer aSourceLine
@@ -758,11 +1365,12 @@ index 1b207e7..ff9686a 100644
 -  viewSourceInStyleEditor:
 -  function WC_viewSourceInStyleEditor(aSourceURL, aSourceLine)
 -  {
--    let toolbox = gDevTools.getToolbox(this.target);
--    if (!toolbox) {
--      this.viewSource(aSourceURL, aSourceLine);
--      return;
--    }
++  viewSourceInStyleEditor: function WC_viewSourceInStyleEditor(aSourceURL, aSourceLine) {
+     let toolbox = gDevTools.getToolbox(this.target);
+     if (!toolbox) {
+       this.viewSource(aSourceURL, aSourceLine);
+       return;
+     }
 -
 -    gDevTools.showToolbox(this.target, "styleeditor").then(function(toolbox) {
 -      try {
@@ -772,8 +1380,7 @@ index 1b207e7..ff9686a 100644
 -        this.viewSource(aSourceURL, aSourceLine);
 -      }
 -    });
-+  viewSourceInStyleEditor: function WC_viewSourceInStyleEditor(aSourceURL, aSourceLine) {
-+    sourceUtils.viewSourceInStyleEditor(this.target, aSourceURL, aSourceLine);
++    toolbox.viewSourceInStyleEditor(aSourceURL, aSourceLine);
    },
  
    /**
@@ -781,6 +1388,8 @@ index 1b207e7..ff9686a 100644
     * instance in the Script Debugger. If the file is not found, it is opened in
     * source view instead.
     *
++   * Manually handle the case where toolbox does not exist (Browser Console).
++   *
     * @param string aSourceURL
     *        The URL of the file.
     * @param integer aSourceLine
@@ -789,11 +1398,12 @@ index 1b207e7..ff9686a 100644
 -  viewSourceInDebugger:
 -  function WC_viewSourceInDebugger(aSourceURL, aSourceLine)
 -  {
--    let toolbox = gDevTools.getToolbox(this.target);
--    if (!toolbox) {
--      this.viewSource(aSourceURL, aSourceLine);
--      return;
--    }
++  viewSourceInDebugger: function WC_viewSourceInDebugger(aSourceURL, aSourceLine) {
+     let toolbox = gDevTools.getToolbox(this.target);
+     if (!toolbox) {
+       this.viewSource(aSourceURL, aSourceLine);
+       return;
+     }
 -
 -    let showSource = ({ DebuggerView }) => {
 -      let item = DebuggerView.Sources.getItemForAttachment(
@@ -821,8 +1431,7 @@ index 1b207e7..ff9686a 100644
 -        dbg.once(dbg.EVENTS.SOURCES_ADDED, () => showSource(dbg));
 -      }
 -    });
-+  viewSourceInDebugger: function WC_viewSourceInDebugger(aSourceURL, aSourceLine) {
-+    sourceUtils.viewSourceInDebugger(this.target, aSourceURL, aSourceLine).then(() => {
++    toolbox.viewSourceInDebugger(aSourceURL, aSourceLine).then(() => {
 +      this.ui.emit("source-in-debugger-opened");
 +    })
    },
@@ -862,8 +1471,8 @@ index 1b207e7..ff9686a 100644
 -        }
 -      }
 -    }
-+  viewSourceInScratchpad: function WC_viewSourceInScratchpad(aSourceURL) {
-+    sourceUtils.viewSourceInScratchPad(this.target, aSourceURL);
++  viewSourceInScratchpad: function WC_viewSourceInScratchpad(aSourceURL, aSourceLine) {
++    sourceUtils.viewSourceInScratchpad(aSourceURL, aSourceLine);
    },
  
    /**
@@ -943,6 +1552,29 @@ index 5e2ecb9..3443ca3 100644
      finishTest();
    }
  }
+diff --git a/browser/devtools/webconsole/webconsole.js b/browser/devtools/webconsole/webconsole.js
+index cfdbdec..5ce56f7 100644
+--- a/browser/devtools/webconsole/webconsole.js
++++ b/browser/devtools/webconsole/webconsole.js
+@@ -2715,17 +2715,17 @@ WebConsoleFrame.prototype = {
+     }
+     locationNode.setAttribute("title", url);
+     locationNode.className = "message-location theme-link devtools-monospace";
+ 
+     // Make the location clickable.
+     let onClick = () => {
+       let target = locationNode.target;
+       if (target == "scratchpad" || isScratchpad) {
+-        this.owner.viewSourceInScratchpad(url);
++        this.owner.viewSourceInScratchpad(url, line);
+         return;
+       }
+ 
+       let category = locationNode.parentNode.category;
+       if (target == "styleeditor" || category == CATEGORY_CSS) {
+         this.owner.viewSourceInStyleEditor(fullURL, line);
+       }
+       else if (target == "jsdebugger" ||
 -- 
 2.2.1
 
