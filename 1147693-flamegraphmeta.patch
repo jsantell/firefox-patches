@@ -1,0 +1,234 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 9 Apr 2015 15:38:17 -0700
+Subject: Bug 1147693 - Should only show platform categories as
+ metanodes when hiding platform data in the flame graph in perf tool. r=vp
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 8dfe9b0..792dab8 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -46,16 +46,18 @@ devtools.lazyRequireGetter(this, "FrameNode",
+ devtools.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/shared/profiler/jit", true);
+ devtools.lazyRequireGetter(this, "OptionsView",
+   "devtools/shared/options-view", true);
+ devtools.lazyRequireGetter(this, "FlameGraphUtils",
+   "devtools/shared/widgets/FlameGraph", true);
+ devtools.lazyRequireGetter(this, "FlameGraph",
+   "devtools/shared/widgets/FlameGraph", true);
++devtools.lazyRequireGetter(this, "frameUtils",
++  "devtools/shared/profiler/frame-utils");
+ 
+ devtools.lazyImporter(this, "CanvasGraphUtils",
+   "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "SideMenuWidget",
+   "resource:///modules/devtools/SideMenuWidget.jsm");
+ devtools.lazyImporter(this, "PluralForm",
+   "resource://gre/modules/PluralForm.jsm");
+ 
+diff --git a/browser/devtools/performance/views/details-js-flamegraph.js b/browser/devtools/performance/views/details-js-flamegraph.js
+index 8c1a7dc..79e0522 100644
+--- a/browser/devtools/performance/views/details-js-flamegraph.js
++++ b/browser/devtools/performance/views/details-js-flamegraph.js
+@@ -56,17 +56,17 @@ let JsFlameGraphView = Heritage.extend(DetailsSubview, {
+     let recording = PerformanceController.getCurrentRecording();
+     let duration = recording.getDuration();
+     let profile = recording.getProfile();
+     let samples = profile.threads[0].samples;
+ 
+     let data = FlameGraphUtils.createFlameGraphDataFromSamples(samples, {
+       invertStack: PerformanceController.getOption("invert-flame-graph"),
+       flattenRecursion: PerformanceController.getOption("flatten-tree-recursion"),
+-      filterFrames: !PerformanceController.getOption("show-platform-data") && FrameNode.isContent,
++      filterFrames: !PerformanceController.getOption("show-platform-data") && frameUtils.filterPlatformData,
+       showIdleBlocks: PerformanceController.getOption("show-idle-blocks") && L10N.getStr("table.idle")
+     });
+ 
+     this.graph.setData({ data,
+       bounds: {
+         startTime: 0,
+         endTime: duration
+       },
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-03.js b/browser/devtools/shared/test/browser_flame-graph-utils-03.js
+index 3596ce6..5bcfc5a 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-03.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-03.js
+@@ -9,17 +9,17 @@ let {FrameNode} = devtools.require("devtools/shared/profiler/tree-model");
+ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+ function* performTest() {
+   let out = FlameGraphUtils.createFlameGraphDataFromSamples(TEST_DATA, {
+-    filterFrames: FrameNode.isContent
++    filterFrames: (frames) => frames.filter(FrameNode.isContent)
+   });
+ 
+   ok(out, "Some data was outputted properly");
+   is(out.length, 10, "The outputted length is correct.");
+ 
+   info("Got flame graph data:\n" + out.toSource() + "\n");
+ 
+   for (let i = 0; i < out.length; i++) {
+diff --git a/browser/devtools/shared/test/browser_flame-graph-utils-04.js b/browser/devtools/shared/test/browser_flame-graph-utils-04.js
+index 5f93b64..0bfe035 100644
+--- a/browser/devtools/shared/test/browser_flame-graph-utils-04.js
++++ b/browser/devtools/shared/test/browser_flame-graph-utils-04.js
+@@ -10,17 +10,17 @@ add_task(function*() {
+   yield promiseTab("about:blank");
+   yield performTest();
+   gBrowser.removeCurrentTab();
+ });
+ 
+ function* performTest() {
+   let out = FlameGraphUtils.createFlameGraphDataFromSamples(TEST_DATA, {
+     flattenRecursion: true,
+-    filterFrames: FrameNode.isContent,
++    filterFrames: (frames) => frames.filter(FrameNode.isContent),
+     showIdleBlocks: "\m/"
+   });
+ 
+   ok(out, "Some data was outputted properly");
+   is(out.length, 10, "The outputted length is correct.");
+ 
+   info("Got flame graph data:\n" + out.toSource() + "\n");
+ 
+diff --git a/browser/devtools/shared/widgets/FlameGraph.js b/browser/devtools/shared/widgets/FlameGraph.js
+index 6655c21..f76b580 100644
+--- a/browser/devtools/shared/widgets/FlameGraph.js
++++ b/browser/devtools/shared/widgets/FlameGraph.js
+@@ -5,16 +5,17 @@
+ 
+ const { ViewHelpers } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ const { AbstractCanvasGraph, GraphArea, GraphAreaDragger } = require("resource:///modules/devtools/Graphs.jsm");
+ const { Promise } = require("resource://gre/modules/Promise.jsm");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { getColor } = require("devtools/shared/theme");
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const FrameUtils = require("devtools/shared/profiler/frame-utils");
++const { CATEGORY_MAPPINGS, CATEGORY_OTHER } = require("devtools/shared/profiler/global");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ const GRAPH_SRC = "chrome://browser/content/devtools/graphs-frame.xhtml";
+ const L10N = new ViewHelpers.L10N();
+ 
+ const GRAPH_RESIZE_EVENTS_DRAIN = 100; // ms
+ 
+ const GRAPH_WHEEL_ZOOM_SENSITIVITY = 0.00035;
+@@ -966,17 +967,17 @@ let FlameGraphUtils = {
+    *        A list of { time, frames: [{ location }] } objects.
+    * @param object options [optional]
+    *        Additional options supported by this operation:
+    *          - invertStack: specifies if the frames array in every sample
+    *                         should be reversed
+    *          - flattenRecursion: specifies if identical consecutive frames
+    *                              should be omitted from the output
+    *          - filterFrames: predicate used for filtering all frames, passing
+-   *                          in each frame, its index and the sample array
++   *                          in a sample's array of frames.
+    *          - showIdleBlocks: adds "idle" blocks when no frames are available
+    *                            using the provided localized text
+    * @param array out [optional]
+    *        An output storage to reuse for storing the flame graph data.
+    * @return array
+    *         The flame graph data.
+    */
+   createFlameGraphDataFromSamples: function(samples, options = {}, out = []) {
+@@ -1007,47 +1008,53 @@ let FlameGraphUtils = {
+       if (options.flattenRecursion) {
+         frames = frames.filter(this._isConsecutiveDuplicate);
+       }
+ 
+       // Apply a provided filter function. This can be used, for example, to
+       // filter out platform frames if only content-related function calls
+       // should be taken into consideration.
+       if (options.filterFrames) {
+-        frames = frames.filter(options.filterFrames);
++        frames = options.filterFrames(frames);
+       }
+ 
+       // Invert the stack if preferred, reversing the frames array in place.
+       if (options.invertStack) {
+         frames.reverse();
+       }
+ 
+       // If no frames are available, add a pseudo "idle" block in between.
+       if (options.showIdleBlocks && frames.length == 0) {
+         frames = [{ location: options.showIdleBlocks || "", idle: true }];
+       }
+ 
+       for (let frame of frames) {
+         let { location } = frame;
+         let prevFrame = prevFrames[frameIndex];
+ 
++        // If frame is tagged with `isMetaCategory`, use its category
++        // type to categorize the frames rather than location.
++        // Use the category name instead of the number so we can get
++        // a good string hash via `this._getStringHash()`
++        let key = frame.isMetaCategory ? this._getCategoryName(frame.category) : location;
++
+         // Frames at the same location and the same depth will be reused.
+         // If there is a block already created, change its width.
+-        if (prevFrame && prevFrame.srcData.rawLocation == location) {
++        if (prevFrame && prevFrame.srcData.key === key) {
+           prevFrame.width = (time - prevFrame.srcData.startTime);
+         }
+         // Otherwise, create a new block for this frame at this depth,
+         // using a simple location based salt for picking a color.
+         else {
+-          let hash = this._getStringHash(location);
++          let hash = this._getStringHash(key);
+           let color = COLOR_PALLETTE[hash % PALLETTE_SIZE];
+           let bucket = buckets.get(color);
+ 
+           bucket.push(prevFrames[frameIndex] = {
+-            srcData: { startTime: prevTime, rawLocation: location },
++            srcData: { startTime: prevTime, rawLocation: location, key: key },
+             x: prevTime,
+             y: frameIndex * FLAME_GRAPH_BLOCK_HEIGHT,
+             width: time - prevTime,
+             height: FLAME_GRAPH_BLOCK_HEIGHT,
+             text: this._formatLabel(frame)
+           });
+         }
+ 
+@@ -1128,22 +1135,34 @@ let FlameGraphUtils = {
+    */
+   _formatLabel: function (frame) {
+     // If an idle block, just return the location which will just be "(idle)" text
+     // anyway.
+     if (frame.idle) {
+       return frame.location;
+     }
+ 
++    if (frame.isMetaCategory) {
++      return this._getCategoryName(frame.category);
++    }
++
+     let { functionName, fileName, line } = FrameUtils.parseLocation(frame);
+     let label = functionName;
+ 
+     if (fileName) {
+       label += ` (${fileName}${line != null ? (":" + line) : ""})`;
+     }
+ 
+     return label;
++  },
++
++  /**
++   * Takes the category number of a frame and returns a label
++   * for that category, like "Graphics" or "Gecko".
++   */
++  _getCategoryName: function (category) {
++    return (CATEGORY_MAPPINGS[category] || CATEGORY_MAPPINGS[CATEGORY_OTHER]).label || "";
+   }
+ };
+ 
+ exports.FlameGraph = FlameGraph;
+ exports.FlameGraphUtils = FlameGraphUtils;
+ exports.FLAME_GRAPH_BLOCK_HEIGHT = FLAME_GRAPH_BLOCK_HEIGHT;
+-- 
+2.2.1
+

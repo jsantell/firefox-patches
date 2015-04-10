@@ -1,0 +1,82 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 9 Apr 2015 16:58:10 -0700
+Subject: Bug 1152605 - Should not show host names for chrome URIs. r=vp
+
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-frame-node.js b/browser/devtools/performance/test/browser_profiler_tree-frame-node.js
+index 1ec578b..4cf5051 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-frame-node.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-frame-node.js
+@@ -173,10 +173,27 @@ function test() {
+     "The seventh frame node has the correct line.");
+   is(frame7.getInfo().column, null,
+     "The seventh frame node has the correct column.");
+   is(frame7.getInfo().categoryData.abbrev, "js",
+     "The seventh frame node has the correct category data.");
+   is(frame7.getInfo().isContent, false,
+     "The seventh frame node has the correct content flag.");
+ 
++  let frame8 = new FrameNode({
++    location: "chrome://browser/content/content.js",
++    line: 456,
++    column: 123
++  });
++
++  is(frame8.getInfo().hostName, null,
++    "The eighth frame node has the correct host name.");
++
++  let frame9 = new FrameNode({
++    location: "hello/<.world (resource://gre/foo.js:123:434)",
++    line: 456
++  });
++
++  is(frame9.getInfo().hostName, null,
++    "The ninth frame node has the correct host name.");
++
+   finish();
+ }
+diff --git a/browser/devtools/shared/profiler/frame-utils.js b/browser/devtools/shared/profiler/frame-utils.js
+index e2065ba..e3d3d3b 100644
+--- a/browser/devtools/shared/profiler/frame-utils.js
++++ b/browser/devtools/shared/profiler/frame-utils.js
+@@ -32,17 +32,17 @@ exports.parseLocation = function parseLocation (frame) {
+   let url = resource.split(" -> ").pop();
+   let uri = nsIURL(url);
+   let functionName, fileName, hostName;
+ 
+   // If the URI digged out from the `location` is valid, this is a JS frame.
+   if (uri) {
+     functionName = frame.location.substring(0, firstParenIndex - 1);
+     fileName = (uri.fileName + (uri.ref ? "#" + uri.ref : "")) || "/";
+-    hostName = url.indexOf("jar:") == 0 ? "" : uri.host;
++    hostName = getHost(url, uri.host);
+   } else {
+     functionName = frame.location;
+     url = null;
+   }
+ 
+   return {
+     functionName: functionName,
+     fileName: fileName,
+@@ -124,8 +124,19 @@ function nsIURL(url) {
+   try {
+     uri = Services.io.newURI(url, null, null).QueryInterface(Ci.nsIURL);
+   } catch(e) {
+     // The passed url string is invalid.
+   }
+   gNSURLStore.set(url, uri);
+   return uri;
+ }
++
++/**
++ * Takes a `host` string from an nsIURL instance and
++ * returns the same string, or null, if it's an invalid host.
++ */
++function getHost (url, hostName) {
++  if (CHROME_SCHEMES.find(e => url.indexOf(e) === 0)) {
++    return null;
++  }
++  return hostName;
++}
+-- 
+2.2.1
+
