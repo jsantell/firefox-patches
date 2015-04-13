@@ -3,47 +3,8 @@ Date: Tue, 24 Feb 2015 17:16:17 -0800
 Subject: Bug 1149634 - Modularize the components of Netmonitor into
  several views and modules. r=vp
 
----
- browser/devtools/jar.mn                            |    5 +
- .../netmonitor/modules/request-collection.js       |  357 +++
- .../devtools/netmonitor/modules/request-model.js   |  183 ++
- .../netmonitor/modules/summary-renderer.js         |   73 +
- .../devtools/netmonitor/modules/table-renderer.js  |  707 +++++
- browser/devtools/netmonitor/modules/types.js       |  130 +
- browser/devtools/netmonitor/modules/utils.js       |  318 ++
- browser/devtools/netmonitor/moz.build              |    6 +
- .../devtools/netmonitor/netmonitor-controller.js   |   77 +-
- browser/devtools/netmonitor/netmonitor-view.js     | 3151 +-------------------
- browser/devtools/netmonitor/netmonitor.xul         |    9 +-
- .../netmonitor/test/browser_net_footer-summary.js  |    8 +-
- .../netmonitor/test/browser_net_icon-preview.js    |    4 +-
- .../test/browser_net_simple-request-data.js        |  467 +--
- .../netmonitor/test/browser_net_sort-01.js         |    4 +-
- .../netmonitor/test/browser_net_sort-02.js         |    4 +-
- .../netmonitor/test/browser_net_sort-03.js         |    4 +-
- .../netmonitor/test/browser_net_statistics-01.js   |   10 +-
- .../netmonitor/test/browser_net_timing-division.js |    8 +-
- browser/devtools/netmonitor/test/head.js           |   23 +-
- .../netmonitor/views/custom-request-view.js        |  191 ++
- browser/devtools/netmonitor/views/details-view.js  |  848 ++++++
- .../netmonitor/views/request-context-view.js       |  105 +
- browser/devtools/netmonitor/views/requests-view.js |  343 +++
- browser/devtools/netmonitor/views/sidebar-view.js  |  155 +
- 25 files changed, 3871 insertions(+), 3319 deletions(-)
- create mode 100644 browser/devtools/netmonitor/modules/request-collection.js
- create mode 100644 browser/devtools/netmonitor/modules/request-model.js
- create mode 100644 browser/devtools/netmonitor/modules/summary-renderer.js
- create mode 100644 browser/devtools/netmonitor/modules/table-renderer.js
- create mode 100644 browser/devtools/netmonitor/modules/types.js
- create mode 100644 browser/devtools/netmonitor/modules/utils.js
- create mode 100644 browser/devtools/netmonitor/views/custom-request-view.js
- create mode 100644 browser/devtools/netmonitor/views/details-view.js
- create mode 100644 browser/devtools/netmonitor/views/request-context-view.js
- create mode 100644 browser/devtools/netmonitor/views/requests-view.js
- create mode 100644 browser/devtools/netmonitor/views/sidebar-view.js
-
 diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
-index 53c4d11..35037ac 100644
+index 9436334..f497982 100644
 --- a/browser/devtools/jar.mn
 +++ b/browser/devtools/jar.mn
 @@ -11,16 +11,21 @@ browser.jar:
@@ -70,10 +31,10 @@ index 53c4d11..35037ac 100644
      content/browser/devtools/frame-script-utils.js                     (shared/frame-script-utils.js)
 diff --git a/browser/devtools/netmonitor/modules/request-collection.js b/browser/devtools/netmonitor/modules/request-collection.js
 new file mode 100644
-index 0000000..4bb0d5e
+index 0000000..1fd3093
 --- /dev/null
 +++ b/browser/devtools/netmonitor/modules/request-collection.js
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,377 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -201,6 +162,15 @@ index 0000000..4bb0d5e
 +  },
 +
 +  /**
++   * Set a text filter for all requests, matching requests whose URL contains the query.
++   */
++  setURLFilter: function (query) {
++    this._urlFilter = query;
++    this._invalidateFilterCache();
++    this.emit("filtered");
++  },
++
++  /**
 +   * Overwrite all other filters and set filters only
 +   * described in `filters`. See @addFilter for filter options. Takes
 +   * a string or an array.
@@ -295,7 +265,10 @@ index 0000000..4bb0d5e
 +      return this._cachedFilterPredicate;
 +    }
 +
-+    return this._cachedFilterPredicate = (model) => this._filters.some(filterName => FILTERS[filterName](model));
++    return this._cachedFilterPredicate = (model) => {
++      return model.matchesQuery(this._urlFilter) &&
++             this._filters.some(filterName => FILTERS[filterName](model));
++    };
 +  },
 +
 +  _invalidateFilterCache: function () {
@@ -389,6 +362,14 @@ index 0000000..4bb0d5e
 +  },
 +
 +  /**
++   * Retrieve a model from the collection via an `index`. Ordered by creation time,
++   * and does not consider filtered views.
++   */
++  at: function (index) {
++    return this.models[index];
++  },
++
++  /**
 +   * Takes a hash. Return the first object in the
 +   * collection that matches the values in the hash.
 +   * From Backbone.Collection#findWhere
@@ -433,10 +414,10 @@ index 0000000..4bb0d5e
 +});
 diff --git a/browser/devtools/netmonitor/modules/request-model.js b/browser/devtools/netmonitor/modules/request-model.js
 new file mode 100644
-index 0000000..b1f3b2f
+index 0000000..cfdff87
 --- /dev/null
 +++ b/browser/devtools/netmonitor/modules/request-model.js
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,193 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -481,6 +462,7 @@ index 0000000..b1f3b2f
 +  totalTime: null,
 +  eventTimings: null,
 +  isCustom: null,
++  cloned: null,
 +
 +  /**
 +   * Creates a new Request instance.
@@ -493,13 +475,14 @@ index 0000000..b1f3b2f
 +   * - @param boolean isXhr
 +   * - @param number startedMillis
 +   */
-+  initialize: function ({ gNetwork, id, method, url, isXHR, startedMillis }) {
++  initialize: function ({ gNetwork, id, method, url, isXHR, startedMillis, cloned }) {
 +    this.gNetwork = gNetwork;
 +    this.id = id;
 +    this.url = url;
 +    this.method = method;
 +    this.isXHR = isXHR;
 +    this.startedMillis = startedMillis;
++    this.cloned = !!cloned;
 +  },
 +
 +  /**
@@ -601,8 +584,15 @@ index 0000000..b1f3b2f
 +    let { mimeType, text, encoding } = this.responseContent.content;
 +
 +    let decoded = yield this.gNetwork.getString(text);
-+    return "data:" + mimeType + ";" + encoding + "," + decoded;
++    return `data:${mimeType};${encoding},${decoded}`;
 +  }),
++
++  /**
++   * Used to see if passed in string matches the request's URL.
++   */
++  matchesQuery: function (query) {
++    return !query || this.url.contains(query);
++  },
 +
 +  /**
 +   * Clone the selected request model.
@@ -614,7 +604,8 @@ index 0000000..b1f3b2f
 +      url: this.url,
 +      isXHR: this.isXHR,
 +      id: this.id,
-+      startedMillis: this.startedMillis
++      startedMillis: this.startedMillis,
++      cloned: true
 +    });
 +    CLONE_PROPERTIES.forEach(prop => clone[prop] = this[prop]);
 +    return clone;
@@ -701,10 +692,10 @@ index 0000000..6409088
 +});
 diff --git a/browser/devtools/netmonitor/modules/table-renderer.js b/browser/devtools/netmonitor/modules/table-renderer.js
 new file mode 100644
-index 0000000..8ba3007
+index 0000000..30c7998
 --- /dev/null
 +++ b/browser/devtools/netmonitor/modules/table-renderer.js
-@@ -0,0 +1,707 @@
+@@ -0,0 +1,733 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -752,16 +743,21 @@ index 0000000..8ba3007
 + * Exposed API
 + * To refactor this renderer, or replace with something else, the following methods and events
 + * must be implemented.
++ * Many of these methods are remenants of using ViewHelper widgets, and can probably be removed if
++ * tests are updated to just use the request model.
 + *
++ * destroy() - May return a promise upon destruction complete. Must be sure to handle that after calling
++ * destroy, no further action should come from here (drawing to canvas, etc)
 + * refreshWaterfall(boolean) - Called from main view when timing data or a resize has occurred. Debounced here.
 + * selectFirstRequest() - Selects the first visible request.
 + * unselectRequest() - Unselects a request.
 + * selectRequest(id) - Selects a request by ID.
++ * selectRequestByIndex(i) - Selects a request by index.
++ * getSelectedIndex() - Returns the currently selected index.
++ * getSelected() - Returns the currently selected request (NOT the widget "item", but the attachment)
 + *
 + * Events:
 + * - 'select' Emits the selected model.
-+ *
-+ *
 + */
 +const TableRenderer = exports.TableRenderer = Class({
 +  implements: [WidgetMethods, EventTarget],
@@ -817,18 +813,17 @@ index 0000000..8ba3007
 +   * Destruction function, called when the network monitor is closed.
 +   */
 +  destroy: function() {
-+    dumpn("Destroying the SourcesView");
-+
-+    requests.off("add", this._onRequestAdd);
-+    requests.off("change", this._onRequestUpdate);
-+    requests.off("sort", this._onRequestSort);
-+    requests.off("filtered", this._onRequestFilter);
-+    requests.off("reset", this._onRequestReset);
++    this.requests.off("add", this._onRequestAdd);
++    this.requests.off("change", this._onRequestUpdate);
++    this.requests.off("sort", this._onRequestSort);
++    this.requests.off("filtered", this._onRequestFilter);
++    this.requests.off("reset", this._onRequestReset);
 +    this.widget.removeEventListener("select", this._onSelect, false);
 +  },
 +
 +  /**
-+   * Specifies if this view may be updated lazily.
++   * Specifies if this view may be updated lazily. Should be controlled via
++   * parent RequestsMenu.
 +   */
 +  lazyUpdate: true,
 +
@@ -878,6 +873,20 @@ index 0000000..8ba3007
 +  },
 +
 +  /**
++   * Returns the currently selected index.
++   */
++  getSelectedIndex: function () {
++    return this.selectedIndex;
++  },
++
++  /**
++   * Returns the currently selected request model.
++   */
++  getSelected: function () {
++    return this.selectedItem && this.selectedItem.attachment;
++  },
++
++  /**
 +   * Selects the first visible request.
 +   */
 +  selectFirstRequest: function () {
@@ -896,6 +905,13 @@ index 0000000..8ba3007
 +   */
 +  selectRequest: function (id) {
 +    this.selectedValue = id;
++  },
++
++  /**
++   * Selects a request by index.
++   */
++  selectRequestByIndex: function (i) {
++    this.selectedIndex = i;
 +  },
 +
 +  /**
@@ -958,7 +974,7 @@ index 0000000..8ba3007
 +    }
 +
 +    // We're done flushing all the requests, clear the update queue.
-+    this._updateQueue = [];
++    this._updateQueue.length = 0;
 +
 +    // Make sure all the requests are sorted and filtered.
 +    // Freshly added requests may not yet contain all the information required
@@ -1338,7 +1354,7 @@ index 0000000..8ba3007
 +      for (let i = 1; i <= REQUESTS_WATERFALL_BACKGROUND_TICKS_SCALES; i++) {
 +        let increment = scaledStep * Math.pow(2, i);
 +        for (let x = 0; x < canvasWidth; x += increment) {
-+          let position = (this.document.defaultView.isRTL ? canvasWidth - x : x) | 0;
++          let position = (this.window.isRTL ? canvasWidth - x : x) | 0;
 +          view32bit[position] = (alphaComponent << 24) | (b << 16) | (g << 8) | r;
 +        }
 +        alphaComponent += REQUESTS_WATERFALL_BACKGROUND_TICKS_OPACITY_ADD;
@@ -1355,6 +1371,7 @@ index 0000000..8ba3007
 +   * The selection listener for this container.
 +   */
 +  _onSelect: function({ detail: item }) {
++    console.log("ON SELECT", item);
 +    emit(this, "select", item ? item.attachment : null);
 +  },
 +
@@ -1894,7 +1911,7 @@ index addaa6f..615a22f 100644
  
  BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
 diff --git a/browser/devtools/netmonitor/netmonitor-controller.js b/browser/devtools/netmonitor/netmonitor-controller.js
-index 7619280..d7e7350 100644
+index 7619280..771bad4 100644
 --- a/browser/devtools/netmonitor/netmonitor-controller.js
 +++ b/browser/devtools/netmonitor/netmonitor-controller.js
 @@ -66,25 +66,31 @@ const EVENTS = {
@@ -1963,25 +1980,28 @@ index 7619280..d7e7350 100644
  
  XPCOMUtils.defineLazyModuleGetter(this, "DevToolsUtils",
    "resource://gre/modules/devtools/DevToolsUtils.jsm");
-@@ -163,34 +166,42 @@ let NetMonitorController = {
+@@ -158,46 +161,45 @@ Object.defineProperty(this, "NetworkHelper", {
+  */
+ let NetMonitorController = {
+   /**
+    * Initializes the view.
+    *
     * @return object
     *         A promise that is resolved when the monitor finishes startup.
     */
-   startupNetMonitor: function() {
+-  startupNetMonitor: function() {
++  startupNetMonitor: Task.async(function*() {
      if (this._startup) {
        return this._startup;
      }
  
 -    NetMonitorView.initialize();
- 
-     // Startup is synchronous, for now.
-+    NetMonitorView.initialize();
-+    NetMonitorView.RequestsMenu.initialize();
-+    NetMonitorView.Sidebar.initialize();
-+    NetMonitorView.NetworkDetails.initialize();
-+
+-
+-    // Startup is synchronous, for now.
++    yield NetMonitorView.initialize();
      return this._startup = promise.resolve();
-   },
+-  },
++  }),
  
    /**
     * Destroys the view and disconnects the monitor client from the server.
@@ -1989,25 +2009,32 @@ index 7619280..d7e7350 100644
     * @return object
     *         A promise that is resolved when the monitor finishes shutdown.
     */
-   shutdownNetMonitor: function() {
+-  shutdownNetMonitor: function() {
++  shutdownNetMonitor: Task.async(function*() {
      if (this._shutdown) {
        return this._shutdown;
      }
  
+-    NetMonitorView.destroy();
 +    RequestCollection.disable();
-     NetMonitorView.destroy();
-+    NetMonitorView.RequestsMenu.destroy();
-+    NetMonitorView.Sidebar.destroy();
-+    NetMonitorView.NetworkDetails.destroy();
++    yield NetMonitorView.destroy();
      this.TargetEventsHandler.disconnect();
      this.NetworkEventsHandler.disconnect();
      this.disconnect();
  
      // Shutdown is synchronous, for now.
      return this._shutdown = promise.resolve();
-   },
+-  },
++  }),
  
-@@ -239,16 +250,23 @@ let NetMonitorController = {
+   /**
+    * Initiates remote or chrome network monitoring based on the current target,
+    * wiring event handlers as necessary.
+    *
+    * @return object
+    *         A promise that is resolved when the monitor finishes connecting.
+    */
+@@ -239,16 +241,23 @@ let NetMonitorController = {
     * Checks whether the netmonitor connection is active.
     * @return boolean
     */
@@ -2031,7 +2058,7 @@ index 7619280..d7e7350 100644
     *        The remote protocol grip of the tab.
     * @param function aCallback
     *        A function to invoke once the client attached to the console client.
-@@ -473,18 +491,17 @@ TargetEventsHandler.prototype = {
+@@ -473,18 +482,17 @@ TargetEventsHandler.prototype = {
     * @param object aPacket
     *        Packet received from the server.
     */
@@ -2051,7 +2078,7 @@ index 7619280..d7e7350 100644
  
          window.emit(EVENTS.TARGET_WILL_NAVIGATE);
          break;
-@@ -554,31 +571,36 @@ NetworkEventsHandler.prototype = {
+@@ -554,31 +562,35 @@ NetworkEventsHandler.prototype = {
     */
    _onNetworkEvent: function(aType, aPacket) {
      if (aPacket.from != this.webConsoleClient.actor) {
@@ -2061,9 +2088,8 @@ index 7619280..d7e7350 100644
  
      let { actor, startedDateTime, method, url, isXHR } = aPacket.eventActor;
 -    NetMonitorView.RequestsMenu.addRequest(actor, startedDateTime, method, url, isXHR);
-+    console.log("NETWORKVENT", actor);
-+
 +    let unixTime = Date.parse(startedDateTime);
++
 +    RequestCollection.add({
 +      gNetwork, isXHR, url, method, id: actor, startedMillis: unixTime
 +    });
@@ -2090,7 +2116,7 @@ index 7619280..d7e7350 100644
        case "requestHeaders":
          this.webConsoleClient.getRequestHeaders(actor, this._onRequestHeaders);
          window.emit(EVENTS.UPDATING_REQUEST_HEADERS, actor);
-@@ -587,160 +609,160 @@ NetworkEventsHandler.prototype = {
+@@ -587,160 +599,160 @@ NetworkEventsHandler.prototype = {
          this.webConsoleClient.getRequestCookies(actor, this._onRequestCookies);
          window.emit(EVENTS.UPDATING_REQUEST_COOKIES, actor);
          break;
@@ -2263,7 +2289,26 @@ index 7619280..d7e7350 100644
    /**
     * Fetches the full text of a LongString.
     *
-@@ -863,8 +885,15 @@ const WDA_DEFAULT_GIVE_UP_TIMEOUT = 2000; // ms
+@@ -771,17 +783,17 @@ NetworkEventsHandler.prototype = {
+         Cu.reportError(aResponse.error + ": " + aResponse.message);
+         deferred.reject(aResponse);
+         return;
+       }
+       deferred.resolve(initial + aResponse.substring);
+     });
+ 
+     return deferred.promise;
+-  }
++  },
+ };
+ 
+ /**
+  * Localization convenience methods.
+  */
+ let L10N = new ViewHelpers.L10N(NET_STRINGS_URI);
+ let PKI_L10N = new ViewHelpers.L10N(PKI_STRINGS_URI);
+ 
+@@ -863,8 +875,15 @@ const WDA_DEFAULT_GIVE_UP_TIMEOUT = 2000; // ms
   */
  function dumpn(str) {
    if (wantLogging) {
@@ -2280,10 +2325,10 @@ index 7619280..d7e7350 100644
 +function $$(aSelector, aTarget = document) aTarget.querySelectorAll(aSelector);
 +
 diff --git a/browser/devtools/netmonitor/netmonitor-view.js b/browser/devtools/netmonitor/netmonitor-view.js
-index 957e9b5..c39c82c 100644
+index 996782c..04211d1 100644
 --- a/browser/devtools/netmonitor/netmonitor-view.js
 +++ b/browser/devtools/netmonitor/netmonitor-view.js
-@@ -1,182 +1,97 @@
+@@ -1,183 +1,108 @@
  /* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
  /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
  /* This Source Code Form is subject to the terms of the Mozilla Public
@@ -2346,6 +2391,7 @@ index 957e9b5..c39c82c 100644
 -  eval: () => {}
 -};
  const NETWORK_ANALYSIS_PIE_CHART_DIAMETER = 200; // px
+-const FREETEXT_FILTER_SEARCH_DELAY = 200; // ms
  
  /**
   * Object defining the network monitor view components.
@@ -2354,8 +2400,8 @@ index 957e9b5..c39c82c 100644
    /**
     * Initializes the network monitor view.
     */
-   initialize: function() {
--    this._initializePanes();
+-  initialize: function() {
++  initialize: Task.async(function*() {
 +    this._body = $("#body");
 +    this.clearButton = $("#requests-menu-clear-button");
 +    this.reloadButton = $("#requests-menu-reload-notice-button");
@@ -2363,32 +2409,46 @@ index 957e9b5..c39c82c 100644
 +    this._onClear = this._onClear.bind(this);
 +    this._onConnect = this._onConnect.bind(this);
 +    this.reloadPage = this.reloadPage.bind(this);
++
++    this.clearButton.addEventListener("click", this._onClear, false);
+     this._initializePanes();
++    window.once(EVENTS.CONNECTED, this._onConnect);
  
 -    this.Toolbar.initialize();
 -    this.RequestsMenu.initialize();
 -    this.NetworkDetails.initialize();
 -    this.CustomRequest.initialize();
-+    this.clearButton.addEventListener("click", this._onClear, false);
-+    this._initializePanes();
-+    window.once(EVENTS.CONNECTED, this._onConnect);
-   },
+-  },
++    if (NetMonitorController.supportsCustomRequest) {
++      yield NetMonitorView.CustomRequest.destroy();
++    }
++
++    yield NetMonitorView.RequestsMenu.initialize();
++    yield NetMonitorView.Sidebar.initialize();
++  }),
  
    /**
     * Destroys the network monitor view.
     */
-   destroy: function() {
+-  destroy: function() {
 -    this.Toolbar.destroy();
 -    this.RequestsMenu.destroy();
 -    this.NetworkDetails.destroy();
 -    this.CustomRequest.destroy();
--
++  destroy: Task.async(function*() {
 +    this.clearButton.removeEventListener("click", this._onClear, false);
 +    this.reloadButton.removeEventListener("command", this.reloadPage, false);
-     this._destroyPanes();
++    yield this._destroyPanes();
+ 
+-    this._destroyPanes();
+-  },
 +    if (NetMonitorController.supportsCustomRequest) {
-+      NetMonitorView.CustomRequest.destroy();
++      yield NetMonitorView.CustomRequest.destroy();
 +    }
-   },
++
++    yield NetMonitorView.RequestsMenu.destroy();
++    yield NetMonitorView.Sidebar.destroy();
++  }),
  
    /**
     * Initializes the UI for all the displayed panes.
@@ -2491,7 +2551,7 @@ index 957e9b5..c39c82c 100644
     */
    get currentFrontendMode() {
      return this._body.selectedPanel.id;
-@@ -193,17 +108,17 @@ let NetMonitorView = {
+@@ -194,17 +119,17 @@ let NetMonitorView = {
      }
    },
  
@@ -2510,7 +2570,7 @@ index 957e9b5..c39c82c 100644
    showNetworkStatisticsView: function() {
      this._body.selectedPanel = $("#network-statistics-view");
  
-@@ -216,26 +131,26 @@ let NetMonitorView = {
+@@ -217,26 +142,26 @@ let NetMonitorView = {
        yield controller.triggerActivity(ACTIVITY_TYPE.RELOAD.WITH_CACHE_ENABLED);
  
        try {
@@ -2540,7 +2600,7 @@ index 957e9b5..c39c82c 100644
    },
  
    /**
-@@ -260,2973 +175,137 @@ let NetMonitorView = {
+@@ -261,3008 +186,138 @@ let NetMonitorView = {
      // in the ether of a resolved promise's value.
      let editor = new Editor(DEFAULT_EDITOR_CONFIG);
      editor.appendTo($(aId)).then(() => deferred.resolve(editor));
@@ -2635,6 +2695,7 @@ index 957e9b5..c39c82c 100644
 -    this._splitter = $("#network-inspector-view-splitter");
 -    this._summary = $("#requests-menu-network-summary-label");
 -    this._summary.setAttribute("value", L10N.getStr("networkMenu.empty"));
+-    this.userInputTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
 -
 -    Prefs.filters.forEach(type => this.filterOn(type));
 -    this.sortContents(this._byTiming);
@@ -2664,6 +2725,13 @@ index 957e9b5..c39c82c 100644
 -    this.closeCustomRequestEvent = this.closeCustomRequest.bind(this);
 -    this.cloneSelectedRequestEvent = this.cloneSelectedRequest.bind(this);
 -    this.toggleRawHeadersEvent = this.toggleRawHeaders.bind(this);
+-
+-    this.requestsFreetextFilterEvent = this.requestsFreetextFilterEvent.bind(this);
+-    this.reFilterRequests = this.reFilterRequests.bind(this);
+-
+-    this.freetextFilterBox = $("#requests-menu-filter-freetext-text");
+-    this.freetextFilterBox.addEventListener("input", this.requestsFreetextFilterEvent, false);
+-    this.freetextFilterBox.addEventListener("command", this.requestsFreetextFilterEvent, false);
 -
 -    $("#toolbar-labels").addEventListener("click", this.requestsMenuSortEvent, false);
 -    $("#requests-menu-footer").addEventListener("click", this.requestsMenuFilterEvent, false);
@@ -2725,6 +2793,9 @@ index 957e9b5..c39c82c 100644
 -    $("#toolbar-labels").removeEventListener("click", this.requestsMenuSortEvent, false);
 -    $("#requests-menu-footer").removeEventListener("click", this.requestsMenuFilterEvent, false);
 -    $("#requests-menu-clear-button").removeEventListener("click", this.reqeustsMenuClearEvent, false);
+-    this.freetextFilterBox.removeEventListener("input", this.requestsFreetextFilterEvent, false);
+-    this.freetextFilterBox.removeEventListener("command", this.requestsFreetextFilterEvent, false);
+-    this.userInputTimer.cancel();
 -    $("#network-request-popup").removeEventListener("popupshowing", this._onContextShowing, false);
 -    $("#request-menu-context-newtab").removeEventListener("command", this._onContextNewTabCommand, false);
 -    $("#request-menu-context-copy-url").removeEventListener("command", this._onContextCopyUrlCommand, false);
@@ -3000,35 +3071,18 @@ index 957e9b5..c39c82c 100644
 +      return L10N.getFormatStr("charts.totalS", string);
      }
    },
--
+ 
 -  /**
--   * Filters all network requests in this container by a specified type.
--   *
--   * @param string aType
--   *        Either "all", "html", "css", "js", "xhr", "fonts", "images", "media"
--   *        "flash" or "other".
+-   * Handles the timeout on the freetext filter textbox
 -   */
--  filterOn: function(aType = "all") {
--    if (aType === "all") {
--      // The filter "all" is special as it doesn't toggle.
--      // - If some filters are selected and 'all' is clicked, the previously
--      //   selected filters will be disabled and 'all' is the only active one.
--      // - If 'all' is already selected, do nothing.
--      if (this._activeFilters.indexOf("all") !== -1) {
--        return;
--      }
+-  requestsFreetextFilterEvent: function() {
+-    this.userInputTimer.cancel();
+-    this._currentFreetextFilter = this.freetextFilterBox.value || "";
 -
--      // Uncheck all other filters and select 'all'. Must create a copy as
--      // _disableFilter removes the filters from the list while it's being
--      // iterated. 'all' will be enabled automatically by _disableFilter once
--      // the last filter is disabled.
--      this._activeFilters.slice().forEach(this._disableFilter, this);
--    }
--    else if (this._activeFilters.indexOf(aType) === -1) {
--      this._enableFilter(aType);
--    }
--    else {
--      this._disableFilter(aType);
+-    if (this._currentFreetextFilter.length === 0) {
+-      this.freetextFilterBox.removeAttribute("filled");
+-    } else {
+-      this.freetextFilterBox.setAttribute("filled", true);
 +  _commonChartTotals: {
 +    size: total => {
 +      let string = L10N.numberWithDecimals(total / 1024, CONTENT_SIZE_DECIMALS);
@@ -3046,25 +3100,20 @@ index 957e9b5..c39c82c 100644
 +      return L10N.getFormatStr("charts.totalCount", total);
      }
 -
--    this.filterContents(this._filterPredicate);
--    this.refreshSummary();
--    this.refreshZebra();
+-    this.userInputTimer.initWithCallback(this.reFilterRequests, FREETEXT_FILTER_SEARCH_DELAY, Ci.nsITimer.TYPE_ONE_SHOT);
 -  },
 -
 -  /**
--   * Same as `filterOn`, except that it only allows a single type exclusively.
--   *
--   * @param string aType
--   *        @see RequestsMenuView.prototype.fitlerOn
+-   * Refreshes the view contents with the newly selected filters
 -   */
--  filterOnlyOn: function(aType = "all") {
--    this._activeFilters.slice().forEach(this._disableFilter, this);
--    this.filterOn(aType);
+-  reFilterRequests: function() {
+-    this.filterContents(this._filterPredicate);
+-    this.refreshSummary();
+-    this.refreshZebra();
    },
  
    /**
--   * Disables the given filter, its button and toggles 'all' on if the filter to
--   * be disabled is the last one active.
+-   * Filters all network requests in this container by a specified type.
 +   * Adds a specific chart to this container.
     *
 -   * @param string aType
@@ -3075,6 +3124,65 @@ index 957e9b5..c39c82c 100644
 +   *          - id: either "#primed-cache-chart" or "#empty-cache-chart"
 +   *          - title/data/strings/totals/sorted: @see Chart.jsm for details
     */
+-  filterOn: function(aType = "all") {
+-    if (aType === "all") {
+-      // The filter "all" is special as it doesn't toggle.
+-      // - If some filters are selected and 'all' is clicked, the previously
+-      //   selected filters will be disabled and 'all' is the only active one.
+-      // - If 'all' is already selected, do nothing.
+-      if (this._activeFilters.indexOf("all") !== -1) {
+-        return;
+-      }
++  _createChart: function({ id, title, data, strings, totals, sorted }) {
++    let container = $(id);
+ 
+-      // Uncheck all other filters and select 'all'. Must create a copy as
+-      // _disableFilter removes the filters from the list while it's being
+-      // iterated. 'all' will be enabled automatically by _disableFilter once
+-      // the last filter is disabled.
+-      this._activeFilters.slice().forEach(this._disableFilter, this);
+-    }
+-    else if (this._activeFilters.indexOf(aType) === -1) {
+-      this._enableFilter(aType);
+-    }
+-    else {
+-      this._disableFilter(aType);
++    // Nuke all existing charts of the specified type.
++    while (container.hasChildNodes()) {
++      container.firstChild.remove();
+     }
+ 
+-    this.reFilterRequests();
+-  },
++    // Create a new chart.
++    let chart = Chart.PieTable(document, {
++      diameter: NETWORK_ANALYSIS_PIE_CHART_DIAMETER,
++      title: L10N.getStr(title),
++      data: data,
++      strings: strings,
++      totals: totals,
++      sorted: sorted
++    });
+ 
+-  /**
+-   * Same as `filterOn`, except that it only allows a single type exclusively.
+-   *
+-   * @param string aType
+-   *        @see RequestsMenuView.prototype.fitlerOn
+-   */
+-  filterOnlyOn: function(aType = "all") {
+-    this._activeFilters.slice().forEach(this._disableFilter, this);
+-    this.filterOn(aType);
+-  },
+-
+-  /**
+-   * Disables the given filter, its button and toggles 'all' on if the filter to
+-   * be disabled is the last one active.
+-   *
+-   * @param string aType
+-   *        Either "all", "html", "css", "js", "xhr", "fonts", "images", "media"
+-   *        "flash" or "other".
+-   */
 -  _disableFilter: function (aType) {
 -    // Remove the filter from list of active filters.
 -    this._activeFilters.splice(this._activeFilters.indexOf(aType), 1);
@@ -3088,9 +3196,7 @@ index 957e9b5..c39c82c 100644
 -      this._enableFilter("all");
 -    }
 -  },
-+  _createChart: function({ id, title, data, strings, totals, sorted }) {
-+    let container = $(id);
- 
+-
 -  /**
 -   * Enables the given filter, its button and toggles 'all' off if the filter to
 -   * be enabled is the first one active.
@@ -3103,27 +3209,15 @@ index 957e9b5..c39c82c 100644
 -    // Make sure this is a valid filter type.
 -    if (Object.keys(this._allFilterPredicates).indexOf(aType) == -1) {
 -      return;
-+    // Nuke all existing charts of the specified type.
-+    while (container.hasChildNodes()) {
-+      container.firstChild.remove();
-     }
- 
+-    }
+-
 -    // Add the filter to the list of active filters.
 -    this._activeFilters.push(aType);
 -
 -    // Add the checked status to the filter button.
 -    let target = $("#requests-menu-filter-" + aType + "-button");
 -    target.setAttribute("checked", true);
-+    // Create a new chart.
-+    let chart = Chart.PieTable(document, {
-+      diameter: NETWORK_ANALYSIS_PIE_CHART_DIAMETER,
-+      title: L10N.getStr(title),
-+      data: data,
-+      strings: strings,
-+      totals: totals,
-+      sorted: sorted
-+    });
- 
+-
 -    // Check if 'all' was selected before. If so, disable it.
 -    if (aType !== "all" && this._activeFilters.indexOf("all") !== -1) {
 -      this._disableFilter("all");
@@ -3136,18 +3230,14 @@ index 957e9b5..c39c82c 100644
 -   */
 -  get _filterPredicate() {
 -    let filterPredicates = this._allFilterPredicates;
+-    let currentFreetextFilter = this._currentFreetextFilter;
 -
--     if (this._activeFilters.length === 1) {
--       // The simplest case: only one filter active.
--       return filterPredicates[this._activeFilters[0]].bind(this);
--     } else {
--       // Multiple filters active.
--       return requestItem => {
--         return this._activeFilters.some(filterName => {
--           return filterPredicates[filterName].call(this, requestItem);
--         });
--       };
--     }
+-    return requestItem => {
+-      return this._activeFilters.some(filterName => {
+-        return filterPredicates[filterName].call(this, requestItem) &&
+-                filterPredicates["freetext"].call(this, requestItem, currentFreetextFilter);
+-      });
+-    };
 -  },
 -
 -  /**
@@ -3163,7 +3253,8 @@ index 957e9b5..c39c82c 100644
 -    images: this.isImage,
 -    media: this.isMedia,
 -    flash: this.isFlash,
--    other: this.isOther
+-    other: this.isOther,
+-    freetext: this.isFreetextMatch
 -  }),
 -
 -  /**
@@ -3321,6 +3412,9 @@ index 957e9b5..c39c82c 100644
 -  isOther: function(e)
 -    !this.isHtml(e) && !this.isCss(e) && !this.isJs(e) && !this.isXHR(e) &&
 -    !this.isFont(e) && !this.isImage(e) && !this.isMedia(e) && !this.isFlash(e),
+-
+-  isFreetextMatch: function({ attachment: { url } }, text) //no text is a positive match
+-    !text || url.contains(text),
 -
 -  /**
 -   * Predicates used when sorting items.
@@ -4230,7 +4324,8 @@ index 957e9b5..c39c82c 100644
 -  _updateQueue: [],
 -  _updateTimeout: null,
 -  _resizeTimeout: null,
--  _activeFilters: ["all"]
+-  _activeFilters: ["all"],
+-  _currentFreetextFilter: ""
 -});
 -
 -/**
@@ -5601,7 +5696,7 @@ index 957e9b5..c39c82c 100644
 -NetMonitorView.NetworkDetails = new NetworkDetailsView();
  NetMonitorView.PerformanceStatistics = new PerformanceStatisticsView();
 diff --git a/browser/devtools/netmonitor/netmonitor.xul b/browser/devtools/netmonitor/netmonitor.xul
-index a2353e4..6698090 100644
+index b3403a7..0252ff3 100644
 --- a/browser/devtools/netmonitor/netmonitor.xul
 +++ b/browser/devtools/netmonitor/netmonitor.xul
 @@ -17,28 +17,32 @@
@@ -5639,7 +5734,7 @@ index a2353e4..6698090 100644
                  accesskey="&netmonitorUI.summary.editAndResend.accesskey;"/>
        <menuseparator id="request-menu-context-separator"/>
        <menuitem id="request-menu-context-perf"
-@@ -331,16 +335,17 @@
+@@ -343,16 +347,17 @@
                             value="&netmonitorUI.summary.status;"/>
                      <box id="headers-summary-status-circle"
                           class="requests-menu-status"/>
@@ -5657,6 +5752,449 @@ index a2353e4..6698090 100644
                    </hbox>
                    <hbox id="headers-summary-version"
                          class="tabpanel-summary-container"
+diff --git a/browser/devtools/netmonitor/test/browser_net_accessibility-01.js b/browser/devtools/netmonitor/test/browser_net_accessibility-01.js
+index 39a210d..dd29a70 100644
+--- a/browser/devtools/netmonitor/test/browser_net_accessibility-01.js
++++ b/browser/devtools/netmonitor/test/browser_net_accessibility-01.js
+@@ -8,76 +8,76 @@
+ function test() {
+   initNetMonitor(CUSTOM_GET_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     // It seems that this test may be slow on Ubuntu builds running on ec2.
+     requestLongerTimeout(2);
+ 
+     let { NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu } = NetMonitorView;
++    let { Sidebar, RequestsMenu: { tableRenderer: Table }} = NetMonitorView;
+ 
+-    RequestsMenu.lazyUpdate = false;
++    Table.lazyUpdate = false;
+ 
+     waitForNetworkEvents(aMonitor, 2).then(() => {
+       check(-1, false);
+ 
+-      RequestsMenu.focusLastVisibleItem();
++      Table.focusLastVisibleItem();
+       check(1, true);
+-      RequestsMenu.focusFirstVisibleItem();
++      Table.focusFirstVisibleItem();
+       check(0, true);
+ 
+-      RequestsMenu.focusNextItem();
++      Table.focusNextItem();
+       check(1, true);
+-      RequestsMenu.focusPrevItem();
++      Table.focusPrevItem();
+       check(0, true);
+ 
+-      RequestsMenu.focusItemAtDelta(+1);
++      Table.focusItemAtDelta(+1);
+       check(1, true);
+-      RequestsMenu.focusItemAtDelta(-1);
++      Table.focusItemAtDelta(-1);
+       check(0, true);
+ 
+-      RequestsMenu.focusItemAtDelta(+10);
++      Table.focusItemAtDelta(+10);
+       check(1, true);
+-      RequestsMenu.focusItemAtDelta(-10);
++      Table.focusItemAtDelta(-10);
+       check(0, true);
+ 
+       aDebuggee.performRequests(18);
+       return waitForNetworkEvents(aMonitor, 18);
+     })
+     .then(() => {
+-      RequestsMenu.focusLastVisibleItem();
++      Table.focusLastVisibleItem();
+       check(19, true);
+-      RequestsMenu.focusFirstVisibleItem();
++      Table.focusFirstVisibleItem();
+       check(0, true);
+ 
+-      RequestsMenu.focusNextItem();
++      Table.focusNextItem();
+       check(1, true);
+-      RequestsMenu.focusPrevItem();
++      Table.focusPrevItem();
+       check(0, true);
+ 
+-      RequestsMenu.focusItemAtDelta(+10);
++      Table.focusItemAtDelta(+10);
+       check(10, true);
+-      RequestsMenu.focusItemAtDelta(-10);
++      Table.focusItemAtDelta(-10);
+       check(0, true);
+ 
+-      RequestsMenu.focusItemAtDelta(+100);
++      Table.focusItemAtDelta(+100);
+       check(19, true);
+-      RequestsMenu.focusItemAtDelta(-100);
++      Table.focusItemAtDelta(-100);
+       check(0, true);
+ 
+       teardown(aMonitor).then(finish);
+     });
+ 
+     let count = 0;
+ 
+     function check(aSelectedIndex, aPaneVisibility) {
+       info("Performing check " + (count++) + ".");
+ 
+-      is(RequestsMenu.selectedIndex, aSelectedIndex,
++      is(Table.selectedIndex, aSelectedIndex,
+         "The selected item in the requests menu was incorrect.");
+-      is(NetMonitorView.detailsPaneHidden, !aPaneVisibility,
++      is(Sidebar.detailsPaneHidden, !aPaneVisibility,
+         "The network requests details pane visibility state was incorrect.");
+     }
+ 
+     aDebuggee.performRequests(2);
+   });
+ }
+diff --git a/browser/devtools/netmonitor/test/browser_net_accessibility-02.js b/browser/devtools/netmonitor/test/browser_net_accessibility-02.js
+index 0ec5490..cea2492e 100644
+--- a/browser/devtools/netmonitor/test/browser_net_accessibility-02.js
++++ b/browser/devtools/netmonitor/test/browser_net_accessibility-02.js
+@@ -8,19 +8,19 @@
+ function test() {
+   initNetMonitor(CUSTOM_GET_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     // It seems that this test may be slow on Ubuntu builds running on ec2.
+     requestLongerTimeout(2);
+ 
+     let { window, $, NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu } = NetMonitorView;
++    let { Sidebar, RequestsMenu: { tableRenderer: Table }} = NetMonitorView;
+ 
+-    RequestsMenu.lazyUpdate = false;
++    Table.lazyUpdate = false;
+ 
+     waitForNetworkEvents(aMonitor, 2).then(() => {
+       check(-1, false);
+ 
+       EventUtils.sendKey("DOWN", window);
+       check(0, true);
+       EventUtils.sendKey("UP", window);
+       check(0, true);
+@@ -110,17 +110,17 @@ function test() {
+       teardown(aMonitor).then(finish);
+     });
+ 
+     let count = 0;
+ 
+     function check(aSelectedIndex, aPaneVisibility) {
+       info("Performing check " + (count++) + ".");
+ 
+-      is(RequestsMenu.selectedIndex, aSelectedIndex,
++      is(Table.getSelectedIndex(), aSelectedIndex,
+         "The selected item in the requests menu was incorrect.");
+-      is(NetMonitorView.detailsPaneHidden, !aPaneVisibility,
++      is(Sidebar.detailsPaneHidden, !aPaneVisibility,
+         "The network requests details pane visibility state was incorrect.");
+     }
+ 
+     aDebuggee.performRequests(2);
+   });
+ }
+diff --git a/browser/devtools/netmonitor/test/browser_net_clear.js b/browser/devtools/netmonitor/test/browser_net_clear.js
+index a78492c..387e1ee 100644
+--- a/browser/devtools/netmonitor/test/browser_net_clear.js
++++ b/browser/devtools/netmonitor/test/browser_net_clear.js
+@@ -4,73 +4,73 @@
+ /**
+  * Tests if the clear button empties the request menu.
+  */
+ 
+ function test() {
+   initNetMonitor(SIMPLE_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+-    let { document, $, NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu } = NetMonitorView;
++    let { document, $, NetMonitorView, RequestCollection } = aMonitor.panelWin;
++    let { RequestsMenu, Sidebar } = NetMonitorView;
+     let detailsPane = $("#details-pane");
+     let detailsPaneToggleButton = $('#details-pane-toggle');
+     let clearButton = $('#requests-menu-clear-button');
+ 
+     RequestsMenu.lazyUpdate = false;
+ 
+     // Make sure we start in a sane state
+-    assertNoRequestState(RequestsMenu, detailsPaneToggleButton);
++    assertNoRequestState(RequestCollection, detailsPaneToggleButton);
+ 
+     // Load one request and assert it shows up in the lis
+     aMonitor.panelWin.once(aMonitor.panelWin.EVENTS.NETWORK_EVENT, () => {
+-      assertSingleRequestState(RequestsMenu, detailsPaneToggleButton);
++      assertSingleRequestState(RequestCollection, detailsPaneToggleButton);
+ 
+       // Click clear and make sure the requests are gone
+       EventUtils.sendMouseEvent({ type: "click" }, clearButton);
+-      assertNoRequestState(RequestsMenu, detailsPaneToggleButton);
++      assertNoRequestState(RequestCollection, detailsPaneToggleButton);
+ 
+       // Load a second request and make sure they still show up
+       aMonitor.panelWin.once(aMonitor.panelWin.EVENTS.NETWORK_EVENT, () => {
+-        assertSingleRequestState(RequestsMenu, detailsPaneToggleButton);
++        assertSingleRequestState(RequestCollection, detailsPaneToggleButton);
+ 
+         // Make sure we can now open the details pane
+-        NetMonitorView.toggleDetailsPane({ visible: true, animated: false });
++        Sidebar.toggle(true);
+         ok(!detailsPane.hasAttribute("pane-collapsed") &&
+           !detailsPaneToggleButton.hasAttribute("pane-collapsed"),
+           "The details pane should be visible after clicking the toggle button.");
+ 
+         // Click clear and make sure the details pane closes
+         EventUtils.sendMouseEvent({ type: "click" }, clearButton);
+-        assertNoRequestState(RequestsMenu, detailsPaneToggleButton);
++        assertNoRequestState(RequestCollection, detailsPaneToggleButton);
+         ok(detailsPane.hasAttribute("pane-collapsed") &&
+           detailsPaneToggleButton.hasAttribute("pane-collapsed"),
+           "The details pane should not be visible clicking 'clear'.");
+ 
+         teardown(aMonitor).then(finish);
+       });
+ 
+       aDebuggee.location.reload();
+     });
+ 
+     aDebuggee.location.reload();
+   });
+ 
+   /**
+    * Asserts the state of the network monitor when one request has loaded
+    */
+-  function assertSingleRequestState(RequestsMenu, detailsPaneToggleButton) {
+-    is(RequestsMenu.itemCount, 1,
++  function assertSingleRequestState(RequestCollection, detailsPaneToggleButton) {
++    is(RequestCollection.length, 1,
+       "The request menu should have one item at this point.");
+     is(detailsPaneToggleButton.hasAttribute("disabled"), false,
+       "The pane toggle button should be enabled after a request is made.");
+   }
+ 
+   /**
+    * Asserts the state of the network monitor when no requests have loaded
+    */
+-  function assertNoRequestState(RequestsMenu, detailsPaneToggleButton) {
+-    is(RequestsMenu.itemCount, 0,
++  function assertNoRequestState(RequestCollection, detailsPaneToggleButton) {
++    is(RequestCollection.length, 0,
+       "The request menu should be empty at this point.");
+     is(detailsPaneToggleButton.hasAttribute("disabled"), true,
+       "The pane toggle button should be disabled when the request menu is cleared.");
+   }
+ }
+diff --git a/browser/devtools/netmonitor/test/browser_net_complex-params.js b/browser/devtools/netmonitor/test/browser_net_complex-params.js
+index 7db80ca..a49ab6a 100644
+--- a/browser/devtools/netmonitor/test/browser_net_complex-params.js
++++ b/browser/devtools/netmonitor/test/browser_net_complex-params.js
+@@ -19,16 +19,17 @@ function test() {
+     Task.spawn(function () {
+       yield waitForNetworkEvents(aMonitor, 0, 6);
+ 
+       EventUtils.sendMouseEvent({ type: "mousedown" },
+         document.getElementById("details-pane-toggle"));
+       EventUtils.sendMouseEvent({ type: "mousedown" },
+         document.querySelectorAll("#details-pane tab")[2]);
+ 
++      RequestsMenu.selectedIndex = 0;
+       yield waitFor(aMonitor.panelWin, EVENTS.REQUEST_POST_PARAMS_DISPLAYED);
+       yield testParamsTab1('a', '""', '{ "foo": "bar" }', '""');
+ 
+       RequestsMenu.selectedIndex = 1;
+       yield waitFor(aMonitor.panelWin, EVENTS.REQUEST_POST_PARAMS_DISPLAYED);
+       yield testParamsTab1('a', '"b"', '{ "foo": "bar" }', '""');
+ 
+       RequestsMenu.selectedIndex = 2;
+diff --git a/browser/devtools/netmonitor/test/browser_net_copy_as_curl.js b/browser/devtools/netmonitor/test/browser_net_copy_as_curl.js
+index a5b1adb..2a62842 100644
+--- a/browser/devtools/netmonitor/test/browser_net_copy_as_curl.js
++++ b/browser/devtools/netmonitor/test/browser_net_copy_as_curl.js
+@@ -39,26 +39,24 @@ function test() {
+       '-H "Connection: keep-alive"'
+     ].join(" ");
+ 
+     const EXPECTED_RESULT = Services.appinfo.OS == "WINNT"
+       ? EXPECTED_WIN_RESULT
+       : EXPECTED_POSIX_RESULT;
+ 
+     let { NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu } = NetMonitorView;
++    let { RequestsMenu, ContextMenu } = NetMonitorView;
+ 
+     RequestsMenu.lazyUpdate = false;
+ 
+     waitForNetworkEvents(aMonitor, 1).then(() => {
+-      let requestItem = RequestsMenu.getItemAtIndex(0);
+-      RequestsMenu.selectedItem = requestItem;
+-
++      RequestsMenu.selectedIndex = 0;
+       waitForClipboard(EXPECTED_RESULT, function setup() {
+-        RequestsMenu.copyAsCurl();
++        ContextMenu._onCopyCurl();
+       }, function onSuccess() {
+         ok(true, "Clipboard contains a cURL command for the currently selected item's url.");
+         cleanUp();
+       }, function onFailure() {
+         ok(false, "Creating a cURL command for the currently selected item was unsuccessful.");
+         cleanUp();
+       });
+ 
+diff --git a/browser/devtools/netmonitor/test/browser_net_copy_image_as_data_uri.js b/browser/devtools/netmonitor/test/browser_net_copy_image_as_data_uri.js
+index f82fa22..3fc44ad 100644
+--- a/browser/devtools/netmonitor/test/browser_net_copy_image_as_data_uri.js
++++ b/browser/devtools/netmonitor/test/browser_net_copy_image_as_data_uri.js
+@@ -5,26 +5,25 @@
+  * Tests if copying an image as data uri works.
+  */
+ 
+ function test() {
+   initNetMonitor(CONTENT_TYPE_WITHOUT_CACHE_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     let { NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu } = NetMonitorView;
++    let { ContextMenu, RequestsMenu } = NetMonitorView;
+ 
+     RequestsMenu.lazyUpdate = false;
+ 
+     waitForNetworkEvents(aMonitor, 6).then(() => {
+-      let requestItem = RequestsMenu.getItemAtIndex(5);
+-      RequestsMenu.selectedItem = requestItem;
++      RequestsMenu.selectedIndex = 5;
+ 
+       waitForClipboard(TEST_IMAGE_DATA_URI, function setup() {
+-        RequestsMenu.copyImageAsDataUri();
++        ContextMenu._onCopyImage();
+       }, function onSuccess() {
+         ok(true, "Clipboard contains the currently selected image as data uri.");
+         cleanUp();
+       }, function onFailure() {
+         ok(false, "Copying the currently selected image as data uri was unsuccessful.");
+         cleanUp();
+       });
+     });
+diff --git a/browser/devtools/netmonitor/test/browser_net_copy_url.js b/browser/devtools/netmonitor/test/browser_net_copy_url.js
+index d2e54f1..0d24685 100644
+--- a/browser/devtools/netmonitor/test/browser_net_copy_url.js
++++ b/browser/devtools/netmonitor/test/browser_net_copy_url.js
+@@ -5,24 +5,23 @@
+  * Tests if copying a request's url works.
+  */
+ 
+ function test() {
+   initNetMonitor(CUSTOM_GET_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     let { NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu } = NetMonitorView;
++    let { RequestsMenu, ContextMenu } = NetMonitorView;
+ 
+     waitForNetworkEvents(aMonitor, 1).then(() => {
+-      let requestItem = RequestsMenu.getItemAtIndex(0);
+-      RequestsMenu.selectedItem = requestItem;
+-
+-      waitForClipboard(requestItem.attachment.url, function setup() {
+-        RequestsMenu.copyUrl();
++      RequestsMenu.selectRequestByIndex(0);
++      let model = RequestsMenu.getSelected(); 
++      waitForClipboard(model.url, function setup() {
++        ContextMenu._onCopyURL();
+       }, function onSuccess() {
+         ok(true, "Clipboard contains the currently selected item's url.");
+         cleanUp();
+       }, function onFailure() {
+         ok(false, "Copying the currently selected item's url was unsuccessful.");
+         cleanUp();
+       });
+     });
+diff --git a/browser/devtools/netmonitor/test/browser_net_details-no-duplicated-content.js b/browser/devtools/netmonitor/test/browser_net_details-no-duplicated-content.js
+index 343f806..c7414ac 100644
+--- a/browser/devtools/netmonitor/test/browser_net_details-no-duplicated-content.js
++++ b/browser/devtools/netmonitor/test/browser_net_details-no-duplicated-content.js
+@@ -4,17 +4,17 @@
+ "use strict";
+ 
+ // A test to ensure that the content in details pane is not duplicated.
+ 
+ let test = Task.async(function* () {
+   info("Initializing test");
+   let [tab, debuggee, monitor] = yield initNetMonitor(CUSTOM_GET_URL);
+   let panel = monitor.panelWin;
+-  let { NetMonitorView, EVENTS } = panel;
++  let { RequestCollection, NetMonitorView, EVENTS } = panel;
+   let { RequestsMenu, NetworkDetails } = NetMonitorView;
+ 
+   const COOKIE_UNIQUE_PATH = "/do-not-use-in-other-tests-using-cookies";
+ 
+   let TEST_CASES = [
+     {
+       desc: "Test headers tab",
+       pageURI: CUSTOM_GET_URL,
+@@ -64,17 +64,17 @@ let test = Task.async(function* () {
+   /**
+    * A helper that handles the execution of each case.
+    */
+   function* runTestCase(spec) {
+     info("Running case: " + spec.desc);
+     debuggee.content.location = spec.pageURI;
+ 
+     yield waitForNetworkEvents(monitor, 1);
+-    RequestsMenu.clear();
++    RequestCollection.reset();
+     yield waitForFinalDetailTabUpdate(spec.tabIndex, spec.isPost, spec.requestURI);
+ 
+     is(spec.variablesView._store.length, spec.expectedScopeLength,
+        "View contains " + spec.expectedScopeLength + " scope headers");
+   }
+ 
+   /**
+    * A helper that prepares the variables view for the actual testing. It
+@@ -91,18 +91,18 @@ let test = Task.async(function* () {
+ 
+     info("Performing a request");
+     debuggee.performRequests(1, uri);
+ 
+     info("Waiting for NETWORK_EVENT");
+     yield onNetworkEvent;
+ 
+     ok(true, "Received NETWORK_EVENT. Selecting the item.");
+-    let item = RequestsMenu.getItemAtIndex(0);
+-    RequestsMenu.selectedItem = item;
++    let model = RequestCollection.at(0);
++    RequestsMenu.selectRequest(model);
+ 
+     info("Item selected. Waiting for NETWORKDETAILSVIEW_POPULATED");
+     yield onDetailsPopulated;
+ 
+     info("Received populated event. Selecting tab at index " + tabIndex);
+     NetworkDetails.widget.selectedIndex = tabIndex;
+ 
+     info("Waiting for request to finish.");
+@@ -125,17 +125,17 @@ let test = Task.async(function* () {
+      *   TAB_UPDATED event is emitted.
+      * - case #3 the running update is the final update that'll emit one
+      *   TAB_UPDATED event.
+      *
+      * For case #4 we must wait for the updates to be flushed before we can
+      * start waiting for TAB_UPDATED event or we'll continue the test right
+      * after the pending update finishes.
+      */
+-    let hasQueuedUpdates = RequestsMenu._updateQueue.length !== 0;
++    let hasQueuedUpdates = RequestsMenu.tableRenderer._updateQueue.length !== 0;
+     let hasRunningTabUpdate = NetworkDetails._viewState.updating[tabIndex];
+ 
+     if (hasQueuedUpdates || hasRunningTabUpdate) {
+       info("There's pending updates - waiting for them to finish.");
+       info("  hasQueuedUpdates: " + hasQueuedUpdates);
+       info("  hasRunningTabUpdate: " + hasRunningTabUpdate);
+ 
+       if (hasQueuedUpdates && hasRunningTabUpdate) {
 diff --git a/browser/devtools/netmonitor/test/browser_net_footer-summary.js b/browser/devtools/netmonitor/test/browser_net_footer-summary.js
 index 9677afa..1d5e246 100644
 --- a/browser/devtools/netmonitor/test/browser_net_footer-summary.js
@@ -5704,6 +6242,46 @@ index 9677afa..1d5e246 100644
          .replace("#1", visibleRequestsCount)
          .replace("#2", L10N.numberWithDecimals((totalBytes || 0) / 1024, 2))
          .replace("#3", L10N.numberWithDecimals((totalMillis || 0) / 1000, 2))
+diff --git a/browser/devtools/netmonitor/test/browser_net_html-preview.js b/browser/devtools/netmonitor/test/browser_net_html-preview.js
+index b9d6146..2938505 100644
+--- a/browser/devtools/netmonitor/test/browser_net_html-preview.js
++++ b/browser/devtools/netmonitor/test/browser_net_html-preview.js
+@@ -5,33 +5,33 @@
+  * Tests if html responses show and properly populate a "Preview" tab.
+  */
+ 
+ function test() {
+   initNetMonitor(CONTENT_TYPE_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     let { $, document, EVENTS, NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu } = NetMonitorView;
++    let { Sidebar, RequestsMenu } = NetMonitorView;
+ 
+     RequestsMenu.lazyUpdate = false;
+ 
+     waitForNetworkEvents(aMonitor, 6).then(() => {
+       EventUtils.sendMouseEvent({ type: "mousedown" },
+         document.getElementById("details-pane-toggle"));
+ 
+       is($("#event-details-pane").selectedIndex, 0,
+         "The first tab in the details pane should be selected.");
+       is($("#preview-tab").hidden, true,
+         "The preview tab should be hidden for non html responses.");
+       is($("#preview-tabpanel").hidden, true,
+         "The preview tabpanel should be hidden for non html responses.");
+ 
+       RequestsMenu.selectedIndex = 4;
+-      NetMonitorView.toggleDetailsPane({ visible: true, animated: false }, 6);
++      Sidebar.toggle(true, 6);
+ 
+       is($("#event-details-pane").selectedIndex, 6,
+         "The sixth tab in the details pane should be selected.");
+       is($("#preview-tab").hidden, false,
+         "The preview tab should be visible now.");
+       is($("#preview-tabpanel").hidden, false,
+         "The preview tabpanel should be visible now.");
+ 
 diff --git a/browser/devtools/netmonitor/test/browser_net_icon-preview.js b/browser/devtools/netmonitor/test/browser_net_icon-preview.js
 index 19b4c4c..d3d8f35 100644
 --- a/browser/devtools/netmonitor/test/browser_net_icon-preview.js
@@ -5746,6 +6324,225 @@ index 19b4c4c..d3d8f35 100644
      }
  
      aDebuggee.performRequests();
+diff --git a/browser/devtools/netmonitor/test/browser_net_pane-collapse.js b/browser/devtools/netmonitor/test/browser_net_pane-collapse.js
+index 6434aa2..d465058 100644
+--- a/browser/devtools/netmonitor/test/browser_net_pane-collapse.js
++++ b/browser/devtools/netmonitor/test/browser_net_pane-collapse.js
+@@ -5,54 +5,55 @@
+  * Tests if the network monitor panes collapse properly.
+  */
+ 
+ function test() {
+   initNetMonitor(SIMPLE_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     let { document, Prefs, NetMonitorView } = aMonitor.panelWin;
++    let { Sidebar } = NetMonitorView;
+     let detailsPane = document.getElementById("details-pane");
+     let detailsPaneToggleButton = document.getElementById("details-pane-toggle");
+ 
+     ok(detailsPane.hasAttribute("pane-collapsed") &&
+        detailsPaneToggleButton.hasAttribute("pane-collapsed"),
+       "The details pane should initially be hidden.");
+ 
+-    NetMonitorView.toggleDetailsPane({ visible: true, animated: false });
++    Sidebar.toggle(true);
+ 
+     let width = ~~(detailsPane.getAttribute("width"));
+     is(width, Prefs.networkDetailsWidth,
+       "The details pane has an incorrect width.");
+     is(detailsPane.style.marginLeft, "0px",
+       "The details pane has an incorrect left margin.");
+     is(detailsPane.style.marginRight, "0px",
+       "The details pane has an incorrect right margin.");
+     ok(!detailsPane.hasAttribute("animated"),
+       "The details pane has an incorrect animated attribute.");
+     ok(!detailsPane.hasAttribute("pane-collapsed") &&
+        !detailsPaneToggleButton.hasAttribute("pane-collapsed"),
+       "The details pane should at this point be visible.");
+ 
+-    NetMonitorView.toggleDetailsPane({ visible: false, animated: true });
++    Sidebar.toggle(false);
+ 
+     let margin = -(width + 1) + "px";
+     is(width, Prefs.networkDetailsWidth,
+       "The details pane has an incorrect width after collapsing.");
+     is(detailsPane.style.marginLeft, margin,
+       "The details pane has an incorrect left margin after collapsing.");
+     is(detailsPane.style.marginRight, margin,
+       "The details pane has an incorrect right margin after collapsing.");
+     ok(detailsPane.hasAttribute("animated"),
+       "The details pane has an incorrect attribute after an animated collapsing.");
+     ok(detailsPane.hasAttribute("pane-collapsed") &&
+        detailsPaneToggleButton.hasAttribute("pane-collapsed"),
+       "The details pane should not be visible after collapsing.");
+ 
+-    NetMonitorView.toggleDetailsPane({ visible: true, animated: false });
++    Sidebar.toggle(true);
+ 
+     is(width, Prefs.networkDetailsWidth,
+       "The details pane has an incorrect width after uncollapsing.");
+     is(detailsPane.style.marginLeft, "0px",
+       "The details pane has an incorrect left margin after uncollapsing.");
+     is(detailsPane.style.marginRight, "0px",
+       "The details pane has an incorrect right margin after uncollapsing.");
+     ok(!detailsPane.hasAttribute("animated"),
+diff --git a/browser/devtools/netmonitor/test/browser_net_post-data-02.js b/browser/devtools/netmonitor/test/browser_net_post-data-02.js
+index 7799bef..a9c7213 100644
+--- a/browser/devtools/netmonitor/test/browser_net_post-data-02.js
++++ b/browser/devtools/netmonitor/test/browser_net_post-data-02.js
+@@ -6,23 +6,23 @@
+  * for raw payloads with attached content-type headers.
+  */
+ 
+ function test() {
+   initNetMonitor(POST_RAW_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     let { document, L10N, NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu, NetworkDetails } = NetMonitorView;
++    let { RequestsMenu, NetworkDetails, Sidebar } = NetMonitorView;
+ 
+     RequestsMenu.lazyUpdate = false;
+     NetworkDetails._params.lazyEmpty = false;
+ 
+     waitForNetworkEvents(aMonitor, 0, 1).then(() => {
+-      NetMonitorView.toggleDetailsPane({ visible: true }, 2)
++      Sidebar.toggle(true, 2);
+       RequestsMenu.selectedIndex = 0;
+ 
+       let TAB_UPDATED = aMonitor.panelWin.EVENTS.TAB_UPDATED;
+       waitFor(aMonitor.panelWin, TAB_UPDATED).then(() => {
+         let tab = document.querySelectorAll("#event-details-pane tab")[2];
+         let tabpanel = document.querySelectorAll("#event-details-pane tabpanel")[2];
+ 
+         is(tab.getAttribute("selected"), "true",
+diff --git a/browser/devtools/netmonitor/test/browser_net_post-data-03.js b/browser/devtools/netmonitor/test/browser_net_post-data-03.js
+index 620111a..b0ca0f6 100644
+--- a/browser/devtools/netmonitor/test/browser_net_post-data-03.js
++++ b/browser/devtools/netmonitor/test/browser_net_post-data-03.js
+@@ -6,24 +6,24 @@
+  * for raw payloads with content-type headers attached to the upload stream.
+  */
+ 
+ function test() {
+   initNetMonitor(POST_RAW_WITH_HEADERS_URL).then(([aTab, aDebuggee, aMonitor]) => {
+     info("Starting test... ");
+ 
+     let { document, L10N, NetMonitorView } = aMonitor.panelWin;
+-    let { RequestsMenu, NetworkDetails } = NetMonitorView;
++    let { Sidebar, RequestsMenu, NetworkDetails } = NetMonitorView;
+     let TAB_UPDATED = aMonitor.panelWin.EVENTS.TAB_UPDATED;
+     RequestsMenu.lazyUpdate = false;
+ 
+     Task.spawn(function*() {
+       yield waitForNetworkEvents(aMonitor, 0, 1);
+ 
+-      NetMonitorView.toggleDetailsPane({ visible: true });
++      Sidebar.toggle(true);
+       RequestsMenu.selectedIndex = 0;
+ 
+       yield waitFor(aMonitor.panelWin, TAB_UPDATED);
+ 
+       let tab = document.querySelectorAll("#details-pane tab")[0];
+       let tabpanel = document.querySelectorAll("#details-pane tabpanel")[0];
+       let requestFromUploadScope = tabpanel.querySelectorAll(".variables-view-scope")[2];
+ 
+diff --git a/browser/devtools/netmonitor/test/browser_net_resend.js b/browser/devtools/netmonitor/test/browser_net_resend.js
+index cb3f196..b457a90 100644
+--- a/browser/devtools/netmonitor/test/browser_net_resend.js
++++ b/browser/devtools/netmonitor/test/browser_net_resend.js
+@@ -22,66 +22,69 @@ function test() {
+     let { NetMonitorView } = gPanelWin;
+     let { RequestsMenu } = NetMonitorView;
+     let TAB_UPDATED = aMonitor.panelWin.EVENTS.TAB_UPDATED;
+     let CUSTOMREQUESTVIEW_POPULATED = aMonitor.panelWin.EVENTS.CUSTOMREQUESTVIEW_POPULATED;
+ 
+     RequestsMenu.lazyUpdate = false;
+ 
+     waitForNetworkEvents(aMonitor, 0, 2).then(() => {
+-      let origItem = RequestsMenu.getItemAtIndex(0);
+-      RequestsMenu.selectedItem = origItem;
++      RequestsMenu.selectedIndex = 0;
++      let origReq = RequestsMenu.getSelected();
+ 
+       waitFor(aMonitor.panelWin, TAB_UPDATED).then(() => {
+         // add a new custom request cloned from selected request
+-        RequestsMenu.cloneSelectedRequest();
++        NetMonitorView.CustomRequest.populate(origReq);
+         return waitFor(aMonitor.panelWin, CUSTOMREQUESTVIEW_POPULATED);
+       }).then(() => {
+-        testCustomForm(origItem.attachment);
++        testCustomForm(origReq);
+ 
+-        let customItem = RequestsMenu.selectedItem;
+-        testCustomItem(customItem, origItem);
++        testCustomItem(2, 0);
+ 
+         // edit the custom request
+         editCustomForm(() => {
+-          testCustomItemChanged(customItem, origItem);
++          testCustomItemChanged(2, 0);
+ 
+           waitForNetworkEvents(aMonitor, 0, 1).then(() => {
+-            let sentItem = RequestsMenu.selectedItem;
+-            testSentRequest(sentItem.attachment, origItem.attachment);
++            let sentItem = RequestsMenu.getSelected();
++            testSentRequest(sentItem, origReq);
+             finishUp(aMonitor);
+           });
+           // send the new request
+-          RequestsMenu.sendCustomRequest();
++          NetMonitorView.CustomRequest.populate(origReq);
+         });
+       });
+     });
+ 
+     aDebuggee.performRequests();
+   });
+ }
+ 
+-function testCustomItem(aItem, aOrigItem) {
+-  let method = aItem.target.querySelector(".requests-menu-method").value;
+-  let origMethod = aOrigItem.target.querySelector(".requests-menu-method").value;
++function testCustomItem(aItemIndex, aOrigItemIndex) {
++  let menu = gPanelDoc.getElementById("requests-menu-contents");
++  let method = menu.querySelectorAll(".requests-menu-method")[aItemIndex].value;
++  let origMethod = menu.querySelectorAll(".requests-menu-method")[aOrigItemIndex].value;
++  ok(method && origMethod, "Found a method for both items");
+   is(method, origMethod, "menu item is showing the same method as original request");
+ 
+-  let file = aItem.target.querySelector(".requests-menu-file").value;
+-  let origFile = aOrigItem.target.querySelector(".requests-menu-file").value;
++  let file = menu.querySelectorAll(".requests-menu-file")[aItemIndex].value;
++  let origFile = menu.querySelectorAll(".requests-menu-file")[aOrigItemIndex].value;
++  ok(file && origFile, "Found a file for both items");
+   is(file, origFile, "menu item is showing the same file name as original request");
+ 
+-  let domain = aItem.target.querySelector(".requests-menu-domain").value;
+-  let origDomain = aOrigItem.target.querySelector(".requests-menu-domain").value;
++  let domain = menu.querySelectorAll(".requests-menu-domain")[aItemIndex].value;
++  let origDomain = menu.querySelectorAll(".requests-menu-domain")[aOrigItemIndex].value;
++  ok(domain && origDomain, "Found a domain for both items");
+   is(domain, origDomain, "menu item is showing the same domain as original request");
+ }
+ 
+-function testCustomItemChanged(aItem, aOrigItem) {
+-  let file = aItem.target.querySelector(".requests-menu-file").value;
+-  let expectedFile = aOrigItem.target.querySelector(".requests-menu-file").value + "&" + ADD_QUERY;
+-
++function testCustomItemChanged(aItemIndex, aOrigItemIndex) {
++  let menu = gPanelDoc.getElementById("requests-menu-contents");
++  let file = menu.querySelectorAll(".requests-menu-file")[aItemIndex].value;
++  let expectedFile = menu.querySelectorAll(".requests-menu-file")[aOrigItemIndex].value + "&" + ADD_QUERY;
+   is(file, expectedFile, "menu item is updated to reflect url entered in form");
+ }
+ 
+ /*
+  * Test that the New Request form was populated correctly
+  */
+ function testCustomForm(aData) {
+   is(gPanelDoc.getElementById("custom-method-value").value, aData.method,
 diff --git a/browser/devtools/netmonitor/test/browser_net_simple-request-data.js b/browser/devtools/netmonitor/test/browser_net_simple-request-data.js
 index 11da60e..04eb019 100644
 --- a/browser/devtools/netmonitor/test/browser_net_simple-request-data.js
@@ -6448,7 +7245,7 @@ index fa537dd..3383e65 100644
          info("Millisecond division: " + div.getAttribute("value"));
        }
 diff --git a/browser/devtools/netmonitor/test/head.js b/browser/devtools/netmonitor/test/head.js
-index 3f1b089..e371991 100644
+index 3f1b089..644069f 100644
 --- a/browser/devtools/netmonitor/test/head.js
 +++ b/browser/devtools/netmonitor/test/head.js
 @@ -73,16 +73,26 @@ registerCleanupFunction(() => {
@@ -6478,8 +7275,61 @@ index 3f1b089..e371991 100644
    let targetBrowser = targetWindow.gBrowser;
  
    targetWindow.focus();
-@@ -181,17 +191,17 @@ function teardown(aMonitor) {
+@@ -95,20 +105,29 @@ function addTab(aUrl, aWindow) {
+   }, true);
+ 
    return deferred.promise;
+ }
+ 
+ function removeTab(aTab, aWindow) {
+   info("Removing tab.");
+ 
++  let deferred = promise.defer();
+   let targetWindow = aWindow || window;
+   let targetBrowser = targetWindow.gBrowser;
++  let tabContainer = targetBrowser.tabContainer;
++
++  tabContainer.addEventListener("TabClose", function onClose(aEvent) {
++    tabContainer.removeEventListener("TabClose", onClose, false);
++    info("Tab removed and finished closing.");
++    deferred.resolve();
++  }, false);
+ 
+   targetBrowser.removeTab(aTab);
++  return deferred.promise;
+ }
+ 
+ function waitForNavigation(aTarget) {
+   let deferred = promise.defer();
+   aTarget.once("will-navigate", () => {
+     aTarget.once("navigate", () => {
+       deferred.resolve();
+     });
+@@ -165,33 +184,33 @@ function restartNetMonitor(aMonitor, aNewUrl) {
+ 
+   aMonitor.once("destroyed", () => initNetMonitor(url).then(deferred.resolve));
+   removeTab(tab);
+ 
+   return deferred.promise;
+ }
+ 
+ function teardown(aMonitor) {
+-  info("Destroying the specified network monitor.");
+-
+-  let deferred = promise.defer();
+-  let tab = aMonitor.target.tab;
++  return Task.spawn(function*() {
++    info("Destroying the specified network monitor.");
+ 
+-  aMonitor.once("destroyed", () => executeSoon(deferred.resolve));
+-  removeTab(tab);
++    let deferred = promise.defer();
++    let tab = aMonitor.target.tab;
+ 
+-  return deferred.promise;
++    yield aMonitor._toolbox.destroy();
++    yield removeTab(tab);
++  });
  }
  
  function waitForNetworkEvents(aMonitor, aGetRequests, aPostRequests = 0) {
@@ -6497,7 +7347,7 @@ index 3f1b089..e371991 100644
    let awaitedEventsToListeners = [
      ["UPDATING_REQUEST_HEADERS", onGenericEvent],
      ["RECEIVED_REQUEST_HEADERS", onGenericEvent],
-@@ -232,17 +242,17 @@ function waitForNetworkEvents(aMonitor, aGetRequests, aPostRequests = 0) {
+@@ -232,17 +251,17 @@ function waitForNetworkEvents(aMonitor, aGetRequests, aPostRequests = 0) {
    }
  
    function maybeResolve(event, actor) {
@@ -6516,7 +7366,7 @@ index 3f1b089..e371991 100644
      // non-POST requests.
      if (genericEvents == (aGetRequests + aPostRequests) * 13 &&
          postEvents == aPostRequests * 2) {
-@@ -371,17 +381,24 @@ function verifyRequestItemTarget(aRequestItem, aMethod, aUrl, aData = {}) {
+@@ -371,17 +390,25 @@ function verifyRequestItemTarget(aRequestItem, aMethod, aUrl, aData = {}) {
   *        The event emitter object that is being listened to.
   * @param string eventName
   *        The name of the event to listen to.
@@ -6526,6 +7376,7 @@ index 3f1b089..e371991 100644
  function waitFor (subject, eventName) {
    let deferred = promise.defer();
 -  subject.once(eventName, deferred.resolve);
++  info(`Waiting for ${eventName} on ${subject}...`);
 +  if (subject.once) {
 +    subject.once(eventName, deferred.resolve);
 +  } else {
@@ -6544,10 +7395,10 @@ index 3f1b089..e371991 100644
   *        The type of the filter that should be the only one checked.
 diff --git a/browser/devtools/netmonitor/views/custom-request-view.js b/browser/devtools/netmonitor/views/custom-request-view.js
 new file mode 100644
-index 0000000..d53f8d6
+index 0000000..7be5f0a
 --- /dev/null
 +++ b/browser/devtools/netmonitor/views/custom-request-view.js
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,193 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6621,7 +7472,9 @@ index 0000000..d53f8d6
 +      $("#custom-postdata-value").value = yield gNetwork.getString(postData);
 +    }
 +
-+    window.emit(EVENTS.CUSTOMREQUESTVIEW_POPULATED);
++    // Only emit the ID -- we recreate this model anyway once it comes through
++    // the wire.
++    window.emit(EVENTS.CUSTOMREQUESTVIEW_POPULATED, this.model.id);
 +  }),
 +
 +  /**
@@ -6712,11 +7565,11 @@ index 0000000..d53f8d6
 +      data.body = this.model.requestPostData.postData.text;
 +    }
 +
-+    console.log("sending", data);
++    console.log(data);
 +    NetMonitorController.webConsoleClient.sendHTTPRequest(data, aResponse => {
 +      let id = aResponse.eventActor.actor;
-+      console.log("sent", id);
-+      window.emit(EVENTS.CUSTOM_REQUEST_SENT, id);
++      console.log("SENT", id);
++      window.emit(EVENTS.CUSTOM_REQUEST_SENT, this.model);
 +      this._onClose();
 +      NetMonitorView.Sidebar.toggle(false);
 +    });
@@ -6741,10 +7594,10 @@ index 0000000..d53f8d6
 +NetMonitorView.CustomRequest = new CustomRequestView();
 diff --git a/browser/devtools/netmonitor/views/details-view.js b/browser/devtools/netmonitor/views/details-view.js
 new file mode 100644
-index 0000000..212da51
+index 0000000..1d16f5e
 --- /dev/null
 +++ b/browser/devtools/netmonitor/views/details-view.js
-@@ -0,0 +1,848 @@
+@@ -0,0 +1,853 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6967,6 +7820,7 @@ index 0000000..212da51
 +          view.populate(viewState.latestData);
 +        }
 +        else {
++          console.log("TAB_UPDATED");
 +          // Tab is selected but not dirty. We're done here.
 +          populated[tab] = true;
 +          window.emit(EVENTS.TAB_UPDATED);
@@ -7086,6 +7940,7 @@ index 0000000..212da51
 +      headerVar.setGrip(headerValue);
 +    }
 +
++    console.log("ADD HEADERS", aType, aName);
 +    // Write the raw headers, which may or may not be visible.
 +    let headerRawText = $(`#raw-${aType}-headers-textarea`);
 +    headerRawText.value = utils.writeHeaderText(aResponse.headers);
@@ -7185,6 +8040,7 @@ index 0000000..212da51
 +   *        A promise that is resolved when the request post params are set.
 +   */
 +  _setRequestPostParams: Task.async(function*(aHeadersResponse, aHeadersFromUploadStream, aPostDataResponse) {
++                           console.log("SET REQUEST POST PARAMS ** ** * ** * *");
 +    if (!aHeadersResponse || !aHeadersFromUploadStream || !aPostDataResponse) {
 +      return;
 +    }
@@ -7589,7 +8445,9 @@ index 0000000..212da51
 +  _requestHeaders: "",
 +  _responseHeaders: "",
 +  _requestCookies: "",
-+  _responseCookies: ""
++  _responseCookies: "",
++
++  toString: () => "[object NetworkDetailsView]"
 +};
 +
 +NetMonitorView.NetworkDetails = new NetworkDetailsView();
@@ -7706,10 +8564,10 @@ index 0000000..9632735
 +NetMonitorView.ContextMenu = RequestContextView;
 diff --git a/browser/devtools/netmonitor/views/requests-view.js b/browser/devtools/netmonitor/views/requests-view.js
 new file mode 100644
-index 0000000..043664f
+index 0000000..01150c6
 --- /dev/null
 +++ b/browser/devtools/netmonitor/views/requests-view.js
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,427 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7724,6 +8582,7 @@ index 0000000..043664f
 +const REQUEST_TIME_DECIMALS = 2;
 +const HEADERS_SIZE_DECIMALS = 3;
 +const CONTENT_SIZE_DECIMALS = 2;
++const FREETEXT_FILTER_SEARCH_DELAY = 200; // ms
 +
 +/**
 + * Functions handling the requests menu (containing details about each request,
@@ -7738,9 +8597,12 @@ index 0000000..043664f
 +  this._onRequestUpdate = this._onRequestUpdate.bind(this);
 +  this._onRequestAdd = this._onRequestAdd.bind(this);
 +  this._onResize = this._onResize.bind(this);
-+  this._onResize = this._onResize.bind(this);
 +  this._onSidebarToggled = this._onSidebarToggled.bind(this);
 +  this._onSecurityIconClick = this._onSecurityIconClick.bind(this);
++  this._onURLFilter = this._onURLFilter.bind(this);
++  this.setURLFilter = this.setURLFilter.bind(this);
++
++  this.userInputTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
 +}
 +
 +RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
@@ -7762,24 +8624,28 @@ index 0000000..043664f
 +      }]
 +    });
 +
++    this.freetextFilterBox = $("#requests-menu-filter-freetext-text");
++
 +    this.tableRenderer = new TableRenderer($("#requests-menu-contents"), RequestCollection, gNetwork);
 +    RequestCollection.on("change", this._onRequestUpdate);
 +    RequestCollection.on("add", this._onRequestAdd);
++    RequestCollection.on("filtered", this._onFilterUpdate);
 +    this.tableRenderer.on("select", this._onSelect);
 +
 +    this.summaryRenderer = new SummaryRenderer($("#requests-menu-network-summary-label"), RequestCollection);
 +    Prefs.filters.forEach(type => this._onFilterSelection(type));
 +
++    $("#toolbar-labels").addEventListener("click", this.requestsMenuSortEvent, false);
++    $("#requests-menu-footer").addEventListener("click", this.requestsMenuFilterEvent, false);
 +    this._splitter.addEventListener("mousemove", this._onResize, false);
++    this.freetextFilterBox.addEventListener("input", this._onURLFilter, false);
++    this.freetextFilterBox.addEventListener("command", this._onURLFilter, false);
 +    window.addEventListener("resize", this._onResize, false);
 +    window.on(EVENTS.SIDEBAR_TOGGLED, this._onSidebarToggled);
 +
 +    this.requestsMenuSortEvent = utils.getKeyWithEvent(this.sortBy.bind(this));
 +    this.requestsMenuFilterEvent = utils.getKeyWithEvent(this._onFilterSelection.bind(this));
 +    this._onContextPerfCommand = () => NetMonitorView.toggleFrontendMode();
-+
-+    $("#toolbar-labels").addEventListener("click", this.requestsMenuSortEvent, false);
-+    $("#requests-menu-footer").addEventListener("click", this.requestsMenuFilterEvent, false);
 +
 +    window.once("connected", this._onConnect.bind(this));
 +  },
@@ -7811,15 +8677,20 @@ index 0000000..043664f
 +  /**
 +   * Destruction function, called when the network monitor is closed.
 +   */
-+  destroy: function() {
++  destroy: Task.async(function*() {
 +    dumpn("Destroying the SourcesView");
 +
 +    Prefs.filters = RequestCollection.getFilters();
 +
-+    NetMonitorView.ContextMenu.destroy();
++    yield this.tableRenderer.destroy();
++    yield NetMonitorView.ContextMenu.destroy();
++
 +    RequestCollection.off("change", this._onRequestUpdate);
 +    RequestCollection.off("add", this._onRequestAdd);
 +    this._splitter.removeEventListener("mousemove", this._onResize, false);
++    this.freetextFilterBox.removeEventListener("input", this._onURLFilter, false);
++    this.freetextFilterBox.removeEventListener("command", this._onURLFilter, false);
++    this.userInputTimer.cancel();
 +    window.removeEventListener("resize", this._onResize, false);
 +    window.off(EVENTS.SIDEBAR_TOGGLED, this._onSidebarToggled);
 +
@@ -7831,13 +8702,18 @@ index 0000000..043664f
 +    $("#requests-menu-network-summary-button").removeEventListener("command", this._onContextPerfCommand, false);
 +    $("#requests-menu-network-summary-label").removeEventListener("click", this._onContextPerfCommand, false);
 +    $("#network-statistics-back-button").removeEventListener("command", this._onContextPerfCommand, false);
-+
-+  },
++  }),
 +
 +  /**
-+   * Specifies if this view may be updated lazily.
++   * Specifies if this view may be updated lazily. Currently a proxy for
++   * the table renderer.
 +   */
-+  lazyUpdate: true,
++  set lazyUpdate(value) {
++    this.tableRenderer.lazyUpdate = value;
++  },
++  get lazyUpdate() {
++    return this.tableRenderer.lazyUpdate;
++  },
 +
 +  /**
 +   * Called when a Request instance's property is updated.
@@ -7849,7 +8725,7 @@ index 0000000..043664f
 +  /**
 +   * Called when a Request instance is created. Initializes the view.
 +   */
-+  _onRequestAdd: function ({ id }) {
++  _onRequestAdd: function ({ id, cloned }) {
 +    $("#requests-menu-empty-notice").hidden = true;
 +  },
 +
@@ -7866,6 +8742,10 @@ index 0000000..043664f
 +    }
 +  },
 +
++  /**
++   * The following methods are used to
++   * interface with the table renderer to manipulate the selected request.
++   */
 +  selectFirstRequest: function () {
 +    this.tableRenderer.selectFirstRequest();
 +  },
@@ -7874,8 +8754,67 @@ index 0000000..043664f
 +    this.tableRenderer.unselectRequest();
 +  },
 +
-+  selectRequest: function (id) {
-+    this.tableRenderer.selectRequest(id);
++  selectRequest: function (modelOrId) {
++    this.tableRenderer.selectRequest(modelOrId.id != null ? modelOrId.id : modelOrId);
++  },
++
++  selectRequestByIndex: function (index) {
++    this.tableRenderer.selectRequestByIndex(index);
++  },
++
++  /**
++   * Gets the currently selected request model.
++   */
++  getSelected: function () {
++    return this.selectedRequest;
++  },
++
++  /**
++   * Return current selected index. Used in tests.
++   */
++  getSelectedIndex: function () {
++    return this.tableRenderer.getSelectedIndex();
++  },
++
++  /**
++   * Aliases for previous ViewHelper way of selecting or
++   * returning selected index.
++   * Used to avoid rewriting all tests.
++   * TODO update tests so this isnt needed.
++   */
++  set selectedIndex(val) {
++    this.selectRequestByIndex(val);
++  },
++  get selectedIndex() {
++    return this.getSelectedIndex();
++  },
++  getItemAtIndex: function (i) {
++    return this.tableRenderer.getItemAtIndex(i);
++  },
++  get itemCount() {
++    return RequestCollection.length;
++  },
++
++  /**
++   * Sets the URL filter for all requests. Called after being debounced
++   * by _onURLFilter.
++   */
++  setURLFilter: function () {
++    RequestCollection.setURLFilter(this._currentFreetextFilter);
++  },
++
++  /**
++   * Handles the timeout on the freetext filter textbox
++   */
++  _onURLFilter: function () {
++    this.userInputTimer.cancel();
++    this._currentFreetextFilter = this.freetextFilterBox.value || "";
++    if (this._currentFreetextFilter.length === 0) {
++      this.freetextFilterBox.removeAttribute("filled");
++    } else {
++      this.freetextFilterBox.setAttribute("filled", true);
++    }
++    this.userInputTimer.initWithCallback(this.setURLFilter, FREETEXT_FILTER_SEARCH_DELAY, Ci.nsITimer.TYPE_ONE_SHOT);
 +  },
 +
 +  /**
@@ -7892,7 +8831,6 @@ index 0000000..043664f
 +    } else {
 +      RequestCollection.addFilter(aType);
 +    }
-+    this._updateFilterButtons();
 +  },
 +
 +  /**
@@ -7903,13 +8841,13 @@ index 0000000..043664f
 +   */
 +  filterOnlyOn: function(aType = "all") {
 +    RequestCollection.setFilter(aType);
-+    this._updateFilterButtons();
 +  },
 +
 +  /**
-+   * Updates filter buttons based on RequestCollection filter state.
++   * Updates filter buttons based on RequestCollection filter state, triggered
++   * by `filtered` event on RequestCollection.
 +   */
-+  _updateFilterButtons: function () {
++  _onFilterUpdate: function () {
 +    for (let button of $$(".requests-menu-filter-button")) {
 +      if (RequestCollection.hasFilter(button.getAttribute("data-key"))) {
 +        button.setAttribute("checked", true);
@@ -8032,7 +8970,11 @@ index 0000000..043664f
 +    this.tableRenderer.refreshWaterfall(reset);
 +  },
 +
-+  _splitter: null
++  _splitter: null,
++
++  _currentFreetextFilter: "",
++
++  toString: () => "[object RequestsMenuView]"
 +});
 +
 +/**
@@ -8055,10 +8997,10 @@ index 0000000..043664f
 +NetMonitorView.RequestsMenu = new RequestsMenuView();
 diff --git a/browser/devtools/netmonitor/views/sidebar-view.js b/browser/devtools/netmonitor/views/sidebar-view.js
 new file mode 100644
-index 0000000..107f797
+index 0000000..ed093b4
 --- /dev/null
 +++ b/browser/devtools/netmonitor/views/sidebar-view.js
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,158 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8075,7 +9017,7 @@ index 0000000..107f797
 +}
 +
 +SidebarView.prototype = {
-+  initialize: function () {
++  initialize: Task.async(function*() {
 +    this._body = $("#body");
 +    this._detailsPane = $("#details-pane");
 +    this._detailsPaneToggleButton = $("#details-pane-toggle");
@@ -8092,9 +9034,11 @@ index 0000000..107f797
 +    this._detailsPaneToggleButton.addEventListener("mousedown", this._onTogglePanesPressed, false);
 +    RequestCollection.on("reset", this._onReset);
 +    RequestCollection.on("add", this._onAdd);
-+  },
++    yield NetMonitorView.NetworkDetails.initialize();
++  }),
 +
-+  destroy: function () {
++  destroy: Task.async(function*() {
++             console.log("SIDEBAR****DESTRoY");
 +    Prefs.networkDetailsWidth = this._detailsPane.getAttribute("width");
 +    Prefs.networkDetailsHeight = this._detailsPane.getAttribute("height");
 +
@@ -8104,7 +9048,8 @@ index 0000000..107f797
 +
 +    this._detailsPane = null;
 +    this._detailsPaneToggleButton = null;
-+  },
++    yield NetMonitorView.NetworkDetails.destroy();
++  }),
 +
 +  /**
 +   * Gets the visibility state of the network details pane.
