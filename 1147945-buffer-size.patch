@@ -1,12 +1,12 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Tue, 7 Apr 2015 21:46:31 -0700
+Date: Mon, 13 Apr 2015 18:00:02 -0700
 Subject: Bug 1147945 - Let the profiler's buffer size and sample rate be configurable via prefs. r=vp
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
-index 2e8218c..6d4a44b 100644
+index 4967514..221f9ea 100644
 --- a/browser/app/profile/firefox.js
 +++ b/browser/app/profile/firefox.js
-@@ -1433,16 +1433,18 @@ pref("devtools.debugger.ui.variables-searchbox-visible", false);
+@@ -1428,16 +1428,18 @@ pref("devtools.debugger.ui.variables-searchbox-visible", false);
  
  // Enable the Performance tools
  pref("devtools.performance.enabled", true);
@@ -25,103 +25,17 @@ index 2e8218c..6d4a44b 100644
  pref("devtools.performance.ui.enable-memory", false);
  pref("devtools.performance.ui.enable-framerate", true);
  pref("devtools.performance.ui.show-jit-optimizations", false);
-diff --git a/browser/devtools/framework/gDevTools.jsm b/browser/devtools/framework/gDevTools.jsm
-index 413a995..d36c6a5 100644
---- a/browser/devtools/framework/gDevTools.jsm
-+++ b/browser/devtools/framework/gDevTools.jsm
-@@ -6,30 +6,31 @@
- 
- this.EXPORTED_SYMBOLS = [ "gDevTools", "DevTools", "gDevToolsBrowser" ];
- 
- const { classes: Cc, interfaces: Ci, utils: Cu } = Components;
- 
- Cu.import("resource://gre/modules/XPCOMUtils.jsm");
- Cu.import("resource://gre/modules/Services.jsm");
- Cu.import("resource://gre/modules/devtools/Loader.jsm");
--
- XPCOMUtils.defineLazyModuleGetter(this, "promise",
-                                   "resource://gre/modules/Promise.jsm", "Promise");
- 
- XPCOMUtils.defineLazyModuleGetter(this, "console",
-                                   "resource://gre/modules/devtools/Console.jsm");
- 
- XPCOMUtils.defineLazyModuleGetter(this, "CustomizableUI",
-                                   "resource:///modules/CustomizableUI.jsm");
- XPCOMUtils.defineLazyModuleGetter(this, "DebuggerServer",
-                                   "resource://gre/modules/devtools/dbg-server.jsm");
- 
- XPCOMUtils.defineLazyModuleGetter(this, "DebuggerClient",
-                                   "resource://gre/modules/devtools/dbg-client.jsm");
-+XPCOMUtils.defineLazyModuleGetter(this, "Task",
-+                                  "resource://gre/modules/Task.jsm");
- 
- const EventEmitter = devtools.require("devtools/toolkit/event-emitter");
- const Telemetry = devtools.require("devtools/shared/telemetry");
- 
- const TABS_OPEN_PEAK_HISTOGRAM = "DEVTOOLS_TABS_OPEN_PEAK_LINEAR";
- const TABS_OPEN_AVG_HISTOGRAM = "DEVTOOLS_TABS_OPEN_AVERAGE_LINEAR";
- const TABS_PINNED_PEAK_HISTOGRAM = "DEVTOOLS_TABS_PINNED_PEAK_LINEAR";
- const TABS_PINNED_AVG_HISTOGRAM = "DEVTOOLS_TABS_PINNED_AVERAGE_LINEAR";
-@@ -1213,18 +1214,18 @@ let gDevToolsBrowser = {
-   },
- 
-   /**
-    * Connects to the SPS profiler when the developer tools are open. This is
-    * necessary because of the WebConsole's `profile` and `profileEnd` methods.
-    */
-   _connectToProfiler: function DT_connectToProfiler(event, toolbox) {
-     let SharedPerformanceUtils = devtools.require("devtools/performance/front");
--    let connection = SharedPerformanceUtils.getPerformanceActorsConnection(toolbox.target);
--    connection.open();
-+    this._performanceConnection = SharedPerformanceUtils.getPerformanceActorsConnection(toolbox.target);
-+    this._performanceConnection.open();
-   },
- 
-   /**
-    * Remove the menuitem for a tool to all open browser windows.
-    *
-    * @param {string} toolId
-    *        id of the tool to remove
-    */
-@@ -1324,21 +1325,25 @@ let gDevToolsBrowser = {
-       case "TabSelect":
-         gDevToolsBrowser._updateMenuCheckbox();
-     }
-   },
- 
-   /**
-    * All browser windows have been closed, tidy up remaining objects.
-    */
--  destroy: function() {
-+  destroy: Task.async(function*() {
-     gDevTools.off("toolbox-ready", gDevToolsBrowser._connectToProfiler);
-     Services.prefs.removeObserver("devtools.", gDevToolsBrowser);
-     Services.obs.removeObserver(gDevToolsBrowser.destroy, "quit-application");
--  },
-+
-+    if (this._performanceConnection) {
-+      yield this._performanceConnection.destroy();
-+    }
-+  }),
- }
- 
- this.gDevToolsBrowser = gDevToolsBrowser;
- 
- gDevTools.on("tool-registered", function(ev, toolId) {
-   let toolDefinition = gDevTools._tools.get(toolId);
-   gDevToolsBrowser._addToolToWindows(toolDefinition);
- });
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index 221a05f..4eb9d5c 100644
+index 6cf302f..4329bfc 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
-@@ -242,17 +242,17 @@ PerformanceFront.prototype = {
-    *        An options object to pass to the actors. Supported properties are
-    *        `withTicks`, `withMemory` and `withAllocations`.
+@@ -396,17 +396,17 @@ PerformanceActorsConnection.prototype = {
+    *        `withTicks`, `withMemory` and `withAllocations`, `probability`, and `maxLogLength`.
     * @return object
     *         A promise that is resolved once recording has started.
     */
    startRecording: Task.async(function*(options = {}) {
+     let model = new RecordingModel(options);
      // All actors are started asynchronously over the remote debugging protocol.
      // Get the corresponding start times from each one of them.
 -    let profilerStartTime = yield this._startProfiler();
@@ -129,16 +43,16 @@ index 221a05f..4eb9d5c 100644
      let timelineStartTime = yield this._startTimeline(options);
      let memoryStartTime = yield this._startMemory(options);
  
-     return {
+     let data = {
        profilerStartTime,
        timelineStartTime,
        memoryStartTime
      };
-@@ -281,31 +281,34 @@ PerformanceFront.prototype = {
-       timelineEndTime: timelineEndTime,
-       memoryEndTime: memoryEndTime
-     };
-   }),
+@@ -480,31 +480,34 @@ PerformanceActorsConnection.prototype = {
+    */
+   isRecording: function () {
+     return this._recordings.some(recording => recording.isRecording());
+   },
  
    /**
     * Starts the profiler actor, if necessary.
@@ -175,12 +89,12 @@ index 221a05f..4eb9d5c 100644
    /**
     * Starts the timeline actor.
 diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
-index 9aa9002..a246f35 100644
+index 2d5292b..1b49a58 100644
 --- a/browser/devtools/performance/modules/recording-model.js
 +++ b/browser/devtools/performance/modules/recording-model.js
 @@ -21,17 +21,19 @@ const RecordingModel = function (options={}) {
-   this._performance = options.performance;
    this._label = options.label || "";
+   this._console = options.console || false;
  
    this._configuration = {
      withTicks: options.withTicks || false,
@@ -196,15 +110,15 @@ index 9aa9002..a246f35 100644
  
  RecordingModel.prototype = {
    // Private fields, only needed when a recording is started or stopped.
+   _console: false,
    _imported: false,
    _recording: false,
-   _profilerStartTime: 0,
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index 8dfe9b0..cc9642e 100644
+index fc7b83b..f49d24f 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
-@@ -194,17 +194,19 @@ let PerformanceController = {
-     this._onThemeChanged = this._onThemeChanged.bind(this);
+@@ -201,17 +201,19 @@ let PerformanceController = {
+     this._onConsoleProfileEnding = this._onConsoleProfileEnding.bind(this);
  
      // All boolean prefs should be handled via the OptionsView in the
      // ToolbarView, so that they may be accessible via the "gear" menu.
@@ -221,35 +135,37 @@ index 8dfe9b0..cc9642e 100644
      this._nonBooleanPrefs.registerObserver();
      this._nonBooleanPrefs.on("pref-changed", this._onPrefChanged);
  
-     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
-     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
-     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
-@@ -285,17 +287,19 @@ let PerformanceController = {
+     gFront.on("console-profile-start", this._onConsoleProfileStart);
+     gFront.on("console-profile-ending", this._onConsoleProfileEnding);
+     gFront.on("console-profile-end", this._onConsoleProfileEnd);
+@@ -288,18 +290,20 @@ let PerformanceController = {
     * when the front has started to record.
     */
    startRecording: Task.async(function *() {
-     let recording = this._createRecording({
+     let options = {
        withMemory: this.getOption("enable-memory"),
        withTicks: this.getOption("enable-framerate"),
        withAllocations: this.getOption("enable-memory"),
        allocationsSampleProbability: this.getPref("memory-sample-probability"),
 -      allocationsMaxLogLength: this.getPref("memory-max-log-length")
+-    };
 +      allocationsMaxLogLength: this.getPref("memory-max-log-length"),
 +      bufferSize: this.getPref("profiler-buffer-size"),
 +      sampleFrequency: this.getPref("profiler-sample-frequency")
-     });
++    });
  
-     this.emit(EVENTS.RECORDING_WILL_START, recording);
-     yield recording.startRecording();
+     this.emit(EVENTS.RECORDING_WILL_START);
+ 
+     let recording = yield gFront.startRecording(options);
+     this._recordings.push(recording);
+ 
      this.emit(EVENTS.RECORDING_STARTED, recording);
- 
-     this.setCurrentRecording(recording);
    }),
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 25b7c6f..e1ed0fb 100644
+index 9be9058..9ed53ab 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -58,16 +58,17 @@ support-files =
+@@ -70,16 +70,17 @@ support-files =
  [browser_perf-options-show-platform-data-01.js]
  [browser_perf-options-show-platform-data-02.js]
  [browser_perf-options-show-idle-blocks-01.js]
@@ -300,7 +216,7 @@ index 0000000..48d3968
 +  finish();
 +}
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 3075954..f9de433 100644
+index 0b98f9ce..8a53dd1 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
 @@ -1,16 +1,16 @@
