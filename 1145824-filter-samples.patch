@@ -1,0 +1,740 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 17 Apr 2015 12:44:52 -0700
+Subject: Bug 1145824 - Profiler actor and performance tools now handle passing in a startTime to filter out SPS profiles on platform rather than client. r=vp,fitzgen
+
+diff --git a/browser/devtools/performance/modules/compatibility.js b/browser/devtools/performance/modules/compatibility.js
+index d0352b5..267fd79 100644
+--- a/browser/devtools/performance/modules/compatibility.js
++++ b/browser/devtools/performance/modules/compatibility.js
+@@ -1,22 +1,90 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Task } = require("resource://gre/modules/Task.jsm");
++loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
++loader.lazyRequireGetter(this, "RecordingUtils",
++  "devtools/performance/recording-utils", true);
+ 
+ const REQUIRED_MEMORY_ACTOR_METHODS = [
+   "attach", "detach", "startRecordingAllocations", "stopRecordingAllocations", "getAllocations"
+ ];
+ 
+ /**
++ * Constructor for a facade around an underlying ProfilerFront.
++ */
++function ProfilerFront (target) {
++  this._target = target;
++}
++
++ProfilerFront.prototype = {
++  // Connects to the targets underlying real ProfilerFront.
++  connect: Task.async(function*() {
++    let target = this._target;
++    // Chrome and content process targets already have obtained a reference
++    // to the profiler tab actor. Use it immediately.
++    if (target.form && target.form.profilerActor) {
++      this._profiler = target.form.profilerActor;
++    }
++    // Check if we already have a grip to the `listTabs` response object
++    // and, if we do, use it to get to the profiler actor.
++    else if (target.root && target.root.profilerActor) {
++      this._profiler = target.root.profilerActor;
++    }
++    // Otherwise, call `listTabs`.
++    else {
++      this._profiler = (yield listTabs(target.client)).profilerActor;
++    }
++
++    // Fetch and store information about the SPS profiler and
++    // server profiler.
++    let { features, traits } = yield this._request("getFeatures");
++    this.features = features;
++    this.traits = traits || {};
++  }),
++
++  /**
++   * Makes a request to the underlying real profiler actor. Handles
++   * backwards compatibility differences based off of the features
++   * and traits of the actor.
++   */
++  _request: function (method, ...args) {
++    let deferred = promise.defer();
++    let data = args[0] || {};
++    data.to = this._profiler;
++    data.type = method;
++    this._target.client.request(data, res => {
++      // Return immediately, as the later conditionals check
++      // for a "traits" that does not yet exist until the first getFeatures
++      // goes through.
++      if (method === "getFeatures") {
++        return deferred.resolve(res);
++      }
++
++      // If the backend does not support filtering by start and endtime on platform (< Fx40),
++      // do it on the client (much slower).
++      if (method === "getProfile" && !this.traits.filterable) {
++        RecordingUtils.filterSamples(res.profile, data.startTime || 0);
++      }
++
++      deferred.resolve(res);
++    });
++    return deferred.promise;
++  }
++};
++
++exports.ProfilerFront = ProfilerFront;
++
++/**
+  * A dummy front decorated with the provided methods.
+  *
+  * @param array blueprint
+  *        A list of [funcName, retVal] describing the class.
+  */
+ function MockFront (blueprint) {
+   EventEmitter.decorate(this);
+ 
+@@ -102,8 +170,19 @@ function timelineActorSupported(target) {
+   // instances where the timeline actor is not available.
+   if (target.TEST_MOCK_TIMELINE_ACTOR) {
+     return false;
+   }
+ 
+   return target.hasActor("timeline");
+ }
+ exports.timelineActorSupported = Task.async(timelineActorSupported);
++
++/**
++ * Returns a promise resolved with a listing of all the tabs in the
++ * provided thread client.
++ */
++function listTabs(client) {
++  let deferred = promise.defer();
++  client.listTabs(deferred.resolve);
++  return deferred.promise;
++}
++
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index 6cf302f..0007549 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -150,33 +150,22 @@ PerformanceActorsConnection.prototype = {
+     yield this._unregisterListeners();
+     yield this._disconnectActors();
+ 
+     this._memory = this._timeline = this._profiler = this._target = this._client = null;
+     this._connected = false;
+   }),
+ 
+   /**
+-   * Initializes a connection to the profiler actor.
++   * Initializes a connection to the profiler actor. Uses a facade around the ProfilerFront
++   * for similarity to the other actors in the shared connection.
+    */
+   _connectProfilerActor: Task.async(function*() {
+-    // Chrome and content process targets already have obtained a reference
+-    // to the profiler tab actor. Use it immediately.
+-    if (this._target.form && this._target.form.profilerActor) {
+-      this._profiler = this._target.form.profilerActor;
+-    }
+-    // Check if we already have a grip to the `listTabs` response object
+-    // and, if we do, use it to get to the profiler actor.
+-    else if (this._target.root && this._target.root.profilerActor) {
+-      this._profiler = this._target.root.profilerActor;
+-    }
+-    // Otherwise, call `listTabs`.
+-    else {
+-      this._profiler = (yield listTabs(this._client)).profilerActor;
+-    }
++    this._profiler = new compatibility.ProfilerFront(this._target);
++    yield this._profiler.connect();
+   }),
+ 
+   /**
+    * Initializes a connection to a timeline actor.
+    */
+   _connectTimelineActor: function() {
+     let supported = yield compatibility.timelineActorSupported(this._target);
+     if (supported) {
+@@ -248,22 +237,17 @@ PerformanceActorsConnection.prototype = {
+    * @param any args [optional]
+    *        Additional data or arguments to send with the request.
+    * @return object
+    *         A promise resolved with the response once the request finishes.
+    */
+   _request: function(actor, method, ...args) {
+     // Handle requests to the profiler actor.
+     if (actor == "profiler") {
+-      let deferred = promise.defer();
+-      let data = args[0] || {};
+-      data.to = this._profiler;
+-      data.type = method;
+-      this._client.request(data, deferred.resolve);
+-      return deferred.promise;
++      return this._profiler._request(method, ...args);
+     }
+ 
+     // Handle requests to the timeline actor.
+     if (actor == "timeline") {
+       return this._timeline[method].apply(this._timeline, args);
+     }
+ 
+     // Handle requests to the memory actor.
+@@ -326,30 +310,40 @@ PerformanceActorsConnection.prototype = {
+     }));
+ 
+     this.emit("console-profile-start", model);
+   }),
+ 
+   /**
+    * Invoked whenever `console.profileEnd` is called.
+    *
+-   * @param object profilerData
+-   *        The dump of data from the profiler triggered by this console.profileEnd call.
++   * @param string profileLabel
++   *        The provided string argument if available; undefined otherwise.
++   * @param number currentTime
++   *        The time (in milliseconds) when the call was made, relative to when
++   *        the nsIProfiler module was started.
+    */
+-  _onConsoleProfileEnd: Task.async(function *(profilerData) {
++  _onConsoleProfileEnd: Task.async(function *(data) {
++    // If no data, abort; can occur if profiler isn't running and we get a surprise
++    // call to console.profileEnd()
++    if (!data) {
++      return;
++    }
++    let { profileLabel, currentTime: endTime } = data;
++
+     let pending = this._recordings.filter(r => r.isConsole() && r.isRecording());
+     if (pending.length === 0) {
+       return;
+     }
+ 
+     let model;
+     // Try to find the corresponding `console.profile` call if
+     // a label was used in profileEnd(). If no matches, abort.
+-    if (profilerData.profileLabel) {
+-      model = pending.find(e => e.getLabel() === profilerData.profileLabel);
++    if (profileLabel) {
++      model = pending.find(e => e.getLabel() === profileLabel);
+     }
+     // If no label supplied, pop off the most recent pending console recording
+     else {
+       model = pending[pending.length - 1];
+     }
+ 
+     // If `profileEnd()` was called with a label, and there are no matching
+     // sessions, abort.
+@@ -440,17 +434,18 @@ PerformanceActorsConnection.prototype = {
+     // from the PerformanceFront or via `console-profile-end` event) and then
+     // remove it from the internal store.
+     //
+     // In the case where a console.profile is generated via the console (so the tools are
+     // open), we initialize the Performance tool so it can listen to those events.
+     this._recordings.splice(this._recordings.indexOf(model), 1);
+ 
+     let config = model.getConfiguration();
+-    let profilerData = yield this._request("profiler", "getProfile");
++    let startTime = model.getProfilerStartTime();
++    let profilerData = yield this._request("profiler", "getProfile", { startTime });
+     let memoryEndTime = Date.now();
+     let timelineEndTime = Date.now();
+ 
+     // Only if there are no more sessions recording do we stop
+     // the underlying memory and timeline actors. If we're still recording,
+     // juse use Date.now() for the memory and timeline end times, as those
+     // are only used in tests.
+     if (!this.isRecording()) {
+@@ -663,26 +658,16 @@ PerformanceFront.prototype = {
+     return {
+       memory: this._usingMockMemory,
+       timeline: this._usingMockTimeline
+     };
+   }
+ };
+ 
+ /**
+- * Returns a promise resolved with a listing of all the tabs in the
+- * provided thread client.
+- */
+-function listTabs(client) {
+-  let deferred = promise.defer();
+-  client.listTabs(deferred.resolve);
+-  return deferred.promise;
+-}
+-
+-/**
+  * Creates an object of configurations based off of preferences for a RecordingModel.
+  */
+ function getRecordingModelPrefs () {
+   return {
+     withMemory: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
+     withTicks: Services.prefs.getBoolPref("devtools.performance.ui.enable-framerate"),
+     withAllocations: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
+     allocationsSampleProbability: +Services.prefs.getCharPref("devtools.performance.memory.sample-probability"),
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index 2d5292b..c000267 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -108,28 +108,36 @@ RecordingModel.prototype = {
+    * Sets results available from stopping a recording from SharedPerformanceConnection.
+    * Should only be called by SharedPerformanceConnection.
+    */
+   _onStopRecording: Task.async(function *(info) {
+     this._profile = info.profile;
+     this._duration = info.profilerEndTime - this._profilerStartTime;
+     this._recording = false;
+ 
+-    // We'll need to filter out all samples that fall out of current profile's
+-    // range since the profiler is continuously running. Because of this, sample
+-    // times are not guaranteed to have a zero epoch, so offset the timestamps.
+-    RecordingUtils.filterSamples(this._profile, this._profilerStartTime);
++    // We filter out all samples that fall out of current profile's range
++    // since the profiler is continuously running. Because of this, sample
++    // times are not guaranteed to have a zero epoch, so offset the
++    // timestamps.
+     RecordingUtils.offsetSampleTimes(this._profile, this._profilerStartTime);
+ 
+     // Markers need to be sorted ascending by time, to be properly displayed
+     // in a waterfall view.
+     this._markers = this._markers.sort((a, b) => (a.start > b.start));
+   }),
+ 
+   /**
++   * Gets the profile's start time.
++   * @return number
++   */
++  getProfilerStartTime: function () {
++    return this._profilerStartTime;
++  },
++
++  /**
+    * Gets the profile's label, from `console.profile(LABEL)`.
+    * @return string
+    */
+   getLabel: function () {
+     return this._label;
+   },
+ 
+   /**
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 9be9058..f66c00c 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -14,16 +14,17 @@ support-files =
+ 
+ [browser_markers-parse-html.js]
+ 
+ [browser_perf-allocations-to-samples.js]
+ [browser_perf-compatibility-01.js]
+ [browser_perf-compatibility-02.js]
+ [browser_perf-compatibility-03.js]
+ [browser_perf-compatibility-04.js]
++[browser_perf-compatibility-05.js]
+ [browser_perf-clear-01.js]
+ [browser_perf-clear-02.js]
+ [browser_perf-columns-js-calltree.js]
+ [browser_perf-columns-memory-calltree.js]
+ [browser_perf-console-record-01.js]
+ [browser_perf-console-record-02.js]
+ [browser_perf-console-record-03.js]
+ [browser_perf-console-record-04.js]
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-05.js b/browser/devtools/performance/test/browser_perf-compatibility-05.js
+new file mode 100644
+index 0000000..66d9d63
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-compatibility-05.js
+@@ -0,0 +1,75 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that when using an older server (< Fx40) where the profiler actor does not
++ * have the `filterable` trait, the samples are filtered by time on the client, rather
++ * than the more performant platform code.
++ */
++
++const WAIT_TIME = 1000; // ms
++
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { gFront: front, gTarget: target } = panel.panelWin;
++  let connection = getPerformanceActorsConnection(target);
++
++  // Explicitly override the profiler's trait `filterable`
++  connection._profiler.traits.filterable = false;
++
++  // Ugly, but we need to also not send the startTime to the server
++  // so we don't filter it both on the server and client
++  let request = target.client.request;
++  target.client.request = (data, res) => {
++    // Copy so we don't destructively change the request object, as we use
++    // the startTime on this object for filtering in the callback
++    let newData = merge({}, data, { startTime: void 0 });
++    request.call(target.client, newData, res);
++  };
++
++  // Perform the first recording...
++
++  let firstRecording = yield front.startRecording();
++  let firstRecordingStartTime = firstRecording._profilerStartTime;
++  info("Started profiling at: " + firstRecordingStartTime);
++
++  busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
++
++  yield front.stopRecording(firstRecording);
++
++  is(firstRecordingStartTime, 0,
++    "The profiling start time should be 0 for the first recording.");
++  ok(firstRecording.getDuration() >= WAIT_TIME,
++    "The first recording duration is correct.");
++
++  // Perform the second recording...
++
++  let secondRecording = yield front.startRecording();
++  let secondRecordingStartTime = secondRecording._profilerStartTime;
++  info("Started profiling at: " + secondRecordingStartTime);
++
++  busyWait(WAIT_TIME); // allow the profiler module to sample more cpu activity
++
++  yield front.stopRecording(secondRecording);
++  let secondRecordingProfile = secondRecording.getProfile();
++  let secondRecordingSamples = secondRecordingProfile.threads[0].samples;
++
++  isnot(secondRecording._profilerStartTime, 0,
++    "The profiling start time should not be 0 on the second recording.");
++  ok(secondRecording.getDuration() >= WAIT_TIME,
++    "The second recording duration is correct.");
++
++  info("Second profile's first sample time: " + secondRecordingSamples[0].time);
++  ok(secondRecordingSamples[0].time < secondRecordingStartTime,
++    "The second recorded sample times were normalized.");
++  ok(secondRecordingSamples[0].time > 0,
++    "The second recorded sample times were normalized correctly.");
++  ok(!secondRecordingSamples.find(e => e.time + secondRecordingStartTime <= firstRecording.getDuration()),
++    "There should be no samples from the first recording in the second one, " +
++    "even though the total number of frames did not overflow.");
++
++  target.client.request = request;
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
+index 8720ae1..8dd8a8b 100644
+--- a/toolkit/devtools/server/actors/profiler.js
++++ b/toolkit/devtools/server/actors/profiler.js
+@@ -13,19 +13,16 @@ let DEFAULT_PROFILER_FEATURES = ["js"];
+ let DEFAULT_PROFILER_THREADFILTERS = ["GeckoMain"];
+ 
+ /**
+  * The nsIProfiler is target agnostic and interacts with the whole platform.
+  * Therefore, special care needs to be given to make sure different actor
+  * consumers (i.e. "toolboxes") don't interfere with each other.
+  */
+ let gProfilerConsumers = 0;
+-let gProfilingStartTime = -1;
+-Services.obs.addObserver(() => gProfilingStartTime = Date.now(), "profiler-started", false);
+-Services.obs.addObserver(() => gProfilingStartTime = -1, "profiler-stopped", false);
+ 
+ loader.lazyGetter(this, "nsIProfilerModule", () => {
+   return Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+ });
+ 
+ /**
+  * The profiler actor provides remote access to the built-in nsIProfiler module.
+  */
+@@ -43,22 +40,30 @@ ProfilerActor.prototype = {
+     this._observedEvents = null;
+     this.onStopProfiler();
+ 
+     gProfilerConsumers--;
+     checkProfilerConsumers();
+   },
+ 
+   /**
+-   * Returns an array of feature strings, describing the profiler features
+-   * that are available on this platform. Can be called while the profiler
+-   * is stopped.
++   * Returns an object with an array of `features` strings, describing the profiler features
++   * that are available on this platform. Also has a hash of `traits` used to describe
++   * what features are available in this actor, so clients can handle older profiler actors.
++   * Can be called while the profiler is stopped.
+    */
+   onGetFeatures: function() {
+-    return { features: nsIProfilerModule.GetFeatures([]) };
++    return {
++      features: nsIProfilerModule.GetFeatures([]),
++      traits: {
++        // Whether or not `getProfile()` supports specifying a `startTime`
++        // and `endTime` to filter out samples.
++        filterable: true
++      }
++    };
+   },
+ 
+   /**
+    * Starts the nsIProfiler module. Doing so will discard any samples
+    * that might have been accumulated so far.
+    *
+    * @param number entries [optional]
+    * @param number interval [optional]
+@@ -92,17 +97,17 @@ ProfilerActor.prototype = {
+   },
+ 
+   /**
+    * Verifies whether or not the nsIProfiler module has started.
+    * If already active, the current time is also returned.
+    */
+   onIsActive: function() {
+     let isActive = nsIProfilerModule.IsActive();
+-    let elapsedTime = isActive ? getElapsedTime() : undefined;
++    let elapsedTime = isActive ? nsIProfilerModule.getElapsedTime() : undefined;
+     return { isActive: isActive, currentTime: elapsedTime };
+   },
+ 
+   /**
+    * Returns a stringified JSON object that describes the shared libraries
+    * which are currently loaded into our process. Can be called while the
+    * profiler is stopped.
+    */
+@@ -128,20 +133,28 @@ ProfilerActor.prototype = {
+    *         category: number
+    *       } ... ],
+    *       name: string
+    *       responsiveness: number
+    *       time: number
+    *     } ... ]
+    *   } ... ]
+    * }
++   *
++   *
++   * @param number startTime
++   *        Since the circular buffer will only grow as long as the profiler lives,
++   *        the buffer can contain unwanted samples. Pass in a `startTime` to only retrieve
++   *        samples that took place after the `startTime`, with 0 being when the profiler
++   *        just started.
+    */
+-  onGetProfile: function() {
+-    let profile = nsIProfilerModule.getProfileData();
+-    return { profile: profile, currentTime: getElapsedTime() };
++  onGetProfile: function(request) {
++    let startTime = request.startTime || 0;
++    let profile = nsIProfilerModule.getProfileData(startTime);
++    return { profile: profile, currentTime: nsIProfilerModule.getElapsedTime() };
+   },
+ 
+   /**
+    * Registers for certain event notifications.
+    * Currently supported events:
+    *   - "console-api-profiler"
+    *   - "profiler-started"
+    *   - "profiler-stopped"
+@@ -224,95 +237,65 @@ ProfilerActor.prototype = {
+    * creates an appropriate response sent over the protocol.
+    * @param object subject
+    * @param object data
+    * @return object
+    */
+   _handleConsoleEvent: function(subject, data) {
+     // An optional label may be specified when calling `console.profile`.
+     // If that's the case, stringify it and send it over with the response.
+-    let args = subject.arguments;
++    let { action, arguments: args } = subject;
+     let profileLabel = args.length > 0 ? args[0] + "" : undefined;
+ 
+     // If the event was generated from `console.profile` or `console.profileEnd`
+     // we need to start the profiler right away and then just notify the client.
+     // Otherwise, we'll lose precious samples.
+ 
+-    if (subject.action == "profile") {
++    if (action === "profile" || action === "profileEnd") {
+       let { isActive, currentTime } = this.onIsActive();
+ 
+       // Start the profiler only if it wasn't already active. Otherwise, any
+       // samples that might have been accumulated so far will be discarded.
+-      if (!isActive) {
++      if (!isActive && action === "profile") {
+         this.onStartProfiler();
+         return {
+           profileLabel: profileLabel,
+           currentTime: 0
+         };
+       }
++      // Otherwise, if inactive and a call to profile end, send
++      // an empty object because we can't do anything with this.
++      else if (!isActive) {
++        return {};
++      }
++
++      // Otherwise, the profiler is already active, so just send
++      // to the front the current time, label, and the notification
++      // adds the action as well.
+       return {
+         profileLabel: profileLabel,
+         currentTime: currentTime
+       };
+     }
+-
+-    if (subject.action == "profileEnd") {
+-      let details = this.onGetProfile();
+-      details.profileLabel = profileLabel;
+-      return details;
+-    }
+   }
+ };
+ 
+ exports.ProfilerActor = ProfilerActor;
+ 
+ /**
+  * JSON.stringify callback used in ProfilerActor.prototype.observe.
+  */
+ function cycleBreaker(key, value) {
+   if (key == "wrappedJSObject") {
+     return undefined;
+   }
+   return value;
+ }
+ 
+ /**
+- * Gets the time elapsed since the profiler was last started.
+- * @return number
+- */
+-function getElapsedTime() {
+-  // Assign `gProfilingStartTime` now if no client of this actor has actually
+-  // started it yet, but the built-in profiler module is somehow already active
+-  // (it could happen if the MOZ_PROFILER_STARTUP environment variable is set,
+-  // or the Gecko Profiler add-on is installed and isn't using this actor).
+-  // Otherwise, the returned value is bogus and messes up the samples filtering.
+-  if (gProfilingStartTime == -1) {
+-    let profile = nsIProfilerModule.getProfileData();
+-    let lastSampleTime = findOldestSampleTime(profile);
+-    gProfilingStartTime = Date.now() - lastSampleTime;
+-  }
+-  return Date.now() - gProfilingStartTime;
+-}
+-
+-/**
+- * Finds the oldest sample time in the provided profile.
+- * @param object profile
+- * @return number
+- */
+-function findOldestSampleTime(profile) {
+-  let firstThreadSamples = profile.threads[0].samples;
+-
+-  for (let i = firstThreadSamples.length - 1; i >= 0; i--) {
+-    if ("time" in firstThreadSamples[i]) {
+-      return firstThreadSamples[i].time;
+-    }
+-  }
+-}
+-
+-/**
+  * Asserts the value sanity of `gProfilerConsumers`.
+  */
+ function checkProfilerConsumers() {
+   if (gProfilerConsumers < 0) {
+     let msg = "Somehow the number of started profilers is now negative.";
+     DevToolsUtils.reportException("ProfilerActor", msg);
+   }
+ }
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_data.js b/toolkit/devtools/server/tests/unit/test_profiler_data.js
+index 638e95e..e065e3b 100644
+--- a/toolkit/devtools/server/tests/unit/test_profiler_data.js
++++ b/toolkit/devtools/server/tests/unit/test_profiler_data.js
+@@ -11,65 +11,65 @@
+ const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+ const INITIAL_WAIT_TIME = 100; // ms
+ const MAX_WAIT_TIME = 20000; // ms
+ 
+ function run_test()
+ {
+   get_chrome_actors((client, form) => {
+     let actor = form.profilerActor;
+-    activate_profiler(client, actor, () => {
+-      test_data(client, actor, () => {
++    activate_profiler(client, actor, startTime => {
++      test_data(client, actor, startTime, () => {
+         deactivate_profiler(client, actor, () => {
+           client.close(do_test_finished);
+         })
+       });
+     });
+   })
+ 
+   do_test_pending();
+ }
+ 
+ function activate_profiler(client, actor, callback)
+ {
+   client.request({ to: actor, type: "startProfiler" }, response => {
+     do_check_true(response.started);
+     client.request({ to: actor, type: "isActive" }, response => {
+       do_check_true(response.isActive);
+-      callback();
++      callback(response.currentTime);
+     });
+   });
+ }
+ 
+ function deactivate_profiler(client, actor, callback)
+ {
+   client.request({ to: actor, type: "stopProfiler" }, response => {
+     do_check_false(response.started);
+     client.request({ to: actor, type: "isActive" }, response => {
+       do_check_false(response.isActive);
+       callback();
+     });
+   });
+ }
+ 
+-function test_data(client, actor, callback)
++function test_data(client, actor, startTime, callback)
+ {
+   function attempt(delay)
+   {
+     // No idea why, but Components.stack.sourceLine returns null.
+     let funcLine = Components.stack.lineNumber - 3;
+ 
+     // Spin for the requested time, then take a sample.
+     let start = Date.now();
+     let stack;
+     do_print("Attempt: delay = " + delay);
+     while (Date.now() - start < delay) { stack = Components.stack; }
+     do_print("Attempt: finished waiting.");
+ 
+-    client.request({ to: actor, type: "getProfile" }, response => {
++    client.request({ to: actor, type: "getProfile", startTime  }, response => {
+       // Any valid getProfile response should have the following top
+       // level structure.
+       do_check_eq(typeof response.profile, "object");
+       do_check_eq(typeof response.profile.meta, "object");
+       do_check_eq(typeof response.profile.meta.platform, "string");
+       do_check_eq(typeof response.profile.threads, "object");
+       do_check_eq(typeof response.profile.threads[0], "object");
+       do_check_eq(typeof response.profile.threads[0].samples, "object");
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_getfeatures.js b/toolkit/devtools/server/tests/unit/test_profiler_getfeatures.js
+index 41d0337..2d5e1c5 100644
+--- a/toolkit/devtools/server/tests/unit/test_profiler_getfeatures.js
++++ b/toolkit/devtools/server/tests/unit/test_profiler_getfeatures.js
+@@ -25,11 +25,13 @@ function run_test()
+ 
+ function test_getfeatures(client, actor, callback)
+ {
+   client.request({ to: actor, type: "getFeatures" }, response => {
+     do_check_eq(typeof response.features, "object");
+     do_check_true(response.features.length >= 1);
+     do_check_eq(typeof response.features[0], "string");
+     do_check_true(response.features.indexOf("js") != -1);
++    do_check_eq(typeof response.traits, "object");
++    do_check_true(response.traits.filterable === true);
+     callback();
+   });
+ }
+-- 
+2.2.1
+
