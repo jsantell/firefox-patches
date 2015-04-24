@@ -1,9 +1,26 @@
+From f5336d0850c6d62410c80e2cbbdcebfe846adf0e Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
 Date: Fri, 17 Apr 2015 12:44:52 -0700
-Subject: Bug 1145824 - Profiler actor and performance tools now handle passing in a startTime to filter out SPS profiles on platform rather than client. r=vp,fitzgen
+Subject: [PATCH 1/2] Bug 1145824 - Profiler actor and performance tools now
+ handle passing in a startTime to filter out SPS profiles on platform rather
+ than client. r=vp,fitzgen
+
+---
+ browser/devtools/framework/toolbox.js              | 13 ++--
+ .../devtools/performance/modules/compatibility.js  | 71 +++++++++++++++++++
+ browser/devtools/performance/modules/front.js      | 64 +++++++----------
+ .../performance/modules/recording-model.js         | 16 +++--
+ browser/devtools/performance/test/browser.ini      |  1 +
+ .../test/browser_perf-compatibility-05.js          | 75 ++++++++++++++++++++
+ browser/devtools/webide/test/head.js               |  3 +
+ toolkit/devtools/server/actors/profiler.js         | 82 +++++++---------------
+ toolkit/devtools/server/actors/root.js             |  3 +
+ .../server/tests/unit/test_profiler_data.js        | 10 +--
+ 10 files changed, 229 insertions(+), 109 deletions(-)
+ create mode 100644 browser/devtools/performance/test/browser_perf-compatibility-05.js
 
 diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
-index 8f3a387..2bc5629 100644
+index 7e66b57..f34bfe3 100644
 --- a/browser/devtools/framework/toolbox.js
 +++ b/browser/devtools/framework/toolbox.js
 @@ -375,21 +375,24 @@ Toolbox.prototype = {
@@ -34,7 +51,7 @@ index 8f3a387..2bc5629 100644
      }.bind(this)).then(null, console.error.bind(console));
    },
  
-@@ -1858,17 +1861,19 @@ Toolbox.prototype = {
+@@ -1861,17 +1864,19 @@ Toolbox.prototype = {
      }
  
      yield this.getPerformanceActorsConnection().open();
@@ -163,7 +180,7 @@ index d0352b5..2cf4fa3 100644
 +}
 +
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index 6cf302f..95a07fc 100644
+index a99a030..4a95102 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
 @@ -139,44 +139,36 @@ PerformanceActorsConnection.prototype = {
@@ -836,6 +853,841 @@ index 638e95e..e065e3b 100644
        do_check_eq(typeof response.profile.threads, "object");
        do_check_eq(typeof response.profile.threads[0], "object");
        do_check_eq(typeof response.profile.threads[0].samples, "object");
+-- 
+2.2.1
+
+
+From 10e498701fb1388eff44f83e2c4ff91111bf24bd Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 24 Apr 2015 11:25:34 -0700
+Subject: [PATCH 2/2] backend
+
+---
+ tools/profiler/GeckoProfiler.h     |  7 +++--
+ tools/profiler/GeckoProfilerFunc.h |  4 +--
+ tools/profiler/GeckoProfilerImpl.h |  8 ++---
+ tools/profiler/ProfileEntry.cpp    | 60 +++++++++++++++++++++++++++++---------
+ tools/profiler/ProfileEntry.h      | 12 ++++----
+ tools/profiler/ProfilerMarkers.cpp |  2 +-
+ tools/profiler/PseudoStack.h       |  2 +-
+ tools/profiler/TableTicker.cpp     | 22 +++++++-------
+ tools/profiler/TableTicker.h       |  6 ++--
+ tools/profiler/nsIProfiler.idl     | 22 ++++++++++++--
+ tools/profiler/nsProfiler.cpp      | 18 ++++++++----
+ tools/profiler/platform.cpp        | 10 +++----
+ 12 files changed, 116 insertions(+), 57 deletions(-)
+
+diff --git a/tools/profiler/GeckoProfiler.h b/tools/profiler/GeckoProfiler.h
+index 6ad624f..db85bfd 100644
+--- a/tools/profiler/GeckoProfiler.h
++++ b/tools/profiler/GeckoProfiler.h
+@@ -153,20 +153,23 @@ static inline bool profiler_feature_active(const char*) { return false; }
+ 
+ // Internal-only. Used by the event tracer.
+ static inline void profiler_responsiveness(const mozilla::TimeStamp& aTime) {}
+ 
+ // Internal-only.
+ static inline void profiler_set_frame_number(int frameNumber) {}
+ 
+ // Get the profile encoded as a JSON string.
+-static inline char* profiler_get_profile() { return nullptr; }
++static inline char* profiler_get_profile(float aSinceTime = 0) { return nullptr; }
+ 
+ // Get the profile encoded as a JSON object.
+-static inline JSObject* profiler_get_profile_jsobject(JSContext* aCx) { return nullptr; }
++static inline JSObject* profiler_get_profile_jsobject(JSContext* aCx,
++                                                      float aSinceTime = 0) {
++  return nullptr;
++}
+ 
+ // Get the profile and write it into a file
+ static inline void profiler_save_profile_to_file(char* aFilename) { }
+ 
+ // Get the features supported by the profiler that are accepted by profiler_init.
+ // Returns a null terminated char* array.
+ static inline char** profiler_get_features() { return nullptr; }
+ 
+diff --git a/tools/profiler/GeckoProfilerFunc.h b/tools/profiler/GeckoProfilerFunc.h
+index 5f444b8..03ecbc8 100644
+--- a/tools/profiler/GeckoProfilerFunc.h
++++ b/tools/profiler/GeckoProfilerFunc.h
+@@ -48,19 +48,19 @@ bool mozilla_sampler_feature_active(const char* aName);
+ void mozilla_sampler_responsiveness(const mozilla::TimeStamp& time);
+ 
+ void mozilla_sampler_frame_number(int frameNumber);
+ 
+ const double* mozilla_sampler_get_responsiveness();
+ 
+ void mozilla_sampler_save();
+ 
+-char* mozilla_sampler_get_profile();
++char* mozilla_sampler_get_profile(float aSinceTime);
+ 
+-JSObject *mozilla_sampler_get_profile_data(JSContext *aCx);
++JSObject *mozilla_sampler_get_profile_data(JSContext *aCx, float aSinceTime);
+ 
+ // Make this function easily callable from a debugger in a build without
+ // debugging information (work around http://llvm.org/bugs/show_bug.cgi?id=22211)
+ extern "C" {
+   void mozilla_sampler_save_profile_to_file(const char* aFilename);
+ }
+ 
+ const char** mozilla_sampler_get_features();
+diff --git a/tools/profiler/GeckoProfilerImpl.h b/tools/profiler/GeckoProfilerImpl.h
+index fa358f8..62f3b9c 100644
+--- a/tools/profiler/GeckoProfilerImpl.h
++++ b/tools/profiler/GeckoProfilerImpl.h
+@@ -139,25 +139,25 @@ void profiler_responsiveness(const mozilla::TimeStamp& aTime)
+ 
+ static inline
+ void profiler_set_frame_number(int frameNumber)
+ {
+   return mozilla_sampler_frame_number(frameNumber);
+ }
+ 
+ static inline
+-char* profiler_get_profile()
++char* profiler_get_profile(float aSinceTime = 0)
+ {
+-  return mozilla_sampler_get_profile();
++  return mozilla_sampler_get_profile(aSinceTime);
+ }
+ 
+ static inline
+-JSObject* profiler_get_profile_jsobject(JSContext* aCx)
++JSObject* profiler_get_profile_jsobject(JSContext* aCx, float aSinceTime = 0)
+ {
+-  return mozilla_sampler_get_profile_data(aCx);
++  return mozilla_sampler_get_profile_data(aCx, aSinceTime);
+ }
+ 
+ static inline
+ void profiler_save_profile_to_file(const char* aFilename)
+ {
+   return mozilla_sampler_save_profile_to_file(aFilename);
+ }
+ 
+diff --git a/tools/profiler/ProfileEntry.cpp b/tools/profiler/ProfileEntry.cpp
+index d94247d..a0e0e22 100644
+--- a/tools/profiler/ProfileEntry.cpp
++++ b/tools/profiler/ProfileEntry.cpp
+@@ -388,28 +388,40 @@ void UniqueJITOptimizations::stream(JSStreamWriter& b, JSRuntime* rt)
+     unsigned line, column;
+     line = JS_PCToLineNumber(script, pc, &column);
+     b.NameValue("line", line);
+     b.NameValue("column", column);
+     b.EndObject();
+   }
+ }
+ 
+-void ProfileBuffer::StreamSamplesToJSObject(JSStreamWriter& b, int aThreadId, JSRuntime* rt,
++void ProfileBuffer::StreamSamplesToJSObject(JSStreamWriter& b, int aThreadId,
++                                            float aSinceTime, JSRuntime* rt,
+                                             UniqueJITOptimizations& aUniqueOpts)
+ {
+   bool sample = false;
+   int readPos = mReadPos;
+   int currentThreadID = -1;
++  float currentTime = 0;
++  bool hasCurrentTime = false;
+   while (readPos != mWritePos) {
+     ProfileEntry entry = mEntries[readPos];
+     if (entry.mTagName == 'T') {
+       currentThreadID = entry.mTagInt;
++      hasCurrentTime = false;
++      int readAheadPos = (readPos + 1) % mEntrySize;
++      if (readAheadPos != mWritePos) {
++        ProfileEntry readAheadEntry = mEntries[readAheadPos];
++        if (readAheadEntry.mTagName == 't') {
++          currentTime = readAheadEntry.mTagFloat;
++          hasCurrentTime = true;
++        }
++      }
+     }
+-    if (currentThreadID == aThreadId) {
++    if (currentThreadID == aThreadId && (!hasCurrentTime || currentTime >= aSinceTime)) {
+       switch (entry.mTagName) {
+         case 'r':
+           {
+             if (sample) {
+               b.NameValue("responsiveness", entry.mTagFloat);
+             }
+           }
+           break;
+@@ -438,32 +450,42 @@ void ProfileBuffer::StreamSamplesToJSObject(JSStreamWriter& b, int aThreadId, JS
+           {
+             if (sample) {
+               b.NameValue("frameNumber", entry.mTagInt);
+             }
+           }
+           break;
+         case 't':
+           {
+-            if (sample) {
++            // FIXMEshu: this case is only needed because filtering by
++            // aSinceTime is broken if the unwinder thread is used, due to
++            // its placement of 't' tags.
++            //
++            // UnwinderTick is slated for removal in bug 1141712. Remove
++            // this case once it lands.
++            if (sample && (currentTime != entry.mTagFloat)) {
+               b.NameValue("time", entry.mTagFloat);
+             }
+           }
+           break;
+         case 's':
+           {
+             // end the previous sample if there was one
+             if (sample) {
+               b.EndObject();
+             }
+             // begin the next sample
+             b.BeginObject();
+ 
+             sample = true;
+ 
++            if (hasCurrentTime) {
++              b.NameValue("time", currentTime);
++            }
++
+             // Seek forward through the entire sample, looking for frames
+             // this is an easier approach to reason about than adding more
+             // control variables and cases to the loop that goes through the buffer once
+             b.Name("frames");
+             b.BeginArray();
+ 
+               b.BeginObject();
+                 b.NameValue("location", "(root)");
+@@ -530,26 +552,29 @@ void ProfileBuffer::StreamSamplesToJSObject(JSStreamWriter& b, int aThreadId, JS
+     }
+     readPos = (readPos + 1) % mEntrySize;
+   }
+   if (sample) {
+     b.EndObject();
+   }
+ }
+ 
+-void ProfileBuffer::StreamMarkersToJSObject(JSStreamWriter& b, int aThreadId)
++void ProfileBuffer::StreamMarkersToJSObject(JSStreamWriter& b, int aThreadId, float aSinceTime)
+ {
+   int readPos = mReadPos;
+   int currentThreadID = -1;
+   while (readPos != mWritePos) {
+     ProfileEntry entry = mEntries[readPos];
+     if (entry.mTagName == 'T') {
+       currentThreadID = entry.mTagInt;
+     } else if (currentThreadID == aThreadId && entry.mTagName == 'm') {
+-      entry.getMarker()->StreamJSObject(b);
++      const ProfilerMarker* marker = entry.getMarker();
++      if (marker->GetTime() >= aSinceTime) {
++        marker->StreamJSObject(b);
++      }
+     }
+     readPos = (readPos + 1) % mEntrySize;
+   }
+ }
+ 
+ int ProfileBuffer::FindLastSampleOfThread(int aThreadId)
+ {
+   // We search backwards from mWritePos-1 to mReadPos.
+@@ -645,23 +670,23 @@ void ThreadProfile::addStoredMarker(ProfilerMarker *aStoredMarker) {
+   mBuffer->addStoredMarker(aStoredMarker);
+ }
+ 
+ void ThreadProfile::IterateTags(IterateTagsCallback aCallback)
+ {
+   mBuffer->IterateTagsForThread(aCallback, mThreadId);
+ }
+ 
+-void ThreadProfile::ToStreamAsJSON(std::ostream& stream)
++void ThreadProfile::ToStreamAsJSON(std::ostream& stream, float aSinceTime)
+ {
+   JSStreamWriter b(stream);
+-  StreamJSObject(b);
++  StreamJSObject(b, aSinceTime);
+ }
+ 
+-void ThreadProfile::StreamJSObject(JSStreamWriter& b)
++void ThreadProfile::StreamJSObject(JSStreamWriter& b, float aSinceTime)
+ {
+   b.BeginObject();
+     // Thread meta data
+     if (XRE_GetProcessType() == GeckoProcessType_Plugin) {
+       // TODO Add the proper plugin name
+       b.NameValue("name", "Plugin");
+     } else if (XRE_GetProcessType() == GeckoProcessType_Content) {
+       // This isn't going to really help once we have multiple content
+@@ -672,46 +697,53 @@ void ThreadProfile::StreamJSObject(JSStreamWriter& b)
+     }
+     b.NameValue("tid", static_cast<int>(mThreadId));
+ 
+     UniqueJITOptimizations uniqueOpts;
+ 
+     b.Name("samples");
+     b.BeginArray();
+       if (!mSavedStreamedSamples.empty()) {
++        // We would only have saved streamed samples during shutdown
++        // streaming, which cares about dumping the entire buffer, and thus
++        // should have passed in 0 for aSinceTime.
++        MOZ_ASSERT(aSinceTime == 0);
+         b.SpliceArrayElements(mSavedStreamedSamples.c_str());
+         mSavedStreamedSamples.clear();
+       }
+-      mBuffer->StreamSamplesToJSObject(b, mThreadId, mPseudoStack->mRuntime, uniqueOpts);
++      mBuffer->StreamSamplesToJSObject(b, mThreadId, aSinceTime, mPseudoStack->mRuntime,
++                                       uniqueOpts);
+     b.EndArray();
+ 
+     // Having saved streamed optimizations implies the JS engine has
+     // shutdown. If the JS engine is gone, we shouldn't have any new JS
+     // samples, and thus no optimizations.
+     if (!mSavedStreamedOptimizations.empty()) {
++      MOZ_ASSERT(aSinceTime == 0);
+       MOZ_ASSERT(uniqueOpts.empty());
+       b.Name("optimizations");
+       b.BeginArray();
+         b.SpliceArrayElements(mSavedStreamedOptimizations.c_str());
+         mSavedStreamedOptimizations.clear();
+       b.EndArray();
+     } else if (!uniqueOpts.empty()) {
+       b.Name("optimizations");
+       b.BeginArray();
+         uniqueOpts.stream(b, mPseudoStack->mRuntime);
+       b.EndArray();
+     }
+ 
+     b.Name("markers");
+     b.BeginArray();
+       if (!mSavedStreamedMarkers.empty()) {
++        MOZ_ASSERT(aSinceTime == 0);
+         b.SpliceArrayElements(mSavedStreamedMarkers.c_str());
+         mSavedStreamedMarkers.clear();
+       }
+-      mBuffer->StreamMarkersToJSObject(b, mThreadId);
++      mBuffer->StreamMarkersToJSObject(b, mThreadId, aSinceTime);
+     b.EndArray();
+   b.EndObject();
+ }
+ 
+ void ThreadProfile::FlushSamplesAndMarkers()
+ {
+   // This function is used to serialize the current buffer just before
+   // JSRuntime destruction.
+@@ -720,17 +752,17 @@ void ThreadProfile::FlushSamplesAndMarkers()
+   // Unlike StreamJSObject, do not surround the samples in brackets by calling
+   // b.{Begin,End}Array. The result string will be a comma-separated list of
+   // JSON object literals that will prepended by StreamJSObject into an
+   // existing array.
+   std::stringstream ss;
+   JSStreamWriter b(ss);
+   UniqueJITOptimizations uniqueOpts;
+   b.BeginBareList();
+-    mBuffer->StreamSamplesToJSObject(b, mThreadId, mPseudoStack->mRuntime, uniqueOpts);
++  mBuffer->StreamSamplesToJSObject(b, mThreadId, 0, mPseudoStack->mRuntime, uniqueOpts);
+   b.EndBareList();
+   mSavedStreamedSamples = ss.str();
+ 
+   // Reuse the stringstream.
+   ss.str("");
+   ss.clear();
+ 
+   if (!uniqueOpts.empty()) {
+@@ -740,34 +772,34 @@ void ThreadProfile::FlushSamplesAndMarkers()
+     mSavedStreamedOptimizations = ss.str();
+   }
+ 
+   // Reuse the stringstream.
+   ss.str("");
+   ss.clear();
+ 
+   b.BeginBareList();
+-    mBuffer->StreamMarkersToJSObject(b, mThreadId);
++    mBuffer->StreamMarkersToJSObject(b, mThreadId, 0);
+   b.EndBareList();
+   mSavedStreamedMarkers = ss.str();
+ 
+   // Reset the buffer. Attempting to symbolicate JS samples after mRuntime has
+   // gone away will crash.
+   mBuffer->reset();
+ }
+ 
+-JSObject* ThreadProfile::ToJSObject(JSContext *aCx)
++JSObject* ThreadProfile::ToJSObject(JSContext *aCx, float aSinceTime)
+ {
+   JS::RootedValue val(aCx);
+   std::stringstream ss;
+   {
+     // Define a scope to prevent a moving GC during ~JSStreamWriter from
+     // trashing the return value.
+     JSStreamWriter b(ss);
+-    StreamJSObject(b);
++    StreamJSObject(b, aSinceTime);
+     NS_ConvertUTF8toUTF16 js_string(nsDependentCString(ss.str().c_str()));
+     JS_ParseJSON(aCx, static_cast<const char16_t*>(js_string.get()),
+                  js_string.Length(), &val);
+   }
+   return &val.toObject();
+ }
+ 
+ PseudoStack* ThreadProfile::GetPseudoStack()
+diff --git a/tools/profiler/ProfileEntry.h b/tools/profiler/ProfileEntry.h
+index d21a20c..95182d9 100644
+--- a/tools/profiler/ProfileEntry.h
++++ b/tools/profiler/ProfileEntry.h
+@@ -97,19 +97,19 @@ class UniqueJITOptimizations {
+ class ProfileBuffer {
+ public:
+   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ProfileBuffer)
+ 
+   explicit ProfileBuffer(int aEntrySize);
+ 
+   void addTag(const ProfileEntry& aTag);
+   void IterateTagsForThread(IterateTagsCallback aCallback, int aThreadId);
+-  void StreamSamplesToJSObject(JSStreamWriter& b, int aThreadId, JSRuntime* rt,
+-                               UniqueJITOptimizations& aUniqueOpts);
+-  void StreamMarkersToJSObject(JSStreamWriter& b, int aThreadId);
++  void StreamSamplesToJSObject(JSStreamWriter& b, int aThreadId, float aSinceTime,
++                               JSRuntime* rt, UniqueJITOptimizations& aUniqueOpts);
++  void StreamMarkersToJSObject(JSStreamWriter& b, int aThreadId, float aSinceTime);
+   void DuplicateLastSample(int aThreadId);
+ 
+   void addStoredMarker(ProfilerMarker* aStoredMarker);
+ 
+   // The following two methods are not signal safe! They delete markers.
+   void deleteExpiredStoredMarkers();
+   void reset();
+ 
+@@ -150,21 +150,21 @@ public:
+   /**
+    * Track a marker which has been inserted into the ThreadProfile.
+    * This marker can safely be deleted once the generation has
+    * expired.
+    */
+   void addStoredMarker(ProfilerMarker *aStoredMarker);
+ 
+   void IterateTags(IterateTagsCallback aCallback);
+-  void ToStreamAsJSON(std::ostream& stream);
+-  JSObject *ToJSObject(JSContext *aCx);
++  void ToStreamAsJSON(std::ostream& stream, float aSinceTime = 0);
++  JSObject *ToJSObject(JSContext *aCx, float aSinceTime = 0);
+   PseudoStack* GetPseudoStack();
+   mozilla::Mutex* GetMutex();
+-  void StreamJSObject(JSStreamWriter& b);
++  void StreamJSObject(JSStreamWriter& b, float aSinceTime = 0);
+ 
+   /**
+    * Call this method when the JS entries inside the buffer are about to
+    * become invalid, i.e., just before JS shutdown.
+    */
+   void FlushSamplesAndMarkers();
+ 
+   void BeginUnwind();
+diff --git a/tools/profiler/ProfilerMarkers.cpp b/tools/profiler/ProfilerMarkers.cpp
+index 21d9093..97cf4b4 100644
+--- a/tools/profiler/ProfilerMarkers.cpp
++++ b/tools/profiler/ProfilerMarkers.cpp
+@@ -25,17 +25,17 @@ ProfilerMarkerPayload::ProfilerMarkerPayload(const mozilla::TimeStamp& aStartTim
+ 
+ ProfilerMarkerPayload::~ProfilerMarkerPayload()
+ {
+   profiler_free_backtrace(mStack);
+ }
+ 
+ void
+ ProfilerMarkerPayload::streamCommonProps(const char* aMarkerType,
+-                                          JSStreamWriter& b)
++                                         JSStreamWriter& b)
+ {
+   MOZ_ASSERT(aMarkerType);
+   b.NameValue("type", aMarkerType);
+   if (!mStartTime.IsNull()) {
+     b.NameValue("startTime", profiler_time(mStartTime));
+   }
+   if (!mEndTime.IsNull()) {
+     b.NameValue("endTime", profiler_time(mEndTime));
+diff --git a/tools/profiler/PseudoStack.h b/tools/profiler/PseudoStack.h
+index 392842b..bc96af6 100644
+--- a/tools/profiler/PseudoStack.h
++++ b/tools/profiler/PseudoStack.h
+@@ -92,17 +92,17 @@ public:
+   StreamJSObject(JSStreamWriter& b) const;
+ 
+   void SetGeneration(uint32_t aGenID);
+ 
+   bool HasExpired(uint32_t aGenID) const {
+     return mGenID + 2 <= aGenID;
+   }
+ 
+-  float GetTime();
++  float GetTime() const;
+ 
+ private:
+   char* mMarkerName;
+   ProfilerMarkerPayload* mPayload;
+   ProfilerMarker* mNext;
+   float mTime;
+   uint32_t mGenID;
+ };
+diff --git a/tools/profiler/TableTicker.cpp b/tools/profiler/TableTicker.cpp
+index f68c14b..6fc99b3 100644
+--- a/tools/profiler/TableTicker.cpp
++++ b/tools/profiler/TableTicker.cpp
+@@ -213,31 +213,31 @@ void TableTicker::StreamMetaJSCustomObject(JSStreamWriter& b)
+       res = appInfo->GetName(string);
+       if (!NS_FAILED(res))
+         b.NameValue("product", string.Data());
+     }
+ 
+   b.EndObject();
+ }
+ 
+-void TableTicker::ToStreamAsJSON(std::ostream& stream)
++void TableTicker::ToStreamAsJSON(std::ostream& stream, float aSinceTime)
+ {
+   JSStreamWriter b(stream);
+-  StreamJSObject(b);
++  StreamJSObject(b, aSinceTime);
+ }
+ 
+-JSObject* TableTicker::ToJSObject(JSContext *aCx)
++JSObject* TableTicker::ToJSObject(JSContext *aCx, float aSinceTime)
+ {
+   JS::RootedValue val(aCx);
+   std::stringstream ss;
+   {
+     // Define a scope to prevent a moving GC during ~JSStreamWriter from
+     // trashing the return value.
+     JSStreamWriter b(ss);
+-    StreamJSObject(b);
++    StreamJSObject(b, aSinceTime);
+     NS_ConvertUTF8toUTF16 js_string(nsDependentCString(ss.str().c_str()));
+     JS_ParseJSON(aCx, static_cast<const char16_t*>(js_string.get()),
+                  js_string.Length(), &val);
+   }
+   return &val.toObject();
+ }
+ 
+ struct SubprocessClosure {
+@@ -311,17 +311,17 @@ void BuildJavaThreadJSObject(JSStreamWriter& b)
+       }
+ 
+     b.EndArray();
+ 
+   b.EndObject();
+ }
+ #endif
+ 
+-void TableTicker::StreamJSObject(JSStreamWriter& b)
++void TableTicker::StreamJSObject(JSStreamWriter& b, float aSinceTime)
+ {
+   b.BeginObject();
+     // Put shared library info
+     b.NameValue("libs", GetSharedLibraryInfoString().c_str());
+ 
+     // Put meta data
+     b.Name("meta");
+     StreamMetaJSCustomObject(b);
+@@ -346,17 +346,17 @@ void TableTicker::StreamJSObject(JSStreamWriter& b)
+           if (!sRegisteredThreads->at(i)->Profile())
+             continue;
+ 
+           // Note that we intentionally include ThreadProfile which
+           // have been marked for pending delete.
+ 
+           MutexAutoLock lock(*sRegisteredThreads->at(i)->Profile()->GetMutex());
+ 
+-          sRegisteredThreads->at(i)->Profile()->StreamJSObject(b);
++          sRegisteredThreads->at(i)->Profile()->StreamJSObject(b, aSinceTime);
+         }
+       }
+ 
+       if (Sampler::CanNotifyObservers()) {
+         // Send a event asking any subprocesses (plugins) to
+         // give us their information
+         SubprocessClosure closure(&b);
+         nsCOMPtr<nsIObserverService> os = mozilla::services::GetObserverService();
+@@ -974,16 +974,21 @@ void TableTicker::Tick(TickSample* sample)
+ }
+ 
+ void TableTicker::InplaceTick(TickSample* sample)
+ {
+   ThreadProfile& currThreadProfile = *sample->threadProfile;
+ 
+   currThreadProfile.addTag(ProfileEntry('T', currThreadProfile.ThreadId()));
+ 
++  if (sample) {
++    mozilla::TimeDuration delta = sample->timestamp - sStartTime;
++    currThreadProfile.addTag(ProfileEntry('t', static_cast<float>(delta.ToMilliseconds())));
++  }
++
+   PseudoStack* stack = currThreadProfile.GetPseudoStack();
+ 
+ #if defined(USE_NS_STACKWALK) || defined(USE_EHABI_STACKWALK) || \
+     defined(USE_LUL_STACKWALK)
+   if (mUseStackWalk) {
+     doNativeBacktrace(currThreadProfile, sample);
+   } else {
+     doSampleStackTrace(currThreadProfile, sample, mAddLeafAddresses);
+@@ -1003,21 +1008,16 @@ void TableTicker::InplaceTick(TickSample* sample)
+     }
+   }
+ 
+   if (sample && currThreadProfile.GetThreadResponsiveness()->HasData()) {
+     mozilla::TimeDuration delta = currThreadProfile.GetThreadResponsiveness()->GetUnresponsiveDuration(sample->timestamp);
+     currThreadProfile.addTag(ProfileEntry('r', static_cast<float>(delta.ToMilliseconds())));
+   }
+ 
+-  if (sample) {
+-    mozilla::TimeDuration delta = sample->timestamp - sStartTime;
+-    currThreadProfile.addTag(ProfileEntry('t', static_cast<float>(delta.ToMilliseconds())));
+-  }
+-
+   // rssMemory is equal to 0 when we are not recording.
+   if (sample && sample->rssMemory != 0) {
+     currThreadProfile.addTag(ProfileEntry('R', static_cast<float>(sample->rssMemory)));
+   }
+ 
+   // ussMemory is equal to 0 when we are not recording.
+   if (sample && sample->ussMemory != 0) {
+     currThreadProfile.addTag(ProfileEntry('U', static_cast<float>(sample->ussMemory)));
+diff --git a/tools/profiler/TableTicker.h b/tools/profiler/TableTicker.h
+index 9bb86f8..0cadd3e 100644
+--- a/tools/profiler/TableTicker.h
++++ b/tools/profiler/TableTicker.h
+@@ -187,18 +187,18 @@ class TableTicker: public Sampler {
+           break;
+         }
+       }
+     }
+ 
+     return mPrimaryThreadProfile;
+   }
+ 
+-  void ToStreamAsJSON(std::ostream& stream);
+-  virtual JSObject *ToJSObject(JSContext *aCx);
++  void ToStreamAsJSON(std::ostream& stream, float aSinceTime = 0);
++  virtual JSObject *ToJSObject(JSContext *aCx, float aSinceTime = 0);
+   void StreamMetaJSCustomObject(JSStreamWriter& b);
+   void StreamTaskTracer(JSStreamWriter& b);
+   void FlushOnJSShutdown(JSRuntime* aRuntime);
+   bool ProfileJS() const { return mProfileJS; }
+   bool ProfileJava() const { return mProfileJava; }
+   bool ProfileGPU() const { return mProfileGPU; }
+   bool ProfilePower() const { return mProfilePower; }
+   bool ProfileThreads() const override { return mProfileThreads; }
+@@ -214,17 +214,17 @@ class TableTicker: public Sampler {
+ 
+ protected:
+   // Called within a signal. This function must be reentrant
+   virtual void InplaceTick(TickSample* sample);
+ 
+   // Not implemented on platforms which do not support backtracing
+   void doNativeBacktrace(ThreadProfile &aProfile, TickSample* aSample);
+ 
+-  void StreamJSObject(JSStreamWriter& b);
++  void StreamJSObject(JSStreamWriter& b, float aSinceTime);
+ 
+   // This represent the application's main thread (SAMPLER_INIT)
+   ThreadProfile* mPrimaryThreadProfile;
+   nsRefPtr<ProfileBuffer> mBuffer;
+   bool mSaveRequested;
+   bool mAddLeafAddresses;
+   bool mUseStackWalk;
+   bool mProfileJS;
+diff --git a/tools/profiler/nsIProfiler.idl b/tools/profiler/nsIProfiler.idl
+index e4546ce..676b38d 100644
+--- a/tools/profiler/nsIProfiler.idl
++++ b/tools/profiler/nsIProfiler.idl
+@@ -7,39 +7,55 @@
+ 
+ %{C++
+ template<class T> class nsTArray;
+ class nsCString;
+ %}
+ 
+ [ref] native StringArrayRef(const nsTArray<nsCString>);
+ 
+-[scriptable, uuid(edd65f3f-c2a2-4217-a2e2-40347ba4a2b3)]
++[scriptable, uuid(9f3e7c97-abcf-425c-83fd-34d354eb95e8)]
+ interface nsIProfiler : nsISupports
+ {
+   void StartProfiler(in uint32_t aEntries, in double aInterval,
+                       [array, size_is(aFeatureCount)] in string aFeatures,
+                       in uint32_t aFeatureCount,
+                       [array, size_is(aFilterCount), optional] in string aThreadNameFilters,
+                       [optional] in uint32_t aFilterCount);
+   void StopProfiler();
+   boolean IsPaused();
+   void PauseSampling();
+   void ResumeSampling();
+   void AddMarker(in string aMarker);
+-  string GetProfile();
++  /*
++   * Returns the JSON string of the profile. If aSinceTime is passed, only
++   * report samples taken at >= aSinceTime.
++   */
++  string GetProfile([optional] in float aSinceTime);
++
++  /*
++   * Returns a JS object of the profile. If aSinceTime is passed, only report
++   * samples taken at >= aSinceTime.
++   */
+   [implicit_jscontext]
+-  jsval getProfileData();
++  jsval getProfileData([optional] in float aSinceTime);
++
+   boolean IsActive();
+   void GetFeatures(out uint32_t aCount, [retval, array, size_is(aCount)] out string aFeatures);
+ 
+   void GetBufferInfo(out uint32_t aCurrentPosition, out uint32_t aTotalSize,
+                      out uint32_t aGeneration);
+ 
+   /**
++   * Returns the elapsed time, in milliseconds, since the last StartProfiler call.
++   * Returns 0 if there is no active sampler.
++   */
++  float getElapsedTime();
++
++  /**
+    * Returns a JSON string of an array of shared library objects.
+    * Every object has three properties: start, end, and name.
+    * start and end are integers describing the address range that the library
+    * occupies in memory. name is the path of the library as a string.
+    *
+    * On Windows profiling builds, the shared library objects will have
+    * additional pdbSignature and pdbAge properties for uniquely identifying
+    * shared library versions for stack symbolication.
+diff --git a/tools/profiler/nsProfiler.cpp b/tools/profiler/nsProfiler.cpp
+index 9d127b4..56ee2fe 100644
+--- a/tools/profiler/nsProfiler.cpp
++++ b/tools/profiler/nsProfiler.cpp
+@@ -112,19 +112,19 @@ nsProfiler::ResumeSampling()
+ NS_IMETHODIMP
+ nsProfiler::AddMarker(const char *aMarker)
+ {
+   PROFILER_MARKER(aMarker);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsProfiler::GetProfile(char **aProfile)
++nsProfiler::GetProfile(float aSinceTime, char **aProfile)
+ {
+-  char *profile = profiler_get_profile();
++  char *profile = profiler_get_profile(aSinceTime);
+   if (profile) {
+     size_t len = strlen(profile);
+     char *profileStr = static_cast<char *>
+                          (nsMemory::Clone(profile, (len + 1) * sizeof(char)));
+     profileStr[len] = '\0';
+     *aProfile = profileStr;
+     free(profile);
+   }
+@@ -196,28 +196,36 @@ nsProfiler::GetSharedLibraryInformation(nsAString& aOutString)
+ 
+ NS_IMETHODIMP
+ nsProfiler::DumpProfileToFile(const char* aFilename)
+ {
+   profiler_save_profile_to_file(aFilename);
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsProfiler::GetProfileData(JSContext* aCx,
+-                                         JS::MutableHandle<JS::Value> aResult)
++NS_IMETHODIMP
++nsProfiler::GetProfileData(float aSinceTime, JSContext* aCx,
++                           JS::MutableHandle<JS::Value> aResult)
+ {
+-  JS::RootedObject obj(aCx, profiler_get_profile_jsobject(aCx));
++  JS::RootedObject obj(aCx, profiler_get_profile_jsobject(aCx, aSinceTime));
+   if (!obj) {
+     return NS_ERROR_FAILURE;
+   }
+   aResult.setObject(*obj);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
++nsProfiler::GetElapsedTime(float* aElapsedTime)
++{
++  *aElapsedTime = static_cast<float>(profiler_time());
++  return NS_OK;
++}
++
++NS_IMETHODIMP
+ nsProfiler::IsActive(bool *aIsActive)
+ {
+   *aIsActive = profiler_is_active();
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsProfiler::GetFeatures(uint32_t *aCount, char ***aFeatures)
+diff --git a/tools/profiler/platform.cpp b/tools/profiler/platform.cpp
+index b4cb5bc..c61fe5f 100644
+--- a/tools/profiler/platform.cpp
++++ b/tools/profiler/platform.cpp
+@@ -196,17 +196,17 @@ ProfilerMarker::~ProfilerMarker() {
+ }
+ 
+ void
+ ProfilerMarker::SetGeneration(uint32_t aGenID) {
+   mGenID = aGenID;
+ }
+ 
+ float
+-ProfilerMarker::GetTime() {
++ProfilerMarker::GetTime() const {
+   return mTime;
+ }
+ 
+ void ProfilerMarker::StreamJSObject(JSStreamWriter& b) const {
+   b.BeginObject();
+     b.NameValue("name", GetMarkerName());
+     // TODO: Store the callsite for this marker if available:
+     // if have location data
+@@ -546,37 +546,37 @@ void mozilla_sampler_save()
+   }
+ 
+   t->RequestSave();
+   // We're on the main thread already so we don't
+   // have to wait to handle the save request.
+   t->HandleSaveRequest();
+ }
+ 
+-char* mozilla_sampler_get_profile()
++char* mozilla_sampler_get_profile(float aSinceTime)
+ {
+   TableTicker *t = tlsTicker.get();
+   if (!t) {
+     return nullptr;
+   }
+ 
+   std::stringstream stream;
+-  t->ToStreamAsJSON(stream);
++  t->ToStreamAsJSON(stream, aSinceTime);
+   char* profile = strdup(stream.str().c_str());
+   return profile;
+ }
+ 
+-JSObject *mozilla_sampler_get_profile_data(JSContext *aCx)
++JSObject *mozilla_sampler_get_profile_data(JSContext *aCx, float aSinceTime)
+ {
+   TableTicker *t = tlsTicker.get();
+   if (!t) {
+     return nullptr;
+   }
+ 
+-  return t->ToJSObject(aCx);
++  return t->ToJSObject(aCx, aSinceTime);
+ }
+ 
+ void mozilla_sampler_save_profile_to_file(const char* aFilename)
+ {
+   TableTicker *t = tlsTicker.get();
+   if (!t) {
+     return;
+   }
 -- 
 2.2.1
 
