@@ -1,0 +1,589 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 27 Apr 2015 23:13:01 -0700
+Subject: Bug 1136945 - Convert GC events from memory actor to be
+ emitted as pseudo-markers from the TimelineActor. r=vp,fitzgen
+
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 01eee2a..2e9a4bc 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -6,19 +6,18 @@ support-files =
+   doc_innerHTML.html
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
+ # that need to be moved over to performance tool
+ 
+ [browser_perf-aaa-run-first-leaktest.js]
+-
++[browser_markers-gc.js]
+ [browser_markers-parse-html.js]
+-
+ [browser_perf-allocations-to-samples.js]
+ [browser_perf-compatibility-01.js]
+ [browser_perf-compatibility-02.js]
+ [browser_perf-compatibility-03.js]
+ [browser_perf-compatibility-04.js]
+ [browser_perf-compatibility-05.js]
+ [browser_perf-clear-01.js]
+ [browser_perf-clear-02.js]
+diff --git a/browser/devtools/performance/test/browser_markers-gc.js b/browser/devtools/performance/test/browser_markers-gc.js
+new file mode 100644
+index 0000000..701e876
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_markers-gc.js
+@@ -0,0 +1,47 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test that we get a "GarbageCollection" marker.
++ */
++
++const TIME_CLOSE_TO = 10000;
++
++function* spawnTest () {
++  let { target, front } = yield initBackend(SIMPLE_URL);
++  let markers;
++
++  front.on("timeline-data", handler);
++  let model = yield front.startRecording({ withTicks: true });
++
++  // Check async for markers found while GC/CCing between
++  yield waitUntil(() => {
++    forceCC();
++    return !!markers;
++  }, 100);
++
++  front.off("timeline-data", handler);
++  yield front.stopRecording(model);
++
++  info(`Got ${markers.length} markers.`);
++
++  let maxMarkerTime = model._timelineStartTime + model.getDuration() + TIME_CLOSE_TO;
++
++  ok(markers.every(({name}) => name === "GarbageCollection"), "All markers found are GC markers");
++  ok(markers.length > 0, "found atleast one GC marker");
++  ok(markers.every(({start}) => typeof start === "number" && start > 0 && start < maxMarkerTime),
++    "All markers have a start time between the valid range.");
++  ok(markers.every(({end}) => typeof end === "number" && end > 0 && end < maxMarkerTime),
++    "All markers have an end time between the valid range.");
++  ok(markers.every(({causeName}) => typeof causeName === "string"),
++    "All markers have a causeName.");
++
++  yield removeTab(target.tab);
++  finish();
++
++  function handler (_, name, m) {
++    if (name === "markers" && m[0].name === "GarbageCollection") {
++      markers = m;
++    }
++  }
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 2bbc091..a83ebd7 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -485,8 +485,18 @@ function dropSelection(graph) {
+ function fireKey (e) {
+   EventUtils.synthesizeKey(e, {});
+ }
+ 
+ function reload (aTarget, aEvent = "navigate") {
+   aTarget.activeTab.reload();
+   return once(aTarget, aEvent);
+ }
++
++/**
++* Forces cycle collection and GC, used in AudioNode destruction tests.
++*/
++function forceCC () {
++  info("Triggering GC/CC...");
++  SpecialPowers.DOMWindowUtils.cycleCollect();
++  SpecialPowers.DOMWindowUtils.garbageCollect();
++  SpecialPowers.DOMWindowUtils.garbageCollect();
++}
+diff --git a/browser/devtools/shared/timeline/global.js b/browser/devtools/shared/timeline/global.js
+index 6266274..28ee3ef 100644
+--- a/browser/devtools/shared/timeline/global.js
++++ b/browser/devtools/shared/timeline/global.js
+@@ -16,17 +16,18 @@ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ /**
+  * A simple schema for mapping markers to the timeline UI. The keys correspond
+  * to marker names, while the values are objects with the following format:
+  *   - group: the row index in the timeline overview graph; multiple markers
+  *            can be added on the same row. @see <overview.js/buildGraphImage>
+  *   - label: the label used in the waterfall to identify the marker
+  *   - colorName: the name of the DevTools color used for this marker. If adding
+  *                a new color, be sure to check that there's an entry for
+- *                `.marker-details-bullet.{COLORNAME}` for the equivilent entry.
++ *                `.marker-details-bullet.{COLORNAME}` for the equivilent entry
++ *                in ./browser/themes/shared/devtools/performance.inc.css
+  *                https://developer.mozilla.org/en-US/docs/Tools/DevToolsColors
+  *
+  * Whenever this is changed, browser_timeline_waterfall-styles.js *must* be
+  * updated as well.
+  */
+ const TIMELINE_BLUEPRINT = {
+   "Styles": {
+     group: 0,
+@@ -63,13 +64,18 @@ const TIMELINE_BLUEPRINT = {
+     colorName: "highlight-lightorange",
+     label: L10N.getStr("timeline.label.parseXML")
+   },
+   "ConsoleTime": {
+     group: 2,
+     colorName: "highlight-bluegrey",
+     label: L10N.getStr("timeline.label.consoleTime")
+   },
++  "GarbageCollection": {
++    group: 1,
++    colorName: "highlight-red",
++    label: L10N.getStr("timeline.label.garbageCollection")
++  },
+ };
+ 
+ // Exported symbols.
+ exports.L10N = L10N;
+ exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
+diff --git a/browser/locales/en-US/chrome/browser/devtools/timeline.properties b/browser/locales/en-US/chrome/browser/devtools/timeline.properties
+index 3b74b52..fc11ada 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/timeline.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/timeline.properties
+@@ -39,16 +39,17 @@ timeline.records=RECORDS
+ timeline.label.styles2=Recalculate Style
+ timeline.label.reflow2=Layout
+ timeline.label.paint=Paint
+ timeline.label.javascript2=Function Call
+ timeline.label.parseHTML=Parse HTML
+ timeline.label.parseXML=Parse XML
+ timeline.label.domevent=DOM Event
+ timeline.label.consoleTime=Console
++timeline.label.garbageCollection=GC Event
+ 
+ # LOCALIZATION NOTE (graphs.memory):
+ # This string is displayed in the memory graph of the Performance tool,
+ # as the unit used to memory consumption. This label should be kept
+ # AS SHORT AS POSSIBLE so it doesn't obstruct important parts of the graph.
+ graphs.memory=MB
+ 
+ # LOCALIZATION NOTE (timeline.markerDetailFormat):
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 7f0a4bc..2b75bc6 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -442,16 +442,23 @@
+   background-color: var(--theme-highlight-green);
+ }
+ #performance-filter-menupopup > menuitem.highlight-lightorange:before,
+ .marker-details-bullet.highlight-lightorange,
+ .waterfall-marker-bar.highlight-lightorange,
+ .waterfall-marker-bullet.highlight-lightorange {
+   background-color: var(--theme-highlight-lightorange);
+ }
++#performance-filter-menupopup > menuitem.highlight-red:before,
++.marker-details-bullet.highlight-red,
++.waterfall-marker-bar.highlight-red,
++.waterfall-marker-bullet.highlight-red {
++  background-color: var(--theme-highlight-red);
++}
++
+ 
+ #waterfall-details > * {
+   padding-top: 3px;
+ }
+ 
+ .marker-details-labelname {
+   -moz-padding-end: 4px;
+ }
+diff --git a/js/src/doc/Debugger/Debugger.Memory.md b/js/src/doc/Debugger/Debugger.Memory.md
+index 106e8e0..2c5123d 100644
+--- a/js/src/doc/Debugger/Debugger.Memory.md
++++ b/js/src/doc/Debugger/Debugger.Memory.md
+@@ -132,17 +132,17 @@ compartment.
+           "endTimestamp": <i>timestamp</i>,
+         }
+         </code></pre>
+ 
+         Here the *timestamp* values are [timestamps][] of the GC slice's start
+         and end events.
+ 
+     `reason`
+-    :   A very short string describing th reason why the collection was
++    :   A very short string describing the reason why the collection was
+         triggered. Known values include the following:
+ 
+         * "API"
+         * "EAGER_ALLOC_TRIGGER"
+         * "DESTROY_RUNTIME"
+         * "DESTROY_CONTEXT"
+         * "LAST_DITCH"
+         * "TOO_MUCH_MALLOC"
+@@ -176,17 +176,23 @@ compartment.
+         * "SHUTDOWN_CC"
+         * "FINISH_LARGE_EVALUATE"
+         * "USER_INACTIVE"
+ 
+     `nonincrementalReason`
+     :   If SpiderMonkey's collector determined it could not incrementally
+         collect garbage, and had to do a full GC all at once, this is a short
+         string describing the reason it determined the full GC was necessary.
+-        Otherwise, `null` is returned.
++        Otherwise, `null` is returned. Known values include the following:
++
++        * "GC mode"
++        * "malloc bytes trigger"
++        * "allocation trigger"
++        * "requested"
++
+ 
+ Function Properties of the `Debugger.Memory.prototype` Object
+ -------------------------------------------------------------
+ 
+ <code id='drain-alloc-log'>drainAllocationsLog()</code>
+ :   When `trackingAllocationSites` is `true`, this method returns an array of
+     recent `Object` allocations within the set of debuggees. *Recent* is
+     defined as the `maxAllocationsLogLength` most recent `Object` allocations
+diff --git a/toolkit/devtools/server/actors/memory.js b/toolkit/devtools/server/actors/memory.js
+index eca5a40..5b3b2d2 100644
+--- a/toolkit/devtools/server/actors/memory.js
++++ b/toolkit/devtools/server/actors/memory.js
+@@ -4,16 +4,17 @@
+ 
+ "use strict";
+ 
+ const { Cc, Ci, Cu } = require("chrome");
+ let protocol = require("devtools/server/protocol");
+ let { method, RetVal, Arg, types } = protocol;
+ const { reportException } = require("devtools/toolkit/DevToolsUtils");
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
++loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
+ loader.lazyRequireGetter(this, "StackFrameCache",
+                          "devtools/server/actors/utils/stack", true);
+ 
+ /**
+  * A method decorator that ensures the actor is in the expected state before
+  * proceeding. If the actor is not in the expected state, the decorated method
+  * returns a rejected promise.
+  *
+@@ -61,16 +62,17 @@ types.addDictType("AllocationsRecordingOptions", {
+  */
+ let MemoryActor = protocol.ActorClass({
+   typeName: "memory",
+ 
+   /**
+    * The set of unsolicited events the MemoryActor emits that will be sent over
+    * the RDP (by protocol.js).
+    */
++
+   events: {
+     // Same format as the data passed to the
+     // `Debugger.Memory.prototype.onGarbageCollection` hook. See
+     // `js/src/doc/Debugger/Debugger.Memory.md` for documentation.
+     "garbage-collection": {
+       type: "garbage-collection",
+       data: Arg(0, "json"),
+     },
+@@ -86,19 +88,19 @@ let MemoryActor = protocol.ActorClass({
+   initialize: function(conn, parent, frameCache = new StackFrameCache()) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+     this.parent = parent;
+     this._mgr = Cc["@mozilla.org/memory-reporter-manager;1"]
+                   .getService(Ci.nsIMemoryReporterManager);
+     this.state = "detached";
+     this._dbg = null;
+     this._frameCache = frameCache;
+-
+-    this._onGarbageCollection = data =>
+-      events.emit(this, "garbage-collection", data);
++    // A new event target is used so events can be shared locally without going
++    // over RDP, which will throw if there are no listeners.
++    this.eventTarget = EventTarget();
+ 
+     this._onWindowReady = this._onWindowReady.bind(this);
+ 
+     events.on(this.parent, "window-ready", this._onWindowReady);
+   },
+ 
+   destroy: function() {
+     events.off(this.parent, "window-ready", this._onWindowReady);
+@@ -114,17 +116,17 @@ let MemoryActor = protocol.ActorClass({
+    * Attach to this MemoryActor.
+    *
+    * This attaches the MemoryActor's Debugger instance so that you can start
+    * recording allocations or take a census of the heap. In addition, the
+    * MemoryActor will start emitting GC events.
+    */
+   attach: method(expectState("detached", function() {
+     this.dbg.addDebuggees();
+-    this.dbg.memory.onGarbageCollection = this._onGarbageCollection;
++    this.dbg.memory.onGarbageCollection = this._onGarbageCollection.bind(this);
+     this.state = "attached";
+   },
+   `attaching to the debugger`), {
+     request: {},
+     response: {
+       type: "attached"
+     }
+   }),
+@@ -181,16 +183,23 @@ let MemoryActor = protocol.ActorClass({
+         this._clearDebuggees();
+         this._frameCache.initFrames();
+       }
+       this.dbg.addDebuggees();
+     }
+   },
+ 
+   /**
++   * Handler for GC events on the Debugger.Memory instance.
++   */
++  _onGarbageCollection: function (data) {
++    events.emit(this.eventTarget, "garbage-collection", data);
++  },
++
++  /**
+    * Take a census of the heap. See js/src/doc/Debugger/Debugger.Memory.md for
+    * more information.
+    */
+   takeCensus: method(expectState("attached", function() {
+     return this.dbg.memory.takeCensus();
+   },
+   `taking census`), {
+     request: {},
+diff --git a/toolkit/devtools/server/actors/timeline.js b/toolkit/devtools/server/actors/timeline.js
+index 3d2cef6..ffe71a7 100644
+--- a/toolkit/devtools/server/actors/timeline.js
++++ b/toolkit/devtools/server/actors/timeline.js
+@@ -19,16 +19,17 @@
+  *   TimelineFront.on("markers", function(markers) {...})
+  */
+ 
+ const {Ci, Cu} = require("chrome");
+ const protocol = require("devtools/server/protocol");
+ const {method, Arg, RetVal, Option} = protocol;
+ const events = require("sdk/event/core");
+ const {setTimeout, clearTimeout} = require("sdk/timers");
++const {Task} = Cu.import("resource://gre/modules/Task.jsm", {});
+ 
+ const {MemoryActor} = require("devtools/server/actors/memory");
+ const {FramerateActor} = require("devtools/server/actors/framerate");
+ const {StackFrameCache} = require("devtools/server/actors/utils/stack");
+ 
+ // How often do we pull markers from the docShells, and therefore, how often do
+ // we send events to the front (knowing that when there are no markers in the
+ // docShell, no event is sent).
+@@ -107,16 +108,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+     protocol.Actor.prototype.initialize.call(this, conn);
+     this.tabActor = tabActor;
+ 
+     this._isRecording = false;
+     this._stackFrames = null;
+ 
+     // Make sure to get markers from new windows as they become available
+     this._onWindowReady = this._onWindowReady.bind(this);
++    this._onGarbageCollection = this._onGarbageCollection.bind(this);
+     events.on(this.tabActor, "window-ready", this._onWindowReady);
+   },
+ 
+   /**
+    * The timeline actor is the first (and last) in its hierarchy to use protocol.js
+    * so it doesn't have a parent protocol actor that takes care of its lifetime.
+    * So it needs a disconnect method to cleanup.
+    */
+@@ -168,20 +170,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+     return docShells;
+   },
+ 
+   /**
+    * At regular intervals, pop the markers from the docshell, and forward
+    * markers, memory, tick and frames events, if any.
+    */
+   _pullTimelineData: function() {
+-    if (!this._isRecording) {
+-      return;
+-    }
+-    if (!this.docShells.length) {
++    if (!this._isRecording || !this.docShells.length) {
+       return;
+     }
+ 
+     let endTime = this.docShells[0].now();
+     let markers = [];
+ 
+     for (let docShell of this.docShells) {
+       markers.push(...docShell.popProfileTimelineMarkers());
+@@ -204,17 +203,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+ 
+     let frames = this._stackFrames.makeEvent();
+     if (frames) {
+       events.emit(this, "frames", endTime, frames);
+     }
+     if (markers.length > 0) {
+       events.emit(this, "markers", markers, endTime);
+     }
+-    if (this._memoryActor) {
++    if (this._withMemory) {
+       events.emit(this, "memory", endTime, this._memoryActor.measure());
+     }
+     if (this._framerateActor) {
+       events.emit(this, "ticks", endTime, this._framerateActor.getPendingTicks());
+     }
+ 
+     this._dataPullTimeout = setTimeout(() => {
+       this._pullTimelineData();
+@@ -230,79 +229,90 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+     request: {},
+     response: {
+       value: RetVal("boolean")
+     }
+   }),
+ 
+   /**
+    * Start recording profile markers.
++   *
++   * @option {boolean} withMemory
++   *         Boolean indiciating whether we want memory measurements sampled. A memory actor
++   *         will be created regardless (to hook into GC events), but this determines
++   *         whether or not a `memory` event gets fired.
++   * @option {boolean} withTicks
++   *         Boolean indicating whether a `ticks` event is fired and a FramerateActor
++   *         is created.
+    */
+-  start: method(function({ withMemory, withTicks }) {
+-    var startTime = this.docShells[0].now();
++  start: method(Task.async(function *({ withMemory, withTicks }) {
++    var startTime = this._startTime = this.docShells[0].now();
++    // Store the start time from unix epoch so we can normalize
++    // markers from the memory actor
++    this._unixStartTime = Date.now();
+ 
+     if (this._isRecording) {
+       return startTime;
+     }
+ 
+     this._isRecording = true;
+     this._stackFrames = new StackFrameCache();
+     this._stackFrames.initFrames();
++    this._withMemory = withMemory;
+ 
+     for (let docShell of this.docShells) {
+       docShell.recordProfileTimelineMarkers = true;
+     }
+ 
+-    if (withMemory) {
+-      this._memoryActor = new MemoryActor(this.conn, this.tabActor, this._stackFrames);
+-    }
++    this._memoryActor = new MemoryActor(this.conn, this.tabActor, this._stackFrames);
++    yield this._memoryActor.attach();
++    events.on(this._memoryActor.eventTarget, "garbage-collection", this._onGarbageCollection);
+ 
+     if (withTicks) {
+       this._framerateActor = new FramerateActor(this.conn, this.tabActor);
+       this._framerateActor.startRecording();
+     }
+ 
+     this._pullTimelineData();
+     return startTime;
+-  }, {
++  }), {
+     request: {
+       withMemory: Option(0, "boolean"),
+       withTicks: Option(0, "boolean")
+     },
+     response: {
+       value: RetVal("number")
+     }
+   }),
+ 
+   /**
+    * Stop recording profile markers.
+    */
+-  stop: method(function() {
++  stop: method(Task.async(function *() {
+     if (!this._isRecording) {
+       return;
+     }
+     this._isRecording = false;
+     this._stackFrames = null;
+ 
+-    if (this._memoryActor) {
+-      this._memoryActor = null;
+-    }
++    events.off(this._memoryActor.eventTarget, "garbage-collection", this._onGarbageCollection);
++    this._memoryActor = null;
+ 
+     if (this._framerateActor) {
+       this._framerateActor.stopRecording();
+       this._framerateActor = null;
+     }
+ 
+     for (let docShell of this.docShells) {
+       docShell.recordProfileTimelineMarkers = false;
+     }
+ 
+     clearTimeout(this._dataPullTimeout);
+     return this.docShells[0].now();
+-  }, {
++  }), {
+     response: {
+       // Set as possibly nullable due to the end time possibly being
+       // undefined during destruction
+       value: RetVal("nullable:number")
+     }
+   }),
+ 
+   /**
+@@ -311,17 +321,48 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+    */
+   _onWindowReady: function({window}) {
+     if (this._isRecording) {
+       let docShell = window.QueryInterface(Ci.nsIInterfaceRequestor)
+                            .getInterface(Ci.nsIWebNavigation)
+                            .QueryInterface(Ci.nsIDocShell);
+       docShell.recordProfileTimelineMarkers = true;
+     }
+-  }
++  },
++
++  /**
++   * Fired when the MemoryActor emits a `garbage-collection` event. Used to
++   * emit the data to the front end and in similar format to other markers.
++   *
++   * A GC "marker" here represents a full GC cycle, which may contain several incremental
++   * events within its `collection` array. The marker contains a `reason` field, indicating
++   * why there was a GC, and may contain a `nonincrementalReason` when SpiderMonkey could
++   * not incrementally collect garbage.
++   */
++  _onGarbageCollection: function ({ collections, reason, nonincrementalReason }) {
++    if (!this._isRecording || !this.docShells.length) {
++      return;
++    }
++
++    // Normalize the start time to docshell start time, and convert it
++    // to microseconds.
++    let startTime = (this._unixStartTime - this._startTime) * 1000;
++    let endTime = this.docShells[0].now();
++
++    events.emit(this, "markers", collections.map(({ startTimestamp: start, endTimestamp: end }) => {
++      return {
++        name: "GarbageCollection",
++        causeName: reason,
++        nonincrementalReason: nonincrementalReason,
++        // Both timestamps are in microseconds -- convert to milliseconds to match other markers
++        start: (start - startTime) / 1000,
++        end: (end - startTime) / 1000
++      };
++    }), endTime);
++  },
+ });
+ 
+ exports.TimelineFront = protocol.FrontClass(TimelineActor, {
+   initialize: function(client, {timelineActor}) {
+     protocol.Front.prototype.initialize.call(this, client, {actor: timelineActor});
+     this.manage(this);
+   },
+   destroy: function() {
+-- 
+2.2.1
+

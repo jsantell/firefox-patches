@@ -1,0 +1,3570 @@
+From aaf895598bb3c5bda8f2315065b0ae1c0d6e4444 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@gmail.com>
+Date: Fri, 24 Apr 2015 21:04:02 -0700
+Subject: Bug 1132758 - Performance feature visibility now based on a
+ per recording-basis, dependent on features enabled and server support. r=vp
+
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index 42ae275..69648ac 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -95,19 +95,19 @@ function PerformanceActorsConnection(target) {
+   this._onProfilerEvent = this._onProfilerEvent.bind(this);
+   this._pullAllocationSites = this._pullAllocationSites.bind(this);
+ 
+   Services.obs.notifyObservers(null, "performance-actors-connection-created", null);
+ }
+ 
+ PerformanceActorsConnection.prototype = {
+ 
+-  // Properties set when mocks are being used
+-  _usingMockMemory: false,
+-  _usingMockTimeline: false,
++  // Properties set based off of server actor support
++  _memorySupported: true,
++  _timelineSupported: true,
+ 
+   /**
+    * Initializes a connection to the profiler and other miscellaneous actors.
+    * If in the process of opening, or already open, nothing happens.
+    *
+    * @return object
+    *         A promise that is resolved once the connection is established.
+    */
+@@ -169,32 +169,32 @@ PerformanceActorsConnection.prototype = {
+   /**
+    * Initializes a connection to a timeline actor.
+    */
+   _connectTimelineActor: function() {
+     let supported = yield compatibility.timelineActorSupported(this._target);
+     if (supported) {
+       this._timeline = new TimelineFront(this._target.client, this._target.form);
+     } else {
+-      this._usingMockTimeline = true;
+       this._timeline = new compatibility.MockTimelineFront();
+     }
++    this._timelineSupported = supported;
+   },
+ 
+   /**
+    * Initializes a connection to a memory actor.
+    */
+   _connectMemoryActor: Task.async(function* () {
+     let supported = yield compatibility.memoryActorSupported(this._target);
+     if (supported) {
+       this._memory = new MemoryFront(this._target.client, this._target.form);
+     } else {
+-      this._usingMockMemory = true;
+       this._memory = new compatibility.MockMemoryFront();
+     }
++    this._memorySupported = supported;
+   }),
+ 
+   /**
+    * Registers listeners on events from the underlying
+    * actors, so the connection can handle them.
+    */
+   _registerListeners: Task.async(function*() {
+     // Pipe events from TimelineActor to the PerformanceFront
+@@ -615,33 +615,34 @@ PerformanceActorsConnection.prototype = {
+  */
+ function PerformanceFront(connection) {
+   EventEmitter.decorate(this);
+ 
+   this._connection = connection;
+   this._request = connection._request;
+ 
+   // Set when mocks are being used
+-  this._usingMockMemory = connection._usingMockMemory;
+-  this._usingMockTimeline = connection._usingMockTimeline;
++  this._memorySupported = connection._memorySupported;
++  this._timelineSupported = connection._timelineSupported;
+ 
+   // Pipe the console profile events from the connection
+   // to the front so that the UI can listen.
+   CONNECTION_PIPE_EVENTS.forEach(eventName => this._connection.on(eventName, () => this.emit.apply(this, arguments)));
+ }
+ 
+ PerformanceFront.prototype = {
+ 
+   /**
+    * Manually begins a recording session and creates a RecordingModel.
+    * Calls the underlying PerformanceActorsConnection's startRecording method.
+    *
+    * @param object options
+    *        An options object to pass to the actors. Supported properties are
+-   *        `withTicks`, `withMemory` and `withAllocations`, `probability` and `maxLogLength`.
++   *        `withTicks`, `withMemory` and `withAllocations`,
++   *        `probability` and `maxLogLength`.
+    * @return object
+    *         A promise that is resolved once recording has started.
+    */
+   startRecording: function (options) {
+     return this._connection.startRecording(options);
+   },
+ 
+   /**
+@@ -653,31 +654,34 @@ PerformanceFront.prototype = {
+    * @return RecordingModel
+    *         Returns the same model, populated with the profiling data.
+    */
+   stopRecording: function (model) {
+     return this._connection.stopRecording(model);
+   },
+ 
+   /**
+-   * Returns an object indicating if mock actors are being used or not.
++   * Returns an object indicating what server actors are available and
++   * initialized. A falsy value indicates that the server does not support
++   * that feature, or that mock actors were explicitly requested (tests).
+    */
+-  getMocksInUse: function () {
++  getActorSupport: function () {
+     return {
+-      memory: this._usingMockMemory,
+-      timeline: this._usingMockTimeline
++      memory: this._memorySupported,
++      timeline: this._timelineSupported
+     };
+   }
+ };
+ 
+ /**
+  * Creates an object of configurations based off of preferences for a RecordingModel.
+  */
+ function getRecordingModelPrefs () {
+   return {
++    withMarkers: true,
+     withMemory: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
+     withTicks: Services.prefs.getBoolPref("devtools.performance.ui.enable-framerate"),
+     withAllocations: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
+     allocationsSampleProbability: +Services.prefs.getCharPref("devtools.performance.memory.sample-probability"),
+     allocationsMaxLogLength: Services.prefs.getIntPref("devtools.performance.memory.max-log-length")
+   };
+ }
+ 
+diff --git a/browser/devtools/performance/modules/graphs.js b/browser/devtools/performance/modules/graphs.js
+new file mode 100644
+index 0000000..6059abc
+--- /dev/null
++++ b/browser/devtools/performance/modules/graphs.js
+@@ -0,0 +1,394 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * This file contains the base line graph that all Performance line graphs use.
++ */
++
++const {Cc, Ci, Cu, Cr} = require("chrome");
++
++Cu.import("resource:///modules/devtools/Graphs.jsm");
++Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
++Cu.import("resource://gre/modules/Task.jsm");
++
++const { colorUtils: { setAlpha }} = require("devtools/css-color");
++const { getColor } = require("devtools/shared/theme");
++
++loader.lazyRequireGetter(this, "ProfilerGlobal",
++  "devtools/shared/profiler/global");
++loader.lazyRequireGetter(this, "TimelineGlobal",
++  "devtools/shared/timeline/global");
++loader.lazyRequireGetter(this, "MarkersOverview",
++  "devtools/shared/timeline/markers-overview", true);
++loader.lazyRequireGetter(this, "EventEmitter",
++  "devtools/toolkit/event-emitter");
++
++/**
++ * For line graphs
++ */
++const HEIGHT = 35; // px
++const STROKE_WIDTH = 1; // px
++const DAMPEN_VALUES = 0.95;
++const CLIPHEAD_LINE_COLOR = "#666";
++const SELECTION_LINE_COLOR = "#555";
++const SELECTION_BACKGROUND_COLOR_NAME = "highlight-blue";
++const FRAMERATE_GRAPH_COLOR_NAME = "highlight-green";
++const MEMORY_GRAPH_COLOR_NAME = "highlight-blue";
++
++/**
++ * For timeline overview
++ */
++const MARKERS_GRAPH_HEADER_HEIGHT = 14; // px
++const MARKERS_GRAPH_ROW_HEIGHT = 10; // px
++const MARKERS_GROUP_VERTICAL_PADDING = 4; // px
++
++/**
++ * A base class for performance graphs to inherit from.
++ *
++ * @param nsIDOMNode parent
++ *        The parent node holding the overview.
++ * @param string metric
++ *        The unit of measurement for this graph.
++ */
++function PerformanceGraph(parent, metric) {
++  LineGraphWidget.call(this, parent, { metric });
++  this.setTheme();
++}
++
++PerformanceGraph.prototype = Heritage.extend(LineGraphWidget.prototype, {
++  strokeWidth: STROKE_WIDTH,
++  dampenValuesFactor: DAMPEN_VALUES,
++  fixedHeight: HEIGHT,
++  clipheadLineColor: CLIPHEAD_LINE_COLOR,
++  selectionLineColor: SELECTION_LINE_COLOR,
++  withTooltipArrows: false,
++  withFixedTooltipPositions: true,
++
++  /**
++   * Disables selection and empties this graph.
++   */
++  clearView: function() {
++    this.selectionEnabled = false;
++    this.dropSelection();
++    this.setData([]);
++  },
++
++  /**
++   * Sets the theme via `theme` to either "light" or "dark",
++   * and updates the internal styling to match. Requires a redraw
++   * to see the effects.
++   */
++  setTheme: function (theme) {
++    theme = theme || "light";
++    let mainColor = getColor(this.mainColor || "highlight-blue", theme);
++    this.backgroundColor = getColor("body-background", theme);
++    this.strokeColor = mainColor;
++    this.backgroundGradientStart = setAlpha(mainColor, 0.2);
++    this.backgroundGradientEnd = setAlpha(mainColor, 0.2);
++    this.selectionBackgroundColor = setAlpha(getColor(SELECTION_BACKGROUND_COLOR_NAME, theme), 0.25);
++    this.selectionStripesColor = "rgba(255, 255, 255, 0.1)";
++    this.maximumLineColor = setAlpha(mainColor, 0.4);
++    this.averageLineColor = setAlpha(mainColor, 0.7);
++    this.minimumLineColor = setAlpha(mainColor, 0.9);
++  }
++});
++
++/**
++ * Constructor for the framerate graph. Inherits from PerformanceGraph.
++ *
++ * @param nsIDOMNode parent
++ *        The parent node holding the overview.
++ */
++function FramerateGraph(parent) {
++  PerformanceGraph.call(this, parent, ProfilerGlobal.L10N.getStr("graphs.fps"));
++}
++
++FramerateGraph.prototype = Heritage.extend(PerformanceGraph.prototype, {
++  mainColor: FRAMERATE_GRAPH_COLOR_NAME,
++  setPerformanceData: function ({ duration, ticks }, resolution) {
++    this.dataDuration = duration;
++    return this.setDataFromTimestamps(ticks, resolution);
++  }
++});
++exports.FramerateGraph = FramerateGraph;
++
++/**
++ * Constructor for the memory graph. Inherits from PerformanceGraph.
++ *
++ * @param nsIDOMNode parent
++ *        The parent node holding the overview.
++ */
++function MemoryGraph(parent) {
++  PerformanceGraph.call(this, parent, TimelineGlobal.L10N.getStr("graphs.memory"));
++}
++
++MemoryGraph.prototype = Heritage.extend(PerformanceGraph.prototype, {
++  mainColor: MEMORY_GRAPH_COLOR_NAME,
++  setPerformanceData: function ({ duration, memory }) {
++    this.dataDuration = duration;
++    return this.setData(memory);
++  }
++});
++exports.MemoryGraph = MemoryGraph;
++
++function TimelineGraph(parent, blueprint) {
++  MarkersOverview.call(this, parent, blueprint);
++}
++
++TimelineGraph.prototype = Heritage.extend(MarkersOverview.prototype, {
++  headerHeight: MARKERS_GRAPH_HEADER_HEIGHT,
++  rowHeight: MARKERS_GRAPH_ROW_HEIGHT,
++  groupPadding: MARKERS_GROUP_VERTICAL_PADDING,
++  setPerformanceData: MarkersOverview.prototype.setData
++});
++exports.TimelineGraph = TimelineGraph;
++
++const GRAPH_DEFINITIONS = {
++  memory: {
++    constructor: MemoryGraph,
++    selector: "#memory-overview",
++  },
++  framerate: {
++    constructor: FramerateGraph,
++    selector: "#time-framerate",
++  },
++  timeline: {
++    constructor: TimelineGraph,
++    selector: "#markers-overview",
++    needsBlueprints: true,
++    primaryLink: true
++  }
++};
++
++/**
++ * A controller for orchestrating the performance's tool overview graphs. Constructs,
++ * syncs, toggles displays and defines the memory, framerate and timeline view.
++ *
++ * @param {object} definition
++ * @param {DOMElement} root
++ * @param {function} getBlueprint
++ * @param {function} getTheme
++ */
++function GraphsController ({ definition, root, getBlueprint, getTheme }) {
++  this._graphs = {};
++  this._enabled = new Set();
++  this._definition = definition || GRAPH_DEFINITIONS;
++  this._root = root;
++  this._getBlueprint = getBlueprint;
++  this._getTheme = getTheme;
++  this._primaryLink = Object.keys(this._definition).filter(name => this._definition[name].primaryLink)[0];
++  this.$ = root.ownerDocument.querySelector.bind(root.ownerDocument);
++
++  EventEmitter.decorate(this);
++  this._onSelecting = this._onSelecting.bind(this);
++}
++exports.GraphsController = GraphsController;
++
++GraphsController.prototype = {
++
++  /**
++   * Returns the corresponding graph by `graphName`.
++   */
++  get: function (graphName) {
++    return this._graphs[graphName];
++  },
++
++  /**
++   * Iterates through all graphs and renders the data
++   * from a RecordingModel. Takes a resolution value used in
++   * some graphs.
++   * Saves rendering progress as a promise to be consumed by `destroy`,
++   * to wait for cleaning up rendering during destruction.
++   */
++  render: function (recordingData, resolution) {
++    let controller = this;
++
++    // Get the previous render promise so we don't start rendering
++    // until the previous render cycle completes, which can occur
++    // especially when a recording is finished, and triggers a
++    // fresh rendering at a higher rate
++    let lastRender = this._rendering;
++
++    // TODO can this be done faster? parallel? Use less abstractions?
++    return this._rendering = Task.spawn(function *() {
++      yield lastRender;
++      for (let graph of (yield controller._getEnabled())) {
++        yield graph.setPerformanceData(recordingData, resolution);
++        controller.emit("rendered", graph.graphName);
++      }
++    });
++  },
++
++  /**
++   * Destroys the underlying graphs.
++   */
++  destroy: Task.async(function *() {
++    let primary = this._getPrimaryLink();
++
++    if (primary) {
++      primary.off("selecting", this._onSelecting);
++    }
++
++    // If there was rendering, wait until the most recent render cycle
++    // has finished
++    if (this._rendering) {
++      yield this._rendering;
++    }
++
++    for (let graphName in this._graphs) {
++      yield this._graphs[graphName].destroy();
++    }
++  }),
++
++  /**
++   * Applies the theme to the underlying graphs. Optionally takes
++   * a `redraw` boolean in the options to force redraw.
++   */
++  setTheme: function (options={}) {
++    let theme = options.theme || this._getTheme();
++    for (let graph in this._graphs) {
++      this._graphs[graph].setTheme(theme);
++      this._graphs[graph].refresh({ force: options.redraw });
++    }
++  },
++
++  /**
++   * Sets up the graph, if needed. Returns a promise resolving
++   * to the graph if it is enabled once it's ready, or otherwise returns
++   * null if disabled.
++   */
++  isAvailable: Task.async(function *(graphName) {
++    if (!this._enabled.has(graphName)) {
++      return null;
++    }
++
++    let graph = this.get(graphName);
++
++    if (!graph) {
++      graph = yield this._construct(graphName);
++    }
++
++    yield graph.ready();
++    return graph;
++  }),
++
++  enable: function (graphName, isEnabled) {
++    let el = this.$(this._definition[graphName].selector);
++    el.hidden = !isEnabled;
++
++    // If no status change, just return
++    if (this._enabled.has(graphName) === isEnabled) {
++      return;
++    }
++    if (isEnabled) {
++      this._enabled.add(graphName);
++    } else {
++      this._enabled.delete(graphName);
++    }
++
++    // Invalidate our cache of ready-to-go graphs
++    this._enabledGraphs = null;
++  },
++
++  /**
++   * Disables all graphs controller by the GraphsController, and
++   * also hides the root element. This is a one way switch, and used
++   * when older platforms do not have any timeline data.
++   */
++  disableAll: function () {
++    this._root.hidden = true;
++    // Hide all the subelements
++    Object.keys(this._definition).forEach(graphName => this.enable(graphName, false));
++  },
++
++  /**
++   * Sets a mapped selection on the graph that is the main controller
++   * for keeping the graphs' selections in sync.
++   */
++  setMappedSelection: function (selection, { mapStart, mapEnd }) {
++    return this._getPrimaryLink().setMappedSelection(selection, { mapStart, mapEnd });
++  },
++
++  getMappedSelection: function ({ mapStart, mapEnd }) {
++    return this._getPrimaryLink().getMappedSelection({ mapStart, mapEnd });
++  },
++
++  /**
++   * Drops the selection.
++   */
++  dropSelection: function () {
++    if (this._getPrimaryLink()) {
++      return this._getPrimaryLink().dropSelection();
++    }
++  },
++
++  /**
++   * Makes sure the selection is enabled or disabled in all the graphs.
++   */
++  selectionEnabled: Task.async(function *(enabled) {
++    for (let graph of (yield this._getEnabled())) {
++      graph.selectionEnabled = enabled;
++    }
++  }),
++
++  /**
++   * Creates the graph `graphName` and initializes it.
++   */
++  _construct: Task.async(function *(graphName) {
++    let def = this._definition[graphName];
++    let el = this.$(def.selector);
++    let blueprint = def.needsBlueprints ? this._getBlueprint() : void 0;
++    let graph = this._graphs[graphName] = new def.constructor(el, blueprint);
++    graph.graphName = graphName;
++
++    yield graph.ready();
++
++    // Sync the graphs' animations and selections together
++    if (def.primaryLink) {
++      graph.on("selecting", this._onSelecting);
++    } else {
++      CanvasGraphUtils.linkAnimation(this._getPrimaryLink(), graph);
++      CanvasGraphUtils.linkSelection(this._getPrimaryLink(), graph);
++    }
++
++    this.setTheme();
++    return graph;
++  }),
++
++  /**
++   * Returns the main graph for this collection, that all graphs
++   * are bound to for syncing and selection.
++   */
++  _getPrimaryLink: function () {
++    return this.get(this._primaryLink);
++  },
++
++  /**
++   * Emitted when a selection occurs.
++   */
++  _onSelecting: function () {
++    this.emit("selecting");
++  },
++
++  /**
++   * Resolves to an array with all graphs that are enabled, and
++   * creates them if needed. Different than just iterating over `this._graphs`,
++   * as those could be enabled. Uses caching, as rendering happens many times per second,
++   * compared to how often which graphs/features are changed (rarely).
++   */
++  _getEnabled: Task.async(function *() {
++    if (this._enabledGraphs) {
++      return this._enabledGraphs;
++    }
++    let enabled = [];
++    for (let graphName of this._enabled) {
++      let graph;
++      if (graph = yield this.isAvailable(graphName)) {
++        enabled.push(graph);
++      }
++    }
++    return this._enabledGraphs = enabled;
++  }),
++};
+diff --git a/browser/devtools/performance/modules/io.js b/browser/devtools/performance/modules/io.js
+index ef5dd1a..0cc5f20 100644
+--- a/browser/devtools/performance/modules/io.js
++++ b/browser/devtools/performance/modules/io.js
+@@ -143,13 +143,18 @@ function convertLegacyData (legacyData) {
+   let data = {
+     label: profilerData.profilerLabel,
+     duration: recordingDuration,
+     markers: [],
+     frames: [],
+     memory: [],
+     ticks: ticksData,
+     allocations: { sites: [], timestamps: [], frames: [], counts: [] },
+-    profile: profilerData.profile
++    profile: profilerData.profile,
++    // Fake a configuration object here if there's tick data,
++    // so that it can be rendered
++    configuration: {
++      withTicks: !!ticksData.length
++    }
+   };
+ 
+   return data;
+ }
+diff --git a/browser/devtools/performance/modules/performance-graphs.js b/browser/devtools/performance/modules/performance-graphs.js
+deleted file mode 100644
+index 0178bfe..0000000
+--- a/browser/devtools/performance/modules/performance-graphs.js
++++ /dev/null
+@@ -1,113 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-/**
+- * This file contains the base line graph that all Performance line graphs use.
+- */
+-
+-const {Cc, Ci, Cu, Cr} = require("chrome");
+-
+-Cu.import("resource:///modules/devtools/Graphs.jsm");
+-Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+-
+-const { colorUtils: { setAlpha }} = require("devtools/css-color");
+-const { getColor } = require("devtools/shared/theme");
+-
+-loader.lazyRequireGetter(this, "ProfilerGlobal",
+-  "devtools/shared/profiler/global");
+-loader.lazyRequireGetter(this, "TimelineGlobal",
+-  "devtools/shared/timeline/global");
+-
+-const HEIGHT = 35; // px
+-const STROKE_WIDTH = 1; // px
+-const DAMPEN_VALUES = 0.95;
+-const CLIPHEAD_LINE_COLOR = "#666";
+-const SELECTION_LINE_COLOR = "#555";
+-const SELECTION_BACKGROUND_COLOR_NAME = "highlight-blue";
+-const FRAMERATE_GRAPH_COLOR_NAME = "highlight-green";
+-const MEMORY_GRAPH_COLOR_NAME = "highlight-blue";
+-
+-/**
+- * A base class for performance graphs to inherit from.
+- *
+- * @param nsIDOMNode parent
+- *        The parent node holding the overview.
+- * @param string metric
+- *        The unit of measurement for this graph.
+- */
+-function PerformanceGraph(parent, metric) {
+-  LineGraphWidget.call(this, parent, { metric });
+-  this.setTheme();
+-}
+-
+-PerformanceGraph.prototype = Heritage.extend(LineGraphWidget.prototype, {
+-  strokeWidth: STROKE_WIDTH,
+-  dampenValuesFactor: DAMPEN_VALUES,
+-  fixedHeight: HEIGHT,
+-  clipheadLineColor: CLIPHEAD_LINE_COLOR,
+-  selectionLineColor: SELECTION_LINE_COLOR,
+-  withTooltipArrows: false,
+-  withFixedTooltipPositions: true,
+-
+-  /**
+-   * Disables selection and empties this graph.
+-   */
+-  clearView: function() {
+-    this.selectionEnabled = false;
+-    this.dropSelection();
+-    this.setData([]);
+-  },
+-
+-  /**
+-   * Sets the theme via `theme` to either "light" or "dark",
+-   * and updates the internal styling to match. Requires a redraw
+-   * to see the effects.
+-   */
+-  setTheme: function (theme) {
+-    theme = theme || "light";
+-    let mainColor = getColor(this.mainColor || "highlight-blue", theme);
+-    this.backgroundColor = getColor("body-background", theme);
+-    this.strokeColor = mainColor;
+-    this.backgroundGradientStart = setAlpha(mainColor, 0.2);
+-    this.backgroundGradientEnd = setAlpha(mainColor, 0.2);
+-    this.selectionBackgroundColor = setAlpha(getColor(SELECTION_BACKGROUND_COLOR_NAME, theme), 0.25);
+-    this.selectionStripesColor = "rgba(255, 255, 255, 0.1)";
+-    this.maximumLineColor = setAlpha(mainColor, 0.4);
+-    this.averageLineColor = setAlpha(mainColor, 0.7);
+-    this.minimumLineColor = setAlpha(mainColor, 0.9);
+-  }
+-});
+-
+-/**
+- * Constructor for the framerate graph. Inherits from PerformanceGraph.
+- *
+- * @param nsIDOMNode parent
+- *        The parent node holding the overview.
+- */
+-function FramerateGraph(parent) {
+-  PerformanceGraph.call(this, parent, ProfilerGlobal.L10N.getStr("graphs.fps"));
+-}
+-
+-FramerateGraph.prototype = Heritage.extend(PerformanceGraph.prototype, {
+-  mainColor: FRAMERATE_GRAPH_COLOR_NAME
+-});
+-
+-exports.FramerateGraph = FramerateGraph;
+-
+-/**
+- * Constructor for the memory graph. Inherits from PerformanceGraph.
+- *
+- * @param nsIDOMNode parent
+- *        The parent node holding the overview.
+- */
+-function MemoryGraph(parent) {
+-  PerformanceGraph.call(this, parent, TimelineGlobal.L10N.getStr("graphs.memory"));
+-}
+-
+-MemoryGraph.prototype = Heritage.extend(PerformanceGraph.prototype, {
+-  mainColor: MEMORY_GRAPH_COLOR_NAME
+-});
+-
+-exports.MemoryGraph = MemoryGraph;
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index 36be95b..84c504c 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -17,16 +17,17 @@ loader.lazyRequireGetter(this, "RecordingUtils",
+  * a recording as 'in progress' or 'finished'.
+  */
+ 
+ const RecordingModel = function (options={}) {
+   this._label = options.label || "";
+   this._console = options.console || false;
+ 
+   this._configuration = {
++    withMarkers: options.withMarkers || false,
+     withTicks: options.withTicks || false,
+     withMemory: options.withMemory || false,
+     withAllocations: options.withAllocations || false,
+     allocationsSampleProbability: options.allocationsSampleProbability || 0,
+     allocationsMaxLogLength: options.allocationsMaxLogLength || 0,
+     bufferSize: options.bufferSize || 0,
+     sampleFrequency: options.sampleFrequency || 1
+   };
+@@ -65,16 +66,17 @@ RecordingModel.prototype = {
+     this._label = recordingData.label || "";
+     this._duration = recordingData.duration;
+     this._markers = recordingData.markers;
+     this._frames = recordingData.frames;
+     this._memory = recordingData.memory;
+     this._ticks = recordingData.ticks;
+     this._allocations = recordingData.allocations;
+     this._profile = recordingData.profile;
++    this._configuration = recordingData.configuration || {};
+   }),
+ 
+   /**
+    * Saves the current recording to a file.
+    *
+    * @param nsILocalFile file
+    *        The file to stream the data into.
+    */
+@@ -221,17 +223,18 @@ RecordingModel.prototype = {
+     let label = this.getLabel();
+     let duration = this.getDuration();
+     let markers = this.getMarkers();
+     let frames = this.getFrames();
+     let memory = this.getMemory();
+     let ticks = this.getTicks();
+     let allocations = this.getAllocations();
+     let profile = this.getProfile();
+-    return { label, duration, markers, frames, memory, ticks, allocations, profile };
++    let configuration = this.getConfiguration();
++    return { label, duration, markers, frames, memory, ticks, allocations, profile, configuration };
+   },
+ 
+   /**
+    * Returns a boolean indicating whether or not this recording model
+    * was imported via file.
+    */
+   isImported: function () {
+     return this._imported;
+@@ -258,51 +261,58 @@ RecordingModel.prototype = {
+    */
+   addTimelineData: function (eventName, ...data) {
+     // If this model isn't currently recording,
+     // ignore the timeline data.
+     if (!this._recording) {
+       return;
+     }
+ 
++    let config = this.getConfiguration();
++
+     switch (eventName) {
+       // Accumulate timeline markers into an array. Furthermore, the timestamps
+       // do not have a zero epoch, so offset all of them by the start time.
+       case "markers": {
++        if (!config.withMarkers) { return; }
+         let [markers] = data;
+         RecordingUtils.offsetMarkerTimes(markers, this._timelineStartTime);
+         Array.prototype.push.apply(this._markers, markers);
+         break;
+       }
+       // Accumulate stack frames into an array.
+       case "frames": {
++        if (!config.withMarkers) { return; }
+         let [, frames] = data;
+         Array.prototype.push.apply(this._frames, frames);
+         break;
+       }
+       // Accumulate memory measurements into an array. Furthermore, the timestamp
+       // does not have a zero epoch, so offset it by the actor's start time.
+       case "memory": {
++        if (!config.withMemory) { return; }
+         let [currentTime, measurement] = data;
+         this._memory.push({
+           delta: currentTime - this._timelineStartTime,
+           value: measurement.total / 1024 / 1024
+         });
+         break;
+       }
+       // Save the accumulated refresh driver ticks.
+       case "ticks": {
++        if (!config.withTicks) { return; }
+         let [, timestamps] = data;
+         this._ticks = timestamps;
+         break;
+       }
+       // Accumulate allocation sites into an array. Furthermore, the timestamps
+       // do not have a zero epoch, and are microseconds instead of milliseconds,
+       // so offset all of them by the start time, also converting from µs to ms.
+       case "allocations": {
++        if (!config.withAllocations) { return; }
+         let [{ sites, timestamps, frames, counts }] = data;
+         let timeOffset = this._memoryStartTime * 1000;
+         let timeScale = 1000;
+         RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
+         Array.prototype.push.apply(this._allocations.sites, sites);
+         Array.prototype.push.apply(this._allocations.timestamps, timestamps);
+         Array.prototype.push.apply(this._allocations.frames, frames);
+         Array.prototype.push.apply(this._allocations.counts, counts);
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index 301fa6d..7b83784 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -1,16 +1,16 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
+     'modules/compatibility.js',
+     'modules/front.js',
++    'modules/graphs.js',
+     'modules/io.js',
+-    'modules/performance-graphs.js',
+     'modules/recording-model.js',
+     'modules/recording-utils.js',
+     'panel.js'
+ ]
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 8ae2d7c..c13dc80 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -22,22 +22,18 @@ devtools.lazyRequireGetter(this, "TreeWidget",
+ devtools.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/shared/timeline/global", true);
+ devtools.lazyRequireGetter(this, "L10N",
+   "devtools/shared/profiler/global", true);
+ devtools.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/performance/recording-utils", true);
+ devtools.lazyRequireGetter(this, "RecordingModel",
+   "devtools/performance/recording-model", true);
+-devtools.lazyRequireGetter(this, "FramerateGraph",
+-  "devtools/performance/performance-graphs", true);
+-devtools.lazyRequireGetter(this, "MemoryGraph",
+-  "devtools/performance/performance-graphs", true);
+-devtools.lazyRequireGetter(this, "MarkersOverview",
+-  "devtools/shared/timeline/markers-overview", true);
++devtools.lazyRequireGetter(this, "GraphsController",
++  "devtools/performance/graphs", true);
+ devtools.lazyRequireGetter(this, "Waterfall",
+   "devtools/shared/timeline/waterfall", true);
+ devtools.lazyRequireGetter(this, "MarkerDetails",
+   "devtools/shared/timeline/marker-details", true);
+ devtools.lazyRequireGetter(this, "CallView",
+   "devtools/shared/profiler/tree-view", true);
+ devtools.lazyRequireGetter(this, "ThreadNode",
+   "devtools/shared/profiler/tree-model", true);
+@@ -47,18 +43,16 @@ devtools.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/shared/profiler/jit", true);
+ devtools.lazyRequireGetter(this, "OptionsView",
+   "devtools/shared/options-view", true);
+ devtools.lazyRequireGetter(this, "FlameGraphUtils",
+   "devtools/shared/widgets/FlameGraph", true);
+ devtools.lazyRequireGetter(this, "FlameGraph",
+   "devtools/shared/widgets/FlameGraph", true);
+ 
+-devtools.lazyImporter(this, "CanvasGraphUtils",
+-  "resource:///modules/devtools/Graphs.jsm");
+ devtools.lazyImporter(this, "SideMenuWidget",
+   "resource:///modules/devtools/SideMenuWidget.jsm");
+ devtools.lazyImporter(this, "PluralForm",
+   "resource://gre/modules/PluralForm.jsm");
+ 
+ const BRANCH_NAME = "devtools.performance.ui.";
+ 
+ // Events emitted by various objects in the panel.
+@@ -286,16 +280,17 @@ let PerformanceController = {
+   },
+ 
+   /**
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+     let options = {
++      withMarkers: true,
+       withMemory: this.getOption("enable-memory"),
+       withTicks: this.getOption("enable-framerate"),
+       withAllocations: this.getOption("enable-memory"),
+       allocationsSampleProbability: this.getPref("memory-sample-probability"),
+       allocationsMaxLogLength: this.getPref("memory-max-log-length"),
+       bufferSize: this.getPref("profiler-buffer-size"),
+       sampleFrequency: this.getPref("profiler-sample-frequency")
+     };
+@@ -465,16 +460,52 @@ let PerformanceController = {
+ 
+   /**
+    * Returns the internal store of recording models.
+    */
+   getRecordings: function () {
+     return this._recordings;
+   },
+ 
++  /**
++   * Utility method taking the currently selected recording item's features, or optionally passed
++   * in recording item, as well as the actor support on the server, returning a boolean
++   * indicating if the requirements pass or not. Used to toggle features' visibility mostly.
++   *
++   * @option {Array<string>} features
++   *         An array of strings indicating what configuration is needed on the recording
++   *         model, like `withTicks`, or `withMemory`.
++   * @option {Array<string>} actors
++   *         An array of strings indicating what actors must exist.
++   * @option {boolean} isRecording
++   *         A boolean indicating whether the recording must be either recording or not
++   *         recording. Setting to undefined will allow either state.
++   * @param {RecordingModel} recording
++   *        An optional recording model to use instead of the currently selected.
++   *
++   * @return boolean
++   */
++  isFeatureSupported: function ({ features, actors, isRecording: shouldBeRecording }, recording) {
++    recording = recording || this.getCurrentRecording();
++    let recordingConfig = recording ? recording.getConfiguration() : {};
++    let currentRecordingState = recording ? recording.isRecording() : void 0;
++    let actorsSupported = gFront.getActorSupport(); 
++
++    if (shouldBeRecording != null && shouldBeRecording !== currentRecordingState) {
++      return false;
++    }
++    if (actors && !actors.every(a => actorsSupported[a])) {
++      return false;
++    }
++    if (features && !features.every(f => recordingConfig[f])) {
++      return false;
++    }
++    return true;
++  },
++
+   toString: () => "[object PerformanceController]"
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index f2a9b47..90f1d8d 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -97,32 +97,37 @@
+                          popup="performance-filter-menupopup"
+                          class="devtools-toolbarbutton"
+                          tooltiptext="&profilerUI.options.filter.tooltiptext;"/>
+         </hbox>
+         <hbox id="performance-toolbar-controls-detail-views" class="devtools-toolbarbutton-group">
+           <toolbarbutton id="select-waterfall-view"
+                          class="devtools-toolbarbutton devtools-button"
+                          label="&profilerUI.toolbar.waterfall;"
++                         hidden="true"
+                          data-view="waterfall" />
+           <toolbarbutton id="select-js-calltree-view"
+                          class="devtools-toolbarbutton devtools-button"
+                          label="&profilerUI.toolbar.js-calltree;"
++                         hidden="true"
+                          data-view="js-calltree" />
+           <toolbarbutton id="select-js-flamegraph-view"
+                          class="devtools-toolbarbutton devtools-button"
+                          label="&profilerUI.toolbar.js-flamegraph;"
++                         hidden="true"
+                          data-view="js-flamegraph" />
+           <toolbarbutton id="select-memory-calltree-view"
+                          class="devtools-toolbarbutton devtools-button"
+                          label="&profilerUI.toolbar.memory-calltree1;"
++                         hidden="true"
+                          data-view="memory-calltree" />
+           <toolbarbutton id="select-memory-flamegraph-view"
+                          class="devtools-toolbarbutton devtools-button"
+                          label="&profilerUI.toolbar.memory-flamegraph1;"
++                         hidden="true"
+                          data-view="memory-flamegraph" />
+         </hbox>
+         <spacer flex="1"></spacer>
+         <hbox id="performance-toolbar-control-options" class="devtools-toolbarbutton-group">
+           <toolbarbutton id="performance-options-button"
+                          class="devtools-toolbarbutton devtools-option-toolbarbutton"
+                          popup="performance-options-menupopup"
+                          tooltiptext="&profilerUI.options.gear.tooltiptext;"/>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 01eee2a..2e90c3a 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -8,17 +8,16 @@ support-files =
+   head.js
+ 
+ # Commented out tests are profiler tests
+ # that need to be moved over to performance tool
+ 
+ [browser_perf-aaa-run-first-leaktest.js]
+ 
+ [browser_markers-parse-html.js]
+-
+ [browser_perf-allocations-to-samples.js]
+ [browser_perf-compatibility-01.js]
+ [browser_perf-compatibility-02.js]
+ [browser_perf-compatibility-03.js]
+ [browser_perf-compatibility-04.js]
+ [browser_perf-compatibility-05.js]
+ [browser_perf-clear-01.js]
+ [browser_perf-clear-02.js]
+@@ -38,16 +37,17 @@ support-files =
+ [browser_perf-details-flamegraph-render.js]
+ [browser_perf-details-memory-calltree-render.js]
+ [browser_perf-details-memory-flamegraph-render.js]
+ [browser_perf-details-waterfall-render.js]
+ [browser_perf-details-01.js]
+ [browser_perf-details-02.js]
+ [browser_perf-details-03.js]
+ [browser_perf-details-04.js]
++[browser_perf-details-05.js]
+ [browser_perf-events-calltree.js]
+ [browser_perf-front-basic-profiler-01.js]
+ [browser_perf-front-basic-timeline-01.js]
+ #[browser_perf-front-profiler-01.js] bug 1077464
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+diff --git a/browser/devtools/performance/test/browser_markers-parse-html.js b/browser/devtools/performance/test/browser_markers-parse-html.js
+index 510413a..35e0ae7 100644
+--- a/browser/devtools/performance/test/browser_markers-parse-html.js
++++ b/browser/devtools/performance/test/browser_markers-parse-html.js
+@@ -11,17 +11,17 @@ function* getMarkers(front) {
+   const { promise, resolve } = Promise.defer();
+   const handler = (_, name, markers) => {
+     if (name === "markers") {
+       resolve(markers);
+     }
+   };
+   front.on("timeline-data", handler);
+ 
+-  yield front.startRecording({ withTicks: true });
++  yield front.startRecording({ withMarkers: true, withTicks: true });
+ 
+   const markers = yield promise;
+   front.off("timeline-data", handler);
+   yield front.stopRecording();
+ 
+   return markers;
+ }
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-columns-js-calltree.js b/browser/devtools/performance/test/browser_perf-columns-js-calltree.js
+index 0930ab3..a4dc65f 100644
+--- a/browser/devtools/performance/test/browser_perf-columns-js-calltree.js
++++ b/browser/devtools/performance/test/browser_perf-columns-js-calltree.js
+@@ -6,24 +6,23 @@
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, $, $$, DetailsView, JsCallTreeView } = panel.panelWin;
+ 
+   // Enable platform data to show the `busyWait` function in the tree.
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, true);
+ 
+-  yield DetailsView.selectView("js-calltree");
+-  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(1000);
+ 
+   let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+   yield stopRecording(panel);
++  yield DetailsView.selectView("js-calltree");
++  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   testCells($, $$, {
+     "duration": true,
+     "percentage": true,
+     "allocations": false,
+     "self-duration": true,
+     "self-percentage": true,
+diff --git a/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js b/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js
+index 5ddce85..70908f4 100644
+--- a/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js
++++ b/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js
+@@ -6,24 +6,23 @@
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, $, $$, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+-  yield DetailsView.selectView("memory-calltree");
+-  ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(1000);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   yield stopRecording(panel);
++  yield DetailsView.selectView("memory-calltree");
++  ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   testCells($, $$, {
+     "duration": false,
+     "percentage": false,
+     "allocations": true,
+     "self-duration": false,
+     "self-percentage": false,
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-01.js b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+index a295cd9..32b44e5 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-01.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+@@ -9,22 +9,23 @@ let WAIT_TIME = 100;
+ 
+ function spawnTest () {
+   let { target, front } = yield initBackend(SIMPLE_URL, {
+     TEST_MOCK_MEMORY_ACTOR: true,
+     TEST_MOCK_TIMELINE_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+-  let { memory, timeline } = front.getMocksInUse();
+-  ok(memory, "memory should be mocked.");
+-  ok(timeline, "timeline should be mocked.");
++  let { memory, timeline } = front.getActorSupport();
++  ok(!memory, "memory should be mocked.");
++  ok(!timeline, "timeline should be mocked.");
+ 
+   let recording = yield front.startRecording({
+     withTicks: true,
++    withMarkers: true,
+     withMemory: true,
+     withAllocations: true,
+     allocationsSampleProbability: +Services.prefs.getCharPref(MEMORY_SAMPLE_PROB_PREF),
+     allocationsMaxLogLength: Services.prefs.getIntPref(MEMORY_MAX_LOG_LEN_PREF)
+   });
+ 
+   ok(typeof recording._profilerStartTime === "number",
+     "The front.startRecording() returns a recording with a profiler start time");
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-02.js b/browser/devtools/performance/test/browser_perf-compatibility-02.js
+index cace8e9..0d453cb 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-02.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-02.js
+@@ -11,19 +11,19 @@ const WAIT_TIME = 1000;
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL, "performance", {
+     TEST_MOCK_MEMORY_ACTOR: true,
+     TEST_MOCK_TIMELINE_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   let { EVENTS, $, gFront, PerformanceController, PerformanceView, DetailsView, JsCallTreeView } = panel.panelWin;
+ 
+-  let { memory: memoryMock, timeline: timelineMock } = gFront.getMocksInUse();
+-  ok(memoryMock, "memory should be mocked.");
+-  ok(timelineMock, "timeline should be mocked.");
++  let { memory: memorySupport, timeline: timelineSupport } = gFront.getActorSupport();
++  ok(!memorySupport, "memory should be mocked.");
++  ok(!timelineSupport, "timeline should be mocked.");
+ 
+   yield startRecording(panel, { waitForOverview: false });
+   busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
+   yield stopRecording(panel, { waitForOverview: false });
+ 
+   let {
+     label, duration, markers, frames, memory, ticks, allocations, profile
+   } = PerformanceController.getCurrentRecording().getAllData();
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-03.js b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+index db13eef..064268c 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-03.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+@@ -8,22 +8,23 @@
+ let WAIT_TIME = 100;
+ 
+ function spawnTest () {
+   let { target, front } = yield initBackend(SIMPLE_URL, {
+     TEST_MOCK_MEMORY_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+-  let { memory, timeline } = front.getMocksInUse();
+-  ok(memory, "memory should be mocked.");
+-  ok(!timeline, "timeline should not be mocked.");
++  let { memory, timeline } = front.getActorSupport();
++  ok(!memory, "memory should be mocked.");
++  ok(timeline, "timeline should not be mocked.");
+ 
+   let recording = yield front.startRecording({
+     withTicks: true,
++    withMarkers: true,
+     withMemory: true,
+     withAllocations: true,
+     allocationsSampleProbability: +Services.prefs.getCharPref(MEMORY_SAMPLE_PROB_PREF),
+     allocationsMaxLogLength: Services.prefs.getIntPref(MEMORY_MAX_LOG_LEN_PREF)
+   });
+ 
+   ok(typeof recording._profilerStartTime === "number",
+     "The front.startRecording() returns a recording with a profiler start time");
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-04.js b/browser/devtools/performance/test/browser_perf-compatibility-04.js
+index a0e6bb8..1ac6609 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-04.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-04.js
+@@ -11,19 +11,19 @@ const WAIT_TIME = 1000;
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL, "performance", {
+     TEST_MOCK_MEMORY_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   let { EVENTS, $, gFront, PerformanceController, PerformanceView, DetailsView, WaterfallView } = panel.panelWin;
+ 
+ 
+-  let { memory: memoryMock, timeline: timelineMock } = gFront.getMocksInUse();
+-  ok(memoryMock, "memory should be mocked.");
+-  ok(!timelineMock, "timeline should not be mocked.");
++  let { memory: memorySupport, timeline: timelineSupport } = gFront.getActorSupport();
++  ok(!memorySupport, "memory should be mocked.");
++  ok(timelineSupport, "timeline should not be mocked.");
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getTicks().length);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getMemory().length);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length);
+   yield stopRecording(panel);
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-06.js b/browser/devtools/performance/test/browser_perf-console-record-06.js
+index d86a15d..d3e3254 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-06.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-06.js
+@@ -24,28 +24,26 @@ function spawnTest () {
+   is(RecordingsView.selectedItem.attachment, recordings[0],
+     "The first console recording should still be selected.");
+ 
+   // Ensure overview is still rendering
+   yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
+   yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
+   yield once(OverviewView, EVENTS.OVERVIEW_RENDERED);
+ 
+-  let detailsRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   yield consoleProfileEnd(panel.panelWin, "rust");
+-  yield detailsRendered;
+ 
+   recordings = PerformanceController.getRecordings();
+   is(recordings.length, 2, "two recordings found in the performance panel.");
+   is(RecordingsView.selectedItem.attachment, recordings[0],
+     "The first console recording should still be selected.");
+   is(RecordingsView.selectedItem.attachment.isRecording(), false,
+     "The first console recording should no longer be recording.");
+ 
+-  detailsRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  let detailsRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   yield consoleProfileEnd(panel.panelWin, "golang");
+   yield detailsRendered;
+ 
+   recordings = PerformanceController.getRecordings();
+   is(recordings.length, 2, "two recordings found in the performance panel.");
+   is(RecordingsView.selectedItem.attachment, recordings[0],
+     "The first console recording should still be selected.");
+   is(recordings[1].isRecording(), false,
+diff --git a/browser/devtools/performance/test/browser_perf-details-01.js b/browser/devtools/performance/test/browser_perf-details-01.js
+index 0843fc5..78d2c64 100644
+--- a/browser/devtools/performance/test/browser_perf-details-01.js
++++ b/browser/devtools/performance/test/browser_perf-details-01.js
+@@ -3,16 +3,19 @@
+ 
+ /**
+  * Tests that the details view toggles subviews.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, $, DetailsView, document: doc } = panel.panelWin;
+ 
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
+   info("views on startup");
+   checkViews(DetailsView, doc, "waterfall");
+ 
+   // Select calltree view
+   let viewChanged = onceSpread(DetailsView, EVENTS.DETAILS_VIEW_SELECTED);
+   command($("toolbarbutton[data-view='js-calltree']"));
+   let [_, viewName] = yield viewChanged;
+   is(viewName, "js-calltree", "DETAILS_VIEW_SELECTED fired with view name");
+diff --git a/browser/devtools/performance/test/browser_perf-details-02.js b/browser/devtools/performance/test/browser_perf-details-02.js
+index 08aa4f6..9e677d0 100644
+--- a/browser/devtools/performance/test/browser_perf-details-02.js
++++ b/browser/devtools/performance/test/browser_perf-details-02.js
+@@ -4,26 +4,29 @@
+ /**
+  * Tests that the details view utility functions work as advertised.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView } = panel.panelWin;
+   let { WaterfallView, JsCallTreeView, JsFlameGraphView } = panel.panelWin;
+ 
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
+   ok(DetailsView.isViewSelected(WaterfallView),
+     "The waterfall view is selected by default in the details view.");
+ 
+   let selected = DetailsView.whenViewSelected(JsCallTreeView);
+   let notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+   yield DetailsView.selectView("js-calltree");
+   yield Promise.all([selected, notified]);
+ 
+   ok(DetailsView.isViewSelected(JsCallTreeView),
+-    "The waterfall view is now selected in the details view.");
++    "The jscalltree view is now selected in the details view.");
+ 
+   selected = DetailsView.whenViewSelected(JsFlameGraphView);
+   notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+   yield DetailsView.selectView("js-flamegraph");
+   yield Promise.all([selected, notified]);
+ 
+   ok(DetailsView.isViewSelected(JsFlameGraphView),
+     "The flamegraph view is now selected in the details view.");
+diff --git a/browser/devtools/performance/test/browser_perf-details-03.js b/browser/devtools/performance/test/browser_perf-details-03.js
+index 8a5388d..ba29cc6 100644
+--- a/browser/devtools/performance/test/browser_perf-details-03.js
++++ b/browser/devtools/performance/test/browser_perf-details-03.js
+@@ -1,38 +1,39 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Tests that the details view hides the memory buttons when `enable-memory` is toggled,
+- * and that it switches to default panel if toggling while a memory panel is selected.
++ * Tests that the details view hides the memory buttons when a recording does not
++ * have memory data (withMemory: false), and that when a memory panel is selected,
++ * switching to a panel that does not have memory goes to a default panel instead.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, OverviewView, DetailsView } = panel.panelWin;
+-  let { $, WaterfallView, MemoryCallTreeView, MemoryFlameGraphView } = panel.panelWin;
++  let { $, WaterfallView, MemoryCallTreeView, RecordingsView, MemoryFlameGraphView } = panel.panelWin;
++
++  Services.prefs.setBoolPref(MEMORY_PREF, false);
++  yield startRecording(panel);
++  yield stopRecording(panel);
+ 
+   ok(DetailsView.isViewSelected(WaterfallView),
+     "The waterfall view is selected by default in the details view.");
+ 
++  Services.prefs.setBoolPref(MEMORY_PREF, true);
+   // The toolbar buttons will always be hidden when a recording isn't available,
+   // so make sure we have one that's finished.
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   let flameBtn = $("toolbarbutton[data-view='memory-flamegraph']");
+   let callBtn = $("toolbarbutton[data-view='memory-calltree']");
+ 
+-  Services.prefs.setBoolPref(MEMORY_PREF, false);
+-  is(flameBtn.hidden, true, "memory-flamegraph button hidden when enable-memory=false");
+-  is(callBtn.hidden, true, "memory-calltree button hidden when enable-memory=false");
+-
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
+-  is(flameBtn.hidden, false, "memory-flamegraph button shown when enable-memory=true");
+-  is(callBtn.hidden, false, "memory-calltree button shown when enable-memory=true");
++  is(flameBtn.hidden, false, "memory-flamegraph button shown when recording has memory data");
++  is(callBtn.hidden, false, "memory-calltree button shown when recording has memory data");
+ 
+   let selected = DetailsView.whenViewSelected(MemoryCallTreeView);
+   let notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+   DetailsView.selectView("memory-calltree");
+   yield Promise.all([selected, notified]);
+ 
+   ok(DetailsView.isViewSelected(MemoryCallTreeView),
+     "The memory call tree view can now be selected.");
+@@ -40,45 +41,37 @@ function spawnTest () {
+   selected = DetailsView.whenViewSelected(MemoryFlameGraphView);
+   notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+   DetailsView.selectView("memory-flamegraph");
+   yield Promise.all([selected, notified]);
+ 
+   ok(DetailsView.isViewSelected(MemoryFlameGraphView),
+     "The memory flamegraph view can now be selected.");
+ 
++  // Select the first recording with no memory data
+   selected = DetailsView.whenViewSelected(WaterfallView);
+   notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+-  Services.prefs.setBoolPref(MEMORY_PREF, false);
++  RecordingsView.selectedIndex = 0;
+   yield Promise.all([selected, notified]);
+ 
+   ok(DetailsView.isViewSelected(WaterfallView),
+-    "The waterfall view is now selected when toggling off enable-memory when a memory panel is selected.");
++    "The waterfall view is now selected when switching back to a recording that does not have memory data");
++  is(flameBtn.hidden, true, "memory-flamegraph button hidden when recording does not have memory data");
++  is(callBtn.hidden, true, "memory-calltree button hidden when recording does not have memory data");
+ 
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  // Go back to the recording with memory data
++  let render = WaterfallView.once(EVENTS.WATERFALL_RENDERED);
++  RecordingsView.selectedIndex = 1;
++  yield render;
+ 
+   selected = DetailsView.whenViewSelected(MemoryCallTreeView);
+   notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+   DetailsView.selectView("memory-calltree");
+   yield Promise.all([selected, notified]);
+ 
+   ok(DetailsView.isViewSelected(MemoryCallTreeView),
+-    "The memory call tree view can be selected again after re-enabling memory.");
+-
+-  selected = DetailsView.whenViewSelected(MemoryFlameGraphView);
+-  notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+-  DetailsView.selectView("memory-flamegraph");
+-  yield Promise.all([selected, notified]);
+-
+-  ok(DetailsView.isViewSelected(MemoryFlameGraphView),
+-    "The memory flamegraph view can be selected again after re-enabling memory.");
+-
+-  selected = DetailsView.whenViewSelected(WaterfallView);
+-  notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
+-  Services.prefs.setBoolPref(MEMORY_PREF, false);
+-  yield Promise.all([selected, notified]);
+-
+-  ok(DetailsView.isViewSelected(WaterfallView),
+-    "The waterfall view is now selected when toggling off enable-memory when a memory panel is selected.");
++    "The memory call tree view can be selected again after going back to the view with memory data");
++  is(flameBtn.hidden, false, "memory-flamegraph button shown when recording has memory data");
++  is(callBtn.hidden, false, "memory-calltree button shown when recording has memory data");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-details-04.js b/browser/devtools/performance/test/browser_perf-details-04.js
+index c19646b..5ec68bc 100644
+--- a/browser/devtools/performance/test/browser_perf-details-04.js
++++ b/browser/devtools/performance/test/browser_perf-details-04.js
+@@ -2,17 +2,17 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that the details view hides the toolbar buttons when a recording
+  * doesn't exist or is in progress.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, $, $$, PerformanceController, RecordingsView, DetailsView } = panel.panelWin;
++  let { EVENTS, $, $$, WaterfallView, PerformanceController, RecordingsView, DetailsView } = panel.panelWin;
+ 
+   let waterfallBtn = $("toolbarbutton[data-view='waterfall']");
+   let jsFlameBtn = $("toolbarbutton[data-view='js-flamegraph']");
+   let jsCallBtn = $("toolbarbutton[data-view='js-calltree']");
+   let memFlameBtn = $("toolbarbutton[data-view='memory-flamegraph']");
+   let memCallBtn = $("toolbarbutton[data-view='memory-calltree']");
+ 
+   is(waterfallBtn.hidden, true, "waterfall button hidden when tool starts.");
+@@ -41,18 +41,19 @@ function spawnTest () {
+ 
+   is(waterfallBtn.hidden, true, "waterfall button hidden when another recording starts.");
+   is(jsFlameBtn.hidden, true, "js-flamegraph button hidden when another recording starts.");
+   is(jsCallBtn.hidden, true, "js-calltree button hidden when another recording starts.");
+   is(memFlameBtn.hidden, true, "memory-flamegraph button hidden when another recording starts.");
+   is(memCallBtn.hidden, true, "memory-calltree button hidden when another recording starts.");
+ 
+   let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  let render = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   mousedown(panel.panelWin, $$(".recording-item")[0]);
+-  yield select;
++  yield Promise.all([select, render]);
+ 
+   is(RecordingsView.selectedIndex, 0,
+     "The first recording was selected again.");
+ 
+   is(waterfallBtn.hidden, false, "waterfall button visible when first recording selected.");
+   is(jsFlameBtn.hidden, false, "js-flamegraph button visible when first recording selected.");
+   is(jsCallBtn.hidden, false, "js-calltree button visible when first recording selected.");
+   is(memFlameBtn.hidden, true, "memory-flamegraph button hidden when first recording selected.");
+@@ -66,17 +67,19 @@ function spawnTest () {
+     "The second recording was selected again.");
+ 
+   is(waterfallBtn.hidden, true, "waterfall button still hidden when second recording selected.");
+   is(jsFlameBtn.hidden, true, "js-flamegraph button still hidden when second recording selected.");
+   is(jsCallBtn.hidden, true, "js-calltree button still hidden when second recording selected.");
+   is(memFlameBtn.hidden, true, "memory-flamegraph button still hidden when second recording selected.");
+   is(memCallBtn.hidden, true, "memory-calltree button still hidden when second recording selected.");
+ 
++  render = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   yield stopRecording(panel);
++  yield render;
+ 
+   is(RecordingsView.selectedIndex, 1,
+     "The second recording is still selected.");
+ 
+   is(waterfallBtn.hidden, false, "waterfall button visible when second recording finished.");
+   is(jsFlameBtn.hidden, false, "js-flamegraph button visible when second recording finished.");
+   is(jsCallBtn.hidden, false, "js-calltree button visible when second recording finished.");
+   is(memFlameBtn.hidden, true, "memory-flamegraph button hidden when second recording finished.");
+diff --git a/browser/devtools/performance/test/browser_perf-details-05.js b/browser/devtools/performance/test/browser_perf-details-05.js
+new file mode 100644
+index 0000000..2a2ecd5
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-details-05.js
+@@ -0,0 +1,38 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the details view utility functions work as advertised.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, DetailsView } = panel.panelWin;
++  let { PerformanceController, WaterfallView, JsCallTreeView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  ok(DetailsView.isViewSelected(WaterfallView),
++    "The waterfall view is selected by default in the details view.");
++
++  let selected = DetailsView.whenViewSelected(JsCallTreeView);
++  let notified = DetailsView.once(EVENTS.DETAILS_VIEW_SELECTED);
++  yield DetailsView.selectView("js-calltree");
++  yield Promise.all([selected, notified]);
++
++  ok(DetailsView.isViewSelected(JsCallTreeView),
++    "The jscalltree view is now selected in the details view.");
++
++  yield PerformanceController.clearRecordings();
++
++  yield startRecording(panel);
++  let render = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  yield stopRecording(panel);
++  yield render;
++
++  ok(DetailsView.isViewSelected(JsCallTreeView),
++    "The jscalltree view is still selected in the details view");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-details-calltree-render.js b/browser/devtools/performance/test/browser_perf-details-calltree-render.js
+index 104a4337..cd5d86a 100644
+--- a/browser/devtools/performance/test/browser_perf-details-calltree-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-calltree-render.js
+@@ -3,24 +3,23 @@
+ 
+ /**
+  * Tests that the call tree view renders content after recording.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsCallTreeView } = panel.panelWin;
+ 
+-  yield DetailsView.selectView("js-calltree");
+-  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("js-calltree");
++  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   ok(true, "JsCallTreeView rendered after recording is stopped.");
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+diff --git a/browser/devtools/performance/test/browser_perf-details-flamegraph-render.js b/browser/devtools/performance/test/browser_perf-details-flamegraph-render.js
+index e327f99..9067af6 100644
+--- a/browser/devtools/performance/test/browser_perf-details-flamegraph-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-flamegraph-render.js
+@@ -3,24 +3,23 @@
+ 
+ /**
+  * Tests that the flamegraph view renders content after recording.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsFlameGraphView } = panel.panelWin;
+ 
+-  yield DetailsView.selectView("js-flamegraph");
+-  ok(DetailsView.isViewSelected(JsFlameGraphView), "The flamegraph is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("js-flamegraph");
++  ok(DetailsView.isViewSelected(JsFlameGraphView), "The flamegraph is now selected.");
+   yield rendered;
+ 
+   ok(true, "JsFlameGraphView rendered after recording is stopped.");
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+diff --git a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+index 432b790..20af219 100644
+--- a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+@@ -6,24 +6,23 @@
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+-  yield DetailsView.selectView("memory-calltree");
+-  ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("memory-calltree");
++  ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   ok(true, "MemoryCallTreeView rendered after recording is stopped.");
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+diff --git a/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js b/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js
+index 7629b28..ca79d7c 100644
+--- a/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js
+@@ -6,24 +6,23 @@
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryFlameGraphView } = panel.panelWin;
+ 
+   // Enable memory to test.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+-  yield DetailsView.selectView("memory-flamegraph");
+-  ok(DetailsView.isViewSelected(MemoryFlameGraphView), "The flamegraph is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("memory-flamegraph");
++  ok(DetailsView.isViewSelected(MemoryFlameGraphView), "The flamegraph is now selected.");
+   yield rendered;
+ 
+   ok(true, "MemoryFlameGraphView rendered after recording is stopped.");
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+diff --git a/browser/devtools/performance/test/browser_perf-details-waterfall-render.js b/browser/devtools/performance/test/browser_perf-details-waterfall-render.js
+index 44d487d..133b7d8 100644
+--- a/browser/devtools/performance/test/browser_perf-details-waterfall-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-waterfall-render.js
+@@ -3,24 +3,23 @@
+ 
+ /**
+  * Tests that the waterfall view renders content after recording.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, DetailsView, WaterfallView } = panel.panelWin;
+ 
+-  ok(DetailsView.isViewSelected(WaterfallView),
+-    "The waterfall view is selected by default in the details view.");
+-
+   yield startRecording(panel);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length);
+ 
+   let rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   yield stopRecording(panel);
++  ok(DetailsView.isViewSelected(WaterfallView),
++    "The waterfall view is selected by default in the details view.");
+   yield rendered;
+ 
+   ok(true, "WaterfallView rendered after recording is stopped.");
+ 
+   yield startRecording(panel);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length);
+ 
+   rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+diff --git a/browser/devtools/performance/test/browser_perf-front-02.js b/browser/devtools/performance/test/browser_perf-front-02.js
+index fe2ce72..c854752 100644
+--- a/browser/devtools/performance/test/browser_perf-front-02.js
++++ b/browser/devtools/performance/test/browser_perf-front-02.js
+@@ -5,17 +5,17 @@
+  * Test that timeline and memory actors can be started multiple times to get
+  * different start times for different recording sessions.
+  */
+ 
+ let WAIT_TIME = 1000;
+ 
+ function spawnTest () {
+   let { target, front } = yield initBackend(SIMPLE_URL);
+-  let config = { withMemory: true, withTicks: true };
++  let config = { withMarkers: true, withMemory: true, withTicks: true };
+ 
+   yield front._request("memory", "attach");
+ 
+   let timelineStart1 = yield front._request("timeline", "start", config);
+   let memoryStart1 = yield front._request("memory", "startRecordingAllocations");
+   let timelineStart2 = yield front._request("timeline", "start", config);
+   let memoryStart2 = yield front._request("memory", "startRecordingAllocations");
+   let timelineStop = yield front._request("timeline", "stop");
+diff --git a/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+index 0a168fa..08f6a44 100644
+--- a/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
++++ b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+@@ -20,17 +20,17 @@ function spawnTest () {
+   let deferreds = {
+     markers: Promise.defer(),
+     memory: Promise.defer(),
+     ticks: Promise.defer()
+   };
+ 
+   front.on("timeline-data", handler);
+ 
+-  yield front.startRecording({ withMemory: true, withTicks: true });
++  yield front.startRecording({ withMarkers: true, withMemory: true, withTicks: true });
+   yield Promise.all(Object.keys(deferreds).map(type => deferreds[type].promise));
+   yield front.stopRecording();
+   front.off("timeline-data", handler);
+ 
+   is(counters.markers.length, 1, "one marker event fired.");
+   is(counters.memory.length, 3, "three memory events fired.");
+   is(counters.ticks.length, 3, "three ticks events fired.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-enable-framerate.js b/browser/devtools/performance/test/browser_perf-options-enable-framerate.js
+index 23459bc..6fa1d37 100644
+--- a/browser/devtools/performance/test/browser_perf-options-enable-framerate.js
++++ b/browser/devtools/performance/test/browser_perf-options-enable-framerate.js
+@@ -3,30 +3,30 @@
+ 
+ /**
+  * Tests that `enable-framerate` toggles the visibility of the fps graph,
+  * as well as enabling ticks data on the PerformanceFront.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, $ } = panel.panelWin;
+-
+   Services.prefs.setBoolPref(FRAMERATE_PREF, false);
+-  ok($("#time-framerate").hidden, "fps graph is hidden when ticks disabled");
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   is(PerformanceController.getCurrentRecording().getConfiguration().withTicks, false,
+     "PerformanceFront started without ticks recording.");
++  ok($("#time-framerate").hidden, "fps graph is hidden when ticks disabled");
+ 
+   Services.prefs.setBoolPref(FRAMERATE_PREF, true);
+-  ok(!$("#time-framerate").hidden, "fps graph is not hidden when ticks enabled");
++  ok($("#time-framerate").hidden, "fps graph is still hidden if recording does not contain ticks.");
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
++  ok(!$("#time-framerate").hidden, "fps graph is not hidden when ticks enabled before recording");
+   is(PerformanceController.getCurrentRecording().getConfiguration().withTicks, true,
+     "PerformanceFront started with ticks recording.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js b/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js
+index 73b936a..ed2067e 100644
+--- a/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js
+@@ -5,32 +5,34 @@
+  * Tests that `enable-memory` toggles the visibility of the memory graph,
+  * as well as enabling memory data on the PerformanceFront.
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, $ } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(MEMORY_PREF, false);
+-  ok($("#memory-overview").hidden, "memory graph is hidden when memory disabled");
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   is(PerformanceController.getCurrentRecording().getConfiguration().withMemory, false,
+     "PerformanceFront started without memory recording.");
+   is(PerformanceController.getCurrentRecording().getConfiguration().withAllocations, false,
+     "PerformanceFront started without allocations recording.");
++  ok($("#memory-overview").hidden, "memory graph is hidden when memory disabled");
+ 
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+-  ok(!$("#memory-overview").hidden, "memory graph is not hidden when memory enabled");
++  ok($("#memory-overview").hidden,
++    "memory graph is still hidden after enabling if recording did not start recording memory");
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
++  ok(!$("#memory-overview").hidden, "memory graph is not hidden when memory enabled before recording");
+   is(PerformanceController.getCurrentRecording().getConfiguration().withMemory, true,
+     "PerformanceFront started with memory recording.");
+   is(PerformanceController.getCurrentRecording().getConfiguration().withAllocations, true,
+     "PerformanceFront started with allocations recording.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js
+index 769c594..f51c912 100644
+--- a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-01.js
+@@ -5,23 +5,22 @@
+  * Tests that the js flamegraphs get rerendered when toggling `flatten-tree-recursion`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, DetailsView, JsFlameGraphView, FlameGraphUtils } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(FLATTEN_PREF, true);
+ 
+-  yield DetailsView.selectView("js-flamegraph");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+-  let rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+   yield stopRecording(panel);
++  let rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
++  yield DetailsView.selectView("js-flamegraph");
+   yield rendered;
+ 
+   let samples1 = PerformanceController.getCurrentRecording().getProfile().threads[0].samples;
+   let rendering1 = FlameGraphUtils._cache.get(samples1);
+ 
+   ok(samples1,
+     "The samples were retrieved from the controller.");
+   ok(rendering1,
+diff --git a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
+index 4f88f5c..7d11a66 100644
+--- a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
+@@ -7,23 +7,22 @@
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, DetailsView, MemoryFlameGraphView, RecordingUtils, FlameGraphUtils } = panel.panelWin;
+ 
+   // Enable memory to test
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(FLATTEN_PREF, true);
+ 
+-  yield DetailsView.selectView("memory-flamegraph");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   yield stopRecording(panel);
++  yield DetailsView.selectView("memory-flamegraph");
+   yield rendered;
+ 
+   let allocations1 = PerformanceController.getCurrentRecording().getAllocations();
+   let samples1 = RecordingUtils.getSamplesFromAllocations(allocations1);
+   let rendering1 = FlameGraphUtils._cache.get(samples1);
+ 
+   ok(allocations1,
+     "The allocations were retrieved from the controller.");
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-call-tree-01.js b/browser/devtools/performance/test/browser_perf-options-invert-call-tree-01.js
+index c03178c..c75d549 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-call-tree-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-call-tree-01.js
+@@ -5,24 +5,23 @@
+  * Tests that the js call tree views get rerendered when toggling `invert-call-tree`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsCallTreeView } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(INVERT_PREF, true);
+ 
+-  yield DetailsView.selectView("js-calltree");
+-  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("js-calltree");
++  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+   Services.prefs.setBoolPref(INVERT_PREF, false);
+   yield rendered;
+ 
+   ok(true, "JsCallTreeView rerendered when toggling invert-call-tree.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js b/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js
+index 0ec0907..f734b7e 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js
+@@ -7,24 +7,23 @@
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(INVERT_PREF, true);
+ 
+-  yield DetailsView.selectView("memory-calltree");
+-  ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("memory-calltree");
++  ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   Services.prefs.setBoolPref(INVERT_PREF, false);
+   yield rendered;
+ 
+   ok(true, "MemoryCallTreeView rerendered when toggling invert-call-tree.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js
+index 9a7b2fd..e4064b8 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-01.js
+@@ -3,25 +3,24 @@
+ 
+ /**
+  * Tests that the js Flamegraphs gets rerendered when toggling `invert-flame-graph`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsFlameGraphView } = panel.panelWin;
+ 
+-  yield DetailsView.selectView("js-flamegraph");
+-
+   Services.prefs.setBoolPref(INVERT_FLAME_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("js-flamegraph");
+   yield rendered;
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+   Services.prefs.setBoolPref(INVERT_FLAME_PREF, false);
+   yield rendered;
+ 
+   ok(true, "JsFlameGraphView rerendered when toggling invert-flame-graph.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
+index 2bc92ea..8254e73 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
+@@ -6,23 +6,22 @@
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryFlameGraphView } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(INVERT_FLAME_PREF, true);
+ 
+-  yield DetailsView.selectView("memory-flamegraph");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("memory-flamegraph");
+   yield rendered;
+ 
+   rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   Services.prefs.setBoolPref(INVERT_FLAME_PREF, false);
+   yield rendered;
+ 
+   ok(true, "MemoryFlameGraphView rerendered when toggling invert-flame-graph.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-01.js b/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-01.js
+index a5dae25..bcb0169 100644
+--- a/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-01.js
+@@ -5,23 +5,22 @@
+  * Tests that the js flamegraphs get rerendered when toggling `show-idle-blocks`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsFlameGraphView } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(IDLE_PREF, true);
+ 
+-  yield DetailsView.selectView("js-flamegraph");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("js-flamegraph");
+   yield rendered;
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+   Services.prefs.setBoolPref(IDLE_PREF, false);
+   yield rendered;
+ 
+   ok(true, "JsFlameGraphView rerendered when toggling show-idle-blocks.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js b/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js
+index 4a9f229..94853f2 100644
+--- a/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js
+@@ -7,23 +7,22 @@
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryFlameGraphView } = panel.panelWin;
+ 
+   // Enable memory to test
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(IDLE_PREF, true);
+ 
+-  yield DetailsView.selectView("memory-flamegraph");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("memory-flamegraph");
+   yield rendered;
+ 
+   rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   Services.prefs.setBoolPref(IDLE_PREF, false);
+   yield rendered;
+ 
+   ok(true, "MemoryFlameGraphView rerendered when toggling show-idle-blocks.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-options-show-platform-data-01.js b/browser/devtools/performance/test/browser_perf-options-show-platform-data-01.js
+index 570946c..efaa9cb 100644
+--- a/browser/devtools/performance/test/browser_perf-options-show-platform-data-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-show-platform-data-01.js
+@@ -5,23 +5,22 @@
+  * Tests that the js call tree views get rerendered when toggling `show-platform-data`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsCallTreeView } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, true);
+ 
+-  yield DetailsView.selectView("js-calltree");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("js-calltree");
+   yield rendered;
+ 
+   rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
+   yield rendered;
+   ok(true, "JsCallTreeView rerendered when toggling off show-platform-data.");
+ 
+   rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+diff --git a/browser/devtools/performance/test/browser_perf-options-show-platform-data-02.js b/browser/devtools/performance/test/browser_perf-options-show-platform-data-02.js
+index e74eddc..2c4564f 100644
+--- a/browser/devtools/performance/test/browser_perf-options-show-platform-data-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-show-platform-data-02.js
+@@ -5,23 +5,22 @@
+  * Tests that the js flamegraphs get rerendered when toggling `show-platform-data`
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, JsFlameGraphView } = panel.panelWin;
+ 
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
+ 
+-  yield DetailsView.selectView("js-flamegraph");
+-
+   yield startRecording(panel);
+   yield busyWait(100);
++  yield stopRecording(panel);
+ 
+   let rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+-  yield stopRecording(panel);
++  yield DetailsView.selectView("js-flamegraph");
+   yield rendered;
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, true);
+   yield rendered;
+   ok(true, "JsFlameGraphView rerendered when toggling on show-platform-data.");
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+diff --git a/browser/devtools/performance/test/browser_perf-overview-render-02.js b/browser/devtools/performance/test/browser_perf-overview-render-02.js
+index 417efe2..602c015 100644
+--- a/browser/devtools/performance/test/browser_perf-overview-render-02.js
++++ b/browser/devtools/performance/test/browser_perf-overview-render-02.js
+@@ -16,70 +16,73 @@ function spawnTest () {
+ 
+   yield Promise.all([
+     once(OverviewView, EVENTS.FRAMERATE_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MARKERS_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MEMORY_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.OVERVIEW_RENDERED),
+   ]);
+ 
+-  ok("selectionEnabled" in OverviewView.framerateGraph,
++  let framerate = OverviewView.graphs.get("framerate");
++  ok("selectionEnabled" in framerate,
+     "The selection should not be enabled for the framerate overview (1).");
+-  is(OverviewView.framerateGraph.selectionEnabled, false,
++  is(framerate.selectionEnabled, false,
+     "The selection should not be enabled for the framerate overview (2).");
+-  is(OverviewView.framerateGraph.hasSelection(), false,
++  is(framerate.hasSelection(), false,
+     "The framerate overview shouldn't have a selection before recording.");
+ 
+-  ok("selectionEnabled" in OverviewView.markersOverview,
++  let markers = OverviewView.graphs.get("timeline");
++  ok("selectionEnabled" in markers,
+     "The selection should not be enabled for the markers overview (1).");
+-  is(OverviewView.markersOverview.selectionEnabled, false,
++  is(markers.selectionEnabled, false,
+     "The selection should not be enabled for the markers overview (2).");
+-  is(OverviewView.markersOverview.hasSelection(), false,
++  is(markers.hasSelection(), false,
+     "The markers overview shouldn't have a selection before recording.");
+ 
+-  ok("selectionEnabled" in OverviewView.memoryOverview,
++  let memory = OverviewView.graphs.get("memory");
++  ok("selectionEnabled" in memory,
+     "The selection should not be enabled for the memory overview (1).");
+-  is(OverviewView.memoryOverview.selectionEnabled, false,
++  is(memory.selectionEnabled, false,
+     "The selection should not be enabled for the memory overview (2).");
+-  is(OverviewView.memoryOverview.hasSelection(), false,
++  is(memory.hasSelection(), false,
+     "The memory overview shouldn't have a selection before recording.");
+ 
+   let updated = 0;
+   OverviewView.on(EVENTS.OVERVIEW_RENDERED, () => updated++);
+ 
+   ok((yield waitUntil(() => updated > 10)),
+     "The overviews were updated several times.");
+ 
+-  ok("selectionEnabled" in OverviewView.framerateGraph,
++  ok("selectionEnabled" in framerate,
+     "The selection should still not be enabled for the framerate overview (1).");
+-  is(OverviewView.framerateGraph.selectionEnabled, false,
++  is(framerate.selectionEnabled, false,
+     "The selection should still not be enabled for the framerate overview (2).");
+-  is(OverviewView.framerateGraph.hasSelection(), false,
++  is(framerate.hasSelection(), false,
+     "The framerate overview still shouldn't have a selection before recording.");
+ 
+-  ok("selectionEnabled" in OverviewView.markersOverview,
++  ok("selectionEnabled" in markers,
+     "The selection should still not be enabled for the markers overview (1).");
+-  is(OverviewView.markersOverview.selectionEnabled, false,
++  is(markers.selectionEnabled, false,
+     "The selection should still not be enabled for the markers overview (2).");
+-  is(OverviewView.markersOverview.hasSelection(), false,
++  is(markers.hasSelection(), false,
+     "The markers overview still shouldn't have a selection before recording.");
+ 
+-  ok("selectionEnabled" in OverviewView.memoryOverview,
++  ok("selectionEnabled" in memory,
+     "The selection should still not be enabled for the memory overview (1).");
+-  is(OverviewView.memoryOverview.selectionEnabled, false,
++  is(memory.selectionEnabled, false,
+     "The selection should still not be enabled for the memory overview (2).");
+-  is(OverviewView.memoryOverview.hasSelection(), false,
++  is(memory.hasSelection(), false,
+     "The memory overview still shouldn't have a selection before recording.");
+ 
+   yield stopRecording(panel);
+ 
+-  is(OverviewView.framerateGraph.selectionEnabled, true,
++  is(framerate.selectionEnabled, true,
+     "The selection should now be enabled for the framerate overview.");
+ 
+-  is(OverviewView.markersOverview.selectionEnabled, true,
++  is(markers.selectionEnabled, true,
+     "The selection should now be enabled for the markers overview.");
+ 
+-  is(OverviewView.memoryOverview.selectionEnabled, true,
++  is(memory.selectionEnabled, true,
+     "The selection should now be enabled for the memory overview.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-overview-render-03.js b/browser/devtools/performance/test/browser_perf-overview-render-03.js
+index 26d0ebc..f1366ec 100644
+--- a/browser/devtools/performance/test/browser_perf-overview-render-03.js
++++ b/browser/devtools/performance/test/browser_perf-overview-render-03.js
+@@ -19,48 +19,47 @@ function spawnTest () {
+   yield busyWait(100);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getMemory().length);
+   yield waitUntil(() => PerformanceController.getCurrentRecording().getTicks().length);
+   yield waitUntil(() => updated > 10);
+ 
+   yield stopRecording(panel);
+ 
+-  ok(OverviewView.markersOverview.width > 0,
+-    "The overview's framerate graph has a width.");
+-  ok(OverviewView.markersOverview.dataScaleX > 0,
+-    "The overview's framerate graph has a data scale factor.");
++  let markers = OverviewView.graphs.get("timeline");
++  let framerate = OverviewView.graphs.get("framerate");
++  let memory = OverviewView.graphs.get("memory");
+ 
+-  ok(OverviewView.memoryOverview.width > 0,
+-    "The overview's framerate graph has a width.");
+-  ok(OverviewView.memoryOverview.dataDuration > 0,
+-    "The overview's framerate graph has a data duration.");
+-  ok(OverviewView.memoryOverview.dataScaleX > 0,
+-    "The overview's framerate graph has a data scale factor.");
++  ok(markers.width > 0,
++    "The overview's markers graph has a width.");
++  ok(markers.dataScaleX > 0,
++    "The overview's markers graph has a data scale factor.");
++
++  ok(memory.width > 0,
++    "The overview's memory graph has a width.");
++  ok(memory.dataDuration > 0,
++    "The overview's memory graph has a data duration.");
++  ok(memory.dataScaleX > 0,
++    "The overview's memory graph has a data scale factor.");
+ 
+-  ok(OverviewView.framerateGraph.width > 0,
++  ok(framerate.width > 0,
+     "The overview's framerate graph has a width.");
+-  ok(OverviewView.framerateGraph.dataDuration > 0,
++  ok(framerate.dataDuration > 0,
+     "The overview's framerate graph has a data duration.");
+-  ok(OverviewView.framerateGraph.dataScaleX > 0,
++  ok(framerate.dataScaleX > 0,
+     "The overview's framerate graph has a data scale factor.");
+ 
+-  is(OverviewView.markersOverview.width,
+-     OverviewView.memoryOverview.width,
+-    "The markers and memory graphs widths are the same.")
+-  is(OverviewView.markersOverview.width,
+-     OverviewView.framerateGraph.width,
++  is(markers.width, memory.width,
++    "The markers and memory graphs widths are the same.");
++  is(markers.width, framerate.width,
+     "The markers and framerate graphs widths are the same.");
+ 
+-  is(OverviewView.memoryOverview.dataDuration,
+-     OverviewView.framerateGraph.dataDuration,
++  is(memory.dataDuration, framerate.dataDuration,
+     "The memory and framerate graphs data duration are the same.");
+ 
+-  is(OverviewView.markersOverview.dataScaleX,
+-     OverviewView.memoryOverview.dataScaleX,
+-    "The markers and memory graphs data scale are the same.")
+-  is(OverviewView.markersOverview.dataScaleX,
+-     OverviewView.framerateGraph.dataScaleX,
++  is(markers.dataScaleX, memory.dataScaleX,
++    "The markers and memory graphs data scale are the same.");
++  is(markers.dataScaleX, framerate.dataScaleX,
+     "The markers and framerate graphs data scale are the same.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-overview-selection-01.js b/browser/devtools/performance/test/browser_perf-overview-selection-01.js
+index 1095941..72b3ce6 100644
+--- a/browser/devtools/performance/test/browser_perf-overview-selection-01.js
++++ b/browser/devtools/performance/test/browser_perf-overview-selection-01.js
+@@ -14,17 +14,17 @@ function spawnTest () {
+   yield Promise.all([
+     once(OverviewView, EVENTS.FRAMERATE_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MARKERS_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.OVERVIEW_RENDERED)
+   ]);
+ 
+   yield stopRecording(panel);
+ 
+-  let graph = OverviewView.markersOverview;
++  let graph = OverviewView.graphs.get("timeline");
+   let MAX = graph.width;
+ 
+   // Select the first half of the graph
+   let results = onceSpread(OverviewView, EVENTS.OVERVIEW_RANGE_SELECTED);
+   dragStart(graph, 0);
+   dragStop(graph, MAX / 2);
+   [_, { startTime, endTime }] = yield results;
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-overview-selection-02.js b/browser/devtools/performance/test/browser_perf-overview-selection-02.js
+index 2e80d86..85a6806 100644
+--- a/browser/devtools/performance/test/browser_perf-overview-selection-02.js
++++ b/browser/devtools/performance/test/browser_perf-overview-selection-02.js
+@@ -15,19 +15,19 @@ function spawnTest () {
+ 
+   yield Promise.all([
+     once(OverviewView, EVENTS.FRAMERATE_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MARKERS_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MEMORY_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.OVERVIEW_RENDERED),
+   ]);
+ 
+-  let markersOverview = OverviewView.markersOverview;
+-  let memoryOverview = OverviewView.memoryOverview;
+-  let framerateGraph = OverviewView.framerateGraph;
++  let markersOverview = OverviewView.graphs.get("timeline");
++  let memoryOverview = OverviewView.graphs.get("memory");
++  let framerateGraph = OverviewView.graphs.get("framerate");
+ 
+   ok(markersOverview,
+     "The markers graph should have been created now.");
+   ok(memoryOverview,
+     "The memory graph should have been created now.");
+   ok(framerateGraph,
+     "The framerate graph should have been created now.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-overview-selection-03.js b/browser/devtools/performance/test/browser_perf-overview-selection-03.js
+index 7503f4b..e8892a6 100644
+--- a/browser/devtools/performance/test/browser_perf-overview-selection-03.js
++++ b/browser/devtools/performance/test/browser_perf-overview-selection-03.js
+@@ -17,19 +17,19 @@ function spawnTest () {
+     once(OverviewView, EVENTS.FRAMERATE_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MARKERS_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MEMORY_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.OVERVIEW_RENDERED),
+   ]);
+ 
+   yield stopRecording(panel);
+ 
+-  let framerateGraph = OverviewView.framerateGraph;
+-  let markersOverview = OverviewView.markersOverview;
+-  let memoryOverview = OverviewView.memoryOverview;
++  let framerateGraph = OverviewView.graphs.get("framerate");
++  let markersOverview = OverviewView.graphs.get("timeline");
++  let memoryOverview = OverviewView.graphs.get("memory");
+   let MAX = framerateGraph.width;
+ 
+   // Perform a selection inside the framerate graph.
+ 
+   let selected = once(OverviewView, EVENTS.OVERVIEW_RANGE_SELECTED);
+   dragStart(framerateGraph, 0);
+   dragStop(framerateGraph, MAX / 2);
+   yield selected;
+diff --git a/browser/devtools/performance/test/browser_perf-recording-selected-04.js b/browser/devtools/performance/test/browser_perf-recording-selected-04.js
+index 8d0b30c..fb3dc71 100644
+--- a/browser/devtools/performance/test/browser_perf-recording-selected-04.js
++++ b/browser/devtools/performance/test/browser_perf-recording-selected-04.js
+@@ -12,30 +12,30 @@ let test = Task.async(function*() {
+ 
+   // Enable memory to test the memory-calltree and memory-flamegraph.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+   // Need to allow widgets to be updated while hidden, otherwise we can't use
+   // `waitForWidgetsRendered`.
+   DetailsSubview.canUpdateWhileHidden = true;
+ 
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
+   // Cycle through all the views to initialize them, otherwise we can't use
+   // `waitForWidgetsRendered`. The waterfall is shown by default, but all the
+   // other views are created lazily, so won't emit any events.
+   yield DetailsView.selectView("js-calltree");
+   yield DetailsView.selectView("js-flamegraph");
+   yield DetailsView.selectView("memory-calltree");
+   yield DetailsView.selectView("memory-flamegraph");
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+-  yield startRecording(panel);
+-  yield stopRecording(panel);
+-
+   let rerender = waitForWidgetsRendered(panel);
+   RecordingsView.selectedIndex = 0;
+   yield rerender;
+ 
+   rerender = waitForWidgetsRendered(panel);
+   RecordingsView.selectedIndex = 1;
+   yield rerender;
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-states.js b/browser/devtools/performance/test/browser_perf-states.js
+index 659316f..4bbcf2a 100644
+--- a/browser/devtools/performance/test/browser_perf-states.js
++++ b/browser/devtools/performance/test/browser_perf-states.js
+@@ -6,52 +6,52 @@
+  */
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceView, OverviewView, DetailsView } = panel.panelWin;
+ 
+   is(PerformanceView.getState(), "empty",
+     "The intial state of the performance panel view is correct.");
+ 
+-  ok(!("markersOverview" in OverviewView),
++  ok(!(OverviewView.graphs.get("timeline")),
+     "The markers graph should not have been created yet.");
+-  ok(!("memoryOverview" in OverviewView),
++  ok(!(OverviewView.graphs.get("memory")),
+     "The memory graph should not have been created yet.");
+-  ok(!("framerateGraph" in OverviewView),
++  ok(!(OverviewView.graphs.get("framerate")),
+     "The framerate graph should not have been created yet.");
+ 
+-  ok(DetailsView.components["waterfall"].initialized,
+-    "The waterfall detail view should have been created by default.");
++  ok(!DetailsView.components["waterfall"].initialized,
++    "The waterfall detail view should not have been created yet.");
+   ok(!DetailsView.components["js-calltree"].initialized,
+     "The js-calltree detail view should not have been created yet.");
+   ok(!DetailsView.components["js-flamegraph"].initialized,
+     "The js-flamegraph detail view should not have been created yet.");
+   ok(!DetailsView.components["memory-calltree"].initialized,
+     "The memory-calltree detail view should not have been created yet.");
+   ok(!DetailsView.components["memory-flamegraph"].initialized,
+     "The memory-flamegraph detail view should not have been created yet.");
+ 
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+-  ok(!("markersOverview" in OverviewView),
++  ok(!(OverviewView.graphs.get("timeline")),
+     "The markers graph should still not have been created yet.");
+-  ok(!("memoryOverview" in OverviewView),
++  ok(!(OverviewView.graphs.get("memory")),
+     "The memory graph should still not have been created yet.");
+-  ok(!("framerateGraph" in OverviewView),
++  ok(!(OverviewView.graphs.get("framerate")),
+     "The framerate graph should still not have been created yet.");
+ 
+   let stateChanged = once(PerformanceView, EVENTS.UI_STATE_CHANGED);
+   yield startRecording(panel);
+   yield stateChanged;
+ 
+   is(PerformanceView.getState(), "recording",
+     "The current state of the performance panel view is 'recording'.");
+-  ok(OverviewView.memoryOverview,
++  ok(OverviewView.graphs.get("memory"),
+     "The memory graph should have been created now.");
+-  ok(OverviewView.framerateGraph,
++  ok(OverviewView.graphs.get("framerate"),
+     "The framerate graph should have been created now.");
+ 
+   stateChanged = once(PerformanceView, EVENTS.UI_STATE_CHANGED);
+   yield stopRecording(panel);
+   yield stateChanged;
+ 
+   is(PerformanceView.getState(), "recorded",
+     "The current state of the performance panel view is 'recorded'.");
+diff --git a/browser/devtools/performance/test/browser_perf-theme-toggle-01.js b/browser/devtools/performance/test/browser_perf-theme-toggle-01.js
+index 03b9896..46a267b 100644
+--- a/browser/devtools/performance/test/browser_perf-theme-toggle-01.js
++++ b/browser/devtools/performance/test/browser_perf-theme-toggle-01.js
+@@ -12,58 +12,60 @@ const DARK_BG = "#14171a";
+ setTheme("dark");
+ Services.prefs.setBoolPref(MEMORY_PREF, false);
+ 
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, $, OverviewView, document: doc } = panel.panelWin;
+ 
+   yield startRecording(panel);
+-  is(OverviewView.markersOverview.backgroundColor, DARK_BG,
++  let markers = OverviewView.graphs.get("timeline");
++  is(markers.backgroundColor, DARK_BG,
+     "correct theme on load for markers.");
+   yield stopRecording(panel);
+ 
+-  let refreshed = once(OverviewView.markersOverview, "refresh");
++  let refreshed = once(markers, "refresh");
+   setTheme("light");
+   yield refreshed;
+ 
+   ok(true, "markers were rerendered after theme change.");
+-  is(OverviewView.markersOverview.backgroundColor, LIGHT_BG,
++  is(markers.backgroundColor, LIGHT_BG,
+     "correct theme on after toggle for markers.");
+ 
+   // reset back to dark
+-  refreshed = once(OverviewView.markersOverview, "refresh");
++  refreshed = once(markers, "refresh");
+   setTheme("dark");
+   yield refreshed;
+ 
+   info("Testing with memory overview");
+ 
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+   yield startRecording(panel);
+-  is(OverviewView.memoryOverview.backgroundColor, DARK_BG,
++  let memory = OverviewView.graphs.get("memory");
++  is(memory.backgroundColor, DARK_BG,
+     "correct theme on load for memory.");
+   yield stopRecording(panel);
+ 
+   refreshed = Promise.all([
+-    once(OverviewView.markersOverview, "refresh"),
+-    once(OverviewView.memoryOverview, "refresh"),
++    once(markers, "refresh"),
++    once(memory, "refresh"),
+   ]);
+   setTheme("light");
+   yield refreshed;
+ 
+   ok(true, "Both memory and markers were rerendered after theme change.");
+-  is(OverviewView.markersOverview.backgroundColor, LIGHT_BG,
++  is(markers.backgroundColor, LIGHT_BG,
+     "correct theme on after toggle for markers.");
+-  is(OverviewView.memoryOverview.backgroundColor, LIGHT_BG,
++  is(memory.backgroundColor, LIGHT_BG,
+     "correct theme on after toggle for memory.");
+ 
+   refreshed = Promise.all([
+-    once(OverviewView.markersOverview, "refresh"),
+-    once(OverviewView.memoryOverview, "refresh"),
++    once(markers, "refresh"),
++    once(memory, "refresh"),
+   ]);
+ 
+   // Set theme back to light
+   setTheme("light");
+   yield refreshed;
+ 
+   yield teardown(panel);
+   finish();
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-01.js b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+index 081ed49..a3d884a 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-01.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+@@ -6,31 +6,33 @@
+  */
+ 
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, DetailsView, DetailsSubview } = panel.panelWin;
+ 
+   // Enable memory to test the memory-calltree and memory-flamegraph.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(FRAMERATE_PREF, true);
++
++  // Need to allow widgets to be updated while hidden, otherwise we can't use
++  // `waitForWidgetsRendered`.
++  DetailsSubview.canUpdateWhileHidden = true;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
+ 
+   // Cycle through all the views to initialize them, otherwise we can't use
+   // `waitForWidgetsRendered`. The waterfall is shown by default, but all the
+   // other views are created lazily, so won't emit any events.
+   yield DetailsView.selectView("js-calltree");
+   yield DetailsView.selectView("js-flamegraph");
+   yield DetailsView.selectView("memory-calltree");
+   yield DetailsView.selectView("memory-flamegraph");
+ 
+-  // Need to allow widgets to be updated while hidden, otherwise we can't use
+-  // `waitForWidgetsRendered`.
+-  DetailsSubview.canUpdateWhileHidden = true;
+-
+-  yield startRecording(panel);
+-  yield stopRecording(panel);
+ 
+   // Verify original recording.
+ 
+   let originalData = PerformanceController.getCurrentRecording().getAllData();
+   ok(originalData, "The original recording is not empty.");
+ 
+   // Save recording.
+ 
+@@ -55,25 +57,29 @@ let test = Task.async(function*() {
+   yield rerendered;
+   ok(true, "The imported data was re-rendered.");
+ 
+   // Verify imported recording.
+ 
+   let importedData = PerformanceController.getCurrentRecording().getAllData();
+ 
+   is(importedData.label, originalData.label,
+-    "The impored data is identical to the original data (1).");
++    "The imported data is identical to the original data (1).");
+   is(importedData.duration, originalData.duration,
+-    "The impored data is identical to the original data (2).");
++    "The imported data is identical to the original data (2).");
+   is(importedData.markers.toSource(), originalData.markers.toSource(),
+-    "The impored data is identical to the original data (3).");
++    "The imported data is identical to the original data (3).");
+   is(importedData.memory.toSource(), originalData.memory.toSource(),
+-    "The impored data is identical to the original data (4).");
++    "The imported data is identical to the original data (4).");
+   is(importedData.ticks.toSource(), originalData.ticks.toSource(),
+-    "The impored data is identical to the original data (5).");
++    "The imported data is identical to the original data (5).");
+   is(importedData.allocations.toSource(), originalData.allocations.toSource(),
+-    "The impored data is identical to the original data (6).");
++    "The imported data is identical to the original data (6).");
+   is(importedData.profile.toSource(), originalData.profile.toSource(),
+-    "The impored data is identical to the original data (7).");
++    "The imported data is identical to the original data (7).");
++  is(importedData.configuration.withTicks, originalData.configuration.withTicks,
++    "The imported data is identical to the original data (8).");
++  is(importedData.configuration.withMemory, originalData.configuration.withMemory,
++    "The imported data is identical to the original data (9).");
+ 
+   yield teardown(panel);
+   finish();
+ });
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-04.js b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+index 0d8a91d..cfbe12f 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-04.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+@@ -1,35 +1,23 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the performance tool can import profiler data from the
+- * original profiler tool.
++ * original profiler tool and the correct views and graphs are loaded.
+  */
+ 
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, PerformanceController, DetailsView, DetailsSubview } = panel.panelWin;
++  let { $, EVENTS, PerformanceController, DetailsView, OverviewView, JsCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test the memory-calltree and memory-flamegraph.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+-  // Cycle through all the views to initialize them, otherwise we can't use
+-  // `waitForWidgetsRendered`. The waterfall is shown by default, but all the
+-  // other views are created lazily, so won't emit any events.
+-  yield DetailsView.selectView("js-calltree");
+-  yield DetailsView.selectView("js-flamegraph");
+-  yield DetailsView.selectView("memory-calltree");
+-  yield DetailsView.selectView("memory-flamegraph");
+-
+-  // Need to allow widgets to be updated while hidden, otherwise we can't use
+-  // `waitForWidgetsRendered`.
+-  DetailsSubview.canUpdateWhileHidden = true;
+-
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   // Get data from the current profiler
+   let data = PerformanceController.getCurrentRecording().getAllData();
+ 
+   // Create a structure from the data that mimics the old profiler's data.
+   // Different name for `ticks`, different way of storing time,
+@@ -44,26 +32,40 @@ let test = Task.async(function*() {
+ 
+   // Save recording as an old profiler data.
+   let file = FileUtils.getFile("TmpD", ["tmpprofile.json"]);
+   file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("666", 8));
+   yield asyncCopy(oldProfilerData, file);
+ 
+   // Import recording.
+ 
+-  let rerendered = waitForWidgetsRendered(panel);
++  let calltreeRendered = once(OverviewView, EVENTS.FRAMERATE_GRAPH_RENDERED);
++  let fpsRendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+   let imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
+   yield PerformanceController.importRecording("", file);
+ 
+   yield imported;
+   ok(true, "The original profiler data appears to have been successfully imported.");
+ 
+-  yield rerendered;
++  yield calltreeRendered;
++  yield fpsRendered;
+   ok(true, "The imported data was re-rendered.");
+ 
++  // Ensure that only framerate and js calltree/flamegraph view are available
++  is($("#overview-pane").hidden, false, "overview graph container still shown");
++  is($("#memory-overview").hidden, true, "memory graph hidden");
++  is($("#markers-overview").hidden, true, "markers overview graph hidden");
++  is($("#time-framerate").hidden, false, "fps graph shown");
++  is($("#select-waterfall-view").hidden, true, "waterfall button hidden");
++  is($("#select-js-calltree-view").hidden, false, "jscalltree button shown");
++  is($("#select-js-flamegraph-view").hidden, false, "jsflamegraph button shown");
++  is($("#select-memory-calltree-view").hidden, true, "memorycalltree button hidden");
++  is($("#select-memory-flamegraph-view").hidden, true, "memoryflamegraph button hidden");
++  ok(DetailsView.isViewSelected(JsCallTreeView), "jscalltree view selected as its the only option");
++
+   // Verify imported recording.
+ 
+   let importedData = PerformanceController.getCurrentRecording().getAllData();
+ 
+   is(importedData.label, data.label,
+     "The imported legacy data was successfully converted for the current tool (1).");
+   is(importedData.duration, data.duration,
+     "The imported legacy data was successfully converted for the current tool (2).");
+@@ -74,16 +76,20 @@ let test = Task.async(function*() {
+   is(importedData.memory.toSource(), [].toSource(),
+     "The imported legacy data was successfully converted for the current tool (5).");
+   is(importedData.ticks.toSource(), data.ticks.toSource(),
+     "The imported legacy data was successfully converted for the current tool (6).");
+   is(importedData.allocations.toSource(), ({sites:[], timestamps:[], frames:[], counts:[]}).toSource(),
+     "The imported legacy data was successfully converted for the current tool (7).");
+   is(importedData.profile.toSource(), data.profile.toSource(),
+     "The imported legacy data was successfully converted for the current tool (8).");
++  is(importedData.configuration.withTicks, true,
++    "The imported legacy data was successfully converted for the current tool (9).");
++  is(importedData.configuration.withMemory, void 0,
++    "The imported legacy data was successfully converted for the current tool (10).");
+ 
+   yield teardown(panel);
+   finish();
+ });
+ 
+ function getUnicodeConverter() {
+   let className = "@mozilla.org/intl/scriptableunicodeconverter";
+   let converter = Cc[className].createInstance(Ci.nsIScriptableUnicodeConverter);
+diff --git a/browser/devtools/performance/test/browser_timeline_filters.js b/browser/devtools/performance/test/browser_timeline_filters.js
+index b23c5b7..23892d2 100644
+--- a/browser/devtools/performance/test/browser_timeline_filters.js
++++ b/browser/devtools/performance/test/browser_timeline_filters.js
+@@ -3,32 +3,33 @@
+ 
+ /**
+  * Tests markers filtering mechanism.
+  */
+ 
+ function spawnTest () {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { $, $$, PerformanceController, OverviewView, WaterfallView } = panel.panelWin;
+-  let { MARKERS_GRAPH_ROW_HEIGHT } = panel.panelWin;
++  let { TimelineGraph } = devtools.require("devtools/performance/graphs");
++  let { rowHeight: MARKERS_GRAPH_ROW_HEIGHT } = TimelineGraph.prototype;
+ 
+   yield startRecording(panel);
+   ok(true, "Recording has started.");
+ 
+   yield waitUntil(() => {
+     // Wait until we get 3 different markers.
+     let markers = PerformanceController.getCurrentRecording().getMarkers();
+     return markers.some(m => m.name == "Styles") &&
+            markers.some(m => m.name == "Reflow") &&
+            markers.some(m => m.name == "Paint");
+   });
+ 
+   yield stopRecording(panel);
+ 
+-  let overview = OverviewView.markersOverview;
++  let overview = OverviewView.graphs.get("timeline");
+   let waterfall = WaterfallView.waterfall;
+ 
+   // Select everything
+   OverviewView.setTimeInterval({ startTime: 0, endTime: Number.MAX_VALUE })
+ 
+   $("#filter-button").click();
+ 
+   yield waitUntil(() => !waterfall._outstandingMarkers.length);
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 2bbc091..611d16a 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -349,16 +349,17 @@ function* startRecording(panel, options = {
+     "The record button should be locked.");
+ 
+   yield willStart;
+   let stateChanged = options.waitForStateChanged
+     ? once(win.PerformanceView, win.EVENTS.UI_STATE_CHANGED)
+     : Promise.resolve();
+ 
+   yield hasStarted;
++
+   let overviewRendered = options.waitForOverview
+     ? once(win.OverviewView, win.EVENTS.OVERVIEW_RENDERED)
+     : Promise.resolve();
+ 
+   yield stateChanged;
+   yield overviewRendered;
+ 
+   is(win.PerformanceView.getState(), "recording",
+@@ -374,16 +375,17 @@ function* stopRecording(panel, options = {
+   waitForOverview: true,
+   waitForStateChanged: true
+ }) {
+   let win = panel.panelWin;
+   let clicked = panel.panelWin.PerformanceView.once(win.EVENTS.UI_STOP_RECORDING);
+   let willStop = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_WILL_STOP);
+   let hasStopped = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_STOPPED);
+   let button = win.$("#main-record-button");
++  let overviewRendered = null;
+ 
+   ok(button.hasAttribute("checked"),
+     "The record button should already be checked.");
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked yet.");
+ 
+   click(win, button);
+   yield clicked;
+@@ -394,22 +396,27 @@ function* stopRecording(panel, options = {
+     "The record button should be locked.");
+ 
+   yield willStop;
+   let stateChanged = options.waitForStateChanged
+     ? once(win.PerformanceView, win.EVENTS.UI_STATE_CHANGED)
+     : Promise.resolve();
+ 
+   yield hasStopped;
+-  let overviewRendered = options.waitForOverview
+-    ? once(win.OverviewView, win.EVENTS.OVERVIEW_RENDERED)
+-    : Promise.resolve();
++
++  // Wait for the final rendering of the overview, not a low res
++  // incremental rendering and less likely to be from another rendering that was selected
++  while (!overviewRendered && options.waitForOverview) {
++    let [_, res] = yield onceSpread(win.OverviewView, win.EVENTS.OVERVIEW_RENDERED);
++    if (res === win.FRAMERATE_GRAPH_HIGH_RES_INTERVAL) {
++      overviewRendered = true;
++    }
++  }
+ 
+   yield stateChanged;
+-  yield overviewRendered;
+ 
+   is(win.PerformanceView.getState(), "recorded",
+     "The current state is 'recorded'.");
+ 
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked.");
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked.");
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+index 791e16b..fdabaa3 100644
+--- a/browser/devtools/performance/views/details.js
++++ b/browser/devtools/performance/views/details.js
+@@ -11,38 +11,39 @@ let DetailsView = {
+   /**
+    * Name to (node id, view object, actor requirements, pref killswitch)
+    * mapping of subviews.
+    */
+   components: {
+     "waterfall": {
+       id: "waterfall-view",
+       view: WaterfallView,
+-      requires: ["timeline"]
++      actors: ["timeline"],
++      features: ["withMarkers"]
+     },
+     "js-calltree": {
+       id: "js-profile-view",
+       view: JsCallTreeView
+     },
+     "js-flamegraph": {
+       id: "js-flamegraph-view",
+       view: JsFlameGraphView,
+-      requires: ["timeline"]
++      actors: ["timeline"]
+     },
+     "memory-calltree": {
+       id: "memory-calltree-view",
+       view: MemoryCallTreeView,
+-      requires: ["memory"],
+-      pref: "enable-memory"
++      actors: ["memory"],
++      features: ["withAllocations"]
+     },
+     "memory-flamegraph": {
+       id: "memory-flamegraph-view",
+       view: MemoryFlameGraphView,
+-      requires: ["memory", "timeline"],
+-      pref: "enable-memory"
++      actors: ["memory", "timeline"],
++      features: ["withAllocations"]
+     }
+   },
+ 
+   /**
+    * Sets up the view with event binding, initializes subviews.
+    */
+   initialize: Task.async(function *() {
+     this.el = $("#details-pane");
+@@ -51,17 +52,16 @@ let DetailsView = {
+     this._onViewToggle = this._onViewToggle.bind(this);
+     this._onRecordingStoppedOrSelected = this._onRecordingStoppedOrSelected.bind(this);
+     this.setAvailableViews = this.setAvailableViews.bind(this);
+ 
+     for (let button of $$("toolbarbutton[data-view]", this.toolbar)) {
+       button.addEventListener("command", this._onViewToggle);
+     }
+ 
+-    yield this.selectDefaultView();
+     yield this.setAvailableViews();
+ 
+     PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.PREF_CHANGED, this.setAvailableViews);
+   }),
+ 
+@@ -79,43 +79,64 @@ let DetailsView = {
+ 
+     PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.PREF_CHANGED, this.setAvailableViews);
+   }),
+ 
+   /**
+-   * Sets the possible views based off of prefs and server actor support by hiding/showing the
+-   * buttons that select them and going to default view if currently selected.
+-   * Called when a preference changes in `devtools.performance.ui.`.
++   * Sets the possible views based off of recording features and server actor support
++   * by hiding/showing the buttons that select them and going to default view
++   * if currently selected. Called when a preference changes in `devtools.performance.ui.`.
+    */
+   setAvailableViews: Task.async(function* () {
+-    let mocks = gFront.getMocksInUse();
+-
+-    for (let [name, { view, pref, requires }] of Iterator(this.components)) {
+-      let recording = PerformanceController.getCurrentRecording();
++    let recording = PerformanceController.getCurrentRecording();
++    let isRecording = recording && recording.isRecording();
++    let invalidCurrentView = false;
+ 
+-      let isRecorded = recording && !recording.isRecording();
+-      // View is enabled by its corresponding pref
+-      let isEnabled = !pref || PerformanceController.getOption(pref);
+-      // View is supported by the server actor, and the requried actor is not being mocked
+-      let isSupported = !requires || requires.every(r => !mocks[r]);
++    for (let [name, { view }] of Iterator(this.components)) {
++      let isSupported = this._isViewSupported(name, false);
+ 
+-      $(`toolbarbutton[data-view=${name}]`).hidden = !isRecorded || !(isEnabled && isSupported);
++      $(`toolbarbutton[data-view=${name}]`).hidden = !isSupported;
+ 
+-      // If the view is currently selected and not enabled, go back to the
++      // If the view is currently selected and not supported, go back to the
+       // default view.
+-      if (!isEnabled && this.isViewSelected(view)) {
+-        yield this.selectDefaultView();
++      if (!isSupported && this.isViewSelected(view)) {
++        invalidCurrentView = true;
+       }
+     }
++
++    // Two scenarios in which we select the default view.
++    //
++    // 1: If we currently have selected a view that is no longer valid due
++    // to feature support, and this isn't the first view, and the current recording
++    // is not recording.
++    //
++    // 2. If we have a finished recording and no panel was selected yet,
++    // use a default now that we have the recording configurations
++    if ((invalidCurrentView && this._initialized && !isRecording) ||
++        (recording && !isRecording && !this._initialized)) {
++      yield this.selectDefaultView();
++    }
+   }),
+ 
+   /**
++   * Takes a view name and optionally if there must be a currently recording in progress.
++   *
++   * @param {string} viewName
++   * @param {boolean?} isRecording
++   * @return {boolean}
++   */
++  _isViewSupported: function (viewName, isRecording) {
++    let { features, actors } = this.components[viewName];
++    return PerformanceController.isFeatureSupported({ features, actors, isRecording });
++  },
++
++  /**
+    * Select one of the DetailView's subviews to be rendered,
+    * hiding the others.
+    *
+    * @param String viewName
+    *        Name of the view to be shown.
+    */
+   selectView: Task.async(function *(viewName) {
+     let component = this.components[viewName];
+@@ -126,42 +147,51 @@ let DetailsView = {
+     for (let button of $$("toolbarbutton[data-view]", this.toolbar)) {
+       if (button.getAttribute("data-view") === viewName) {
+         button.setAttribute("checked", true);
+       } else {
+         button.removeAttribute("checked");
+       }
+     }
+ 
++    // Set a flag indicating that a view was explicitly set based on a
++    // recording's features.
++    this._initialized = true;
++
+     this.emit(EVENTS.DETAILS_VIEW_SELECTED, viewName);
+   }),
+ 
+   /**
+    * Selects a default view based off of protocol support
+    * and preferences enabled.
+    */
+   selectDefaultView: function () {
+-    let { timeline: mockTimeline } = gFront.getMocksInUse();
+-    // If timelines are mocked, the first view available is the js-calltree.
+-    if (mockTimeline) {
+-      return this.selectView("js-calltree");
+-    } else {
+-      // In every other scenario with preferences and mocks, waterfall will
+-      // be the default view.
++    // We want the waterfall to be default view in almost all cases, except when
++    // timeline actor isn't supported, or we have markers disabled (which should only
++    // occur temporarily via bug 1156499
++    if (this._isViewSupported("waterfall")) {
+       return this.selectView("waterfall");
++    } else {
++      return this.selectView("js-calltree");
+     }
+   },
+ 
+   /**
+    * Checks if the provided view is currently selected.
+    *
+    * @param object viewObject
+    * @return boolean
+    */
+   isViewSelected: function(viewObject) {
++    // If not initialized, and we have no recordings,
++    // no views are selected (even though there's a selected panel)
++    if (!this._initialized) {
++      return false;
++    }
++
+     let selectedPanel = this.el.selectedPanel;
+     let selectedId = selectedPanel.id;
+ 
+     for (let [, { id, view }] of Iterator(this.components)) {
+       if (id == selectedId && view == viewObject) {
+         return true;
+       }
+     }
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 4714ec3..691f13f 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -2,131 +2,121 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ // No sense updating the overview more often than receiving data from the
+ // backend. Make sure this isn't lower than DEFAULT_TIMELINE_DATA_PULL_TIMEOUT
+ // in toolkit/devtools/server/actors/timeline.js
+ const OVERVIEW_UPDATE_INTERVAL = 200; // ms
+-
+ const FRAMERATE_GRAPH_LOW_RES_INTERVAL = 100; // ms
+ const FRAMERATE_GRAPH_HIGH_RES_INTERVAL = 16; // ms
+-
+-const MARKERS_GRAPH_HEADER_HEIGHT = 14; // px
+-const MARKERS_GRAPH_ROW_HEIGHT = 10; // px
+-const MARKERS_GROUP_VERTICAL_PADDING = 4; // px
++const GRAPH_REQUIREMENTS = {
++  timeline: {
++    actors: ["timeline"],
++    features: ["withMarkers"]
++  },
++  framerate: {
++    actors: ["timeline"],
++    features: ["withTicks"]
++  },
++  memory: {
++    actors: ["memory"],
++    features: ["withMemory"]
++  },
++}
+ 
+ /**
+  * View handler for the overview panel's time view, displaying
+- * framerate, markers and memory over time.
++ * framerate, timeline and memory over time.
+  */
+ let OverviewView = {
++
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+-    if (gFront.getMocksInUse().timeline) {
++    this.graphs = new GraphsController({
++      root: $("#overview-pane"),
++      getBlueprint: () => PerformanceController.getTimelineBlueprint(),
++      getTheme: () => PerformanceController.getTheme(),
++    });
++
++    // If no timeline support, shut it all down.
++    if (!gFront.getActorSupport().timeline) {
+       this.disable();
++      return;
+     }
++
+     this._onRecordingWillStart = this._onRecordingWillStart.bind(this);
+     this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingWillStop = this._onRecordingWillStop.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
+     this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onRecordingTick = this._onRecordingTick.bind(this);
+     this._onGraphSelecting = this._onGraphSelecting.bind(this);
++    this._onGraphRendered = this._onGraphRendered.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+     this._onThemeChanged = this._onThemeChanged.bind(this);
+ 
+     // Toggle the initial visibility of memory and framerate graph containers
+     // based off of prefs.
+-    $("#memory-overview").hidden = !PerformanceController.getOption("enable-memory");
+-    $("#time-framerate").hidden = !PerformanceController.getOption("enable-framerate");
+-
+     PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+     PerformanceController.on(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.CONSOLE_RECORDING_WILL_STOP, this._onRecordingWillStop);
++    this.graphs.on("selecting", this._onGraphSelecting);
++    this.graphs.on("rendered", this._onGraphRendered);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: Task.async(function*() {
+-    if (this.markersOverview) {
+-      yield this.markersOverview.destroy();
+-    }
+-    if (this.memoryOverview) {
+-      yield this.memoryOverview.destroy();
+-    }
+-    if (this.framerateGraph) {
+-      yield this.framerateGraph.destroy();
+-    }
+-
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.off(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+     PerformanceController.off(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.CONSOLE_RECORDING_WILL_STOP, this._onRecordingWillStop);
++    this.graphs.off("selecting", this._onGraphSelecting);
++    this.graphs.off("rendered", this._onGraphRendered);
++    yield this.graphs.destroy();
+   }),
+ 
+   /**
+    * Disabled in the event we're using a Timeline mock, so we'll have no
+-   * markers, ticks or memory data to show, so just block rendering and hide
++   * timeline, ticks or memory data to show, so just block rendering and hide
+    * the panel.
+    */
+   disable: function () {
+     this._disabled = true;
+-    $("#overview-pane").hidden = true;
++    this.graphs.disableAll();
+   },
+ 
+   /**
+    * Returns the disabled status.
+    *
+    * @return boolean
+    */
+   isDisabled: function () {
+     return this._disabled;
+   },
+ 
+   /**
+-   * Sets the theme for the markers overview and memory overview.
+-   */
+-  setTheme: function (options={}) {
+-    let theme = options.theme || PerformanceController.getTheme();
+-
+-    if (this.framerateGraph) {
+-      this.framerateGraph.setTheme(theme);
+-      this.framerateGraph.refresh({ force: options.redraw });
+-    }
+-
+-    if (this.markersOverview) {
+-      this.markersOverview.setTheme(theme);
+-      this.markersOverview.refresh({ force: options.redraw });
+-    }
+-
+-    if (this.memoryOverview) {
+-      this.memoryOverview.setTheme(theme);
+-      this.memoryOverview.refresh({ force: options.redraw });
+-    }
+-  },
+-
+-  /**
+    * Sets the time interval selection for all graphs in this overview.
+    *
+    * @param object interval
+    *        The { startTime, endTime }, in milliseconds.
+    */
+   setTimeInterval: function(interval, options = {}) {
+     let recording = PerformanceController.getCurrentRecording();
+     if (recording == null) {
+@@ -134,17 +124,17 @@ let OverviewView = {
+     }
+     if (this.isDisabled()) {
+       return;
+     }
+     let mapStart = () => 0;
+     let mapEnd = () => recording.getDuration();
+     let selection = { start: interval.startTime, end: interval.endTime };
+     this._stopSelectionChangeEventPropagation = options.stopPropagation;
+-    this.markersOverview.setMappedSelection(selection, { mapStart, mapEnd });
++    this.graphs.setMappedSelection(selection, { mapStart, mapEnd });
+     this._stopSelectionChangeEventPropagation = false;
+   },
+ 
+   /**
+    * Gets the time interval selection for all graphs in this overview.
+    *
+    * @return object
+    *         The { startTime, endTime }, in milliseconds.
+@@ -154,124 +144,35 @@ let OverviewView = {
+     if (recording == null) {
+       throw new Error("A recording should be available in order to get the selection.");
+     }
+     if (this.isDisabled()) {
+       return { startTime: 0, endTime: recording.getDuration() };
+     }
+     let mapStart = () => 0;
+     let mapEnd = () => recording.getDuration();
+-    let selection = this.markersOverview.getMappedSelection({ mapStart, mapEnd });
++    let selection = this.graphs.getMappedSelection({ mapStart, mapEnd });
+     return { startTime: selection.min, endTime: selection.max };
+   },
+ 
+   /**
+-   * Sets up the markers overivew graph, if needed.
+-   *
+-   * @return object
+-   *         A promise resolved to `true` when the graph was initialized.
+-   */
+-  _markersGraphAvailable: Task.async(function *() {
+-    if (this.markersOverview) {
+-      yield this.markersOverview.ready();
+-      return true;
+-    }
+-    let blueprint = PerformanceController.getTimelineBlueprint();
+-    this.markersOverview = new MarkersOverview($("#markers-overview"), blueprint);
+-    this.markersOverview.headerHeight = MARKERS_GRAPH_HEADER_HEIGHT;
+-    this.markersOverview.rowHeight = MARKERS_GRAPH_ROW_HEIGHT;
+-    this.markersOverview.groupPadding = MARKERS_GROUP_VERTICAL_PADDING;
+-    this.markersOverview.on("selecting", this._onGraphSelecting);
+-    yield this.markersOverview.ready();
+-    this.setTheme();
+-    return true;
+-  }),
+-
+-  /**
+-   * Sets up the memory overview graph, if allowed and needed.
+-   *
+-   * @return object
+-   *         A promise resolved to `true` if the graph was initialized and is
+-   *         ready to use, `false` if the graph is disabled.
+-   */
+-  _memoryGraphAvailable: Task.async(function *() {
+-    if (!PerformanceController.getOption("enable-memory")) {
+-      return false;
+-    }
+-    if (this.memoryOverview) {
+-      yield this.memoryOverview.ready();
+-      return true;
+-    }
+-    this.memoryOverview = new MemoryGraph($("#memory-overview"));
+-    yield this.memoryOverview.ready();
+-    this.setTheme();
+-
+-    CanvasGraphUtils.linkAnimation(this.markersOverview, this.memoryOverview);
+-    CanvasGraphUtils.linkSelection(this.markersOverview, this.memoryOverview);
+-    return true;
+-  }),
+-
+-  /**
+-   * Sets up the framerate graph, if allowed and needed.
+-   *
+-   * @return object
+-   *         A promise resolved to `true` if the graph was initialized and is
+-   *         ready to use, `false` if the graph is disabled.
+-   */
+-  _framerateGraphAvailable: Task.async(function *() {
+-    if (!PerformanceController.getOption("enable-framerate")) {
+-      return false;
+-    }
+-    if (this.framerateGraph) {
+-      yield this.framerateGraph.ready();
+-      return true;
+-    }
+-    this.framerateGraph = new FramerateGraph($("#time-framerate"));
+-    yield this.framerateGraph.ready();
+-    this.setTheme();
+-
+-    CanvasGraphUtils.linkAnimation(this.markersOverview, this.framerateGraph);
+-    CanvasGraphUtils.linkSelection(this.markersOverview, this.framerateGraph);
+-    return true;
+-  }),
+-
+-  /**
+    * Method for handling all the set up for rendering the overview graphs.
+    *
+    * @param number resolution
+    *        The fps graph resolution. @see Graphs.jsm
+    */
+   render: Task.async(function *(resolution) {
+     if (this.isDisabled()) {
+       return;
+     }
+     let recording = PerformanceController.getCurrentRecording();
+-    let duration = recording.getDuration();
+-    let markers = recording.getMarkers();
+-    let memory = recording.getMemory();
+-    let timestamps = recording.getTicks();
+-
+-    // Empty or older recordings might yield no markers, memory or timestamps.
+-    if (markers && (yield this._markersGraphAvailable())) {
+-      this.markersOverview.setData({ markers, duration });
+-      this.emit(EVENTS.MARKERS_GRAPH_RENDERED);
+-    }
+-    if (memory && (yield this._memoryGraphAvailable())) {
+-      this.memoryOverview.dataDuration = duration;
+-      this.memoryOverview.setData(memory);
+-      this.emit(EVENTS.MEMORY_GRAPH_RENDERED);
+-    }
+-    if (timestamps && (yield this._framerateGraphAvailable())) {
+-      this.framerateGraph.dataDuration = duration;
+-      yield this.framerateGraph.setDataFromTimestamps(timestamps, resolution);
+-      this.emit(EVENTS.FRAMERATE_GRAPH_RENDERED);
+-    }
++    yield this.graphs.render(recording.getAllData(), resolution);
+ 
+     // Finished rendering all graphs in this overview.
+-    this.emit(EVENTS.OVERVIEW_RENDERED);
++    this.emit(EVENTS.OVERVIEW_RENDERED, resolution);
+   }),
+ 
+   /**
+    * Called at most every OVERVIEW_UPDATE_INTERVAL milliseconds
+    * and uses data fetched from the controller to render
+    * data into all the corresponding overview graphs.
+    */
+   _onRecordingTick: Task.async(function *() {
+@@ -286,42 +187,24 @@ let OverviewView = {
+     // Check here to see if there's still a _timeoutId, incase
+     // `stop` was called before the _prepareNextTick call was executed.
+     if (this.isRendering()) {
+       this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
+     }
+   },
+ 
+   /**
+-   * Fired when the graph selection has changed. Called by
+-   * mouseup and scroll events.
+-   */
+-  _onGraphSelecting: function () {
+-    if (this._stopSelectionChangeEventPropagation) {
+-      return;
+-    }
+-    // If the range is smaller than a pixel (which can happen when performing
+-    // a click on the graphs), treat this as a cleared selection.
+-    let interval = this.getTimeInterval();
+-    if (interval.endTime - interval.startTime < 1) {
+-      this.emit(EVENTS.OVERVIEW_RANGE_CLEARED);
+-    } else {
+-      this.emit(EVENTS.OVERVIEW_RANGE_SELECTED, interval);
+-    }
+-  },
+-
+-  /**
+    * Called when recording will start. No recording because it does not
+    * exist yet, but can just disable from here. This will only trigger for
+    * manual recordings.
+    */
+   _onRecordingWillStart: Task.async(function* () {
+     this._onRecordingStateChange();
+     yield this._checkSelection();
+-    this.markersOverview.dropSelection();
++    this.graphs.dropSelection();
+   }),
+ 
+   /**
+    * Called when recording actually starts.
+    */
+   _onRecordingStarted: function (_, recording) {
+     this._onRecordingStateChange();
+   },
+@@ -353,22 +236,24 @@ let OverviewView = {
+   /**
+    * Called when a new recording is selected.
+    */
+   _onRecordingSelected: Task.async(function* (_, recording) {
+     if (!recording) {
+       return;
+     }
+     this._onRecordingStateChange();
++    this._setGraphVisibilityFromRecordingFeatures(recording);
++
+     // If this recording is complete, render the high res graph
+     if (!recording.isRecording()) {
+       yield this.render(FRAMERATE_GRAPH_HIGH_RES_INTERVAL);
+     }
+     yield this._checkSelection(recording);
+-    this.markersOverview.dropSelection();
++    this.graphs.dropSelection();
+   }),
+ 
+   /**
+    * Called when a recording is starting, stopping, or about to start/stop.
+    * Checks the current recording displayed to determine whether or not
+    * the polling for rendering the overview graph needs to start or stop.
+    */
+   _onRecordingStateChange: function () {
+@@ -402,58 +287,82 @@ let OverviewView = {
+     return !!this._timeoutId;
+   },
+ 
+   /**
+    * Makes sure the selection is enabled or disabled in all the graphs,
+    * based on whether a recording currently exists and is not in progress.
+    */
+   _checkSelection: Task.async(function* (recording) {
+-    let selectionEnabled = recording ? !recording.isRecording() : false;
+-
+-    if (yield this._markersGraphAvailable()) {
+-      this.markersOverview.selectionEnabled = selectionEnabled;
++    let isEnabled = recording ? !recording.isRecording() : false;
++    yield this.graphs.selectionEnabled(isEnabled);
++  }),
++  
++  /**
++   * Fired when the graph selection has changed. Called by
++   * mouseup and scroll events.
++   */
++  _onGraphSelecting: function () {
++    if (this._stopSelectionChangeEventPropagation) {
++      return;
+     }
+-    if (yield this._memoryGraphAvailable()) {
+-      this.memoryOverview.selectionEnabled = selectionEnabled;
++    // If the range is smaller than a pixel (which can happen when performing
++    // a click on the graphs), treat this as a cleared selection.
++    let interval = this.getTimeInterval();
++    if (interval.endTime - interval.startTime < 1) {
++      this.emit(EVENTS.OVERVIEW_RANGE_CLEARED);
++    } else {
++      this.emit(EVENTS.OVERVIEW_RANGE_SELECTED, interval);
+     }
+-    if (yield this._framerateGraphAvailable()) {
+-      this.framerateGraph.selectionEnabled = selectionEnabled;
++  },
++
++  _onGraphRendered: function (_, graphName) {
++    switch (graphName) {
++      case "timeline":
++        this.emit(EVENTS.MARKERS_GRAPH_RENDERED);
++        break;
++      case "memory":
++        this.emit(EVENTS.MEMORY_GRAPH_RENDERED);
++        break;
++      case "framerate":
++        this.emit(EVENTS.FRAMERATE_GRAPH_RENDERED);
++        break;
+     }
+-  }),
++  },
+ 
+   /**
+-   * Called whenever a preference in `devtools.performance.ui.` changes. Used
+-   * to toggle the visibility of memory and framerate graphs.
++   * Called whenever a preference in `devtools.performance.ui.` changes.
++   * Does not care about the enabling of memory/framerate graphs,
++   * because those will set values on a recording model, and
++   * the graphs will render based on the existence.
+    */
+   _onPrefChanged: Task.async(function* (_, prefName, prefValue) {
+     switch (prefName) {
+-      case "enable-memory": {
+-        $("#memory-overview").hidden = !prefValue;
+-        break;
+-      }
+-      case "enable-framerate": {
+-        $("#time-framerate").hidden = !prefValue;
+-        break;
+-      }
+       case "hidden-markers": {
+-        if (yield this._markersGraphAvailable()) {
++        let graph;
++        if (graph = yield this.graphs.isAvailable("timeline")) {
+           let blueprint = PerformanceController.getTimelineBlueprint();
+-          this.markersOverview.setBlueprint(blueprint);
+-          this.markersOverview.refresh({ force: true });
++          graph.setBlueprint(blueprint);
++          graph.refresh({ force: true });
+         }
+         break;
+       }
+     }
+   }),
+ 
++  _setGraphVisibilityFromRecordingFeatures: function (recording) {
++    for (let [graphName, requirements] of Iterator(GRAPH_REQUIREMENTS)) {
++      this.graphs.enable(graphName, PerformanceController.isFeatureSupported(requirements));
++    }
++  },
++
+   /**
+    * Called when `devtools.theme` changes.
+    */
+   _onThemeChanged: function (_, theme) {
+-    this.setTheme({ theme, redraw: true });
++    this.graphs.setTheme({ theme, redraw: true });
+   },
+ 
+   toString: () => "[object OverviewView]"
+ };
+ 
+ // Decorates the OverviewView as an EventEmitter
+ EventEmitter.decorate(OverviewView);
+-- 
+2.2.1
+

@@ -1,0 +1,336 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Mon, 27 Apr 2015 15:59:22 -0700
+Subject: Bug 1143027 - The performance tool tab highlights during a recording. r=vp
+
+diff --git a/browser/devtools/definitions.js b/browser/devtools/definitions.js
+index f3949be..c4e69ce 100644
+--- a/browser/devtools/definitions.js
++++ b/browser/devtools/definitions.js
+@@ -234,16 +234,17 @@ Tools.canvasDebugger = {
+   }
+ };
+ 
+ Tools.performance = {
+   id: "performance",
+   ordinal: 7,
+   icon: "chrome://browser/skin/devtools/tool-profiler.svg",
+   invertIconForLightTheme: true,
++  highlightedicon: "chrome://browser/skin/devtools/tool-profiler-active.svg",
+   url: "chrome://browser/content/devtools/performance.xul",
+   visibilityswitch: "devtools.performance.enabled",
+   label: l10n("profiler.label2", profilerStrings),
+   panelLabel: l10n("profiler.panelLabel2", profilerStrings),
+   tooltip: l10n("profiler.tooltip2", profilerStrings),
+   accesskey: l10n("profiler.accesskey", profilerStrings),
+   key: l10n("profiler.commandkey2", profilerStrings),
+   modifiers: "shift",
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index 42ae275..0ca0066 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -32,17 +32,18 @@ loader.lazyImporter(this, "Promise",
+ 
+ 
+ // How often do we pull allocation sites from the memory actor.
+ const DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT = 200; // ms
+ 
+ // Events to pipe from PerformanceActorsConnection to the PerformanceFront
+ const CONNECTION_PIPE_EVENTS = [
+   "console-profile-start", "console-profile-ending", "console-profile-end",
+-  "timeline-data", "profiler-already-active", "profiler-activated"
++  "timeline-data", "profiler-already-active", "profiler-activated", "recording-started",
++  "recording-stopped"
+ ];
+ 
+ // Events to listen to from the profiler actor
+ const PROFILER_EVENTS = ["console-api-profiler", "profiler-stopped"];
+ 
+ /**
+  * A cache of all PerformanceActorsConnection instances.
+  * The keys are Target objects.
+@@ -408,16 +409,17 @@ PerformanceActorsConnection.prototype = {
+       memoryStartTime
+     };
+ 
+     // Signify to the model that the recording has started,
+     // populate with data and store the recording model here.
+     model.populate(data);
+     this._recordings.push(model);
+ 
++    this.emit("recording-started", model);
+     return model;
+   }),
+ 
+   /**
+    * Manually ends the recording session for the corresponding RecordingModel.
+    *
+    * @param RecordingModel model
+    *        The corresponding RecordingModel that belongs to the recording session wished to stop.
+@@ -462,16 +464,17 @@ PerformanceActorsConnection.prototype = {
+       profile: profilerData.profile,
+ 
+       // End times for all the actors.
+       profilerEndTime: profilerData.currentTime,
+       timelineEndTime: timelineEndTime,
+       memoryEndTime: memoryEndTime
+     });
+ 
++    this.emit("recording-stopped", model);
+     return model;
+   }),
+ 
+   /**
+    * Checks all currently stored recording models and returns a boolean
+    * if there is a session currently being recorded.
+    *
+    * @return Boolean
+@@ -660,16 +663,25 @@ PerformanceFront.prototype = {
+   /**
+    * Returns an object indicating if mock actors are being used or not.
+    */
+   getMocksInUse: function () {
+     return {
+       memory: this._usingMockMemory,
+       timeline: this._usingMockTimeline
+     };
++  },
++
++  /**
++   * Returns a boolean indicating whether or not the current performance connection is recording.
++   *
++   * @return Boolean
++   */
++  isRecording: function () {
++    return this._connection.isRecording();
+   }
+ };
+ 
+ /**
+  * Creates an object of configurations based off of preferences for a RecordingModel.
+  */
+ function getRecordingModelPrefs () {
+   return {
+diff --git a/browser/devtools/performance/panel.js b/browser/devtools/performance/panel.js
+index af65dfe..91fd3dc 100644
+--- a/browser/devtools/performance/panel.js
++++ b/browser/devtools/performance/panel.js
+@@ -29,25 +29,28 @@ PerformancePanel.prototype = {
+    *
+    * @return object
+    *         A promise that is resolved when the Performance tool
+    *         completes opening.
+    */
+   open: Task.async(function*() {
+     this.panelWin.gToolbox = this._toolbox;
+     this.panelWin.gTarget = this.target;
++    this._onRecordingStartAndStop = this._onRecordingStartAndStop.bind(this);
+ 
+     // Connection is already created in the toolbox; reuse
+     // the same connection.
+     this._connection = this.panelWin.gToolbox.getPerformanceActorsConnection();
+     // The toolbox will also open the connection, but attempt to open it again
+     // incase it's still in the process of opening.
+     yield this._connection.open();
+ 
+     this.panelWin.gFront = new PerformanceFront(this._connection);
++    this.panelWin.gFront.on("recording-started", this._onRecordingStartAndStop);
++    this.panelWin.gFront.on("recording-stopped", this._onRecordingStartAndStop);
+ 
+     yield this.panelWin.startupPerformance();
+ 
+     this.isReady = true;
+     this.emit("ready");
+     return this;
+   }),
+ 
+@@ -56,13 +59,24 @@ PerformancePanel.prototype = {
+   get target() this._toolbox.target,
+ 
+   destroy: Task.async(function*() {
+     // Make sure this panel is not already destroyed.
+     if (this._destroyed) {
+       return;
+     }
+ 
++    this.panelWin.gFront.off("recording-started", this._onRecordingStartAndStop);
++    this.panelWin.gFront.off("recording-stopped", this._onRecordingStartAndStop);
+     yield this.panelWin.shutdownPerformance();
+     this.emit("destroyed");
+     this._destroyed = true;
+-  })
++  }),
++
++  _onRecordingStartAndStop: function () {
++    let front = this.panelWin.gFront;
++    if (front.isRecording()) {
++      this._toolbox.highlightTool("performance");
++    } else {
++      this._toolbox.unhighlightTool("performance");
++    }
++  }
+ };
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 01eee2a..68a82de 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -49,16 +49,17 @@ support-files =
+ #[browser_perf-front-profiler-01.js] bug 1077464
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+ #[browser_perf-front-profiler-06.js]
+ [browser_perf-front-01.js]
+ [browser_perf-front-02.js]
++[browser_perf-highlighted.js]
+ [browser_perf-jit-view-01.js]
+ [browser_perf-jit-view-02.js]
+ [browser_perf-jit-model-01.js]
+ [browser_perf-jit-model-02.js]
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-invert-call-tree-01.js]
+ [browser_perf-options-invert-call-tree-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-highlighted.js b/browser/devtools/performance/test/browser_perf-highlighted.js
+new file mode 100644
+index 0000000..6b01743
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-highlighted.js
+@@ -0,0 +1,48 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the toolbox tab for performance is highlighted when recording,
++ * whether already loaded, or via console.profile with an unloaded performance tools.
++ */
++
++let { getPerformanceActorsConnection } = devtools.require("devtools/performance/front");
++
++function spawnTest () {
++  let profilerConnected = waitForProfilerConnection();
++  let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
++  yield profilerConnected;
++  let connection = getPerformanceActorsConnection(target);
++  let tab = toolbox.doc.getElementById("toolbox-tab-performance");
++
++  let profileStart = once(connection, "console-profile-start");
++  console.profile("rust");
++  yield profileStart;
++
++  ok(tab.hasAttribute("highlighted"),
++    "performance tab is highlighted during recording from console.profile when unloaded");
++
++  let profileEnd = once(connection, "console-profile-end");
++  console.profileEnd("rust");
++  yield profileEnd;
++
++  ok(!tab.hasAttribute("highlighted"),
++    "performance tab is no longer highlighted when console.profile recording finishes");
++
++  yield gDevTools.showToolbox(target, "performance");
++  let panel = toolbox.getCurrentPanel();
++  let { panelWin: { PerformanceController, RecordingsView }} = panel;
++
++  yield startRecording(panel);
++
++  ok(tab.hasAttribute("highlighted"),
++    "performance tab is highlighted during recording while in performance tool");
++
++  yield stopRecording(panel);
++
++  ok(!tab.hasAttribute("highlighted"),
++    "performance tab is no longer highlighted when recording finishes");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/themes/linux/jar.mn b/browser/themes/linux/jar.mn
+index 8305cfc..f282939 100644
+--- a/browser/themes/linux/jar.mn
++++ b/browser/themes/linux/jar.mn
+@@ -362,16 +362,17 @@ browser.jar:
+   skin/classic/browser/devtools/tool-webconsole.svg         (../shared/devtools/images/tool-webconsole.svg)
+   skin/classic/browser/devtools/tool-debugger.svg           (../shared/devtools/images/tool-debugger.svg)
+   skin/classic/browser/devtools/tool-debugger-paused.svg    (../shared/devtools/images/tool-debugger-paused.svg)
+   skin/classic/browser/devtools/tool-inspector.svg          (../shared/devtools/images/tool-inspector.svg)
+   skin/classic/browser/devtools/tool-inspector.svg          (../shared/devtools/images/tool-inspector.svg)
+   skin/classic/browser/devtools/tool-styleeditor.svg        (../shared/devtools/images/tool-styleeditor.svg)
+   skin/classic/browser/devtools/tool-storage.svg            (../shared/devtools/images/tool-storage.svg)
+   skin/classic/browser/devtools/tool-profiler.svg           (../shared/devtools/images/tool-profiler.svg)
++  skin/classic/browser/devtools/tool-profiler-active.svg    (../shared/devtools/images/tool-profiler-active.svg)
+   skin/classic/browser/devtools/tool-network.svg            (../shared/devtools/images/tool-network.svg)
+   skin/classic/browser/devtools/tool-scratchpad.svg         (../shared/devtools/images/tool-scratchpad.svg)
+   skin/classic/browser/devtools/tool-webaudio.svg           (../shared/devtools/images/tool-webaudio.svg)
+   skin/classic/browser/devtools/close.png                   (../shared/devtools/images/close.png)
+   skin/classic/browser/devtools/close@2x.png                (../shared/devtools/images/close@2x.png)
+   skin/classic/browser/devtools/vview-delete.png            (../shared/devtools/images/vview-delete.png)
+   skin/classic/browser/devtools/vview-delete@2x.png         (../shared/devtools/images/vview-delete@2x.png)
+   skin/classic/browser/devtools/vview-edit.png              (../shared/devtools/images/vview-edit.png)
+diff --git a/browser/themes/osx/jar.mn b/browser/themes/osx/jar.mn
+index c364d77..f7645cf 100644
+--- a/browser/themes/osx/jar.mn
++++ b/browser/themes/osx/jar.mn
+@@ -495,16 +495,17 @@ browser.jar:
+   skin/classic/browser/devtools/tool-webconsole.svg         (../shared/devtools/images/tool-webconsole.svg)
+   skin/classic/browser/devtools/tool-debugger.svg           (../shared/devtools/images/tool-debugger.svg)
+   skin/classic/browser/devtools/tool-debugger-paused.svg    (../shared/devtools/images/tool-debugger-paused.svg)
+   skin/classic/browser/devtools/tool-inspector.svg          (../shared/devtools/images/tool-inspector.svg)
+   skin/classic/browser/devtools/tool-inspector.svg          (../shared/devtools/images/tool-inspector.svg)
+   skin/classic/browser/devtools/tool-styleeditor.svg        (../shared/devtools/images/tool-styleeditor.svg)
+   skin/classic/browser/devtools/tool-storage.svg            (../shared/devtools/images/tool-storage.svg)
+   skin/classic/browser/devtools/tool-profiler.svg           (../shared/devtools/images/tool-profiler.svg)
++  skin/classic/browser/devtools/tool-profiler-active.svg    (../shared/devtools/images/tool-profiler-active.svg)
+   skin/classic/browser/devtools/tool-network.svg            (../shared/devtools/images/tool-network.svg)
+   skin/classic/browser/devtools/tool-scratchpad.svg         (../shared/devtools/images/tool-scratchpad.svg)
+   skin/classic/browser/devtools/tool-webaudio.svg           (../shared/devtools/images/tool-webaudio.svg)
+   skin/classic/browser/devtools/close.png                   (../shared/devtools/images/close.png)
+   skin/classic/browser/devtools/close@2x.png                (../shared/devtools/images/close@2x.png)
+   skin/classic/browser/devtools/vview-delete.png            (../shared/devtools/images/vview-delete.png)
+   skin/classic/browser/devtools/vview-delete@2x.png         (../shared/devtools/images/vview-delete@2x.png)
+   skin/classic/browser/devtools/vview-edit.png              (../shared/devtools/images/vview-edit.png)
+diff --git a/browser/themes/shared/devtools/images/tool-profiler-active.svg b/browser/themes/shared/devtools/images/tool-profiler-active.svg
+new file mode 100644
+index 0000000..eff1673
+--- /dev/null
++++ b/browser/themes/shared/devtools/images/tool-profiler-active.svg
+@@ -0,0 +1,14 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" xmlns:xlink="http://www.w3.org/1999/xlink" enable-background="new 0 0 16 16">
++<g fill="#71c054" fill-rule="evenodd">
++<path d="m8,1c-3.9,0-7,3.1-7,7s3.1,7 7,7c3.9,0 7-3.1 7-7s-3.1-7-7-7zm-.1,12c-2.8,0-5-2.2-5-5 0-2.8 2.2-5 5-5s5,2.2 5,5c0,2.8-2.2,5-5,5z"/>
++<path d="m8,6.9c.6,0 1.1,.5 1.1,1.1 0,.6-.5,1.1-1.1,1.1-.6,0-1.1-.5-1.1-1.1 0-.6 .5-1.1 1.1-1.1z"/>
++<path d="m11.3,4.6l-3.9,2.5 1.5,1.4 2.4-3.9z"/>
++<path opacity=".4" d="m4.6,10c.7,1.2 2,2 3.4,2 1.5,0 2.7-.8 3.4-2h-6.8z"/>
++<g opacity=".3">
++<path d="m7.1,5.1l-.6-1.3-.9,.4 .7,1.3c.2-.1 .5-.3 .8-.4z"/>
++<path d="m9.8,5.6l.7-1.4-.9-.4-.7,1.3c.3,.2 .6,.3 .9,.5z"/>
++<path d="m10.8,7c.1,.3 .2,.7 .2,1h2v-1h-2.2z"/>
++<path d="m5,8c0-.3 .1-.7 .2-1h-2.2l-.1,1h2.1z"/>
++</g>
++</g>
++</svg>
+diff --git a/browser/themes/windows/jar.mn b/browser/themes/windows/jar.mn
+index bb4818d..c8c3fa3 100644
+--- a/browser/themes/windows/jar.mn
++++ b/browser/themes/windows/jar.mn
+@@ -437,16 +437,17 @@ browser.jar:
+         skin/classic/browser/devtools/tool-options.svg              (../shared/devtools/images/tool-options.svg)
+         skin/classic/browser/devtools/tool-webconsole.svg           (../shared/devtools/images/tool-webconsole.svg)
+         skin/classic/browser/devtools/tool-debugger.svg             (../shared/devtools/images/tool-debugger.svg)
+         skin/classic/browser/devtools/tool-debugger-paused.svg      (../shared/devtools/images/tool-debugger-paused.svg)
+         skin/classic/browser/devtools/tool-inspector.svg            (../shared/devtools/images/tool-inspector.svg)
+         skin/classic/browser/devtools/tool-styleeditor.svg          (../shared/devtools/images/tool-styleeditor.svg)
+         skin/classic/browser/devtools/tool-storage.svg              (../shared/devtools/images/tool-storage.svg)
+         skin/classic/browser/devtools/tool-profiler.svg             (../shared/devtools/images/tool-profiler.svg)
++        skin/classic/browser/devtools/tool-profiler-active.svg      (../shared/devtools/images/tool-profiler-active.svg)
+         skin/classic/browser/devtools/tool-network.svg              (../shared/devtools/images/tool-network.svg)
+         skin/classic/browser/devtools/tool-scratchpad.svg           (../shared/devtools/images/tool-scratchpad.svg)
+         skin/classic/browser/devtools/tool-webaudio.svg             (../shared/devtools/images/tool-webaudio.svg)
+         skin/classic/browser/devtools/close.png                     (../shared/devtools/images/close.png)
+         skin/classic/browser/devtools/close@2x.png                  (../shared/devtools/images/close@2x.png)
+         skin/classic/browser/devtools/vview-delete.png              (../shared/devtools/images/vview-delete.png)
+         skin/classic/browser/devtools/vview-delete@2x.png           (../shared/devtools/images/vview-delete@2x.png)
+         skin/classic/browser/devtools/vview-edit.png                (../shared/devtools/images/vview-edit.png)
+-- 
+2.2.1
+
