@@ -1,8 +1,6 @@
-From aaf895598bb3c5bda8f2315065b0ae1c0d6e4444 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@gmail.com>
 Date: Fri, 24 Apr 2015 21:04:02 -0700
-Subject: Bug 1132758 - Performance feature visibility now based on a
- per recording-basis, dependent on features enabled and server support. r=vp
+Subject: Bug 1132758 - Performance feature visibility now based on a per recording-basis, dependent on features enabled and server support. r=vp
 
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
 index 42ae275..69648ac 100644
@@ -145,10 +143,10 @@ index 42ae275..69648ac 100644
  
 diff --git a/browser/devtools/performance/modules/graphs.js b/browser/devtools/performance/modules/graphs.js
 new file mode 100644
-index 0000000..6059abc
+index 0000000..da9cac4
 --- /dev/null
 +++ b/browser/devtools/performance/modules/graphs.js
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,409 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -163,6 +161,7 @@ index 0000000..6059abc
 +Cu.import("resource:///modules/devtools/Graphs.jsm");
 +Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
 +Cu.import("resource://gre/modules/Task.jsm");
++Cu.import("resource://gre/modules/Promise.jsm");
 +
 +const { colorUtils: { setAlpha }} = require("devtools/css-color");
 +const { getColor } = require("devtools/shared/theme");
@@ -263,7 +262,6 @@ index 0000000..6059abc
 +    return this.setDataFromTimestamps(ticks, resolution);
 +  }
 +});
-+exports.FramerateGraph = FramerateGraph;
 +
 +/**
 + * Constructor for the memory graph. Inherits from PerformanceGraph.
@@ -282,7 +280,6 @@ index 0000000..6059abc
 +    return this.setData(memory);
 +  }
 +});
-+exports.MemoryGraph = MemoryGraph;
 +
 +function TimelineGraph(parent, blueprint) {
 +  MarkersOverview.call(this, parent, blueprint);
@@ -294,8 +291,12 @@ index 0000000..6059abc
 +  groupPadding: MARKERS_GROUP_VERTICAL_PADDING,
 +  setPerformanceData: MarkersOverview.prototype.setData
 +});
-+exports.TimelineGraph = TimelineGraph;
 +
++/**
++ * Definitions file for GraphsController, indicating the constructor,
++ * selector and other meta for each of the graphs controller by
++ * GraphsController.
++ */
 +const GRAPH_DEFINITIONS = {
 +  memory: {
 +    constructor: MemoryGraph,
@@ -335,7 +336,6 @@ index 0000000..6059abc
 +  EventEmitter.decorate(this);
 +  this._onSelecting = this._onSelecting.bind(this);
 +}
-+exports.GraphsController = GraphsController;
 +
 +GraphsController.prototype = {
 +
@@ -353,30 +353,34 @@ index 0000000..6059abc
 +   * Saves rendering progress as a promise to be consumed by `destroy`,
 +   * to wait for cleaning up rendering during destruction.
 +   */
-+  render: function (recordingData, resolution) {
-+    let controller = this;
-+
++  render: Task.async(function *(recordingData, resolution) {
 +    // Get the previous render promise so we don't start rendering
 +    // until the previous render cycle completes, which can occur
 +    // especially when a recording is finished, and triggers a
 +    // fresh rendering at a higher rate
-+    let lastRender = this._rendering;
++    yield (this._rendering && this._rendering.promise);
 +
-+    // TODO can this be done faster? parallel? Use less abstractions?
-+    return this._rendering = Task.spawn(function *() {
-+      yield lastRender;
-+      for (let graph of (yield controller._getEnabled())) {
-+        yield graph.setPerformanceData(recordingData, resolution);
-+        controller.emit("rendered", graph.graphName);
-+      }
-+    });
-+  },
++    // Check after yielding to ensure we're not tearing down,
++    // as this can create a race condition in tests
++    if (this._destroyed) {
++      return;
++    }
++
++    this._rendering = Promise.defer();
++    for (let graph of (yield this._getEnabled())) {
++      yield graph.setPerformanceData(recordingData, resolution);
++      this.emit("rendered", graph.graphName);
++    }
++    this._rendering.resolve();
++  }),
 +
 +  /**
 +   * Destroys the underlying graphs.
 +   */
 +  destroy: Task.async(function *() {
 +    let primary = this._getPrimaryLink();
++
++    this._destroyed = true;
 +
 +    if (primary) {
 +      primary.off("selecting", this._onSelecting);
@@ -385,7 +389,7 @@ index 0000000..6059abc
 +    // If there was rendering, wait until the most recent render cycle
 +    // has finished
 +    if (this._rendering) {
-+      yield this._rendering;
++      yield this._rendering.promise;
 +    }
 +
 +    for (let graphName in this._graphs) {
@@ -425,6 +429,10 @@ index 0000000..6059abc
 +    return graph;
 +  }),
 +
++  /**
++   * Enable or disable a subgraph controlled by GraphsController.
++   * This determines what graphs are visible and get rendered.
++   */
 +  enable: function (graphName, isEnabled) {
 +    let el = this.$(this._definition[graphName].selector);
 +    el.hidden = !isEnabled;
@@ -543,11 +551,16 @@ index 0000000..6059abc
 +    return this._enabledGraphs = enabled;
 +  }),
 +};
++
++exports.FramerateGraph = FramerateGraph;
++exports.MemoryGraph = MemoryGraph;
++exports.TimelineGraph = TimelineGraph;
++exports.GraphsController = GraphsController;
 diff --git a/browser/devtools/performance/modules/io.js b/browser/devtools/performance/modules/io.js
-index ef5dd1a..0cc5f20 100644
+index ef5dd1a..6a27056 100644
 --- a/browser/devtools/performance/modules/io.js
 +++ b/browser/devtools/performance/modules/io.js
-@@ -143,13 +143,18 @@ function convertLegacyData (legacyData) {
+@@ -143,13 +143,21 @@ function convertLegacyData (legacyData) {
    let data = {
      label: profilerData.profilerLabel,
      duration: recordingDuration,
@@ -561,7 +574,10 @@ index ef5dd1a..0cc5f20 100644
 +    // Fake a configuration object here if there's tick data,
 +    // so that it can be rendered
 +    configuration: {
-+      withTicks: !!ticksData.length
++      withTicks: !!ticksData.length,
++      withMarkers: false,
++      withMemory: false,
++      withAllocations: false
 +    }
    };
  
@@ -687,7 +703,7 @@ index 0178bfe..0000000
 -
 -exports.MemoryGraph = MemoryGraph;
 diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
-index 36be95b..84c504c 100644
+index 36be95b..6d92bc9 100644
 --- a/browser/devtools/performance/modules/recording-model.js
 +++ b/browser/devtools/performance/modules/recording-model.js
 @@ -17,16 +17,17 @@ loader.lazyRequireGetter(this, "RecordingUtils",
@@ -761,7 +777,7 @@ index 36be95b..84c504c 100644
        // Accumulate timeline markers into an array. Furthermore, the timestamps
        // do not have a zero epoch, so offset all of them by the start time.
        case "markers": {
-+        if (!config.withMarkers) { return; }
++        if (!config.withMarkers) { break; }
          let [markers] = data;
          RecordingUtils.offsetMarkerTimes(markers, this._timelineStartTime);
          Array.prototype.push.apply(this._markers, markers);
@@ -769,7 +785,7 @@ index 36be95b..84c504c 100644
        }
        // Accumulate stack frames into an array.
        case "frames": {
-+        if (!config.withMarkers) { return; }
++        if (!config.withMarkers) { break; }
          let [, frames] = data;
          Array.prototype.push.apply(this._frames, frames);
          break;
@@ -777,7 +793,7 @@ index 36be95b..84c504c 100644
        // Accumulate memory measurements into an array. Furthermore, the timestamp
        // does not have a zero epoch, so offset it by the actor's start time.
        case "memory": {
-+        if (!config.withMemory) { return; }
++        if (!config.withMemory) { break; }
          let [currentTime, measurement] = data;
          this._memory.push({
            delta: currentTime - this._timelineStartTime,
@@ -787,7 +803,7 @@ index 36be95b..84c504c 100644
        }
        // Save the accumulated refresh driver ticks.
        case "ticks": {
-+        if (!config.withTicks) { return; }
++        if (!config.withTicks) { break; }
          let [, timestamps] = data;
          this._ticks = timestamps;
          break;
@@ -796,7 +812,7 @@ index 36be95b..84c504c 100644
        // do not have a zero epoch, and are microseconds instead of milliseconds,
        // so offset all of them by the start time, also converting from µs to ms.
        case "allocations": {
-+        if (!config.withAllocations) { return; }
++        if (!config.withAllocations) { break; }
          let [{ sites, timestamps, frames, counts }] = data;
          let timeOffset = this._memoryStartTime * 1000;
          let timeScale = 1000;
@@ -828,7 +844,7 @@ index 301fa6d..7b83784 100644
  
  BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index 8ae2d7c..c13dc80 100644
+index 8ae2d7c..b3a6629 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
 @@ -22,22 +22,18 @@ devtools.lazyRequireGetter(this, "TreeWidget",
@@ -924,7 +940,7 @@ index 8ae2d7c..c13dc80 100644
 +    recording = recording || this.getCurrentRecording();
 +    let recordingConfig = recording ? recording.getConfiguration() : {};
 +    let currentRecordingState = recording ? recording.isRecording() : void 0;
-+    let actorsSupported = gFront.getActorSupport(); 
++    let actorsSupported = gFront.getActorSupport();
 +
 +    if (shouldBeRecording != null && shouldBeRecording !== currentRecordingState) {
 +      return false;
@@ -947,7 +963,7 @@ index 8ae2d7c..c13dc80 100644
  EventEmitter.decorate(PerformanceController);
  
 diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
-index f2a9b47..90f1d8d 100644
+index 6cda61c..6b6c729 100644
 --- a/browser/devtools/performance/performance.xul
 +++ b/browser/devtools/performance/performance.xul
 @@ -97,32 +97,37 @@
@@ -1323,7 +1339,7 @@ index 08aa4f6..9e677d0 100644
    ok(DetailsView.isViewSelected(JsFlameGraphView),
      "The flamegraph view is now selected in the details view.");
 diff --git a/browser/devtools/performance/test/browser_perf-details-03.js b/browser/devtools/performance/test/browser_perf-details-03.js
-index 8a5388d..ba29cc6 100644
+index 8a5388d..8e54aef 100644
 --- a/browser/devtools/performance/test/browser_perf-details-03.js
 +++ b/browser/devtools/performance/test/browser_perf-details-03.js
 @@ -1,38 +1,39 @@
@@ -1341,7 +1357,7 @@ index 8a5388d..ba29cc6 100644
    let { panel } = yield initPerformance(SIMPLE_URL);
    let { EVENTS, PerformanceController, OverviewView, DetailsView } = panel.panelWin;
 -  let { $, WaterfallView, MemoryCallTreeView, MemoryFlameGraphView } = panel.panelWin;
-+  let { $, WaterfallView, MemoryCallTreeView, RecordingsView, MemoryFlameGraphView } = panel.panelWin;
++  let { $, RecordingsView, WaterfallView, MemoryCallTreeView, MemoryFlameGraphView } = panel.panelWin;
 +
 +  Services.prefs.setBoolPref(MEMORY_PREF, false);
 +  yield startRecording(panel);
@@ -1435,7 +1451,7 @@ index 8a5388d..ba29cc6 100644
    finish();
  }
 diff --git a/browser/devtools/performance/test/browser_perf-details-04.js b/browser/devtools/performance/test/browser_perf-details-04.js
-index c19646b..5ec68bc 100644
+index c19646b..c919f41 100644
 --- a/browser/devtools/performance/test/browser_perf-details-04.js
 +++ b/browser/devtools/performance/test/browser_perf-details-04.js
 @@ -2,17 +2,17 @@
@@ -1448,7 +1464,7 @@ index c19646b..5ec68bc 100644
  function spawnTest () {
    let { panel } = yield initPerformance(SIMPLE_URL);
 -  let { EVENTS, $, $$, PerformanceController, RecordingsView, DetailsView } = panel.panelWin;
-+  let { EVENTS, $, $$, WaterfallView, PerformanceController, RecordingsView, DetailsView } = panel.panelWin;
++  let { EVENTS, $, $$, PerformanceController, RecordingsView, WaterfallView } = panel.panelWin;
  
    let waterfallBtn = $("toolbarbutton[data-view='waterfall']");
    let jsFlameBtn = $("toolbarbutton[data-view='js-flamegraph']");
@@ -2647,7 +2663,7 @@ index 081ed49..a3d884a 100644
    finish();
  });
 diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-04.js b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
-index 0d8a91d..cfbe12f 100644
+index 0d8a91d..afa65a4 100644
 --- a/browser/devtools/performance/test/browser_perf_recordings-io-04.js
 +++ b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
 @@ -1,35 +1,23 @@
@@ -2731,7 +2747,7 @@ index 0d8a91d..cfbe12f 100644
      "The imported legacy data was successfully converted for the current tool (1).");
    is(importedData.duration, data.duration,
      "The imported legacy data was successfully converted for the current tool (2).");
-@@ -74,16 +76,20 @@ let test = Task.async(function*() {
+@@ -74,16 +76,22 @@ let test = Task.async(function*() {
    is(importedData.memory.toSource(), [].toSource(),
      "The imported legacy data was successfully converted for the current tool (5).");
    is(importedData.ticks.toSource(), data.ticks.toSource(),
@@ -2742,8 +2758,10 @@ index 0d8a91d..cfbe12f 100644
      "The imported legacy data was successfully converted for the current tool (8).");
 +  is(importedData.configuration.withTicks, true,
 +    "The imported legacy data was successfully converted for the current tool (9).");
-+  is(importedData.configuration.withMemory, void 0,
++  is(importedData.configuration.withMemory, false,
 +    "The imported legacy data was successfully converted for the current tool (10).");
++  is(importedData.configuration.sampleFrequency, void 0,
++    "The imported legacy data was successfully converted for the current tool (11).");
  
    yield teardown(panel);
    finish();
@@ -2865,7 +2883,7 @@ index 2bbc091..611d16a 100644
    ok(!button.hasAttribute("locked"),
      "The record button should not be locked.");
 diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
-index 791e16b..fdabaa3 100644
+index 791e16b..0ce1825 100644
 --- a/browser/devtools/performance/views/details.js
 +++ b/browser/devtools/performance/views/details.js
 @@ -11,38 +11,39 @@ let DetailsView = {
@@ -2986,8 +3004,8 @@ index 791e16b..fdabaa3 100644
 +    //
 +    // 2. If we have a finished recording and no panel was selected yet,
 +    // use a default now that we have the recording configurations
-+    if ((invalidCurrentView && this._initialized && !isRecording) ||
-+        (recording && !isRecording && !this._initialized)) {
++    if ((this._initialized  && !isRecording && invalidCurrentView) ||
++        (!this._initialized && !isRecording && recording)) {
 +      yield this.selectDefaultView();
 +    }
    }),
@@ -3013,7 +3031,7 @@ index 791e16b..fdabaa3 100644
     */
    selectView: Task.async(function *(viewName) {
      let component = this.components[viewName];
-@@ -126,42 +147,51 @@ let DetailsView = {
+@@ -126,42 +147,53 @@ let DetailsView = {
      for (let button of $$("toolbarbutton[data-view]", this.toolbar)) {
        if (button.getAttribute("data-view") === viewName) {
          button.setAttribute("checked", true);
@@ -3047,6 +3065,8 @@ index 791e16b..fdabaa3 100644
 +    if (this._isViewSupported("waterfall")) {
        return this.selectView("waterfall");
 +    } else {
++      // The JS CallTree should always be supported since the profiler
++      // actor is as old as the world.
 +      return this.selectView("js-calltree");
      }
    },
@@ -3073,7 +3093,7 @@ index 791e16b..fdabaa3 100644
        }
      }
 diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
-index 4714ec3..691f13f 100644
+index 4714ec3..2425d9c 100644
 --- a/browser/devtools/performance/views/overview.js
 +++ b/browser/devtools/performance/views/overview.js
 @@ -2,131 +2,121 @@
@@ -3469,13 +3489,12 @@ index 4714ec3..691f13f 100644
     */
    _checkSelection: Task.async(function* (recording) {
 -    let selectionEnabled = recording ? !recording.isRecording() : false;
--
--    if (yield this._markersGraphAvailable()) {
--      this.markersOverview.selectionEnabled = selectionEnabled;
 +    let isEnabled = recording ? !recording.isRecording() : false;
 +    yield this.graphs.selectionEnabled(isEnabled);
 +  }),
-+  
+ 
+-    if (yield this._markersGraphAvailable()) {
+-      this.markersOverview.selectionEnabled = selectionEnabled;
 +  /**
 +   * Fired when the graph selection has changed. Called by
 +   * mouseup and scroll events.

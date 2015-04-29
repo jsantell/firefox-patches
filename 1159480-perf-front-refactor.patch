@@ -1,0 +1,1165 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 28 Apr 2015 17:19:15 -0700
+Subject: Bug 1159480 - Pull out actor-specific logic from Performance Front. r=vp
+
+diff --git a/browser/devtools/performance/modules/actors.js b/browser/devtools/performance/modules/actors.js
+new file mode 100644
+index 0000000..61fec66
+--- /dev/null
++++ b/browser/devtools/performance/modules/actors.js
+@@ -0,0 +1,293 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Task } = require("resource://gre/modules/Task.jsm");
++const { Promise } = require("resource://gre/modules/Promise.jsm");
++const {
++  actorCompatibilityBridge, getProfiler,
++  MockMemoryFront, MockTimelineFront,
++  memoryActorSupported, timelineActorSupported
++} = require("devtools/performance/compatibility");
++
++loader.lazyRequireGetter(this, "EventEmitter",
++  "devtools/toolkit/event-emitter");
++loader.lazyRequireGetter(this, "RecordingUtils",
++  "devtools/performance/recording-utils", true);
++loader.lazyRequireGetter(this, "TimelineFront",
++  "devtools/server/actors/timeline", true);
++loader.lazyRequireGetter(this, "MemoryFront",
++  "devtools/server/actors/memory", true);
++loader.lazyRequireGetter(this, "timers",
++  "resource://gre/modules/Timer.jsm");
++
++// how often do we pull allocation sites from the memory actor
++const ALLOCATION_SITE_POLL_TIMER = 200; // ms
++
++const MEMORY_ACTOR_METHODS = [
++  "destroy", "attach", "detach", "getState", "getAllocationsSettings",
++  "getAllocations", "startRecordingAllocations", "stopRecordingAllocations"
++];
++
++const TIMELINE_ACTOR_METHODS = [
++  "start", "stop",
++];
++
++const PROFILER_ACTOR_METHODS = [
++  "isActive", "startProfiler", "getStartOptions", "stopProfiler",
++  "registerEventNotifications", "unregisterEventNotifications"
++];
++
++/**
++ * Constructor for a facade around an underlying ProfilerFront.
++ */
++function ProfilerFrontFacade (target) {
++  this._target = target;
++  this._onProfilerEvent = this._onProfilerEvent.bind(this);
++  EventEmitter.decorate(this);
++}
++
++ProfilerFrontFacade.prototype = {
++  EVENTS: ["console-api-profiler", "profiler-stopped"],
++
++  // Connects to the targets underlying real ProfilerFront.
++  connect: Task.async(function*() {
++    let target = this._target;
++    this._actor = yield getProfiler(target);
++
++    // Fetch and store information about the SPS profiler and
++    // server profiler.
++    this.traits = {};
++    this.traits.filterable = target.getTrait("profilerDataFilterable");
++
++    // Directly register to event notifications when connected
++    // to hook into `console.profile|profileEnd` calls.
++    yield this.registerEventNotifications({ events: this.EVENTS });
++    // TODO bug 1159389, listen directly to actor if supporting new front
++    target.client.addListener("eventNotification", this._onProfilerEvent);
++  }),
++
++  /**
++   * Unregisters events for the underlying profiler actor.
++   */
++  destroy: Task.async(function *() {
++    yield this.unregisterEventNotifications({ events: this.EVENTS });
++    // TODO bug 1159389, listen directly to actor if supporting new front
++    this._target.client.removeListener("eventNotification", this._onProfilerEvent);
++  }),
++
++  /**
++   * Starts the profiler actor, if necessary.
++   */
++  start: Task.async(function *(options={}) {
++    // Start the profiler only if it wasn't already active. The built-in
++    // nsIPerformance module will be kept recording, because it's the same instance
++    // for all targets and interacts with the whole platform, so we don't want
++    // to affect other clients by stopping (or restarting) it.
++    let profilerStatus = yield this.isActive();
++    if (profilerStatus.isActive) {
++      this.emit("profiler-already-active");
++      return profilerStatus.currentTime;
++    }
++
++    // Translate options from the recording model into profiler-specific
++    // options for the nsIProfiler
++    let profilerOptions = {
++      entries: options.bufferSize,
++      interval: options.sampleFrequency ? (1000 / (options.sampleFrequency * 1000)) : void 0
++    };
++
++    yield this.startProfiler(profilerOptions);
++
++    this.emit("profiler-activated");
++    return 0;
++  }),
++
++  /**
++   * Returns profile data from now since `startTime`.
++   */
++  getProfile: Task.async(function *(options) {
++    let profilerData = yield (actorCompatibilityBridge("getProfile").call(this, options));
++    // If the backend does not support filtering by start and endtime on platform (< Fx40),
++    // do it on the client (much slower).
++    if (!this.traits.filterable) {
++      RecordingUtils.filterSamples(profilerData.profile, options.startTime || 0);
++    }
++
++    return profilerData;
++  }),
++
++  /**
++   * Invoked whenever a registered event was emitted by the profiler actor.
++   *
++   * @param object response
++   *        The data received from the backend.
++   */
++  _onProfilerEvent: function (_, { topic, subject, details }) {
++    if (topic === "console-api-profiler") {
++      if (subject.action === "profile") {
++        this.emit("console-profile-start", details);
++      } else if (subject.action === "profileEnd") {
++        this.emit("console-profile-end", details);
++      }
++    } else if (topic === "profiler-stopped") {
++      this.emit("profiler-stopped");
++    }
++  },
++
++  toString: () => "[object ProfilerFrontFacade]"
++};
++
++// Bind all the methods that directly proxy to the actor
++PROFILER_ACTOR_METHODS.forEach(method => ProfilerFrontFacade.prototype[method] = actorCompatibilityBridge(method));
++exports.ProfilerFront = ProfilerFrontFacade;
++
++/**
++ * Constructor for a facade around an underlying TimelineFront.
++ */
++function TimelineFrontFacade (target) {
++  this._target = target;
++  EventEmitter.decorate(this);
++}
++
++TimelineFrontFacade.prototype = {
++  EVENTS: ["markers", "frames", "memory", "ticks"],
++
++  connect: Task.async(function*() {
++    let supported = yield timelineActorSupported(this._target);
++    this._actor = supported ?
++                  new TimelineFront(this._target.client, this._target.form) :
++                  new MockTimelineFront();
++
++    this.IS_MOCK = !supported;
++
++    // Binds underlying actor events and consolidates them to a `timeline-data`
++    // exposed event.
++    this.EVENTS.forEach(type => {
++      let handler = this[`_on${type}`] = this._onTimelineData.bind(this, type);
++      this._actor.on(type, handler);
++    });
++  }),
++
++  /**
++   * Override actor's destroy, so we can unregister listeners before
++   * destroying the underlying actor.
++   */
++  destroy: Task.async(function *() {
++    this.EVENTS.forEach(type => this._actor.off(type, this[`_on${type}`]));
++    yield this._actor.destroy();
++  }),
++
++  /**
++   * An aggregate of all events (markers, frames, memory, ticks) and exposes
++   * to PerformanceActorsConnection as a single event.
++   */
++  _onTimelineData: function (type, ...data) {
++    this.emit("timeline-data", type, ...data);
++  },
++
++  toString: () => "[object TimelineFrontFacade]"
++};
++
++// Bind all the methods that directly proxy to the actor
++TIMELINE_ACTOR_METHODS.forEach(method => TimelineFrontFacade.prototype[method] = actorCompatibilityBridge(method));
++exports.TimelineFront = TimelineFrontFacade;
++
++/**
++ * Constructor for a facade around an underlying ProfilerFront.
++ */
++function MemoryFrontFacade (target) {
++  this._target = target;
++  this._pullAllocationSites = this._pullAllocationSites.bind(this);
++  EventEmitter.decorate(this);
++}
++
++MemoryFrontFacade.prototype = {
++  connect: Task.async(function*() {
++    let supported = yield memoryActorSupported(this._target);
++    this._actor = supported ?
++                  new MemoryFront(this._target.client, this._target.form) :
++                  new MockMemoryFront();
++
++    this.IS_MOCK = !supported;
++  }),
++
++  /**
++   * Starts polling for allocation information.
++   */
++  start: Task.async(function *(options) {
++    if (!options.withAllocations) {
++      return 0;
++    }
++
++    yield this.attach();
++
++    let startTime = yield this.startRecordingAllocations({
++      probability: options.allocationsSampleProbability,
++      maxLogLength: options.allocationsMaxLogLength
++    });
++
++    yield this._pullAllocationSites();
++
++    return startTime;
++  }),
++
++  /**
++   * Stops polling for allocation information.
++   */
++  stop: Task.async(function *(options) {
++    if (!options.withAllocations) {
++      return 0;
++    }
++
++    // Since `_pullAllocationSites` is usually running inside a timeout, and
++    // it's performing asynchronous requests to the server, a recording may
++    // be stopped before that method finishes executing. Therefore, we need to
++    // wait for the last request to `getAllocations` to finish before actually
++    // stopping recording allocations.
++    yield this._lastPullAllocationSitesFinished;
++    timers.clearTimeout(this._sitesPullTimeout);
++
++    let endTime = yield this.stopRecordingAllocations();
++    yield this.detach();
++
++    return endTime;
++  }),
++
++  /**
++   * At regular intervals, pull allocations from the memory actor, and
++   * forward them on this Front facade as "timeline-data" events. This
++   * gives the illusion that the MemoryActor supports an EventEmitter-style
++   * event stream.
++   */
++  _pullAllocationSites: Task.async(function *() {
++    let { promise, resolve } = Promise.defer();
++    this._lastPullAllocationSitesFinished = promise;
++
++    if ((yield this.getState()) !== "attached") {
++      resolve();
++      return;
++    }
++
++    let memoryData = yield this.getAllocations();
++    // Match the signature of the TimelineFront events, with "timeline-data"
++    // being the event name, and the second argument describing the type.
++    this.emit("timeline-data", "allocations", {
++      sites: memoryData.allocations,
++      timestamps: memoryData.allocationsTimestamps,
++      frames: memoryData.frames,
++      counts: memoryData.counts
++    });
++
++    this._sitesPullTimeout = timers.setTimeout(this._pullAllocationSites, ALLOCATION_SITE_POLL_TIMER);
++
++    resolve();
++  }),
++
++  toString: () => "[object MemoryFrontFacade]"
++};
++
++// Bind all the methods that directly proxy to the actor
++MEMORY_ACTOR_METHODS.forEach(method => MemoryFrontFacade.prototype[method] = actorCompatibilityBridge(method));
++exports.MemoryFront = MemoryFrontFacade;
+diff --git a/browser/devtools/performance/modules/compatibility.js b/browser/devtools/performance/modules/compatibility.js
+index 2cf4fa3..fd79287 100644
+--- a/browser/devtools/performance/modules/compatibility.js
++++ b/browser/devtools/performance/modules/compatibility.js
+@@ -1,80 +1,17 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Task } = require("resource://gre/modules/Task.jsm");
+-loader.lazyRequireGetter(this, "promise");
++const { Promise } = require("resource://gre/modules/Promise.jsm");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+-loader.lazyRequireGetter(this, "RecordingUtils",
+-  "devtools/performance/recording-utils", true);
+-
+-const REQUIRED_MEMORY_ACTOR_METHODS = [
+-  "attach", "detach", "startRecordingAllocations", "stopRecordingAllocations", "getAllocations"
+-];
+-
+-/**
+- * Constructor for a facade around an underlying ProfilerFront.
+- */
+-function ProfilerFront (target) {
+-  this._target = target;
+-}
+-
+-ProfilerFront.prototype = {
+-  // Connects to the targets underlying real ProfilerFront.
+-  connect: Task.async(function*() {
+-    let target = this._target;
+-    // Chrome and content process targets already have obtained a reference
+-    // to the profiler tab actor. Use it immediately.
+-    if (target.form && target.form.profilerActor) {
+-      this._profiler = target.form.profilerActor;
+-    }
+-    // Check if we already have a grip to the `listTabs` response object
+-    // and, if we do, use it to get to the profiler actor.
+-    else if (target.root && target.root.profilerActor) {
+-      this._profiler = target.root.profilerActor;
+-    }
+-    // Otherwise, call `listTabs`.
+-    else {
+-      this._profiler = (yield listTabs(target.client)).profilerActor;
+-    }
+-
+-    // Fetch and store information about the SPS profiler and
+-    // server profiler.
+-    this.traits = {};
+-    this.traits.filterable = target.getTrait("profilerDataFilterable");
+-  }),
+-
+-  /**
+-   * Makes a request to the underlying real profiler actor. Handles
+-   * backwards compatibility differences based off of the features
+-   * and traits of the actor.
+-   */
+-  _request: function (method, ...args) {
+-    let deferred = promise.defer();
+-    let data = args[0] || {};
+-    data.to = this._profiler;
+-    data.type = method;
+-    this._target.client.request(data, res => {
+-      // If the backend does not support filtering by start and endtime on platform (< Fx40),
+-      // do it on the client (much slower).
+-      if (method === "getProfile" && !this.traits.filterable) {
+-        RecordingUtils.filterSamples(res.profile, data.startTime || 0);
+-      }
+-
+-      deferred.resolve(res);
+-    });
+-    return deferred.promise;
+-  }
+-};
+-
+-exports.ProfilerFront = ProfilerFront;
+ 
+ /**
+  * A dummy front decorated with the provided methods.
+  *
+  * @param array blueprint
+  *        A list of [funcName, retVal] describing the class.
+  */
+ function MockFront (blueprint) {
+@@ -82,31 +19,31 @@ function MockFront (blueprint) {
+ 
+   for (let [funcName, retVal] of blueprint) {
+     this[funcName] = (x => typeof x === "function" ? x() : x).bind(this, retVal);
+   }
+ }
+ 
+ function MockMemoryFront () {
+   MockFront.call(this, [
+-    ["initialize"],
++    ["start", 0], // for facade
++    ["stop", 0], // for facade
+     ["destroy"],
+     ["attach"],
+     ["detach"],
+     ["getState", "detached"],
+     ["startRecordingAllocations", 0],
+     ["stopRecordingAllocations", 0],
+     ["getAllocations", createMockAllocations],
+   ]);
+ }
+ exports.MockMemoryFront = MockMemoryFront;
+ 
+ function MockTimelineFront () {
+   MockFront.call(this, [
+-    ["initialize"],
+     ["destroy"],
+     ["start", 0],
+     ["stop", 0],
+   ]);
+ }
+ exports.MockTimelineFront = MockTimelineFront;
+ 
+ /**
+@@ -164,17 +101,71 @@ function timelineActorSupported(target) {
+     return false;
+   }
+ 
+   return target.hasActor("timeline");
+ }
+ exports.timelineActorSupported = Task.async(timelineActorSupported);
+ 
+ /**
+- * Returns a promise resolved with a listing of all the tabs in the
+- * provided thread client.
++ * Returns a promise resolving to the location of the profiler actor
++ * within this context.
++ *
++ * @param {TabTarget} target
++ * @return {Promise<ProfilerActor>}
++ */
++function getProfiler (target) {
++  let { promise, resolve } = Promise.defer();
++  // Chrome and content process targets already have obtained a reference
++  // to the profiler tab actor. Use it immediately.
++  if (target.form && target.form.profilerActor) {
++    resolve(target.form.profilerActor);
++  }
++  // Check if we already have a grip to the `listTabs` response object
++  // and, if we do, use it to get to the profiler actor.
++  else if (target.root && target.root.profilerActor) {
++    resolve(target.root.profilerActor);
++  }
++  // Otherwise, call `listTabs`.
++  else {
++    target.client.listTabs(({ profilerActor }) => resolve(profilerActor));
++  }
++  return promise;
++}
++exports.getProfiler = Task.async(getProfiler);
++
++/**
++ * Makes a request to an actor that does not have the modern `Front`
++ * interface.
+  */
+-function listTabs(client) {
+-  let deferred = promise.defer();
+-  client.listTabs(deferred.resolve);
+-  return deferred.promise;
++function legacyRequest (target, actor, method, args) {
++  let { promise, resolve } = Promise.defer();
++  let data = args[0] || {};
++  data.to = actor;
++  data.type = method;
++  target.client.request(data, resolve);
++  return promise;
+ }
+ 
++/**
++ * Returns a function to be used as a method on an "Actor" in ./actors.
++ * Calls the underlying actor's method, supporting the modern `Front`
++ * interface if possible, otherwise, falling back to using
++ * `legacyRequest`.
++ */
++function actorCompatibilityBridge (method) {
++  return function () {
++    // Check to see if this is a modern ActorFront, which has its
++    // own `request` method. Also, check if its a mock actor, as it mimicks
++    // the ActorFront interface.
++    // The profiler actor does not currently support the modern `Front`
++    // interface, so we have to manually push packets to it.
++    // TODO bug 1159389, fix up profiler actor to not need this, however
++    // we will need it for backwards compat
++    if (this.IS_MOCK || this._actor.request) {
++      return this._actor[method].apply(this._actor, arguments);
++    }
++    else {
++      return legacyRequest(this._target, this._actor, method, arguments);
++    }
++  };
++}
++exports.actorCompatibilityBridge = actorCompatibilityBridge;
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index 42ae275..fc5ed21 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -7,47 +7,36 @@ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { extend } = require("sdk/util/object");
+ const { RecordingModel } = require("devtools/performance/recording-model");
+ 
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+-loader.lazyRequireGetter(this, "TimelineFront",
+-  "devtools/server/actors/timeline", true);
+-loader.lazyRequireGetter(this, "MemoryFront",
+-  "devtools/server/actors/memory", true);
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+-loader.lazyRequireGetter(this, "compatibility",
+-  "devtools/performance/compatibility");
++loader.lazyRequireGetter(this, "actors",
++  "devtools/performance/actors");
+ 
+ loader.lazyImporter(this, "gDevTools",
+   "resource:///modules/devtools/gDevTools.jsm");
+-loader.lazyImporter(this, "setTimeout",
+-  "resource://gre/modules/Timer.jsm");
+-loader.lazyImporter(this, "clearTimeout",
+-  "resource://gre/modules/Timer.jsm");
+ loader.lazyImporter(this, "Promise",
+   "resource://gre/modules/Promise.jsm");
+ 
+ 
+ // How often do we pull allocation sites from the memory actor.
+ const DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT = 200; // ms
+ 
+ // Events to pipe from PerformanceActorsConnection to the PerformanceFront
+ const CONNECTION_PIPE_EVENTS = [
+   "console-profile-start", "console-profile-ending", "console-profile-end",
+   "timeline-data", "profiler-already-active", "profiler-activated"
+ ];
+ 
+-// Events to listen to from the profiler actor
+-const PROFILER_EVENTS = ["console-api-profiler", "profiler-stopped"];
+-
+ /**
+  * A cache of all PerformanceActorsConnection instances.
+  * The keys are Target objects.
+  */
+ let SharedPerformanceActors = new WeakMap();
+ 
+ /**
+  * Instantiates a shared PerformanceActorsConnection for the specified target.
+@@ -78,27 +67,25 @@ SharedPerformanceActors.forTarget = function(target) {
+  * @param Target target
+  *        The target owning this connection.
+  */
+ function PerformanceActorsConnection(target) {
+   EventEmitter.decorate(this);
+ 
+   this._target = target;
+   this._client = this._target.client;
+-  this._request = this._request.bind(this);
+   this._pendingConsoleRecordings = [];
+   this._sitesPullTimeout = 0;
+   this._recordings = [];
+ 
+-  this._onTimelineMarkers = this._onTimelineMarkers.bind(this);
+-  this._onTimelineFrames = this._onTimelineFrames.bind(this);
+-  this._onTimelineMemory = this._onTimelineMemory.bind(this);
+-  this._onTimelineTicks = this._onTimelineTicks.bind(this);
+-  this._onProfilerEvent = this._onProfilerEvent.bind(this);
+-  this._pullAllocationSites = this._pullAllocationSites.bind(this);
++  this._pipeToConnection = this._pipeToConnection.bind(this);
++  this._onTimelineData = this._onTimelineData.bind(this);
++  this._onConsoleProfileStart = this._onConsoleProfileStart.bind(this);
++  this._onConsoleProfileEnd = this._onConsoleProfileEnd.bind(this);
++  this._onProfilerUnexpectedlyStopped = this._onProfilerUnexpectedlyStopped.bind(this);
+ 
+   Services.obs.notifyObservers(null, "performance-actors-connection-created", null);
+ }
+ 
+ PerformanceActorsConnection.prototype = {
+ 
+   // Properties set when mocks are being used
+   _usingMockMemory: false,
+@@ -122,20 +109,17 @@ PerformanceActorsConnection.prototype = {
+ 
+     // Local debugging needs to make the target remote.
+     yield this._target.makeRemote();
+ 
+     // Sets `this._profiler`, `this._timeline` and `this._memory`.
+     // Only initialize the timeline and memory fronts if the respective actors
+     // are available. Older Gecko versions don't have existing implementations,
+     // in which case all the methods we need can be easily mocked.
+-    yield this._connectProfilerActor();
+-    yield this._connectTimelineActor();
+-    yield this._connectMemoryActor();
+-
++    yield this._connectActors();
+     yield this._registerListeners();
+ 
+     this._connected = true;
+ 
+     this._connecting.resolve();
+     Services.obs.notifyObservers(null, "performance-actors-connection-opened", null);
+   }),
+ 
+@@ -153,152 +137,84 @@ PerformanceActorsConnection.prototype = {
+     yield this._disconnectActors();
+ 
+     this._memory = this._timeline = this._profiler = this._target = this._client = null;
+     this._connected = false;
+     this._connecting = null;
+   }),
+ 
+   /**
+-   * Initializes a connection to the profiler actor. Uses a facade around the ProfilerFront
+-   * for similarity to the other actors in the shared connection.
++   * Initializes fronts and connects to the underlying actors using the facades
++   * found in ./actors.js.
+    */
+-  _connectProfilerActor: Task.async(function*() {
+-    this._profiler = new compatibility.ProfilerFront(this._target);
+-    yield this._profiler.connect();
+-  }),
+-
+-  /**
+-   * Initializes a connection to a timeline actor.
+-   */
+-  _connectTimelineActor: function() {
+-    let supported = yield compatibility.timelineActorSupported(this._target);
+-    if (supported) {
+-      this._timeline = new TimelineFront(this._target.client, this._target.form);
+-    } else {
+-      this._usingMockTimeline = true;
+-      this._timeline = new compatibility.MockTimelineFront();
+-    }
+-  },
+-
+-  /**
+-   * Initializes a connection to a memory actor.
+-   */
+-  _connectMemoryActor: Task.async(function* () {
+-    let supported = yield compatibility.memoryActorSupported(this._target);
+-    if (supported) {
+-      this._memory = new MemoryFront(this._target.client, this._target.form);
+-    } else {
+-      this._usingMockMemory = true;
+-      this._memory = new compatibility.MockMemoryFront();
+-    }
++  _connectActors: Task.async(function*() {
++    this._profiler = new actors.ProfilerFront(this._target);
++    this._memory = new actors.MemoryFront(this._target);
++    this._timeline = new actors.TimelineFront(this._target);
++
++    yield Promise.all([
++      this._profiler.connect(),
++      this._memory.connect(),
++      this._timeline.connect()
++    ]);
++
++    // Expose server support status of underlying actors
++    // after connecting.
++    this._usingMockMemory = this._memory.IS_MOCK;
++    this._usingMockTimeline = this._timeline.IS_MOCK;
+   }),
+ 
+   /**
+    * Registers listeners on events from the underlying
+    * actors, so the connection can handle them.
+    */
+-  _registerListeners: Task.async(function*() {
+-    // Pipe events from TimelineActor to the PerformanceFront
+-    this._timeline.on("markers", this._onTimelineMarkers);
+-    this._timeline.on("frames", this._onTimelineFrames);
+-    this._timeline.on("memory", this._onTimelineMemory);
+-    this._timeline.on("ticks", this._onTimelineTicks);
+-
+-    // Register events on the profiler actor to hook into `console.profile*` calls.
+-    yield this._request("profiler", "registerEventNotifications", { events: PROFILER_EVENTS });
+-    this._client.addListener("eventNotification", this._onProfilerEvent);
+-  }),
++  _registerListeners: function () {
++    this._timeline.on("timeline-data", this._onTimelineData);
++    this._memory.on("timeline-data", this._onTimelineData);
++    this._profiler.on("console-profile-start", this._onConsoleProfileStart);
++    this._profiler.on("console-profile-end", this._onConsoleProfileEnd);
++    this._profiler.on("profiler-stopped", this._onProfilerUnexpectedlyStopped);
++    this._profiler.on("profiler-already-active", this._pipeToConnection);
++    this._profiler.on("profiler-activated", this._pipeToConnection);
++  },
+ 
+   /**
+    * Unregisters listeners on events on the underlying actors.
+    */
+-  _unregisterListeners: Task.async(function*() {
+-    this._timeline.off("markers", this._onTimelineMarkers);
+-    this._timeline.off("frames", this._onTimelineFrames);
+-    this._timeline.off("memory", this._onTimelineMemory);
+-    this._timeline.off("ticks", this._onTimelineTicks);
+-
+-    yield this._request("profiler", "unregisterEventNotifications", { events: PROFILER_EVENTS });
+-    this._client.removeListener("eventNotification", this._onProfilerEvent);
+-  }),
++  _unregisterListeners: function () {
++    this._timeline.off("timeline-data", this._onTimelineData);
++    this._memory.off("timeline-data", this._onTimelineData);
++    this._profiler.off("console-profile-start", this._onConsoleProfileStart);
++    this._profiler.off("console-profile-end", this._onConsoleProfileEnd);
++    this._profiler.off("profiler-stopped", this._onProfilerUnexpectedlyStopped);
++    this._profiler.off("profiler-already-active", this._pipeToConnection);
++    this._profiler.off("profiler-activated", this._pipeToConnection);
++  },
+ 
+   /**
+    * Closes the connections to non-profiler actors.
+    */
+   _disconnectActors: Task.async(function* () {
+-    yield this._timeline.destroy();
+-    yield this._memory.destroy();
++    yield Promise.all([
++      this._profiler.destroy(),
++      this._timeline.destroy(),
++      this._memory.destroy()
++    ]);
+   }),
+ 
+   /**
+-   * Sends the request over the remote debugging protocol to the
+-   * specified actor.
+-   *
+-   * @param string actor
+-   *        Currently supported: "profiler", "timeline", "memory".
+-   * @param string method
+-   *        Method to call on the backend.
+-   * @param any args [optional]
+-   *        Additional data or arguments to send with the request.
+-   * @return object
+-   *         A promise resolved with the response once the request finishes.
+-   */
+-  _request: function(actor, method, ...args) {
+-    // Handle requests to the profiler actor.
+-    if (actor == "profiler") {
+-      return this._profiler._request(method, ...args);
+-    }
+-
+-    // Handle requests to the timeline actor.
+-    if (actor == "timeline") {
+-      return this._timeline[method].apply(this._timeline, args);
+-    }
+-
+-    // Handle requests to the memory actor.
+-    if (actor == "memory") {
+-      return this._memory[method].apply(this._memory, args);
+-    }
+-  },
+-
+-  /**
+-   * Invoked whenever a registered event was emitted by the profiler actor.
+-   *
+-   * @param object response
+-   *        The data received from the backend.
+-   */
+-  _onProfilerEvent: function (_, { topic, subject, details }) {
+-    if (topic === "console-api-profiler") {
+-      if (subject.action === "profile") {
+-        this._onConsoleProfileStart(details);
+-      } else if (subject.action === "profileEnd") {
+-        this._onConsoleProfileEnd(details);
+-      }
+-    } else if (topic === "profiler-stopped") {
+-      this._onProfilerUnexpectedlyStopped();
+-    }
+-  },
+-
+-  /**
+-   * TODO handle bug 1144438
+-   */
+-  _onProfilerUnexpectedlyStopped: function () {
+-
+-  },
+-
+-  /**
+    * Invoked whenever `console.profile` is called.
+    *
+    * @param string profileLabel
+    *        The provided string argument if available; undefined otherwise.
+    * @param number currentTime
+    *        The time (in milliseconds) when the call was made, relative to when
+    *        the nsIProfiler module was started.
+    */
+-  _onConsoleProfileStart: Task.async(function *({ profileLabel, currentTime: startTime }) {
++  _onConsoleProfileStart: Task.async(function *(_, { profileLabel, currentTime: startTime }) {
+     let recordings = this._recordings;
+ 
+     // Abort if a profile with this label already exists.
+     if (recordings.find(e => e.getLabel() === profileLabel)) {
+       return;
+     }
+ 
+     // Ensure the performance front is set up and ready.
+@@ -319,17 +235,17 @@ PerformanceActorsConnection.prototype = {
+    * Invoked whenever `console.profileEnd` is called.
+    *
+    * @param string profileLabel
+    *        The provided string argument if available; undefined otherwise.
+    * @param number currentTime
+    *        The time (in milliseconds) when the call was made, relative to when
+    *        the nsIProfiler module was started.
+    */
+-  _onConsoleProfileEnd: Task.async(function *(data) {
++  _onConsoleProfileEnd: Task.async(function *(_, data) {
+     // If no data, abort; can occur if profiler isn't running and we get a surprise
+     // call to console.profileEnd()
+     if (!data) {
+       return;
+     }
+     let { profileLabel, currentTime: endTime } = data;
+ 
+     let pending = this._recordings.filter(r => r.isConsole() && r.isRecording());
+@@ -355,37 +271,34 @@ PerformanceActorsConnection.prototype = {
+       return;
+     }
+ 
+     this.emit("console-profile-ending", model);
+     yield this.stopRecording(model);
+     this.emit("console-profile-end", model);
+   }),
+ 
+-  /**
+-   * Handlers for TimelineActor events. All pipe to `_onTimelineData`
+-   * with the appropriate event name.
+-   */
+-  _onTimelineMarkers: function (markers) { this._onTimelineData("markers", markers); },
+-  _onTimelineFrames: function (delta, frames) { this._onTimelineData("frames", delta, frames); },
+-  _onTimelineMemory: function (delta, measurement) { this._onTimelineData("memory", delta, measurement); },
+-  _onTimelineTicks: function (delta, timestamps) { this._onTimelineData("ticks", delta, timestamps); },
++ /**
++  * TODO handle bug 1144438
++  */
++  _onProfilerUnexpectedlyStopped: function () {
++    Cu.reportError("Profiler unexpectedly stopped.", arguments);
++  },
+ 
+   /**
+    * Called whenever there is timeline data of any of the following types:
+    * - markers
+    * - frames
+    * - memory
+    * - ticks
+    * - allocations
+    *
+    * Populate our internal store of recordings for all currently recording sessions.
+    */
+-
+-  _onTimelineData: function (...data) {
++  _onTimelineData: function (_, ...data) {
+     this._recordings.forEach(e => e.addTimelineData.apply(e, data));
+     this.emit("timeline-data", ...data);
+   },
+ 
+   /**
+    * Begins a recording session
+    *
+    * @param object options
+@@ -393,25 +306,23 @@ PerformanceActorsConnection.prototype = {
+    *        `withTicks`, `withMemory` and `withAllocations`, `probability`, and `maxLogLength`.
+    * @return object
+    *         A promise that is resolved once recording has started.
+    */
+   startRecording: Task.async(function*(options = {}) {
+     let model = new RecordingModel(options);
+     // All actors are started asynchronously over the remote debugging protocol.
+     // Get the corresponding start times from each one of them.
+-    let profilerStartTime = yield this._startProfiler(options);
+-    let timelineStartTime = yield this._startTimeline(options);
+-    let memoryStartTime = yield this._startMemory(options);
+-
+-    let data = {
+-      profilerStartTime,
+-      timelineStartTime,
+-      memoryStartTime
+-    };
++    // The timeline and memory actors are target-dependent, so start those as well,
++    // even though these are mocked in older Geckos (FF < 35)
++    let profilerStartTime = yield this._profiler.start(options);
++    let timelineStartTime = yield this._timeline.start(options);
++    let memoryStartTime = yield this._memory.start(options);
++
++    let data = { profilerStartTime, timelineStartTime, memoryStartTime };
+ 
+     // Signify to the model that the recording has started,
+     // populate with data and store the recording model here.
+     model.populate(data);
+     this._recordings.push(model);
+ 
+     return model;
+   }),
+@@ -438,27 +349,27 @@ PerformanceActorsConnection.prototype = {
+     // remove it from the internal store.
+     //
+     // In the case where a console.profile is generated via the console (so the tools are
+     // open), we initialize the Performance tool so it can listen to those events.
+     this._recordings.splice(this._recordings.indexOf(model), 1);
+ 
+     let config = model.getConfiguration();
+     let startTime = model.getProfilerStartTime();
+-    let profilerData = yield this._request("profiler", "getProfile", { startTime });
++    let profilerData = yield this._profiler.getProfile({ startTime });
+     let memoryEndTime = Date.now();
+     let timelineEndTime = Date.now();
+ 
+     // Only if there are no more sessions recording do we stop
+     // the underlying memory and timeline actors. If we're still recording,
+     // juse use Date.now() for the memory and timeline end times, as those
+     // are only used in tests.
+     if (!this.isRecording()) {
+-      memoryEndTime = yield this._stopMemory(config);
+-      timelineEndTime = yield this._stopTimeline(config);
++      memoryEndTime = yield this._memory.stop(config);
++      timelineEndTime = yield this._timeline.stop(config);
+     }
+ 
+     // Set the results on the RecordingModel itself.
+     model._onStopRecording({
+       // Data available only at the end of a recording.
+       profile: profilerData.profile,
+ 
+       // End times for all the actors.
+@@ -476,153 +387,37 @@ PerformanceActorsConnection.prototype = {
+    *
+    * @return Boolean
+    */
+   isRecording: function () {
+     return this._recordings.some(recording => recording.isRecording());
+   },
+ 
+   /**
+-   * Starts the profiler actor, if necessary.
++   * An event from an underlying actor that we just want
++   * to pipe to the connection itself.
+    */
+-  _startProfiler: Task.async(function *(options={}) {
+-    // Start the profiler only if it wasn't already active. The built-in
+-    // nsIPerformance module will be kept recording, because it's the same instance
+-    // for all targets and interacts with the whole platform, so we don't want
+-    // to affect other clients by stopping (or restarting) it.
+-    let profilerStatus = yield this._request("profiler", "isActive");
+-    if (profilerStatus.isActive) {
+-      this.emit("profiler-already-active");
+-      return profilerStatus.currentTime;
+-    }
+-
+-    // Translate options from the recording model into profiler-specific
+-    // options for the nsIProfiler
+-    let profilerOptions = {
+-      entries: options.bufferSize,
+-      interval: options.sampleFrequency ? (1000 / (options.sampleFrequency * 1000)) : void 0
+-    };
+-
+-    yield this._request("profiler", "startProfiler", profilerOptions);
+-
+-    this.emit("profiler-activated");
+-    return 0;
+-  }),
+-
+-  /**
+-   * Starts the timeline actor.
+-   */
+-  _startTimeline: Task.async(function *(options) {
+-    // The timeline actor is target-dependent, so just make sure it's recording.
+-    // It won't, however, be available in older Geckos (FF < 35).
+-    return (yield this._request("timeline", "start", options));
+-  }),
+-
+-  /**
+-   * Stops the timeline actor.
+-   */
+-  _stopTimeline: Task.async(function *(options) {
+-    return (yield this._request("timeline", "stop"));
+-  }),
+-
+-  /**
+-   * Starts polling for allocations from the memory actor, if necessary.
+-   */
+-  _startMemory: Task.async(function *(options) {
+-    if (!options.withAllocations) {
+-      return 0;
+-    }
+-    let memoryStartTime = yield this._startRecordingAllocations(options);
+-    yield this._pullAllocationSites();
+-    return memoryStartTime;
+-  }),
+-
+-  /**
+-   * Stops polling for allocations from the memory actor, if necessary.
+-   */
+-  _stopMemory: Task.async(function *(options) {
+-    if (!options.withAllocations) {
+-      return 0;
+-    }
+-    // Since `_pullAllocationSites` is usually running inside a timeout, and
+-    // it's performing asynchronous requests to the server, a recording may
+-    // be stopped before that method finishes executing. Therefore, we need to
+-    // wait for the last request to `getAllocations` to finish before actually
+-    // stopping recording allocations.
+-    yield this._lastPullAllocationSitesFinished;
+-    clearTimeout(this._sitesPullTimeout);
+-
+-    return yield this._stopRecordingAllocations();
+-  }),
+-
+-  /**
+-   * Starts recording allocations in the memory actor.
+-   */
+-  _startRecordingAllocations: Task.async(function*(options) {
+-    yield this._request("memory", "attach");
+-    let memoryStartTime = yield this._request("memory", "startRecordingAllocations", {
+-      probability: options.allocationsSampleProbability,
+-      maxLogLength: options.allocationsMaxLogLength
+-    });
+-    return memoryStartTime;
+-  }),
+-
+-  /**
+-   * Stops recording allocations in the memory actor.
+-   */
+-  _stopRecordingAllocations: Task.async(function*() {
+-    let memoryEndTime = yield this._request("memory", "stopRecordingAllocations");
+-    yield this._request("memory", "detach");
+-    return memoryEndTime;
+-  }),
+-
+-  /**
+-   * At regular intervals, pull allocations from the memory actor, and forward
+-   * them to consumers.
+-   */
+-  _pullAllocationSites: Task.async(function *() {
+-    let deferred = promise.defer();
+-    this._lastPullAllocationSitesFinished = deferred.promise;
+-
+-    let isDetached = (yield this._request("memory", "getState")) !== "attached";
+-    if (isDetached) {
+-      deferred.resolve();
+-      return;
+-    }
+-
+-    let memoryData = yield this._request("memory", "getAllocations");
+-
+-    this._onTimelineData("allocations", {
+-      sites: memoryData.allocations,
+-      timestamps: memoryData.allocationsTimestamps,
+-      frames: memoryData.frames,
+-      counts: memoryData.counts
+-    });
+-
+-    let delay = DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT;
+-    this._sitesPullTimeout = setTimeout(this._pullAllocationSites, delay);
+-
+-    deferred.resolve();
+-  }),
++  _pipeToConnection: function (eventName, ...args) {
++    this.emit(eventName, ...args);
++  },
+ 
+   toString: () => "[object PerformanceActorsConnection]"
+ };
+ 
+ /**
+  * A thin wrapper around a shared PerformanceActorsConnection for the parent target.
+  * Handles manually starting and stopping a recording.
+  *
+  * @param PerformanceActorsConnection connection
+  *        The shared instance for the parent target.
+  */
+ function PerformanceFront(connection) {
+   EventEmitter.decorate(this);
+ 
+   this._connection = connection;
+-  this._request = connection._request;
+ 
+   // Set when mocks are being used
+   this._usingMockMemory = connection._usingMockMemory;
+   this._usingMockTimeline = connection._usingMockTimeline;
+ 
+   // Pipe the console profile events from the connection
+   // to the front so that the UI can listen.
+   CONNECTION_PIPE_EVENTS.forEach(eventName => this._connection.on(eventName, () => this.emit.apply(this, arguments)));
+@@ -660,16 +455,27 @@ PerformanceFront.prototype = {
+   /**
+    * Returns an object indicating if mock actors are being used or not.
+    */
+   getMocksInUse: function () {
+     return {
+       memory: this._usingMockMemory,
+       timeline: this._usingMockTimeline
+     };
++  },
++
++  /**
++   * Interacts with the connection's actors. Should only be used in tests.
++   */
++  _request: function (actorName, method, ...args) {
++    if (!gDevTools.testing) {
++      throw new Error("PerformanceFront._request may only be used in tests.");
++    }
++    let actor = this._connection[`_${actorName}`];
++    return actor[method].apply(actor, args);
+   }
+ };
+ 
+ /**
+  * Creates an object of configurations based off of preferences for a RecordingModel.
+  */
+ function getRecordingModelPrefs () {
+   return {
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index 301fa6d..b6fd77c 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -1,14 +1,15 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
++    'modules/actors.js',
+     'modules/compatibility.js',
+     'modules/front.js',
+     'modules/io.js',
+     'modules/performance-graphs.js',
+     'modules/recording-model.js',
+     'modules/recording-utils.js',
+     'panel.js'
+ ]
+diff --git a/browser/devtools/performance/test/browser_perf-shared-connection-02.js b/browser/devtools/performance/test/browser_perf-shared-connection-02.js
+index 5df422a..075c297 100644
+--- a/browser/devtools/performance/test/browser_perf-shared-connection-02.js
++++ b/browser/devtools/performance/test/browser_perf-shared-connection-02.js
+@@ -13,18 +13,16 @@ function spawnTest () {
+ 
+   is(gProfilerConnectionsOpened, 1,
+     "Only one profiler connection was opened.");
+ 
+   let sharedConnection = getPerformanceActorsConnection(target);
+ 
+   ok(sharedConnection,
+     "A shared profiler connection for the current toolbox was retrieved.");
+-  is(sharedConnection._request, panel.panelWin.gFront._request,
+-    "The same shared profiler connection is used by the panel's front.");
+ 
+   yield sharedConnection.open();
+ 
+   is(gProfilerConnectionsOpened, 1,
+     "No additional profiler connections were opened.");
+ 
+   yield teardown(panel);
+   finish();
+-- 
+2.2.1
+

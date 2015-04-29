@@ -1,0 +1,191 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Tue, 28 Apr 2015 09:07:22 -0700
+Subject: Bug 114187 - Add getBufferInfo to devtools profiler actor. r=fitzgen
+
+diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
+index 346719a..380741e 100644
+--- a/toolkit/devtools/server/actors/profiler.js
++++ b/toolkit/devtools/server/actors/profiler.js
+@@ -54,16 +54,26 @@ ProfilerActor.prototype = {
+    * Returns an array of feature strings, describing the profiler features
+    * that are available on this platform. Can be called while the profiler
+    * is stopped.
+    */
+   onGetFeatures: function() {
+     return { features: nsIProfilerModule.GetFeatures([]) };
+   },
+ 
++  onGetBufferInfo: function(request) {
++    let position = {}, totalSize = {}, generation = {};
++    nsIProfilerModule.GetBufferInfo(position, totalSize, generation);
++    return {
++      position: position.value,
++      totalSize: totalSize.value,
++      generation: generation.value
++    }
++  },
++
+   /**
+    * Returns the configuration used that was originally passed in to start up the
+    * profiler. Used for tests, and does not account for others using nsIProfiler.
+    */
+   onGetStartOptions: function() {
+     return this._profilerStartOptions || {};
+   },
+ 
+@@ -316,16 +326,17 @@ function checkProfilerConsumers() {
+ 
+ /**
+  * The request types this actor can handle.
+  * At the moment there are two known users of the Profiler actor:
+  * the devtools and the Gecko Profiler addon, which uses the debugger
+  * protocol to get profiles from Fennec.
+  */
+ ProfilerActor.prototype.requestTypes = {
++  "getBufferInfo": ProfilerActor.prototype.onGetBufferInfo,
+   "getFeatures": ProfilerActor.prototype.onGetFeatures,
+   "startProfiler": ProfilerActor.prototype.onStartProfiler,
+   "stopProfiler": ProfilerActor.prototype.onStopProfiler,
+   "isActive": ProfilerActor.prototype.onIsActive,
+   "getSharedLibraryInformation": ProfilerActor.prototype.onGetSharedLibraryInformation,
+   "getProfile": ProfilerActor.prototype.onGetProfile,
+   "registerEventNotifications": ProfilerActor.prototype.onRegisterEventNotifications,
+   "unregisterEventNotifications": ProfilerActor.prototype.onUnregisterEventNotifications,
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_getbufferinfo.js b/toolkit/devtools/server/tests/unit/test_profiler_getbufferinfo.js
+new file mode 100644
+index 0000000..26d9e71
+--- /dev/null
++++ b/toolkit/devtools/server/tests/unit/test_profiler_getbufferinfo.js
+@@ -0,0 +1,107 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++"use strict";
++
++/**
++ * Tests if the profiler actor returns its buffer status via getBufferInfo.
++ */
++
++const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++const INITIAL_WAIT_TIME = 100; // ms
++const MAX_WAIT_TIME = 20000; // ms
++const MAX_PROFILER_ENTRIES = 10000000;
++
++function run_test()
++{
++  get_chrome_actors((client, form) => {
++    let actor = form.profilerActor;
++    activate_profiler(client, actor, startTime => {
++      wait_for_samples(client, actor, () => {
++        check_buffer(client, actor, () => {
++          deactivate_profiler(client, actor, () => {
++            client.close(do_test_finished);
++          });
++        });
++      });
++    });
++  })
++
++  do_test_pending();
++}
++
++function check_buffer(client, actor, callback)
++{
++  client.request({ to: actor, type: "getBufferInfo" }, response => {
++    do_check_true(typeof response.position === "number");
++    do_check_true(typeof response.totalSize === "number");
++    do_check_true(typeof response.generation === "number");
++    do_check_true(response.position > 0 && response.position < response.totalSize);
++    do_check_true(response.totalSize === MAX_PROFILER_ENTRIES);
++    // There's no way we'll fill the buffer in this test.
++    do_check_true(response.generation === 0);
++
++    callback();
++  });
++}
++
++function activate_profiler(client, actor, callback)
++{
++  client.request({ to: actor, type: "startProfiler", entries: MAX_PROFILER_ENTRIES }, response => {
++    do_check_true(response.started);
++    client.request({ to: actor, type: "isActive" }, response => {
++      do_check_true(response.isActive);
++      callback(response.currentTime);
++    });
++  });
++}
++
++function deactivate_profiler(client, actor, callback)
++{
++  client.request({ to: actor, type: "stopProfiler" }, response => {
++    do_check_false(response.started);
++    client.request({ to: actor, type: "isActive" }, response => {
++      do_check_false(response.isActive);
++      callback();
++    });
++  });
++}
++
++function wait_for_samples(client, actor, callback)
++{
++  function attempt(delay)
++  {
++    // No idea why, but Components.stack.sourceLine returns null.
++    let funcLine = Components.stack.lineNumber - 3;
++
++    // Spin for the requested time, then take a sample.
++    let start = Date.now();
++    let stack;
++    do_print("Attempt: delay = " + delay);
++    while (Date.now() - start < delay) { stack = Components.stack; }
++    do_print("Attempt: finished waiting.");
++
++    client.request({ to: actor, type: "getProfile" }, response => {
++      // At this point, we may or may not have samples, depending on
++      // whether the spin loop above has given the profiler enough time
++      // to get started.
++      if (response.profile.threads[0].samples.length == 0) {
++        if (delay < MAX_WAIT_TIME) {
++          // Double the spin-wait time and try again.
++          do_print("Attempt: no samples, going around again.");
++          return attempt(delay * 2);
++        } else {
++          // We've waited long enough, so just fail.
++          do_print("Attempt: waited a long time, but no samples were collected.");
++          do_print("Giving up.");
++          do_check_true(false);
++          return;
++        }
++      }
++      callback();
++    });
++  }
++
++  // Start off with a 100 millisecond delay.
++  attempt(INITIAL_WAIT_TIME);
++}
+diff --git a/toolkit/devtools/server/tests/unit/xpcshell.ini b/toolkit/devtools/server/tests/unit/xpcshell.ini
+index 0880897..9ed7cf1 100644
+--- a/toolkit/devtools/server/tests/unit/xpcshell.ini
++++ b/toolkit/devtools/server/tests/unit/xpcshell.ini
+@@ -211,16 +211,17 @@ skip-if = toolkit == "gonk"
+ reason = bug 820380
+ [test_breakpoint-actor-map.js]
+ [test_profiler_activation-01.js]
+ [test_profiler_activation-02.js]
+ [test_profiler_close.js]
+ [test_profiler_data.js]
+ [test_profiler_events-01.js]
+ [test_profiler_events-02.js]
++[test_profiler_getbufferinfo.js]
+ [test_profiler_getfeatures.js]
+ [test_profiler_getsharedlibraryinformation.js]
+ [test_unsafeDereference.js]
+ [test_add_actors.js]
+ [test_trace_actor-01.js]
+ [test_trace_actor-02.js]
+ [test_trace_actor-03.js]
+ [test_trace_actor-04.js]
+-- 
+2.2.1
+

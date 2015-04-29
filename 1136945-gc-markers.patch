@@ -1,7 +1,6 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 27 Apr 2015 23:13:01 -0700
-Subject: Bug 1136945 - Convert GC events from memory actor to be
- emitted as pseudo-markers from the TimelineActor. r=vp,fitzgen
+Date: Tue, 28 Apr 2015 10:32:32 -0700
+Subject: Bug 1136945 - Convert GC events from memory actor to be emitted as pseudo-markers from the TimelineActor. Pull out the core of the MemoryActor into a bridge, so it does not have to be used over RDP.  r=vp,fitzgen
 
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
 index 01eee2a..2e9a4bc 100644
@@ -197,77 +196,71 @@ index 7f0a4bc..2b75bc6 100644
  .marker-details-labelname {
    -moz-padding-end: 4px;
  }
-diff --git a/js/src/doc/Debugger/Debugger.Memory.md b/js/src/doc/Debugger/Debugger.Memory.md
-index 106e8e0..2c5123d 100644
---- a/js/src/doc/Debugger/Debugger.Memory.md
-+++ b/js/src/doc/Debugger/Debugger.Memory.md
-@@ -132,17 +132,17 @@ compartment.
-           "endTimestamp": <i>timestamp</i>,
-         }
-         </code></pre>
- 
-         Here the *timestamp* values are [timestamps][] of the GC slice's start
-         and end events.
- 
-     `reason`
--    :   A very short string describing th reason why the collection was
-+    :   A very short string describing the reason why the collection was
-         triggered. Known values include the following:
- 
-         * "API"
-         * "EAGER_ALLOC_TRIGGER"
-         * "DESTROY_RUNTIME"
-         * "DESTROY_CONTEXT"
-         * "LAST_DITCH"
-         * "TOO_MUCH_MALLOC"
-@@ -176,17 +176,23 @@ compartment.
-         * "SHUTDOWN_CC"
-         * "FINISH_LARGE_EVALUATE"
-         * "USER_INACTIVE"
- 
-     `nonincrementalReason`
-     :   If SpiderMonkey's collector determined it could not incrementally
-         collect garbage, and had to do a full GC all at once, this is a short
-         string describing the reason it determined the full GC was necessary.
--        Otherwise, `null` is returned.
-+        Otherwise, `null` is returned. Known values include the following:
-+
-+        * "GC mode"
-+        * "malloc bytes trigger"
-+        * "allocation trigger"
-+        * "requested"
-+
- 
- Function Properties of the `Debugger.Memory.prototype` Object
- -------------------------------------------------------------
- 
- <code id='drain-alloc-log'>drainAllocationsLog()</code>
- :   When `trackingAllocationSites` is `true`, this method returns an array of
-     recent `Object` allocations within the set of debuggees. *Recent* is
-     defined as the `maxAllocationsLogLength` most recent `Object` allocations
 diff --git a/toolkit/devtools/server/actors/memory.js b/toolkit/devtools/server/actors/memory.js
-index eca5a40..5b3b2d2 100644
+index eca5a40..d60bf17 100644
 --- a/toolkit/devtools/server/actors/memory.js
 +++ b/toolkit/devtools/server/actors/memory.js
-@@ -4,16 +4,17 @@
+@@ -1,49 +1,30 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  
  "use strict";
  
- const { Cc, Ci, Cu } = require("chrome");
- let protocol = require("devtools/server/protocol");
- let { method, RetVal, Arg, types } = protocol;
- const { reportException } = require("devtools/toolkit/DevToolsUtils");
+-const { Cc, Ci, Cu } = require("chrome");
+-let protocol = require("devtools/server/protocol");
+-let { method, RetVal, Arg, types } = protocol;
+-const { reportException } = require("devtools/toolkit/DevToolsUtils");
++const protocol = require("devtools/server/protocol");
++const { method, RetVal, Arg, types } = protocol;
++const { MemoryBridge } = require("./utils/memory-bridge");
  loader.lazyRequireGetter(this, "events", "sdk/event/core");
-+loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
  loader.lazyRequireGetter(this, "StackFrameCache",
                           "devtools/server/actors/utils/stack", true);
  
  /**
-  * A method decorator that ensures the actor is in the expected state before
-  * proceeding. If the actor is not in the expected state, the decorated method
-  * returns a rejected promise.
-  *
-@@ -61,16 +62,17 @@ types.addDictType("AllocationsRecordingOptions", {
+- * A method decorator that ensures the actor is in the expected state before
+- * proceeding. If the actor is not in the expected state, the decorated method
+- * returns a rejected promise.
+- *
+- * @param String expectedState
+- *        The expected state.
+- * @param String activity
+- *        Additional info about what's going on.
+- * @param Function method
+- *        The actor method to proceed with when the actor is in the expected
+- *        state.
+- *
+- * @returns Function
+- *          The decorated method.
++ * Proxies a call to the MemoryActor to the underlying MemoryBridge,
++ * allowing access to MemoryBridge features by defining the RDP
++ * request/response signature.
+  */
+-function expectState(expectedState, method, activity) {
+-  return function(...args) {
+-    if (this.state !== expectedState) {
+-      const msg = `Wrong state while ${activity}:` +
+-                  `Expected '${expectedState}',` +
+-                  `but current state is '${this.state}'.`;
+-      return Promise.reject(new Error(msg));
+-    }
+-
+-    return method.apply(this, args);
+-  };
++function linkBridge (methodName, definition) {
++  return method(function () {
++    return this.bridge[methodName].apply(this.bridge, arguments);
++  }, definition);
+ }
+ 
+ types.addDictType("AllocationsRecordingOptions", {
+   // The probability we sample any given allocation when recording
+   // allocations. Must be between 0.0 and 1.0. Defaults to 1.0, or sampling
+   // every allocation.
+   probability: "number",
+ 
+@@ -61,385 +42,167 @@ types.addDictType("AllocationsRecordingOptions", {
   */
  let MemoryActor = protocol.ActorClass({
    typeName: "memory",
@@ -285,77 +278,406 @@ index eca5a40..5b3b2d2 100644
        type: "garbage-collection",
        data: Arg(0, "json"),
      },
-@@ -86,19 +88,19 @@ let MemoryActor = protocol.ActorClass({
+   },
+ 
+-  get dbg() {
+-    if (!this._dbg) {
+-      this._dbg = this.parent.makeDebugger();
+-    }
+-    return this._dbg;
+-  },
+-
    initialize: function(conn, parent, frameCache = new StackFrameCache()) {
      protocol.Actor.prototype.initialize.call(this, conn);
-     this.parent = parent;
-     this._mgr = Cc["@mozilla.org/memory-reporter-manager;1"]
-                   .getService(Ci.nsIMemoryReporterManager);
-     this.state = "detached";
-     this._dbg = null;
-     this._frameCache = frameCache;
+-    this.parent = parent;
+-    this._mgr = Cc["@mozilla.org/memory-reporter-manager;1"]
+-                  .getService(Ci.nsIMemoryReporterManager);
+-    this.state = "detached";
+-    this._dbg = null;
+-    this._frameCache = frameCache;
 -
 -    this._onGarbageCollection = data =>
 -      events.emit(this, "garbage-collection", data);
-+    // A new event target is used so events can be shared locally without going
-+    // over RDP, which will throw if there are no listeners.
-+    this.eventTarget = EventTarget();
+-
+-    this._onWindowReady = this._onWindowReady.bind(this);
  
-     this._onWindowReady = this._onWindowReady.bind(this);
- 
-     events.on(this.parent, "window-ready", this._onWindowReady);
+-    events.on(this.parent, "window-ready", this._onWindowReady);
++    this._onGarbageCollection = this._onGarbageCollection.bind(this);
++    this.bridge = new MemoryBridge(parent, frameCache);
++    this.bridge.on("garbage-collection", this._onGarbageCollection);
    },
  
    destroy: function() {
-     events.off(this.parent, "window-ready", this._onWindowReady);
-@@ -114,17 +116,17 @@ let MemoryActor = protocol.ActorClass({
+-    events.off(this.parent, "window-ready", this._onWindowReady);
+-
+-    this._mgr = null;
+-    if (this.state === "attached") {
+-      this.detach();
+-    }
++    this.bridge.off("garbage-collection", this._onGarbageCollection);
++    this.bridge.destroy();
+     protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+   /**
     * Attach to this MemoryActor.
     *
     * This attaches the MemoryActor's Debugger instance so that you can start
     * recording allocations or take a census of the heap. In addition, the
     * MemoryActor will start emitting GC events.
     */
-   attach: method(expectState("detached", function() {
-     this.dbg.addDebuggees();
+-  attach: method(expectState("detached", function() {
+-    this.dbg.addDebuggees();
 -    this.dbg.memory.onGarbageCollection = this._onGarbageCollection;
-+    this.dbg.memory.onGarbageCollection = this._onGarbageCollection.bind(this);
-     this.state = "attached";
-   },
-   `attaching to the debugger`), {
+-    this.state = "attached";
+-  },
+-  `attaching to the debugger`), {
++  attach: linkBridge("attach", {
      request: {},
      response: {
        type: "attached"
      }
    }),
-@@ -181,16 +183,23 @@ let MemoryActor = protocol.ActorClass({
-         this._clearDebuggees();
-         this._frameCache.initFrames();
-       }
-       this.dbg.addDebuggees();
-     }
-   },
  
    /**
-+   * Handler for GC events on the Debugger.Memory instance.
-+   */
-+  _onGarbageCollection: function (data) {
-+    events.emit(this.eventTarget, "garbage-collection", data);
-+  },
-+
-+  /**
+    * Detach from this MemoryActor.
+    */
+-  detach: method(expectState("attached", function() {
+-    this._clearDebuggees();
+-    this.dbg.enabled = false;
+-    this._dbg = null;
+-    this.state = "detached";
+-  },
+-  `detaching from the debugger`), {
++  detach: linkBridge("detach", {
+     request: {},
+     response: {
+       type: "detached"
+     }
+   }),
+ 
+   /**
+    * Gets the current MemoryActor attach/detach state.
+    */
+-  getState: method(function() {
+-    return this.state;
+-  }, {
++  getState: linkBridge("getState", {
+     response: {
+       state: RetVal(0, "string")
+     }
+   }),
+ 
+-  _clearDebuggees: function() {
+-    if (this._dbg) {
+-      if (this.dbg.memory.trackingAllocationSites) {
+-        this.dbg.memory.drainAllocationsLog();
+-      }
+-      this._clearFrames();
+-      this.dbg.removeAllDebuggees();
+-    }
+-  },
+-
+-  _clearFrames: function() {
+-    if (this.dbg.memory.trackingAllocationSites) {
+-      this._frameCache.clearFrames();
+-    }
+-  },
+-
+-  /**
+-   * Handler for the parent actor's "window-ready" event.
+-   */
+-  _onWindowReady: function({ isTopLevel }) {
+-    if (this.state == "attached") {
+-      if (isTopLevel && this.dbg.memory.trackingAllocationSites) {
+-        this._clearDebuggees();
+-        this._frameCache.initFrames();
+-      }
+-      this.dbg.addDebuggees();
+-    }
+-  },
+-
+   /**
     * Take a census of the heap. See js/src/doc/Debugger/Debugger.Memory.md for
     * more information.
     */
-   takeCensus: method(expectState("attached", function() {
-     return this.dbg.memory.takeCensus();
-   },
-   `taking census`), {
+-  takeCensus: method(expectState("attached", function() {
+-    return this.dbg.memory.takeCensus();
+-  },
+-  `taking census`), {
++  takeCensus: linkBridge("takeCensus", {
      request: {},
+     response: RetVal("json")
+   }),
+ 
+   /**
+    * Start recording allocation sites.
+    *
+    * @param AllocationsRecordingOptions options
+    *        See the protocol.js definition of AllocationsRecordingOptions above.
+    */
+-  startRecordingAllocations: method(expectState("attached", function(options = {}) {
+-    if (this.dbg.memory.trackingAllocationSites) {
+-      return Date.now();
+-    }
+-
+-    this._frameCache.initFrames();
+-
+-    this.dbg.memory.allocationSamplingProbability = options.probability != null
+-      ? options.probability
+-      : 1.0;
+-    if (options.maxLogLength != null) {
+-      this.dbg.memory.maxAllocationsLogLength = options.maxLogLength;
+-    }
+-    this.dbg.memory.trackingAllocationSites = true;
+-
+-    return Date.now();
+-  },
+-  `starting recording allocations`), {
++  startRecordingAllocations: linkBridge("startRecordingAllocations", {
+     request: {
+       options: Arg(0, "nullable:AllocationsRecordingOptions")
+     },
+     response: {
+       // Accept `nullable` in the case of server Gecko <= 37, handled on the front
+       value: RetVal(0, "nullable:number")
+     }
+   }),
+ 
+   /**
+    * Stop recording allocation sites.
+    */
+-  stopRecordingAllocations: method(expectState("attached", function() {
+-    this.dbg.memory.trackingAllocationSites = false;
+-    this._clearFrames();
+-
+-    return Date.now();
+-  },
+-  `stopping recording allocations`), {
++  stopRecordingAllocations: linkBridge("stopRecordingAllocations", {
+     request: {},
+     response: {
+       // Accept `nullable` in the case of server Gecko <= 37, handled on the front
+       value: RetVal(0, "nullable:number")
+     }
+   }),
+ 
+   /**
+    * Return settings used in `startRecordingAllocations` for `probability`
+    * and `maxLogLength`. Currently only uses in tests.
+    */
+-  getAllocationsSettings: method(expectState("attached", function() {
+-    return {
+-      maxLogLength: this.dbg.memory.maxAllocationsLogLength,
+-      probability: this.dbg.memory.allocationSamplingProbability
+-    };
+-  },
+-  `getting allocations settings`), {
++  getAllocationsSettings: linkBridge("getAllocationsSettings", {
+     request: {},
+     response: {
+       options: RetVal(0, "json")
+     }
+   }),
+ 
+-  /**
+-   * Get a list of the most recent allocations since the last time we got
+-   * allocations, as well as a summary of all allocations since we've been
+-   * recording.
+-   *
+-   * @returns Object
+-   *          An object of the form:
+-   *
+-   *            {
+-   *              allocations: [<index into "frames" below>, ...],
+-   *              allocationsTimestamps: [
+-   *                <timestamp for allocations[0]>,
+-   *                <timestamp for allocations[1]>,
+-   *                ...
+-   *              ],
+-   *              frames: [
+-   *                {
+-   *                  line: <line number for this frame>,
+-   *                  column: <column number for this frame>,
+-   *                  source: <filename string for this frame>,
+-   *                  functionDisplayName: <this frame's inferred function name function or null>,
+-   *                  parent: <index into "frames">
+-   *                },
+-   *                ...
+-   *              ],
+-   *              counts: [
+-   *                <number of allocations in frames[0]>,
+-   *                <number of allocations in frames[1]>,
+-   *                <number of allocations in frames[2]>,
+-   *                ...
+-   *              ]
+-   *            }
+-   *
+-   *          The timestamps' unit is microseconds since the epoch.
+-   *
+-   *          Subsequent `getAllocations` request within the same recording and
+-   *          tab navigation will always place the same stack frames at the same
+-   *          indices as previous `getAllocations` requests in the same
+-   *          recording. In other words, it is safe to use the index as a
+-   *          unique, persistent id for its frame.
+-   *
+-   *          Additionally, the root node (null) is always at index 0.
+-   *
+-   *          Note that the allocation counts include "self" allocations only,
+-   *          and don't account for allocations in child frames.
+-   *
+-   *          We use the indices into the "frames" array to avoid repeating the
+-   *          description of duplicate stack frames both when listing
+-   *          allocations, and when many stacks share the same tail of older
+-   *          frames. There shouldn't be any duplicates in the "frames" array,
+-   *          as that would defeat the purpose of this compression trick.
+-   *
+-   *          In the future, we might want to split out a frame's "source" and
+-   *          "functionDisplayName" properties out the same way we have split
+-   *          frames out with the "frames" array. While this would further
+-   *          compress the size of the response packet, it would increase CPU
+-   *          usage to build the packet, and it should, of course, be guided by
+-   *          profiling and done only when necessary.
+-   */
+-  getAllocations: method(expectState("attached", function() {
+-    if (this.dbg.memory.allocationsLogOverflowed) {
+-      // Since the last time we drained the allocations log, there have been
+-      // more allocations than the log's capacity, and we lost some data. There
+-      // isn't anything actionable we can do about this, but put a message in
+-      // the browser console so we at least know that it occurred.
+-      reportException("MemoryActor.prototype.getAllocations",
+-                      "Warning: allocations log overflowed and lost some data.");
+-    }
+-
+-    const allocations = this.dbg.memory.drainAllocationsLog()
+-    const packet = {
+-      allocations: [],
+-      allocationsTimestamps: []
+-    };
+-
+-    for (let { frame: stack, timestamp } of allocations) {
+-      if (stack && Cu.isDeadWrapper(stack)) {
+-        continue;
+-      }
+-
+-      // Safe because SavedFrames are frozen/immutable.
+-      let waived = Cu.waiveXrays(stack);
+-
+-      // Ensure that we have a form, count, and index for new allocations
+-      // because we potentially haven't seen some or all of them yet. After this
+-      // loop, we can rely on the fact that every frame we deal with already has
+-      // its metadata stored.
+-      let index = this._frameCache.addFrame(waived);
+-
+-      packet.allocations.push(index);
+-      packet.allocationsTimestamps.push(timestamp);
+-    }
+-
+-    return this._frameCache.updateFramePacket(packet);
+-  },
+-  `getting allocations`), {
++  getAllocations: linkBridge("getAllocations", {
+     request: {},
+     response: RetVal("json")
+   }),
+ 
+   /*
+    * Force a browser-wide GC.
+    */
+-  forceGarbageCollection: method(function() {
+-    for (let i = 0; i < 3; i++) {
+-      Cu.forceGC();
+-    }
+-  }, {
++  forceGarbageCollection: linkBridge("forceGarbageCollection", {
+     request: {},
+     response: {}
+   }),
+ 
+   /**
+    * Force an XPCOM cycle collection. For more information on XPCOM cycle
+    * collection, see
+    * https://developer.mozilla.org/en-US/docs/Interfacing_with_the_XPCOM_cycle_collector#What_the_cycle_collector_does
+    */
+-  forceCycleCollection: method(function() {
+-    Cu.forceCC();
+-  }, {
++  forceCycleCollection: linkBridge("forceCycleCollection", {
+     request: {},
+     response: {}
+   }),
+ 
+   /**
+    * A method that returns a detailed breakdown of the memory consumption of the
+    * associated window.
+    *
+    * @returns object
+    */
+-  measure: method(function() {
+-    let result = {};
+-
+-    let jsObjectsSize = {};
+-    let jsStringsSize = {};
+-    let jsOtherSize = {};
+-    let domSize = {};
+-    let styleSize = {};
+-    let otherSize = {};
+-    let totalSize = {};
+-    let jsMilliseconds = {};
+-    let nonJSMilliseconds = {};
+-
+-    try {
+-      this._mgr.sizeOfTab(this.parent.window, jsObjectsSize, jsStringsSize, jsOtherSize,
+-                          domSize, styleSize, otherSize, totalSize, jsMilliseconds, nonJSMilliseconds);
+-      result.total = totalSize.value;
+-      result.domSize = domSize.value;
+-      result.styleSize = styleSize.value;
+-      result.jsObjectsSize = jsObjectsSize.value;
+-      result.jsStringsSize = jsStringsSize.value;
+-      result.jsOtherSize = jsOtherSize.value;
+-      result.otherSize = otherSize.value;
+-      result.jsMilliseconds = jsMilliseconds.value.toFixed(1);
+-      result.nonJSMilliseconds = nonJSMilliseconds.value.toFixed(1);
+-    } catch (e) {
+-      reportException("MemoryActor.prototype.measure", e);
+-    }
+-
+-    return result;
+-  }, {
++  measure: linkBridge("measure", {
+     request: {},
+     response: RetVal("json"),
+   }),
+ 
+-  residentUnique: method(function() {
+-    return this._mgr.residentUnique;
+-  }, {
++  residentUnique: linkBridge("residentUnique", {
+     request: {},
+     response: { value: RetVal("number") }
+-  })
++  }),
++
++  /**
++   * Called when the underlying MemoryBridge fires a "garbage-collection" events.
++   * Propagates over RDP.
++   */
++  _onGarbageCollection: function (data) {
++    events.emit(this, "garbage-collection", data);
++  },
+ });
+ 
+ exports.MemoryActor = MemoryActor;
+ 
+ exports.MemoryFront = protocol.FrontClass(MemoryActor, {
+   initialize: function(client, form) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+     this.actorID = form.memoryActor;
 diff --git a/toolkit/devtools/server/actors/timeline.js b/toolkit/devtools/server/actors/timeline.js
-index 3d2cef6..ffe71a7 100644
+index 3d2cef6..514588c 100644
 --- a/toolkit/devtools/server/actors/timeline.js
 +++ b/toolkit/devtools/server/actors/timeline.js
-@@ -19,16 +19,17 @@
+@@ -19,18 +19,19 @@
   *   TimelineFront.on("markers", function(markers) {...})
   */
  
@@ -366,19 +688,26 @@ index 3d2cef6..ffe71a7 100644
  const {setTimeout, clearTimeout} = require("sdk/timers");
 +const {Task} = Cu.import("resource://gre/modules/Task.jsm", {});
  
- const {MemoryActor} = require("devtools/server/actors/memory");
+-const {MemoryActor} = require("devtools/server/actors/memory");
++const {MemoryBridge} = require("devtools/server/actors/utils/memory-bridge");
  const {FramerateActor} = require("devtools/server/actors/framerate");
  const {StackFrameCache} = require("devtools/server/actors/utils/stack");
  
  // How often do we pull markers from the docShells, and therefore, how often do
  // we send events to the front (knowing that when there are no markers in the
  // docShell, no event is sent).
-@@ -107,16 +108,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+ const DEFAULT_TIMELINE_DATA_PULL_TIMEOUT = 200; // ms
+ 
+@@ -104,19 +105,21 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+    * Initializes this actor with the provided connection and tab actor.
+    */
+   initialize: function(conn, tabActor) {
      protocol.Actor.prototype.initialize.call(this, conn);
      this.tabActor = tabActor;
  
      this._isRecording = false;
      this._stackFrames = null;
++    this._memoryBridge = null;
  
      // Make sure to get markers from new windows as they become available
      this._onWindowReady = this._onWindowReady.bind(this);
@@ -391,7 +720,25 @@ index 3d2cef6..ffe71a7 100644
     * so it doesn't have a parent protocol actor that takes care of its lifetime.
     * So it needs a disconnect method to cleanup.
     */
-@@ -168,20 +170,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+@@ -127,16 +130,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+   /**
+    * Destroys this actor, stopping recording first.
+    */
+   destroy: function() {
+     this.stop();
+ 
+     events.off(this.tabActor, "window-ready", this._onWindowReady);
+     this.tabActor = null;
++    this._memoryBridge = null;
+ 
+     protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+   /**
+    * Get the list of docShells in the currently attached tabActor. Note that we
+    * always list the docShells included in the real root docShell, even if the
+    * tabActor was switched to a child frame. This is because for now, paint
+@@ -168,20 +172,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
      return docShells;
    },
  
@@ -413,7 +760,7 @@ index 3d2cef6..ffe71a7 100644
  
      for (let docShell of this.docShells) {
        markers.push(...docShell.popProfileTimelineMarkers());
-@@ -204,17 +203,17 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+@@ -204,20 +205,20 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
  
      let frames = this._stackFrames.makeEvent();
      if (frames) {
@@ -423,16 +770,21 @@ index 3d2cef6..ffe71a7 100644
        events.emit(this, "markers", markers, endTime);
      }
 -    if (this._memoryActor) {
+-      events.emit(this, "memory", endTime, this._memoryActor.measure());
 +    if (this._withMemory) {
-       events.emit(this, "memory", endTime, this._memoryActor.measure());
++      events.emit(this, "memory", endTime, this._memoryBridge.measure());
      }
-     if (this._framerateActor) {
+-    if (this._framerateActor) {
++    if (this._withTicks) {
        events.emit(this, "ticks", endTime, this._framerateActor.getPendingTicks());
      }
  
      this._dataPullTimeout = setTimeout(() => {
        this._pullTimelineData();
-@@ -230,79 +229,90 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+     }, DEFAULT_TIMELINE_DATA_PULL_TIMEOUT);
+   },
+ 
+@@ -230,79 +231,91 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
      request: {},
      response: {
        value: RetVal("boolean")
@@ -466,6 +818,7 @@ index 3d2cef6..ffe71a7 100644
      this._stackFrames = new StackFrameCache();
      this._stackFrames.initFrames();
 +    this._withMemory = withMemory;
++    this._withTicks = withTicks;
  
      for (let docShell of this.docShells) {
        docShell.recordProfileTimelineMarkers = true;
@@ -474,9 +827,9 @@ index 3d2cef6..ffe71a7 100644
 -    if (withMemory) {
 -      this._memoryActor = new MemoryActor(this.conn, this.tabActor, this._stackFrames);
 -    }
-+    this._memoryActor = new MemoryActor(this.conn, this.tabActor, this._stackFrames);
-+    yield this._memoryActor.attach();
-+    events.on(this._memoryActor.eventTarget, "garbage-collection", this._onGarbageCollection);
++    this._memoryBridge = new MemoryBridge(this.tabActor, this._stackFrames);
++    this._memoryBridge.attach();
++    events.on(this._memoryBridge, "garbage-collection", this._onGarbageCollection);
  
      if (withTicks) {
        this._framerateActor = new FramerateActor(this.conn, this.tabActor);
@@ -510,8 +863,8 @@ index 3d2cef6..ffe71a7 100644
 -    if (this._memoryActor) {
 -      this._memoryActor = null;
 -    }
-+    events.off(this._memoryActor.eventTarget, "garbage-collection", this._onGarbageCollection);
-+    this._memoryActor = null;
++    events.off(this._memoryBridge, "garbage-collection", this._onGarbageCollection);
++    this._memoryBridge.detach();
  
      if (this._framerateActor) {
        this._framerateActor.stopRecording();
@@ -534,7 +887,7 @@ index 3d2cef6..ffe71a7 100644
    }),
  
    /**
-@@ -311,17 +321,48 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+@@ -311,17 +324,48 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
     */
    _onWindowReady: function({window}) {
      if (this._isRecording) {
@@ -584,6 +937,399 @@ index 3d2cef6..ffe71a7 100644
      this.manage(this);
    },
    destroy: function() {
+diff --git a/toolkit/devtools/server/actors/utils/memory-bridge.js b/toolkit/devtools/server/actors/utils/memory-bridge.js
+new file mode 100644
+index 0000000..f4a3ff7
+--- /dev/null
++++ b/toolkit/devtools/server/actors/utils/memory-bridge.js
+@@ -0,0 +1,367 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++const { Cc, Ci, Cu } = require("chrome");
++const { reportException } = require("devtools/toolkit/DevToolsUtils");
++const { Class } = require("sdk/core/heritage");
++loader.lazyRequireGetter(this, "events", "sdk/event/core");
++loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
++loader.lazyRequireGetter(this, "StackFrameCache",
++                         "devtools/server/actors/utils/stack", true);
++
++/**
++ * A method decorator that ensures the actor is in the expected state before
++ * proceeding. If the actor is not in the expected state, the decorated method
++ * returns a rejected promise.
++ *
++ * @param String expectedState
++ *        The expected state.
++ * @param String activity
++ *        Additional info about what's going on.
++ * @param Function method
++ *        The actor method to proceed with when the actor is in the expected
++ *        state.
++ *
++ * @returns Function
++ *          The decorated method.
++ */
++function expectState(expectedState, method, activity) {
++  return function(...args) {
++    if (this.state !== expectedState) {
++      const msg = `Wrong state while ${activity}:` +
++                  `Expected '${expectedState}',` +
++                  `but current state is '${this.state}'.`;
++      return Promise.reject(new Error(msg));
++    }
++
++    return method.apply(this, args);
++  };
++}
++
++/**
++ * A class that returns memory data for a parent actor's window.
++ * Using a tab-scoped actor with this instance will measure the memory footprint of its
++ * parent tab. Using a global-scoped actor instance however, will measure the memory
++ * footprint of the chrome window referenced by its root actor.
++ *
++ * To be consumed by actor's, like MemoryActor using MemoryBridge to
++ * send information over RDP, and TimelineActor for using more light-weight
++ * utilities like GC events and measuring memory consumption.
++ */
++let MemoryBridge = Class({
++  extends: EventTarget,
++
++  /**
++   * Requires a root actor and a StackFrameCache.
++   */
++  initialize: function (parent, frameCache = new StackFrameCache()) {
++    this.parent = parent;
++    this._mgr = Cc["@mozilla.org/memory-reporter-manager;1"]
++                  .getService(Ci.nsIMemoryReporterManager);
++    this.state = "detached";
++    this._dbg = null;
++    this._frameCache = frameCache;
++
++    this._onGarbageCollection = this._onGarbageCollection.bind(this);
++    this._onWindowReady = this._onWindowReady.bind(this);
++
++    events.on(this.parent, "window-ready", this._onWindowReady);
++  },
++
++  destroy: function() {
++    events.off(this.parent, "window-ready", this._onWindowReady);
++
++    this._mgr = null;
++    if (this.state === "attached") {
++      this.detach();
++    }
++  },
++
++  get dbg() {
++    if (!this._dbg) {
++      this._dbg = this.parent.makeDebugger();
++    }
++    return this._dbg;
++  },
++
++
++  /**
++   * Attach to this MemoryBridge.
++   *
++   * This attaches the MemoryBridge's Debugger instance so that you can start
++   * recording allocations or take a census of the heap. In addition, the
++   * MemoryBridge will start emitting GC events.
++   */
++  attach: expectState("detached", function() {
++    this.dbg.addDebuggees();
++    this.dbg.memory.onGarbageCollection = this._onGarbageCollection.bind(this);
++    this.state = "attached";
++  }, `attaching to the debugger`),
++
++  /**
++   * Detach from this MemoryBridge.
++   */
++  detach: expectState("attached", function() {
++    this._clearDebuggees();
++    this.dbg.enabled = false;
++    this._dbg = null;
++    this.state = "detached";
++  }, `detaching from the debugger`),
++
++  /**
++   * Gets the current MemoryBridge attach/detach state.
++   */
++  getState: function () {
++    return this.state;
++  },
++
++  _clearDebuggees: function() {
++    if (this._dbg) {
++      if (this.dbg.memory.trackingAllocationSites) {
++        this.dbg.memory.drainAllocationsLog();
++      }
++      this._clearFrames();
++      this.dbg.removeAllDebuggees();
++    }
++  },
++
++  _clearFrames: function() {
++    if (this.dbg.memory.trackingAllocationSites) {
++      this._frameCache.clearFrames();
++    }
++  },
++
++  /**
++   * Handler for the parent actor's "window-ready" event.
++   */
++  _onWindowReady: function({ isTopLevel }) {
++    if (this.state == "attached") {
++      if (isTopLevel && this.dbg.memory.trackingAllocationSites) {
++        this._clearDebuggees();
++        this._frameCache.initFrames();
++      }
++      this.dbg.addDebuggees();
++    }
++  },
++
++  /**
++   * Handler for GC events on the Debugger.Memory instance.
++   */
++  _onGarbageCollection: function (data) {
++    events.emit(this, "garbage-collection", data);
++  },
++
++  /**
++   * Take a census of the heap. See js/src/doc/Debugger/Debugger.Memory.md for
++   * more information.
++   */
++  takeCensus: expectState("attached", function() {
++    return this.dbg.memory.takeCensus();
++  }, `taking census`),
++
++  /**
++   * Start recording allocation sites.
++   *
++   * @param AllocationsRecordingOptions options
++   *        See the protocol.js definition of AllocationsRecordingOptions above.
++   */
++  startRecordingAllocations: expectState("attached", function(options = {}) {
++    if (this.dbg.memory.trackingAllocationSites) {
++      return Date.now();
++    }
++
++    this._frameCache.initFrames();
++
++    this.dbg.memory.allocationSamplingProbability = options.probability != null
++      ? options.probability
++      : 1.0;
++    if (options.maxLogLength != null) {
++      this.dbg.memory.maxAllocationsLogLength = options.maxLogLength;
++    }
++    this.dbg.memory.trackingAllocationSites = true;
++
++    return Date.now();
++  }, `starting recording allocations`),
++
++  /**
++   * Stop recording allocation sites.
++   */
++  stopRecordingAllocations: expectState("attached", function() {
++    this.dbg.memory.trackingAllocationSites = false;
++    this._clearFrames();
++
++    return Date.now();
++  }, `stopping recording allocations`),
++
++  /**
++   * Return settings used in `startRecordingAllocations` for `probability`
++   * and `maxLogLength`. Currently only uses in tests.
++   */
++  getAllocationsSettings: expectState("attached", function() {
++    return {
++      maxLogLength: this.dbg.memory.maxAllocationsLogLength,
++      probability: this.dbg.memory.allocationSamplingProbability
++    };
++  }, `getting allocations settings`),
++
++  /**
++   * Get a list of the most recent allocations since the last time we got
++   * allocations, as well as a summary of all allocations since we've been
++   * recording.
++   *
++   * @returns Object
++   *          An object of the form:
++   *
++   *            {
++   *              allocations: [<index into "frames" below>, ...],
++   *              allocationsTimestamps: [
++   *                <timestamp for allocations[0]>,
++   *                <timestamp for allocations[1]>,
++   *                ...
++   *              ],
++   *              frames: [
++   *                {
++   *                  line: <line number for this frame>,
++   *                  column: <column number for this frame>,
++   *                  source: <filename string for this frame>,
++   *                  functionDisplayName: <this frame's inferred function name function or null>,
++   *                  parent: <index into "frames">
++   *                },
++   *                ...
++   *              ],
++   *              counts: [
++   *                <number of allocations in frames[0]>,
++   *                <number of allocations in frames[1]>,
++   *                <number of allocations in frames[2]>,
++   *                ...
++   *              ]
++   *            }
++   *
++   *          The timestamps' unit is microseconds since the epoch.
++   *
++   *          Subsequent `getAllocations` request within the same recording and
++   *          tab navigation will always place the same stack frames at the same
++   *          indices as previous `getAllocations` requests in the same
++   *          recording. In other words, it is safe to use the index as a
++   *          unique, persistent id for its frame.
++   *
++   *          Additionally, the root node (null) is always at index 0.
++   *
++   *          Note that the allocation counts include "self" allocations only,
++   *          and don't account for allocations in child frames.
++   *
++   *          We use the indices into the "frames" array to avoid repeating the
++   *          description of duplicate stack frames both when listing
++   *          allocations, and when many stacks share the same tail of older
++   *          frames. There shouldn't be any duplicates in the "frames" array,
++   *          as that would defeat the purpose of this compression trick.
++   *
++   *          In the future, we might want to split out a frame's "source" and
++   *          "functionDisplayName" properties out the same way we have split
++   *          frames out with the "frames" array. While this would further
++   *          compress the size of the response packet, it would increase CPU
++   *          usage to build the packet, and it should, of course, be guided by
++   *          profiling and done only when necessary.
++   */
++  getAllocations: expectState("attached", function() {
++    if (this.dbg.memory.allocationsLogOverflowed) {
++      // Since the last time we drained the allocations log, there have been
++      // more allocations than the log's capacity, and we lost some data. There
++      // isn't anything actionable we can do about this, but put a message in
++      // the browser console so we at least know that it occurred.
++      reportException("MemoryBridge.prototype.getAllocations",
++                      "Warning: allocations log overflowed and lost some data.");
++    }
++
++    const allocations = this.dbg.memory.drainAllocationsLog()
++    const packet = {
++      allocations: [],
++      allocationsTimestamps: []
++    };
++
++    for (let { frame: stack, timestamp } of allocations) {
++      if (stack && Cu.isDeadWrapper(stack)) {
++        continue;
++      }
++
++      // Safe because SavedFrames are frozen/immutable.
++      let waived = Cu.waiveXrays(stack);
++
++      // Ensure that we have a form, count, and index for new allocations
++      // because we potentially haven't seen some or all of them yet. After this
++      // loop, we can rely on the fact that every frame we deal with already has
++      // its metadata stored.
++      let index = this._frameCache.addFrame(waived);
++
++      packet.allocations.push(index);
++      packet.allocationsTimestamps.push(timestamp);
++    }
++
++    return this._frameCache.updateFramePacket(packet);
++  }, `getting allocations`),
++
++  /*
++   * Force a browser-wide GC.
++   */
++  forceGarbageCollection: function () {
++    for (let i = 0; i < 3; i++) {
++      Cu.forceGC();
++    }
++  },
++
++  /**
++   * Force an XPCOM cycle collection. For more information on XPCOM cycle
++   * collection, see
++   * https://developer.mozilla.org/en-US/docs/Interfacing_with_the_XPCOM_cycle_collector#What_the_cycle_collector_does
++   */
++  forceCycleCollection: function () {
++    Cu.forceCC();
++  },
++
++  /**
++   * A method that returns a detailed breakdown of the memory consumption of the
++   * associated window.
++   *
++   * @returns object
++   */
++  measure: function () {
++    let result = {};
++
++    let jsObjectsSize = {};
++    let jsStringsSize = {};
++    let jsOtherSize = {};
++    let domSize = {};
++    let styleSize = {};
++    let otherSize = {};
++    let totalSize = {};
++    let jsMilliseconds = {};
++    let nonJSMilliseconds = {};
++
++    try {
++      this._mgr.sizeOfTab(this.parent.window, jsObjectsSize, jsStringsSize, jsOtherSize,
++                          domSize, styleSize, otherSize, totalSize, jsMilliseconds, nonJSMilliseconds);
++      result.total = totalSize.value;
++      result.domSize = domSize.value;
++      result.styleSize = styleSize.value;
++      result.jsObjectsSize = jsObjectsSize.value;
++      result.jsStringsSize = jsStringsSize.value;
++      result.jsOtherSize = jsOtherSize.value;
++      result.otherSize = otherSize.value;
++      result.jsMilliseconds = jsMilliseconds.value.toFixed(1);
++      result.nonJSMilliseconds = nonJSMilliseconds.value.toFixed(1);
++    } catch (e) {
++      reportException("MemoryBridge.prototype.measure", e);
++    }
++
++    return result;
++  },
++
++  residentUnique: function () {
++    return this._mgr.residentUnique;
++  }
++});
++
++exports.MemoryBridge = MemoryBridge;
+diff --git a/toolkit/devtools/server/moz.build b/toolkit/devtools/server/moz.build
+index f2cd973..470a124 100644
+--- a/toolkit/devtools/server/moz.build
++++ b/toolkit/devtools/server/moz.build
+@@ -74,14 +74,15 @@ EXTRA_JS_MODULES.devtools.server.actors += [
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.server.actors.utils += [
+     'actors/utils/actor-registry-utils.js',
+     'actors/utils/audionodes.json',
+     'actors/utils/automation-timeline.js',
+     'actors/utils/make-debugger.js',
+     'actors/utils/map-uri-to-addon-id.js',
++    'actors/utils/memory-bridge.js',
+     'actors/utils/ScriptStore.js',
+     'actors/utils/stack.js',
+     'actors/utils/TabSources.js'
+ ]
+ 
+ FAIL_ON_WARNINGS = True
 -- 
 2.2.1
 
