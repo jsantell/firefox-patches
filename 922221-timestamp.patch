@@ -1,30 +1,24 @@
 From: Jordan Santell <jsantell@gmail.com>
-Date: Sat, 28 Mar 2015 14:32:15 -0700
+Date: Wed, 29 Apr 2015 12:48:57 -0700
 Subject: Bug 922221 - implement console.timeStamp(label) to create profile timeline markers. r=khuey
 
 diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
-index cd9dcb1..cbb9e82 100644
+index 36475f5..719005c 100644
 --- a/docshell/base/nsDocShell.cpp
 +++ b/docshell/base/nsDocShell.cpp
-@@ -2980,21 +2980,36 @@ nsDocShell::PopProfileTimelineMarkers(
-   nsTArray<UniquePtr<TimelineMarker>> keptMarkers;
- 
-   for (uint32_t i = 0; i < mProfileTimelineMarkers.Length(); ++i) {
-     UniquePtr<TimelineMarker>& startPayload = mProfileTimelineMarkers[i];
-     const char* startMarkerName = startPayload->GetName();
+@@ -3001,16 +3001,30 @@ nsDocShell::PopProfileTimelineMarkers(
  
      bool hasSeenPaintedLayer = false;
      bool isPaint = strcmp(startMarkerName, "Paint") == 0;
-+    bool isLayer = strcmp(startMarkerName, "Layer") == 0;
  
      // If we are processing a Paint marker, we append information from
      // all the embedded Layer markers to this array.
      dom::Sequence<dom::ProfileTimelineLayerRect> layerRectangles;
  
-+    // Other than Paint and Layer markers, if this marker is a TRACING_EVENT,
-+    // there is no corresponding END, as this marker contains only a timestamp,
-+    // not a duration.
-+    if (!isPaint && !isLayer && startPayload->GetMetaData() == TRACING_EVENT) {
++    // If this is a TRACING_TIMESTAMP marker, there's no corresponding "end"
++    // marker, as it's a single unit of time, not a duration, create the final
++    // marker here.
++    if (startPayload->GetMetaData() == TRACING_TIMESTAMP) {
 +      mozilla::dom::ProfileTimelineMarker* marker =
 +        profileTimelineMarkers.AppendElement();
 +
@@ -87,10 +81,10 @@ index 82039c6..ac651e5 100644
  
  timelineContentTest(TESTS);
 diff --git a/dom/base/Console.cpp b/dom/base/Console.cpp
-index caa9de3..f4ab984 100644
+index 945447d..ef78da6 100644
 --- a/dom/base/Console.cpp
 +++ b/dom/base/Console.cpp
-@@ -778,16 +778,29 @@ Console::TimeEnd(JSContext* aCx, const JS::Handle<JS::Value> aTime)
+@@ -840,16 +840,29 @@ Console::TimeEnd(JSContext* aCx, const JS::Handle<JS::Value> aTime)
    if (!aTime.isUndefined()) {
      data.AppendElement(aTime);
    }
@@ -120,7 +114,7 @@ index caa9de3..f4ab984 100644
  void
  Console::ProfileEnd(JSContext* aCx, const Sequence<JS::Value>& aData)
  {
-@@ -948,16 +961,37 @@ public:
+@@ -1009,16 +1022,37 @@ public:
      if (GetMetaData() == TRACING_INTERVAL_START) {
        aMarker.mCauseName.Construct(GetCause());
      } else {
@@ -138,7 +132,7 @@ index caa9de3..f4ab984 100644
 +    : TimelineMarker(aDocShell, "TimeStamp", aMetaData, aCause)
 +  {
 +    CaptureStack();
-+    MOZ_ASSERT(aMetaData == TRACING_EVENT);
++    MOZ_ASSERT(aMetaData == TRACING_TIMESTAMP);
 +  }
 +
 +  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) override
@@ -156,9 +150,9 @@ index caa9de3..f4ab984 100644
                  const nsAString& aMethodString,
                  const Sequence<JS::Value>& aData)
  {
-   nsAutoPtr<ConsoleCallData> callData(new ConsoleCallData());
+   nsRefPtr<ConsoleCallData> callData(new ConsoleCallData());
  
-@@ -1023,17 +1057,19 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
+@@ -1083,17 +1117,19 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
      callData->mReifiedStack.emplace();
      nsresult rv = ReifyStack(stack, *callData->mReifiedStack);
      if (NS_WARN_IF(NS_FAILED(rv))) {
@@ -179,7 +173,7 @@ index caa9de3..f4ab984 100644
        if (!performance) {
          return;
        }
-@@ -1042,17 +1078,33 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
+@@ -1102,17 +1138,33 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
  
        // 'time' and 'timeEnd' are displayed in the devtools timeline if active.
        bool isTimelineRecording = false;
@@ -201,7 +195,7 @@ index caa9de3..f4ab984 100644
 +        }
 +
 +        mozilla::UniquePtr<TimelineMarker> marker =
-+          MakeUnique<TimestampTimelineMarker>(docShell, TRACING_EVENT, key);
++          MakeUnique<TimestampTimelineMarker>(docShell, TRACING_TIMESTAMP, key);
 +        docShell->AddProfileTimelineMarker(Move(marker));
 +      }
 +      // For `console.time(foo)` and `console.timeEnd(foo)`
@@ -257,10 +251,10 @@ index 0c0a356..94f6021 100644
           const Sequence<JS::Value>& aData);
  
 diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
-index a4e2650..d5106f9 100644
+index 806e117..00a34ea 100644
 --- a/dom/bindings/Bindings.conf
 +++ b/dom/bindings/Bindings.conf
-@@ -269,17 +269,17 @@ DOMInterfaces = {
+@@ -277,17 +277,17 @@ DOMInterfaces = {
  },
  
  'Clients': {
@@ -472,7 +466,7 @@ index 02342e3..abce15d 100644
    DOMString level = "";
    DOMString filename = "";
 diff --git a/dom/webidl/ProfileTimelineMarker.webidl b/dom/webidl/ProfileTimelineMarker.webidl
-index bfa7f01..49aa6f8 100644
+index 8f25b01..0640b7e 100644
 --- a/dom/webidl/ProfileTimelineMarker.webidl
 +++ b/dom/webidl/ProfileTimelineMarker.webidl
 @@ -11,17 +11,17 @@ dictionary ProfileTimelineLayerRect {
@@ -484,16 +478,16 @@ index bfa7f01..49aa6f8 100644
    DOMHighResTimeStamp start = 0;
    DOMHighResTimeStamp end = 0;
    object? stack = null;
--  /* For ConsoleTime markers.  */
-+  /* For ConsoleTime and Timestamp markers.  */
+-  /* For ConsoleTime and Javascript markers.  */
++  /* For ConsoleTime, Timestamp and Javascript markers.  */
    DOMString causeName;
+   /* For ConsoleTime markers.  */
    object? endStack = null;
    /* For DOMEvent markers.  */
    DOMString type;
    unsigned short eventPhase;
    /* For Paint markers.  */
    sequence<ProfileTimelineLayerRect> rectangles;
- };
 diff --git a/dom/workers/test/console_worker.js b/dom/workers/test/console_worker.js
 index 7f4b6a5..6b5f9d8 100644
 --- a/dom/workers/test/console_worker.js
@@ -529,6 +523,30 @@ index 7f4b6a5..6b5f9d8 100644
    }, 10);
  }
  
+diff --git a/tools/profiler/GeckoProfiler.h b/tools/profiler/GeckoProfiler.h
+index db85bfd..7fe276b 100644
+--- a/tools/profiler/GeckoProfiler.h
++++ b/tools/profiler/GeckoProfiler.h
+@@ -55,17 +55,18 @@ namespace mozilla {
+ class TimeStamp;
+ }
+ 
+ enum TracingMetadata {
+   TRACING_DEFAULT,
+   TRACING_INTERVAL_START,
+   TRACING_INTERVAL_END,
+   TRACING_EVENT,
+-  TRACING_EVENT_BACKTRACE
++  TRACING_EVENT_BACKTRACE,
++  TRACING_TIMESTAMP
+ };
+ 
+ #if !defined(MOZ_ENABLE_PROFILER_SPS) || defined(MOZILLA_XPCOMRT_API)
+ 
+ #include <stdint.h>
+ #include <stdarg.h>
+ 
+ // Insert a RAII in this scope to active a pseudo label. Any samples collected
 -- 
 2.2.1
 

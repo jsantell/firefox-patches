@@ -1,0 +1,712 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Wed, 29 Apr 2015 17:24:23 -0700
+Subject: [PATCH] first
+
+diff --git a/browser/devtools/shared/widgets/FlameGraph.js b/browser/devtools/shared/widgets/FlameGraph.js
+index ede7852..0520d15 100644
+--- a/browser/devtools/shared/widgets/FlameGraph.js
++++ b/browser/devtools/shared/widgets/FlameGraph.js
+@@ -97,23 +97,26 @@ function FlameGraph(parent, sharpness) {
+ 
+   this.setTheme();
+ 
+   AbstractCanvasGraph.createIframe(GRAPH_SRC, parent, iframe => {
+     this._iframe = iframe;
+     this._window = iframe.contentWindow;
+     this._document = iframe.contentDocument;
+     this._pixelRatio = sharpness || this._window.devicePixelRatio;
++    this._body = this._document.querySelector("body");
+ 
+     let container = this._container = this._document.getElementById("graph-container");
+     container.className = "flame-graph-widget-container graph-widget-container";
+ 
+     let canvas = this._canvas = this._document.getElementById("graph-canvas");
+     canvas.className = "flame-graph-widget-canvas graph-widget-canvas";
+ 
++    let details = this._detailsView = this._document.querySelector(".flamegraph-details");
++
+     let bounds = parent.getBoundingClientRect();
+     bounds.width = this.fixedWidth || bounds.width;
+     bounds.height = this.fixedHeight || bounds.height;
+     iframe.setAttribute("width", bounds.width);
+     iframe.setAttribute("height", bounds.height);
+ 
+     this._width = canvas.width = bounds.width * this._pixelRatio;
+     this._height = canvas.height = bounds.height * this._pixelRatio;
+@@ -468,23 +471,23 @@ FlameGraph.prototype = {
+    *        Offsets and scales the data source by the specified amount.
+    *        This is used for scrolling the visualization.
+    */
+   _drawPyramid: function(dataSource, verticalOffset, dataOffset, dataScale) {
+     let ctx = this._ctx;
+ 
+     let fontSize = FLAME_GRAPH_BLOCK_TEXT_FONT_SIZE * this._pixelRatio;
+     let fontFamily = FLAME_GRAPH_BLOCK_TEXT_FONT_FAMILY;
+-    let visibleBlocksInfo = this._drawPyramidFill(dataSource, verticalOffset, dataOffset, dataScale);
++    this._visibleBlocksInfo = this._drawPyramidFill(dataSource, verticalOffset, dataOffset, dataScale);
+ 
+     ctx.textBaseline = "middle";
+     ctx.font = fontSize + "px " + fontFamily;
+     ctx.fillStyle = this.blockTextColor;
+ 
+-    this._drawPyramidText(visibleBlocksInfo, verticalOffset, dataOffset, dataScale);
++    this._drawPyramidText(this._visibleBlocksInfo, verticalOffset, dataOffset, dataScale);
+   },
+ 
+   /**
+    * Fills all block inside this graph's pyramid.
+    * @see FlameGraph.prototype._drawPyramid
+    */
+   _drawPyramidFill: function(dataSource, verticalOffset, dataOffset, dataScale) {
+     let visibleBlocksInfoStore = [];
+@@ -772,16 +775,28 @@ FlameGraph.prototype = {
+ 
+     if (vertDrag.origin != null && this._verticalDragEnabled) {
+       let relativeY = mouseY + this._verticalDragDirection * this.verticalPanThreshold;
+       this._verticalOffset = vertDrag.anchor + (vertDrag.origin - relativeY) / this._pixelRatio;
+       this._normalizeVerticalOffset();
+       this._shouldRedraw = true;
+       this.emit("panning-vertically");
+     }
++
++
++    if (!this._visibleBlocksInfo) {
++      return;
++    }
++
++    let block = findBlockFromPosition(this._visibleBlocksInfo, { x: mouseX, y: mouseY });
++    if (block) {
++      this._showDetails(block);
++    } else {
++      this._hideDetails();
++    }
+   },
+ 
+   /**
+    * Listener for the "mousedown" event on the graph's container.
+    */
+   _onMouseDown: function(e) {
+     let offset = this._getContainerOffset();
+     let mouseX = (e.clientX - offset.left) * this._pixelRatio;
+@@ -943,17 +958,40 @@ FlameGraph.prototype = {
+ 
+   /**
+    * Listener for the "resize" event on the graph's parent node.
+    */
+   _onResize: function() {
+     if (this.hasData()) {
+       setNamedTimeout(this._uid, GRAPH_RESIZE_EVENTS_DRAIN, this.refresh);
+     }
+-  }
++  },
++
++  /**
++   * Called when hovering over a flame graph block, this will
++   * render information for the specific frame.
++   *
++   * @param {object} block
++   */
++  _showDetails: function(block) {
++    if (this._currentBlock && this._currentBlock.id === block.id) {
++      return;
++    }
++    this._currentBlock = block;
++    this._detailsView.style.display = "block";
++
++    Object.keys(block.detailsData).forEach(field => {
++      this._detailsView.querySelector(`.flamegraph-details [data-label=${field}] .label`).innerHTML = field;
++      this._detailsView.querySelector(`.flamegraph-details [data-label=${field}] .value`).innerHTML = block.detailsData[field];
++    });
++  },
++
++  _hideDetails: function () {
++    this._detailsView.style.display = "none";
++  },
+ };
+ 
+ const FLAME_GRAPH_BLOCK_HEIGHT = 12; // px
+ 
+ const PALLETTE_SIZE = 10;
+ const PALLETTE_HUE_OFFSET = Math.random() * 90;
+ const PALLETTE_HUE_RANGE = 270;
+ const PALLETTE_SATURATION = 100;
+@@ -1058,17 +1096,19 @@ let FlameGraphUtils = {
+         // Otherwise, create a new block for this frame at this depth,
+         // using a simple location based salt for picking a color.
+         else {
+           let hash = this._getStringHash(location);
+           let color = COLOR_PALLETTE[hash % PALLETTE_SIZE];
+           let bucket = buckets.get(color);
+ 
+           bucket.push(prevFrames[frameIndex] = {
++            id: frameIndex,
+             srcData: { startTime: prevTime, rawLocation: location },
++            detailsData: this._createDetailsData(frame),
+             x: prevTime,
+             y: frameIndex * FLAME_GRAPH_BLOCK_HEIGHT,
+             width: time - prevTime,
+             height: FLAME_GRAPH_BLOCK_HEIGHT,
+             text: this._formatLabel(frame)
+           });
+         }
+ 
+@@ -1157,14 +1197,37 @@ let FlameGraphUtils = {
+     let { functionName, fileName, line } = FrameUtils.parseLocation(frame);
+     let label = functionName;
+ 
+     if (fileName) {
+       label += ` (${fileName}${line != null ? (":" + line) : ""})`;
+     }
+ 
+     return label;
++  },
++
++  /**
++   * Takes a FrameNode and returns a data to be rendered in FlameGraph.prototype._showDetails().
++   */
++  _createDetailsData: function (frame) {
++    let { functionName, fileName, line } = FrameUtils.parseLocation(frame);
++
++    return {
++      name: frame.idle ? frame.location : `${functionName}:${fileName}${line != null ? (":" + line) : ""}`
++    };
+   }
+ };
+ 
++function findBlockFromPosition (blocks, { x, y }) {
++  for (let { block, rect } of blocks) {
++    if (rect.rectLeft < x &&
++        (rect.rectLeft + rect.rectWidth) > x &&
++        rect.rectTop < y &&
++        (rect.rectTop + rect.rectHeight) > y) {
++      return block;
++    }
++  }
++  return null;
++}
++
+ exports.FlameGraph = FlameGraph;
+ exports.FlameGraphUtils = FlameGraphUtils;
+ exports.FLAME_GRAPH_BLOCK_HEIGHT = FLAME_GRAPH_BLOCK_HEIGHT;
+diff --git a/browser/devtools/shared/widgets/graphs-frame.xhtml b/browser/devtools/shared/widgets/graphs-frame.xhtml
+index d983574..3430bf6 100644
+--- a/browser/devtools/shared/widgets/graphs-frame.xhtml
++++ b/browser/devtools/shared/widgets/graphs-frame.xhtml
+@@ -4,23 +4,27 @@
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ <!DOCTYPE html>
+ 
+ <html xmlns="http://www.w3.org/1999/xhtml">
+ <head>
+   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+   <link rel="stylesheet" href="chrome://browser/skin/devtools/common.css" type="text/css"/>
+   <link rel="stylesheet" href="chrome://browser/skin/devtools/widgets.css" ype="text/css"/>
++  <link rel="stylesheet" href="chrome://browser/skin/devtools/graphs.css" ype="text/css"/>
+   <script type="application/javascript;version=1.8" src="theme-switching.js"/>
+   <style>
+     body {
+       overflow: hidden;
+       margin: 0;
+       padding: 0;
+     }
+   </style>
+ </head>
+ <body role="application">
+   <div id="graph-container">
++    <div class="flamegraph-details">
++      <div data-label="name"><div class="label"></div><div class="value"></div></div>
++    </div>
+     <canvas id="graph-canvas"></canvas>
+   </div>
+ </body>
+ </html>
+diff --git a/browser/themes/linux/jar.mn b/browser/themes/linux/jar.mn
+index 8305cfc..eaa315f 100644
+--- a/browser/themes/linux/jar.mn
++++ b/browser/themes/linux/jar.mn
+@@ -222,16 +222,17 @@ browser.jar:
+   skin/classic/browser/tabview/tabview.css            (tabview/tabview.css)
+   skin/classic/browser/translating-16.png             (../shared/translation/translating-16.png)
+   skin/classic/browser/translating-16@2x.png          (../shared/translation/translating-16@2x.png)
+   skin/classic/browser/translation-16.png             (../shared/translation/translation-16.png)
+   skin/classic/browser/translation-16@2x.png          (../shared/translation/translation-16@2x.png)
+   skin/classic/browser/devedition/search.svg          (../shared/devedition/search.svg)
+   skin/classic/browser/devedition/urlbar-history-dropmarker.svg            (../shared/devedition/urlbar-history-dropmarker.svg)
+ * skin/classic/browser/devtools/common.css            (../shared/devtools/common.css)
++  skin/classic/browser/devtools/graphs.css            (../shared/devtools/graphs.css)
+ * skin/classic/browser/devtools/dark-theme.css        (../shared/devtools/dark-theme.css)
+ * skin/classic/browser/devtools/light-theme.css       (../shared/devtools/light-theme.css)
+   skin/classic/browser/devtools/add.svg               (../shared/devtools/images/add.svg)
+   skin/classic/browser/devtools/filters.svg           (../shared/devtools/filters.svg)
+   skin/classic/browser/devtools/filter-swatch.svg     (../shared/devtools/images/filter-swatch.svg)
+   skin/classic/browser/devtools/controls.png          (../shared/devtools/images/controls.png)
+   skin/classic/browser/devtools/controls@2x.png       (../shared/devtools/images/controls@2x.png)
+   skin/classic/browser/devtools/performance-icons.svg  (../shared/devtools/images/performance-icons.svg)
+diff --git a/browser/themes/osx/jar.mn b/browser/themes/osx/jar.mn
+index c364d77..74e8b65 100644
+--- a/browser/themes/osx/jar.mn
++++ b/browser/themes/osx/jar.mn
+@@ -354,16 +354,17 @@ browser.jar:
+   skin/classic/browser/tabview/tabview.css                  (tabview/tabview.css)
+   skin/classic/browser/translating-16.png                   (../shared/translation/translating-16.png)
+   skin/classic/browser/translating-16@2x.png                (../shared/translation/translating-16@2x.png)
+   skin/classic/browser/translation-16.png                   (../shared/translation/translation-16.png)
+   skin/classic/browser/translation-16@2x.png                (../shared/translation/translation-16@2x.png)
+   skin/classic/browser/devedition/search.svg                (../shared/devedition/search.svg)
+   skin/classic/browser/devedition/urlbar-history-dropmarker.svg            (../shared/devedition/urlbar-history-dropmarker.svg)
+ * skin/classic/browser/devtools/common.css                  (../shared/devtools/common.css)
++  skin/classic/browser/devtools/graphs.css                  (../shared/devtools/graphs.css)
+ * skin/classic/browser/devtools/dark-theme.css              (../shared/devtools/dark-theme.css)
+ * skin/classic/browser/devtools/light-theme.css             (../shared/devtools/light-theme.css)
+   skin/classic/browser/devtools/add.svg                     (../shared/devtools/images/add.svg)
+   skin/classic/browser/devtools/filters.svg                 (../shared/devtools/filters.svg)
+   skin/classic/browser/devtools/filter-swatch.svg           (../shared/devtools/images/filter-swatch.svg)
+   skin/classic/browser/devtools/controls.png                (../shared/devtools/images/controls.png)
+   skin/classic/browser/devtools/controls@2x.png             (../shared/devtools/images/controls@2x.png)
+   skin/classic/browser/devtools/performance-icons.svg       (../shared/devtools/images/performance-icons.svg)
+diff --git a/browser/themes/shared/devtools/graphs.css b/browser/themes/shared/devtools/graphs.css
+new file mode 100644
+index 0000000..b8c4666
+--- /dev/null
++++ b/browser/themes/shared/devtools/graphs.css
+@@ -0,0 +1,207 @@
++/* vim:set ts=2 sw=2 sts=2 et: */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++.graph-widget-container {
++  position: relative;
++}
++
++.graph-widget-canvas {
++  width: 100%;
++  height: 100%;
++}
++
++.graph-widget-canvas[input=hovering-background] {
++  cursor: text;
++}
++
++.graph-widget-canvas[input=hovering-region] {
++  cursor: pointer;
++}
++
++.graph-widget-canvas[input=hovering-selection-start-boundary],
++.graph-widget-canvas[input=hovering-selection-end-boundary],
++.graph-widget-canvas[input=adjusting-selection-boundary] {
++  cursor: col-resize;
++}
++
++.graph-widget-canvas[input=adjusting-view-area] {
++  cursor: grabbing;
++}
++
++.graph-widget-canvas[input=hovering-selection-contents] {
++  cursor: grab;
++}
++
++.graph-widget-canvas[input=dragging-selection-contents] {
++  cursor: grabbing;
++}
++
++/* Line graph widget */
++
++.line-graph-widget-gutter {
++  position: absolute;
++  background: rgba(255,255,255,0.75);
++  width: 10px;
++  height: 100%;
++  top: 0;
++  left: 0;
++  border-right: 1px solid rgba(255,255,255,0.25);
++  pointer-events: none;
++}
++
++.line-graph-widget-gutter-line {
++  position: absolute;
++  width: 100%;
++  border-top: 1px solid;
++}
++
++.line-graph-widget-gutter-line[type=maximum] {
++  border-color: #2cbb0f;
++}
++
++.line-graph-widget-gutter-line[type=minimum] {
++  border-color: #ed2655;
++}
++
++.line-graph-widget-gutter-line[type=average] {
++  border-color: #d97e00;
++}
++
++.line-graph-widget-tooltip {
++  position: absolute;
++  background: rgba(255,255,255,0.9);
++  border-radius: 2px;
++  line-height: 15px;
++  -moz-padding-start: 6px;
++  -moz-padding-end: 6px;
++  transform: translateY(-50%);
++  font-size: 80%;
++  z-index: 1;
++  pointer-events: none;
++}
++
++.line-graph-widget-tooltip[with-arrows=true]::before {
++  content: "";
++  position: absolute;
++  border-top: 3px solid transparent;
++  border-bottom: 3px solid transparent;
++  top: calc(50% - 3px);
++}
++
++.line-graph-widget-tooltip[arrow=start][with-arrows=true]::before {
++  -moz-border-end: 3px solid rgba(255,255,255,0.75);
++  left: -3px;
++}
++
++.line-graph-widget-tooltip[arrow=end][with-arrows=true]::before {
++  -moz-border-start: 3px solid rgba(255,255,255,0.75);
++  right: -3px;
++}
++
++.line-graph-widget-tooltip[type=maximum] {
++  left: 14px;
++}
++
++.line-graph-widget-tooltip[type=minimum] {
++  left: 14px;
++}
++
++.line-graph-widget-tooltip[type=average] {
++  right: 4px;
++}
++
++.line-graph-widget-tooltip > [text=info] {
++  color: #18191a;
++}
++
++.line-graph-widget-tooltip > [text=value] {
++  -moz-margin-start: 3px;
++}
++
++.line-graph-widget-tooltip > [text=metric] {
++  -moz-margin-start: 1px;
++  color: #667380;
++}
++
++.line-graph-widget-tooltip > [text=value],
++.line-graph-widget-tooltip > [text=metric] {
++  text-shadow: 1px  0px rgba(255,255,255,0.6),
++              -1px  0px rgba(255,255,255,0.6),
++               0px -1px rgba(255,255,255,0.6),
++               0px  1px rgba(255,255,255,0.6);
++}
++
++.line-graph-widget-tooltip[type=maximum] > [text=value] {
++  color: #2cbb0f;
++}
++
++.line-graph-widget-tooltip[type=minimum] > [text=value] {
++  color: #ed2655;
++}
++
++.line-graph-widget-tooltip[type=average] > [text=value] {
++  color: #d97e00;
++}
++
++/* Bar graph widget */
++
++.bar-graph-widget-canvas {
++  background: #f7f7f7;
++}
++
++.bar-graph-widget-legend {
++  position: absolute;
++  top: 4px;
++  left: 8px;
++  color: #292e33;
++  font-size: 80%;
++  pointer-events: none;
++}
++
++.bar-graph-widget-legend-item {
++  float: left;
++  -moz-margin-end: 8px;
++}
++
++.bar-graph-widget-legend-item > [view="color"],
++.bar-graph-widget-legend-item > [view="label"] {
++  vertical-align: middle;
++}
++
++.bar-graph-widget-legend-item > [view="color"] {
++  display: inline-block;
++  width: 8px;
++  height: 8px;
++  border: 1px solid #fff;
++  border-radius: 1px;
++  -moz-margin-end: 4px;
++  pointer-events: all;
++  cursor: pointer;
++}
++
++.bar-graph-widget-legend-item > [view="label"] {
++  text-shadow: 1px  0px rgba(255,255,255,0.8),
++              -1px  0px rgba(255,255,255,0.8),
++               0px -1px rgba(255,255,255,0.8),
++               0px  1px rgba(255,255,255,0.8);
++}
++
++.flamegraph-details {
++  display: none;
++  width: 400px;
++  background-color: rgba(255, 255, 255, 0.8);
++  height: 100px;
++  position: absolute;
++  bottom: 0px;
++  right: 0px;
++}
++
++.flamegraph-details .label {
++  float: left;
++  font-weight: bold;
++}
++.flamegraph-details .value {
++  float: right;
++}
+diff --git a/browser/themes/shared/devtools/widgets.inc.css b/browser/themes/shared/devtools/widgets.inc.css
+index 6a5b485..2464936 100644
+--- a/browser/themes/shared/devtools/widgets.inc.css
++++ b/browser/themes/shared/devtools/widgets.inc.css
+@@ -834,203 +834,16 @@
+ 
+ /* Variables and properties searching */
+ 
+ .variable-or-property[unmatched] {
+   border: none;
+   margin: 0;
+ }
+ 
+-/* Canvas graphs */
+-
+-.graph-widget-container {
+-  position: relative;
+-}
+-
+-.graph-widget-canvas {
+-  width: 100%;
+-  height: 100%;
+-}
+-
+-.graph-widget-canvas[input=hovering-background] {
+-  cursor: text;
+-}
+-
+-.graph-widget-canvas[input=hovering-region] {
+-  cursor: pointer;
+-}
+-
+-.graph-widget-canvas[input=hovering-selection-start-boundary],
+-.graph-widget-canvas[input=hovering-selection-end-boundary],
+-.graph-widget-canvas[input=adjusting-selection-boundary] {
+-  cursor: col-resize;
+-}
+-
+-.graph-widget-canvas[input=adjusting-view-area] {
+-  cursor: grabbing;
+-}
+-
+-.graph-widget-canvas[input=hovering-selection-contents] {
+-  cursor: grab;
+-}
+-
+-.graph-widget-canvas[input=dragging-selection-contents] {
+-  cursor: grabbing;
+-}
+-
+-/* Line graph widget */
+-
+-.line-graph-widget-gutter {
+-  position: absolute;
+-  background: rgba(255,255,255,0.75);
+-  width: 10px;
+-  height: 100%;
+-  top: 0;
+-  left: 0;
+-  border-right: 1px solid rgba(255,255,255,0.25);
+-  pointer-events: none;
+-}
+-
+-.line-graph-widget-gutter-line {
+-  position: absolute;
+-  width: 100%;
+-  border-top: 1px solid;
+-}
+-
+-.line-graph-widget-gutter-line[type=maximum] {
+-  border-color: #2cbb0f;
+-}
+-
+-.line-graph-widget-gutter-line[type=minimum] {
+-  border-color: #ed2655;
+-}
+-
+-.line-graph-widget-gutter-line[type=average] {
+-  border-color: #d97e00;
+-}
+-
+-.line-graph-widget-tooltip {
+-  position: absolute;
+-  background: rgba(255,255,255,0.9);
+-  border-radius: 2px;
+-  line-height: 15px;
+-  -moz-padding-start: 6px;
+-  -moz-padding-end: 6px;
+-  transform: translateY(-50%);
+-  font-size: 80%;
+-  z-index: 1;
+-  pointer-events: none;
+-}
+-
+-.line-graph-widget-tooltip[with-arrows=true]::before {
+-  content: "";
+-  position: absolute;
+-  border-top: 3px solid transparent;
+-  border-bottom: 3px solid transparent;
+-  top: calc(50% - 3px);
+-}
+-
+-.line-graph-widget-tooltip[arrow=start][with-arrows=true]::before {
+-  -moz-border-end: 3px solid rgba(255,255,255,0.75);
+-  left: -3px;
+-}
+-
+-.line-graph-widget-tooltip[arrow=end][with-arrows=true]::before {
+-  -moz-border-start: 3px solid rgba(255,255,255,0.75);
+-  right: -3px;
+-}
+-
+-.line-graph-widget-tooltip[type=maximum] {
+-  left: 14px;
+-}
+-
+-.line-graph-widget-tooltip[type=minimum] {
+-  left: 14px;
+-}
+-
+-.line-graph-widget-tooltip[type=average] {
+-  right: 4px;
+-}
+-
+-.line-graph-widget-tooltip > [text=info] {
+-  color: #18191a;
+-}
+-
+-.line-graph-widget-tooltip > [text=value] {
+-  -moz-margin-start: 3px;
+-}
+-
+-.line-graph-widget-tooltip > [text=metric] {
+-  -moz-margin-start: 1px;
+-  color: #667380;
+-}
+-
+-.line-graph-widget-tooltip > [text=value],
+-.line-graph-widget-tooltip > [text=metric] {
+-  text-shadow: 1px  0px rgba(255,255,255,0.6),
+-              -1px  0px rgba(255,255,255,0.6),
+-               0px -1px rgba(255,255,255,0.6),
+-               0px  1px rgba(255,255,255,0.6);
+-}
+-
+-.line-graph-widget-tooltip[type=maximum] > [text=value] {
+-  color: #2cbb0f;
+-}
+-
+-.line-graph-widget-tooltip[type=minimum] > [text=value] {
+-  color: #ed2655;
+-}
+-
+-.line-graph-widget-tooltip[type=average] > [text=value] {
+-  color: #d97e00;
+-}
+-
+-/* Bar graph widget */
+-
+-.bar-graph-widget-canvas {
+-  background: #f7f7f7;
+-}
+-
+-.bar-graph-widget-legend {
+-  position: absolute;
+-  top: 4px;
+-  left: 8px;
+-  color: #292e33;
+-  font-size: 80%;
+-  pointer-events: none;
+-}
+-
+-.bar-graph-widget-legend-item {
+-  float: left;
+-  -moz-margin-end: 8px;
+-}
+-
+-.bar-graph-widget-legend-item > [view="color"],
+-.bar-graph-widget-legend-item > [view="label"] {
+-  vertical-align: middle;
+-}
+-
+-.bar-graph-widget-legend-item > [view="color"] {
+-  display: inline-block;
+-  width: 8px;
+-  height: 8px;
+-  border: 1px solid #fff;
+-  border-radius: 1px;
+-  -moz-margin-end: 4px;
+-  pointer-events: all;
+-  cursor: pointer;
+-}
+-
+-.bar-graph-widget-legend-item > [view="label"] {
+-  text-shadow: 1px  0px rgba(255,255,255,0.8),
+-              -1px  0px rgba(255,255,255,0.8),
+-               0px -1px rgba(255,255,255,0.8),
+-               0px  1px rgba(255,255,255,0.8);
+-}
+-
+ /* Charts */
+ 
+ .generic-chart-container {
+   /* Hack: force hardware acceleration */
+   transform: translateZ(1px);
+ }
+ 
+ .theme-dark .generic-chart-container {
+diff --git a/browser/themes/windows/jar.mn b/browser/themes/windows/jar.mn
+index bb4818d..d8fcda5 100644
+--- a/browser/themes/windows/jar.mn
++++ b/browser/themes/windows/jar.mn
+@@ -297,16 +297,17 @@ browser.jar:
+         skin/classic/browser/tabview/tabview.css                    (tabview/tabview.css)
+         skin/classic/browser/translating-16.png                     (../shared/translation/translating-16.png)
+         skin/classic/browser/translating-16@2x.png                  (../shared/translation/translating-16@2x.png)
+         skin/classic/browser/translation-16.png                     (../shared/translation/translation-16.png)
+         skin/classic/browser/translation-16@2x.png                  (../shared/translation/translation-16@2x.png)
+         skin/classic/browser/devedition/search.svg                  (../shared/devedition/search.svg)
+         skin/classic/browser/devedition/urlbar-history-dropmarker.svg            (../shared/devedition/urlbar-history-dropmarker.svg)
+ *       skin/classic/browser/devtools/common.css                    (../shared/devtools/common.css)
++        skin/classic/browser/devtools/graphs.css                    (../shared/devtools/graphs.css)
+ *       skin/classic/browser/devtools/dark-theme.css                (../shared/devtools/dark-theme.css)
+ *       skin/classic/browser/devtools/light-theme.css               (../shared/devtools/light-theme.css)
+         skin/classic/browser/devtools/add.svg                       (../shared/devtools/images/add.svg)
+         skin/classic/browser/devtools/filters.svg                   (../shared/devtools/filters.svg)
+         skin/classic/browser/devtools/filter-swatch.svg             (../shared/devtools/images/filter-swatch.svg)
+         skin/classic/browser/devtools/controls.png                  (../shared/devtools/images/controls.png)
+         skin/classic/browser/devtools/controls@2x.png               (../shared/devtools/images/controls@2x.png)
+         skin/classic/browser/devtools/performance-icons.svg         (../shared/devtools/images/performance-icons.svg)
+-- 
+2.2.1
+

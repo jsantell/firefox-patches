@@ -500,10 +500,10 @@ index 2cf4fa3..fd79287 100644
 +}
 +exports.actorCompatibilityBridge = actorCompatibilityBridge;
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index 42ae275..fc5ed21 100644
+index 63d5da7..d443c4e 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
-@@ -7,47 +7,36 @@ const { Cc, Ci, Cu, Cr } = require("chrome");
+@@ -7,48 +7,37 @@ const { Cc, Ci, Cu, Cr } = require("chrome");
  const { Task } = require("resource://gre/modules/Task.jsm");
  const { extend } = require("sdk/util/object");
  const { RecordingModel } = require("devtools/performance/recording-model");
@@ -539,7 +539,8 @@ index 42ae275..fc5ed21 100644
  // Events to pipe from PerformanceActorsConnection to the PerformanceFront
  const CONNECTION_PIPE_EVENTS = [
    "console-profile-start", "console-profile-ending", "console-profile-end",
-   "timeline-data", "profiler-already-active", "profiler-activated"
+   "timeline-data", "profiler-already-active", "profiler-activated",
+   "recording-started", "recording-stopped"
  ];
  
 -// Events to listen to from the profiler actor
@@ -553,7 +554,7 @@ index 42ae275..fc5ed21 100644
  
  /**
   * Instantiates a shared PerformanceActorsConnection for the specified target.
-@@ -78,27 +67,25 @@ SharedPerformanceActors.forTarget = function(target) {
+@@ -79,27 +68,25 @@ SharedPerformanceActors.forTarget = function(target) {
   * @param Target target
   *        The target owning this connection.
   */
@@ -584,9 +585,9 @@ index 42ae275..fc5ed21 100644
  
  PerformanceActorsConnection.prototype = {
  
-   // Properties set when mocks are being used
-   _usingMockMemory: false,
-@@ -122,20 +109,17 @@ PerformanceActorsConnection.prototype = {
+   // Properties set based off of server actor support
+   _memorySupported: true,
+@@ -123,20 +110,17 @@ PerformanceActorsConnection.prototype = {
  
      // Local debugging needs to make the target remote.
      yield this._target.makeRemote();
@@ -608,7 +609,7 @@ index 42ae275..fc5ed21 100644
      Services.obs.notifyObservers(null, "performance-actors-connection-opened", null);
    }),
  
-@@ -153,152 +137,84 @@ PerformanceActorsConnection.prototype = {
+@@ -154,152 +138,84 @@ PerformanceActorsConnection.prototype = {
      yield this._disconnectActors();
  
      this._memory = this._timeline = this._profiler = this._target = this._client = null;
@@ -635,9 +636,9 @@ index 42ae275..fc5ed21 100644
 -    if (supported) {
 -      this._timeline = new TimelineFront(this._target.client, this._target.form);
 -    } else {
--      this._usingMockTimeline = true;
 -      this._timeline = new compatibility.MockTimelineFront();
 -    }
+-    this._timelineSupported = supported;
 -  },
 -
 -  /**
@@ -648,9 +649,9 @@ index 42ae275..fc5ed21 100644
 -    if (supported) {
 -      this._memory = new MemoryFront(this._target.client, this._target.form);
 -    } else {
--      this._usingMockMemory = true;
 -      this._memory = new compatibility.MockMemoryFront();
 -    }
+-    this._memorySupported = supported;
 +  _connectActors: Task.async(function*() {
 +    this._profiler = new actors.ProfilerFront(this._target);
 +    this._memory = new actors.MemoryFront(this._target);
@@ -664,8 +665,8 @@ index 42ae275..fc5ed21 100644
 +
 +    // Expose server support status of underlying actors
 +    // after connecting.
-+    this._usingMockMemory = this._memory.IS_MOCK;
-+    this._usingMockTimeline = this._timeline.IS_MOCK;
++    this._memorySupported = !this._memory.IS_MOCK;
++    this._timelineSupported = !this._timeline.IS_MOCK;
    }),
  
    /**
@@ -802,7 +803,7 @@ index 42ae275..fc5ed21 100644
      }
  
      // Ensure the performance front is set up and ready.
-@@ -319,17 +235,17 @@ PerformanceActorsConnection.prototype = {
+@@ -320,17 +236,17 @@ PerformanceActorsConnection.prototype = {
     * Invoked whenever `console.profileEnd` is called.
     *
     * @param string profileLabel
@@ -821,7 +822,7 @@ index 42ae275..fc5ed21 100644
      let { profileLabel, currentTime: endTime } = data;
  
      let pending = this._recordings.filter(r => r.isConsole() && r.isRecording());
-@@ -355,37 +271,34 @@ PerformanceActorsConnection.prototype = {
+@@ -356,37 +272,34 @@ PerformanceActorsConnection.prototype = {
        return;
      }
  
@@ -866,7 +867,7 @@ index 42ae275..fc5ed21 100644
     * Begins a recording session
     *
     * @param object options
-@@ -393,25 +306,23 @@ PerformanceActorsConnection.prototype = {
+@@ -394,25 +307,23 @@ PerformanceActorsConnection.prototype = {
     *        `withTicks`, `withMemory` and `withAllocations`, `probability`, and `maxLogLength`.
     * @return object
     *         A promise that is resolved once recording has started.
@@ -897,9 +898,9 @@ index 42ae275..fc5ed21 100644
      model.populate(data);
      this._recordings.push(model);
  
+     this.emit("recording-started", model);
      return model;
-   }),
-@@ -438,27 +349,27 @@ PerformanceActorsConnection.prototype = {
+@@ -440,27 +351,27 @@ PerformanceActorsConnection.prototype = {
      // remove it from the internal store.
      //
      // In the case where a console.profile is generated via the console (so the tools are
@@ -930,7 +931,7 @@ index 42ae275..fc5ed21 100644
        profile: profilerData.profile,
  
        // End times for all the actors.
-@@ -476,153 +387,37 @@ PerformanceActorsConnection.prototype = {
+@@ -479,153 +390,37 @@ PerformanceActorsConnection.prototype = {
     *
     * @return Boolean
     */
@@ -1083,21 +1084,21 @@ index 42ae275..fc5ed21 100644
 -  this._request = connection._request;
  
    // Set when mocks are being used
-   this._usingMockMemory = connection._usingMockMemory;
-   this._usingMockTimeline = connection._usingMockTimeline;
+   this._memorySupported = connection._memorySupported;
+   this._timelineSupported = connection._timelineSupported;
  
    // Pipe the console profile events from the connection
    // to the front so that the UI can listen.
    CONNECTION_PIPE_EVENTS.forEach(eventName => this._connection.on(eventName, () => this.emit.apply(this, arguments)));
-@@ -660,16 +455,27 @@ PerformanceFront.prototype = {
+@@ -675,16 +470,27 @@ PerformanceFront.prototype = {
+ 
    /**
-    * Returns an object indicating if mock actors are being used or not.
+    * Returns a boolean indicating whether or not the current performance connection is recording.
+    *
+    * @return Boolean
     */
-   getMocksInUse: function () {
-     return {
-       memory: this._usingMockMemory,
-       timeline: this._usingMockTimeline
-     };
+   isRecording: function () {
+     return this._connection.isRecording();
 +  },
 +
 +  /**
@@ -1118,7 +1119,7 @@ index 42ae275..fc5ed21 100644
  function getRecordingModelPrefs () {
    return {
 diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
-index 301fa6d..b6fd77c 100644
+index 7b83784..0662e08 100644
 --- a/browser/devtools/performance/moz.build
 +++ b/browser/devtools/performance/moz.build
 @@ -1,14 +1,15 @@
@@ -1131,8 +1132,8 @@ index 301fa6d..b6fd77c 100644
 +    'modules/actors.js',
      'modules/compatibility.js',
      'modules/front.js',
+     'modules/graphs.js',
      'modules/io.js',
-     'modules/performance-graphs.js',
      'modules/recording-model.js',
      'modules/recording-utils.js',
      'panel.js'
