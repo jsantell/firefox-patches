@@ -1,0 +1,1056 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 30 Apr 2015 12:23:11 -0700
+Subject: Bug 1150696 - Move all timeline tests that are still relevent into the performance tools tests. r=vp
+
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index e090b38..cace76e 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -117,10 +117,13 @@ support-files =
+ [browser_profiler_tree-view-01.js]
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
+ [browser_profiler_tree-view-08.js]
+-[browser_timeline_blueprint.js]
+-[browser_timeline_filters.js]
++[browser_timeline-blueprint.js]
++[browser_timeline-filters.js]
++[browser_timeline-waterfall-background.js]
++[browser_timeline-waterfall-generic.js]
++[browser_timeline-waterfall-sidebar.js]
+diff --git a/browser/devtools/performance/test/browser_timeline_blueprint.js b/browser/devtools/performance/test/browser_timeline-blueprint.js
+similarity index 100%
+rename from browser/devtools/performance/test/browser_timeline_blueprint.js
+rename to browser/devtools/performance/test/browser_timeline-blueprint.js
+diff --git a/browser/devtools/performance/test/browser_timeline_filters.js b/browser/devtools/performance/test/browser_timeline-filters.js
+similarity index 100%
+rename from browser/devtools/performance/test/browser_timeline_filters.js
+rename to browser/devtools/performance/test/browser_timeline-filters.js
+diff --git a/browser/devtools/performance/test/browser_timeline-waterfall-background.js b/browser/devtools/performance/test/browser_timeline-waterfall-background.js
+new file mode 100644
+index 0000000..f0f29b2
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_timeline-waterfall-background.js
+@@ -0,0 +1,53 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the waterfall background is a 1px high canvas stretching across
++ * the container bounds.
++ */
++
++function spawnTest () {
++  let { target, panel } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, PerformanceController, OverviewView, DetailsView, WaterfallView } = panel.panelWin;
++
++  yield startRecording(panel);
++  ok(true, "Recording has started.");
++
++  let updated = 0;
++  OverviewView.on(EVENTS.OVERVIEW_RENDERED, () => updated++);
++
++  ok((yield waitUntil(() => updated > 0)),
++    "The overview graphs were updated a bunch of times.");
++  ok((yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length > 0)),
++    "There are some markers available.");
++
++  let rendered = Promise.all([
++    DetailsView.selectView("waterfall"),
++    once(WaterfallView, EVENTS.WATERFALL_RENDERED)
++  ]);
++  yield stopRecording(panel);
++  ok(true, "Recording has ended.");
++  yield rendered;
++
++  // Test the waterfall background.
++
++  let parentWidth = $("#waterfall-view").getBoundingClientRect().width;
++  let sidebarWidth = $(".waterfall-sidebar").getBoundingClientRect().width;
++  let detailsWidth = $("#waterfall-details").getBoundingClientRect().width;
++  let waterfallWidth = WaterfallView.waterfall._waterfallWidth;
++  is(waterfallWidth, parentWidth - sidebarWidth - detailsWidth,
++    "The waterfall width is correct.")
++
++  ok(WaterfallView.waterfall._canvas,
++    "A canvas should be created after the recording ended.");
++  ok(WaterfallView.waterfall._ctx,
++    "A 2d context should be created after the recording ended.");
++
++  is(WaterfallView.waterfall._canvas.width, waterfallWidth,
++    "The canvas width is correct.");
++  is(WaterfallView.waterfall._canvas.height, 1,
++    "The canvas height is correct.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/timeline/test/browser_timeline_waterfall-generic.js b/browser/devtools/performance/test/browser_timeline-waterfall-generic.js
+similarity index 82%
+rename from browser/devtools/timeline/test/browser_timeline_waterfall-generic.js
+rename to browser/devtools/performance/test/browser_timeline-waterfall-generic.js
+index ceff2bd..c279be9 100644
+--- a/browser/devtools/timeline/test/browser_timeline_waterfall-generic.js
++++ b/browser/devtools/performance/test/browser_timeline-waterfall-generic.js
+@@ -1,31 +1,31 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the waterfall is properly built after finishing a recording.
+  */
+ 
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, $$, EVENTS, TimelineController } = panel.panelWin;
++function spawnTest () {
++  let { target, panel } = yield initPerformance(SIMPLE_URL);
++  let { $, $$, EVENTS, PerformanceController, OverviewView, WaterfallView } = panel.panelWin;
+ 
+-  yield TimelineController.toggleRecording();
++  yield startRecording(panel);
+   ok(true, "Recording has started.");
+ 
+   let updated = 0;
+-  panel.panelWin.on(EVENTS.OVERVIEW_UPDATED, () => updated++);
++  OverviewView.on(EVENTS.OVERVIEW_RENDERED, () => updated++);
+ 
+   ok((yield waitUntil(() => updated > 0)),
+     "The overview graphs were updated a bunch of times.");
+-  ok((yield waitUntil(() => TimelineController.getMarkers().length > 0)),
++  ok((yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length > 0)),
+     "There are some markers available.");
+ 
+-  yield TimelineController.toggleRecording();
++  yield stopRecording(panel);
+   ok(true, "Recording has ended.");
+ 
+   // Test the header container.
+ 
+   ok($(".waterfall-header-container"),
+     "A header container should have been created.");
+ 
+   // Test the header sidebar (left).
+@@ -57,9 +57,11 @@ add_task(function*() {
+     "Some marker name labels should have been created inside the sidebar.");
+ 
+   // Test the markers waterfall (right).
+ 
+   ok($$(".waterfall-marker-item").length,
+     "Some marker waterfall nodes should have been created.");
+   ok($$(".waterfall-marker-item:not(spacer) > .waterfall-marker-bar").length,
+     "Some marker color bars should have been created inside the waterfall.");
+-});
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js b/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
+new file mode 100644
+index 0000000..ee608b1
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
+@@ -0,0 +1,59 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the sidebar is properly updated when a marker is selected.
++ */
++
++function spawnTest () {
++  let { target, panel } = yield initPerformance(SIMPLE_URL);
++  let { $, $$, EVENTS, PerformanceController, OverviewView } = panel.panelWin;
++  let { L10N, TIMELINE_BLUEPRINT } = devtools.require("devtools/shared/timeline/global");
++
++  yield startRecording(panel);
++  ok(true, "Recording has started.");
++
++  yield waitUntil(() => {
++    // Wait until we get 3 different markers.
++    let markers = PerformanceController.getCurrentRecording().getMarkers();
++    return markers.some(m => m.name == "Styles") &&
++           markers.some(m => m.name == "Reflow") &&
++           markers.some(m => m.name == "Paint");
++  });
++
++  yield stopRecording(panel);
++  ok(true, "Recording has ended.");
++
++  // Select everything
++  OverviewView.graphs.get("timeline").setSelection({ start: 0, end: OverviewView.graphs.get("timeline").width })
++
++  let bars = $$(".waterfall-marker-item:not(spacer) > .waterfall-marker-bar");
++  let markers = PerformanceController.getCurrentRecording().getMarkers();
++
++  ok(bars.length > 2, "got at least 3 markers");
++
++  let sidebar = $("#waterfall-details");
++  for (let i = 0; i < bars.length; i++) {
++    let bar = bars[i];
++    bar.click();
++    let m = markers[i];
++
++    let name = TIMELINE_BLUEPRINT[m.name].label;
++
++    is($("#waterfall-details .marker-details-type").getAttribute("value"), name,
++      "sidebar title matches markers name");
++
++    let printedStartTime = $(".marker-details-start .marker-details-labelvalue").getAttribute("value");
++    let printedEndTime = $(".marker-details-end .marker-details-labelvalue").getAttribute("value");
++    let printedDuration= $(".marker-details-duration .marker-details-labelvalue").getAttribute("value");
++
++    let toMs = ms => L10N.getFormatStrWithNumbers("timeline.tick", ms);
++
++    // Values are rounded. We don't use a strict equality.
++    is(toMs(m.start), printedStartTime, "sidebar start time is valid");
++    is(toMs(m.end), printedEndTime, "sidebar end time is valid");
++    is(toMs(m.end - m.start), printedDuration, "sidebar duration is valid");
++  }
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/timeline/test/browser.ini b/browser/devtools/timeline/test/browser.ini
+deleted file mode 100644
+index 58197c0..0000000
+--- a/browser/devtools/timeline/test/browser.ini
++++ /dev/null
+@@ -1,19 +0,0 @@
+-[DEFAULT]
+-tags = devtools
+-subsuite = devtools
+-support-files =
+-  doc_simple-test.html
+-  head.js
+-
+-[browser_timeline_aaa_run_first_leaktest.js]
+-[browser_timeline_overview-initial-selection-01.js]
+-[browser_timeline_overview-initial-selection-02.js]
+-[browser_timeline_overview-update.js]
+-[browser_timeline_overview-theme.js]
+-[browser_timeline_panels.js]
+-[browser_timeline_recording-without-memory.js]
+-[browser_timeline_recording.js]
+-[browser_timeline_waterfall-background.js]
+-[browser_timeline_waterfall-generic.js]
+-[browser_timeline_waterfall-styles.js]
+-[browser_timeline_waterfall-sidebar.js]
+diff --git a/browser/devtools/timeline/test/browser_timeline_aaa_run_first_leaktest.js b/browser/devtools/timeline/test/browser_timeline_aaa_run_first_leaktest.js
+deleted file mode 100644
+index 33ecca9..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_aaa_run_first_leaktest.js
++++ /dev/null
+@@ -1,18 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the timeline leaks on initialization and sudden destruction.
+- * You can also use this initialization format as a template for other tests.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-
+-  ok(target, "Should have a target available.");
+-  ok(panel, "Should have a panel available.");
+-
+-  ok(panel.panelWin.gToolbox, "Should have a toolbox reference on the panel window.");
+-  ok(panel.panelWin.gTarget, "Should have a target reference on the panel window.");
+-  ok(panel.panelWin.gFront, "Should have a front reference on the panel window.");
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_overview-initial-selection-01.js b/browser/devtools/timeline/test/browser_timeline_overview-initial-selection-01.js
+deleted file mode 100644
+index c29c056..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_overview-initial-selection-01.js
++++ /dev/null
+@@ -1,44 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the overview has an initial selection when recording has finished
+- * and there is data available.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
+-  let { OVERVIEW_INITIAL_SELECTION_RATIO: selectionRatio } = panel.panelWin;
+-
+-  $("#memory-checkbox").checked = true;
+-  yield TimelineController.updateMemoryRecording();
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  let updated = 0;
+-  panel.panelWin.on(EVENTS.OVERVIEW_UPDATED, () => updated++);
+-
+-  ok((yield waitUntil(() => updated > 10)),
+-    "The overview graph was updated a bunch of times.");
+-  ok((yield waitUntil(() => TimelineController.getMarkers().length > 0)),
+-    "There are some markers available.");
+-  ok((yield waitUntil(() => TimelineController.getMemory().length > 0)),
+-    "There are some memory measurements available now.");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has ended.");
+-
+-  let interval = TimelineController.getInterval();
+-  let markers = TimelineController.getMarkers();
+-  let selection = TimelineView.markersOverview.getSelection();
+-
+-  is((selection.start) | 0,
+-     (markers[0].start * TimelineView.markersOverview.dataScaleX) | 0,
+-    "The initial selection start is correct.");
+-
+-  is((selection.end - selection.start) | 0,
+-     (selectionRatio * TimelineView.markersOverview.width) | 0,
+-    "The initial selection end is correct.");
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_overview-initial-selection-02.js b/browser/devtools/timeline/test/browser_timeline_overview-initial-selection-02.js
+deleted file mode 100644
+index 8a7675c..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_overview-initial-selection-02.js
++++ /dev/null
+@@ -1,35 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the overview has no initial selection when recording has finished
+- * and there is no data available.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
+-  let { OVERVIEW_INITIAL_SELECTION_RATIO: selectionRatio } = panel.panelWin;
+-
+-  $("#memory-checkbox").checked = true;
+-  yield TimelineController.updateMemoryRecording();
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  yield TimelineController._stopRecordingAndDiscardData();
+-  ok(true, "Recording has ended.");
+-
+-  let markers = TimelineController.getMarkers();
+-  let memory = TimelineController.getMemory();
+-  let selection = TimelineView.markersOverview.getSelection();
+-
+-  is(markers.length, 0,
+-    "There are no markers available.");
+-  is(memory.length, 0,
+-    "There are no memory measurements available.");
+-  is(selection.start, null,
+-    "The initial selection start is correct.");
+-  is(selection.end, null,
+-    "The initial selection end is correct.");
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_overview-theme.js b/browser/devtools/timeline/test/browser_timeline_overview-theme.js
+deleted file mode 100644
+index 4a45bef..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_overview-theme.js
++++ /dev/null
+@@ -1,84 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the markers and memory overviews render with the correct
+- * theme on load, and rerenders when changed.
+- */
+-
+-const LIGHT_BG = "#fcfcfc";
+-const DARK_BG = "#14171a";
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel("about:blank");
+-  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
+-
+-  $("#memory-checkbox").checked = true;
+-
+-  setTheme("dark");
+-
+-  yield TimelineController.updateMemoryRecording();
+-  is(TimelineView.markersOverview.backgroundColor, DARK_BG,
+-    "correct theme on load for markers.");
+-  is(TimelineView.memoryOverview.backgroundColor, DARK_BG,
+-    "correct theme on load for memory.");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has ended.");
+-
+-  let refreshed = Promise.all([
+-    once(TimelineView.markersOverview, "refresh"),
+-    once(TimelineView.memoryOverview, "refresh"),
+-  ]);
+-
+-  setTheme("light");
+-  yield refreshed;
+-
+-  ok(true, "Both memory and markers were rerendered after theme change.");
+-  is(TimelineView.markersOverview.backgroundColor, LIGHT_BG,
+-    "correct theme on after toggle for markers.");
+-  is(TimelineView.memoryOverview.backgroundColor, LIGHT_BG,
+-    "correct theme on after toggle for memory.");
+-
+-  refreshed = Promise.all([
+-    once(TimelineView.markersOverview, "refresh"),
+-    once(TimelineView.memoryOverview, "refresh"),
+-  ]);
+-
+-  setTheme("dark");
+-  yield refreshed;
+-
+-  ok(true, "Both memory and markers were rerendered after theme change.");
+-  is(TimelineView.markersOverview.backgroundColor, DARK_BG,
+-    "correct theme on after toggle for markers once more.");
+-  is(TimelineView.memoryOverview.backgroundColor, DARK_BG,
+-    "correct theme on after toggle for memory once more.");
+-
+-  refreshed = Promise.all([
+-    once(TimelineView.markersOverview, "refresh"),
+-    once(TimelineView.memoryOverview, "refresh"),
+-  ]);
+-
+-  // Set theme back to light
+-  setTheme("light");
+-  yield refreshed;
+-});
+-
+-/**
+- * Mimics selecting the theme selector in the toolbox;
+- * sets the preference and emits an event on gDevTools to trigger
+- * the themeing.
+- */
+-function setTheme (newTheme) {
+-  let oldTheme = Services.prefs.getCharPref("devtools.theme");
+-  info("Setting `devtools.theme` to \"" + newTheme + "\"");
+-  Services.prefs.setCharPref("devtools.theme", newTheme);
+-  gDevTools.emit("pref-changed", {
+-    pref: "devtools.theme",
+-    newValue: newTheme,
+-    oldValue: oldTheme
+-  });
+-}
+diff --git a/browser/devtools/timeline/test/browser_timeline_overview-update.js b/browser/devtools/timeline/test/browser_timeline_overview-update.js
+deleted file mode 100644
+index 130f7db..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_overview-update.js
++++ /dev/null
+@@ -1,74 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the markers and memory overviews are continuously updated.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel("about:blank");
+-  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
+-
+-  $("#memory-checkbox").checked = true;
+-  yield TimelineController.updateMemoryRecording();
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  ok("selectionEnabled" in TimelineView.markersOverview,
+-    "The selection should not be enabled for the markers overview (1).");
+-  is(TimelineView.markersOverview.selectionEnabled, false,
+-    "The selection should not be enabled for the markers overview (2).");
+-  is(TimelineView.markersOverview.hasSelection(), false,
+-    "The markers overview shouldn't have a selection before recording.");
+-
+-  ok("selectionEnabled" in TimelineView.memoryOverview,
+-    "The selection should not be enabled for the memory overview (1).");
+-  is(TimelineView.memoryOverview.selectionEnabled, false,
+-    "The selection should not be enabled for the memory overview (2).");
+-  is(TimelineView.memoryOverview.hasSelection(), false,
+-    "The memory overview shouldn't have a selection before recording.");
+-
+-  let updated = 0;
+-  panel.panelWin.on(EVENTS.OVERVIEW_UPDATED, () => updated++);
+-
+-  ok((yield waitUntil(() => updated > 10)),
+-    "The overviews were updated a bunch of times.");
+-  ok((yield waitUntil(() => TimelineController.getMemory().length > 10)),
+-    "There are some memory measurements available now.");
+-
+-  ok("selectionEnabled" in TimelineView.markersOverview,
+-    "The selection should still not be enabled for the markers overview (3).");
+-  is(TimelineView.markersOverview.selectionEnabled, false,
+-    "The selection should still not be enabled for the markers overview (4).");
+-  is(TimelineView.markersOverview.hasSelection(), false,
+-    "The markers overview should not have a selection while recording.");
+-
+-  ok("selectionEnabled" in TimelineView.memoryOverview,
+-    "The selection should still not be enabled for the memory overview (3).");
+-  is(TimelineView.memoryOverview.selectionEnabled, false,
+-    "The selection should still not be enabled for the memory overview (4).");
+-  is(TimelineView.memoryOverview.hasSelection(), false,
+-    "The memory overview should not have a selection while recording.");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has ended.");
+-
+-  // TODO: Re-enable this assertion as part of bug 1120830
+-  // is(TimelineController.getMarkers().length, 0,
+-  //  "There are no markers available.");
+-  isnot(TimelineController.getMemory().length, 0,
+-    "There are some memory measurements available.");
+-
+-  is(TimelineView.markersOverview.selectionEnabled, true,
+-    "The selection should now be enabled for the markers overview.");
+-  // TODO: Re-enable this assertion as part of bug 1120830
+-  // is(TimelineView.markersOverview.hasSelection(), false,
+-  //  "The markers overview should not have a selection after recording.");
+-
+-  is(TimelineView.memoryOverview.selectionEnabled, true,
+-    "The selection should now be enabled for the memory overview.");
+-  // TODO: Re-enable this assertion as part of bug 1120830
+-  // is(TimelineView.memoryOverview.hasSelection(), false,
+-  //  "The memory overview should not have a selection after recording.");
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_panels.js b/browser/devtools/timeline/test/browser_timeline_panels.js
+deleted file mode 100644
+index f7f0de0..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_panels.js
++++ /dev/null
+@@ -1,39 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the timeline panels are correctly shown and hidden when
+- * recording starts and stops.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, EVENTS } = panel.panelWin;
+-
+-  is($("#record-button").hasAttribute("checked"), false,
+-    "The record button should not be checked yet.");
+-  is($("#timeline-pane").selectedPanel, $("#empty-notice"),
+-    "An empty notice is initially displayed instead of the waterfall view.");
+-
+-  let whenRecStarted = panel.panelWin.once(EVENTS.RECORDING_STARTED);
+-  EventUtils.synthesizeMouseAtCenter($("#record-button"), {}, panel.panelWin);
+-  yield whenRecStarted;
+-
+-  ok(true, "Recording has started.");
+-
+-  is($("#record-button").getAttribute("checked"), "true",
+-    "The record button should be checked now.");
+-  is($("#timeline-pane").selectedPanel, $("#recording-notice"),
+-    "A recording notice is now displayed instead of the waterfall view.");
+-
+-  let whenRecEnded = panel.panelWin.once(EVENTS.RECORDING_ENDED);
+-  EventUtils.synthesizeMouseAtCenter($("#record-button"), {}, panel.panelWin);
+-  yield whenRecEnded;
+-
+-  ok(true, "Recording has ended.");
+-
+-  is($("#record-button").hasAttribute("checked"), false,
+-    "The record button should be unchecked again.");
+-  is($("#timeline-pane").selectedPanel, $("#timeline-waterfall-container"),
+-    "A waterfall view is now displayed.");
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_recording-without-memory.js b/browser/devtools/timeline/test/browser_timeline_recording-without-memory.js
+deleted file mode 100644
+index 5b8b0e0..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_recording-without-memory.js
++++ /dev/null
+@@ -1,33 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the timeline actor isn't unnecessarily asked to record memory.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  let updated = 0;
+-  panel.panelWin.on(EVENTS.OVERVIEW_UPDATED, () => updated++);
+-
+-  ok((yield waitUntil(() => updated > 10)),
+-    "The overview graph was updated a bunch of times.");
+-  ok((yield waitUntil(() => TimelineController.getMarkers().length > 0)),
+-    "There are some markers available.");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has ended.");
+-
+-  let markers = TimelineController.getMarkers();
+-  let memory = TimelineController.getMemory();
+-
+-  isnot(markers.length, 0,
+-    "There are some markers available.");
+-  is(memory.length, 0,
+-    "There are no memory measurements available.");
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_recording.js b/browser/devtools/timeline/test/browser_timeline_recording.js
+deleted file mode 100644
+index 3cc977f..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_recording.js
++++ /dev/null
+@@ -1,45 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the timeline can properly start and stop a recording.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, gFront, TimelineController } = panel.panelWin;
+-
+-  $("#memory-checkbox").checked = true;
+-  yield TimelineController.updateMemoryRecording();
+-
+-  is((yield gFront.isRecording()), false,
+-    "The timeline actor should not be recording when the tool starts.");
+-  is(TimelineController.getMarkers().length, 0,
+-    "There should be no markers available when the tool starts.");
+-  is(TimelineController.getMemory().length, 0,
+-    "There should be no memory measurements available when the tool starts.");
+-
+-  yield TimelineController.toggleRecording();
+-
+-  is((yield gFront.isRecording()), true,
+-    "The timeline actor should be recording now.");
+-  ok((yield waitUntil(() => TimelineController.getMarkers().length > 0)),
+-    "There are some markers available now.");
+-  ok((yield waitUntil(() => TimelineController.getMemory().length > 0)),
+-    "There are some memory measurements available now.");
+-
+-  info("Interval: " + TimelineController.getInterval().toSource());
+-  info("Markers: " + TimelineController.getMarkers().toSource());
+-  info("Memory: " + TimelineController.getMemory().toSource());
+-
+-  ok("startTime" in TimelineController.getInterval(),
+-    "A `startTime` field was set on the recording data.");
+-  ok("endTime" in TimelineController.getInterval(),
+-    "An `endTime` field was set on the recording data.");
+-
+-  ok(TimelineController.getInterval().endTime >
+-     TimelineController.getInterval().startTime,
+-    "Some time has passed since the recording started.");
+-
+-  yield TimelineController.toggleRecording();
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_waterfall-background.js b/browser/devtools/timeline/test/browser_timeline_waterfall-background.js
+deleted file mode 100644
+index 47c1cfb..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_waterfall-background.js
++++ /dev/null
+@@ -1,44 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the waterfall background is a 1px high canvas stretching across
+- * the container bounds.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, EVENTS, TimelineView, TimelineController } = panel.panelWin;
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  let updated = 0;
+-  panel.panelWin.on(EVENTS.OVERVIEW_UPDATED, () => updated++);
+-
+-  ok((yield waitUntil(() => updated > 0)),
+-    "The overview graphs were updated a bunch of times.");
+-  ok((yield waitUntil(() => TimelineController.getMarkers().length > 0)),
+-    "There are some markers available.");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has ended.");
+-
+-  // Test the waterfall background.
+-
+-  let parentWidth = $("#timeline-waterfall").getBoundingClientRect().width;
+-  let waterfallWidth = TimelineView.waterfall._waterfallWidth;
+-  let sidebarWidth = 150; // px
+-  is(waterfallWidth, parentWidth - sidebarWidth,
+-    "The waterfall width is correct.")
+-
+-  ok(TimelineView.waterfall._canvas,
+-    "A canvas should be created after the recording ended.");
+-  ok(TimelineView.waterfall._ctx,
+-    "A 2d context should be created after the recording ended.");
+-
+-  is(TimelineView.waterfall._canvas.width, waterfallWidth,
+-    "The canvas width is correct.");
+-  is(TimelineView.waterfall._canvas.height, 1,
+-    "The canvas height is correct.");
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_waterfall-sidebar.js b/browser/devtools/timeline/test/browser_timeline_waterfall-sidebar.js
+deleted file mode 100644
+index 0c55649..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_waterfall-sidebar.js
++++ /dev/null
+@@ -1,58 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the sidebar is properly updated when a marker is selected.
+- */
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { $, $$, EVENTS, TimelineController, TimelineView, TIMELINE_BLUEPRINT} = panel.panelWin;
+-  let { L10N } = devtools.require("devtools/shared/timeline/global");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  yield waitUntil(() => {
+-    // Wait until we get 3 different markers.
+-    let markers = TimelineController.getMarkers();
+-    return markers.some(m => m.name == "Styles") &&
+-           markers.some(m => m.name == "Reflow") &&
+-           markers.some(m => m.name == "Paint");
+-  });
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has ended.");
+-
+-  // Select everything
+-  TimelineView.markersOverview.setSelection({ start: 0, end: TimelineView.markersOverview.width })
+-
+-
+-  let bars = $$(".waterfall-marker-item:not(spacer) > .waterfall-marker-bar");
+-  let markers = TimelineController.getMarkers();
+-
+-  ok(bars.length > 2, "got at least 3 markers");
+-
+-  let sidebar = $("#timeline-waterfall-details");
+-  for (let i = 0; i < bars.length; i++) {
+-    let bar = bars[i];
+-    bar.click();
+-    let m = markers[i];
+-
+-    let name = TIMELINE_BLUEPRINT[m.name].label;
+-
+-    is($("#timeline-waterfall-details .marker-details-type").getAttribute("value"), name,
+-      "sidebar title matches markers name");
+-
+-    let printedStartTime = $(".marker-details-start .marker-details-labelvalue").getAttribute("value");
+-    let printedEndTime = $(".marker-details-end .marker-details-labelvalue").getAttribute("value");
+-    let printedDuration= $(".marker-details-duration .marker-details-labelvalue").getAttribute("value");
+-
+-    let toMs = ms => L10N.getFormatStrWithNumbers("timeline.tick", ms);
+-
+-    // Values are rounded. We don't use a strict equality.
+-    is(toMs(m.start), printedStartTime, "sidebar start time is valid");
+-    is(toMs(m.end), printedEndTime, "sidebar end time is valid");
+-    is(toMs(m.end - m.start), printedDuration, "sidebar duration is valid");
+-  }
+-});
+diff --git a/browser/devtools/timeline/test/browser_timeline_waterfall-styles.js b/browser/devtools/timeline/test/browser_timeline_waterfall-styles.js
+deleted file mode 100644
+index 35ab9ae..0000000
+--- a/browser/devtools/timeline/test/browser_timeline_waterfall-styles.js
++++ /dev/null
+@@ -1,88 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the waterfall is properly built after making a selection
+- * and the child nodes are styled correctly.
+- */
+-
+-var gRGB_TO_HSL = {
+- "rgb(193, 132, 214)": "hsl(285,50%,68%)",
+- "rgb(152, 61, 183)": "hsl(285,50%,48%)",
+- "rgb(161, 223, 138)": "hsl(104,57%,71%)",
+- "rgb(96, 201, 58)": "hsl(104,57%,51%)",
+- "rgb(240, 195, 111)": "hsl(39,82%,69%)",
+- "rgb(227, 155, 22)": "hsl(39,82%,49%)",
+- "rgb(204, 204, 204)": "hsl(0,0%,80%)",
+- "rgb(153, 153, 153)": "hsl(0,0%,60%)",
+-};
+-
+-add_task(function*() {
+-  let { target, panel } = yield initTimelinePanel(SIMPLE_URL);
+-  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/shared/timeline/global");
+-  let { $, $$, EVENTS, TimelineController } = panel.panelWin;
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has started.");
+-
+-  let updated = 0;
+-  panel.panelWin.on(EVENTS.OVERVIEW_UPDATED, () => updated++);
+-
+-  ok((yield waitUntil(() => updated > 0)),
+-    "The overview graphs were updated a bunch of times.");
+-  ok((yield waitUntil(() => TimelineController.getMarkers().length > 0)),
+-    "There are some markers available.");
+-
+-  yield TimelineController.toggleRecording();
+-  ok(true, "Recording has ended.");
+-
+-  // Test the table sidebars.
+-
+-  for (let sidebar of [
+-    ...$$(".timeline-header-sidebar"),
+-    ...$$(".timeline-marker-sidebar")
+-  ]) {
+-    is(sidebar.getAttribute("width"), "150",
+-      "The table's sidebar width is correct.");
+-  }
+-
+-  // Test the table ticks.
+-
+-  for (let tick of $$(".timeline-header-tick")) {
+-    ok(tick.getAttribute("value").match(/^\d+ ms$/),
+-      "The table's timeline ticks appear to have correct labels.");
+-    ok(tick.style.transform.match(/^translateX\(.*px\)$/),
+-      "The table's timeline ticks appear to have proper translations.");
+-  }
+-
+-  // Test the marker bullets.
+-
+-  for (let bullet of $$(".timeline-marker-bullet")) {
+-    let type = bullet.getAttribute("type");
+-
+-    ok(type in TIMELINE_BLUEPRINT,
+-      "The bullet type is present in the timeline blueprint.");
+-    is(gRGB_TO_HSL[bullet.style.backgroundColor], TIMELINE_BLUEPRINT[type].fill,
+-      "The bullet's background color is correct.");
+-    is(gRGB_TO_HSL[bullet.style.borderColor], TIMELINE_BLUEPRINT[type].stroke,
+-      "The bullet's border color is correct.");
+-  }
+-
+-  // Test the marker bars.
+-
+-  for (let bar of $$(".timeline-marker-bar")) {
+-    let type = bar.getAttribute("type");
+-
+-    ok(type in TIMELINE_BLUEPRINT,
+-      "The bar type is present in the timeline blueprint.");
+-    is(gRGB_TO_HSL[bar.style.backgroundColor], TIMELINE_BLUEPRINT[type].fill,
+-      "The bar's background color is correct.");
+-    is(gRGB_TO_HSL[bar.style.borderColor], TIMELINE_BLUEPRINT[type].stroke,
+-      "The bar's border color is correct.");
+-
+-    ok(bar.getAttribute("width") > 0,
+-      "The bar appears to have a proper width.");
+-    ok(bar.style.transform.match(/^translateX\(.*px\)$/),
+-      "The bar appears to have proper translations.");
+-  }
+-});
+diff --git a/browser/devtools/timeline/test/doc_simple-test.html b/browser/devtools/timeline/test/doc_simple-test.html
+deleted file mode 100644
+index d038c46..0000000
+--- a/browser/devtools/timeline/test/doc_simple-test.html
++++ /dev/null
+@@ -1,25 +0,0 @@
+-<!-- Any copyright is dedicated to the Public Domain.
+-     http://creativecommons.org/publicdomain/zero/1.0/ -->
+-<!doctype html>
+-
+-<html>
+-  <head>
+-    <meta charset="utf-8"/>
+-    <title>Timeline test page</title>
+-  </head>
+-
+-  <body>
+-    <script type="text/javascript">
+-      var x = 1;
+-      function test() {
+-        document.body.style.borderTop = x + "px solid red";
+-        x = 1^x;
+-        document.body.innerHeight; // flush pending reflows
+-      }
+-
+-      // Prevent this script from being garbage collected.
+-      window.setInterval(test, 1);
+-    </script>
+-  </body>
+-
+-</html>
+diff --git a/browser/devtools/timeline/test/head.js b/browser/devtools/timeline/test/head.js
+deleted file mode 100644
+index 74b185a..0000000
+--- a/browser/devtools/timeline/test/head.js
++++ /dev/null
+@@ -1,148 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-"use strict";
+-
+-const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+-
+-let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+-
+-// Disable logging for all the tests. Both the debugger server and frontend will
+-// be affected by this pref.
+-let gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
+-Services.prefs.setBoolPref("devtools.debugger.log", false);
+-
+-// Enable the tool while testing.
+-let gToolEnabled = Services.prefs.getBoolPref("devtools.timeline.enabled");
+-Services.prefs.setBoolPref("devtools.timeline.enabled", true);
+-
+-let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+-let { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+-let { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
+-let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+-let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+-
+-let TargetFactory = devtools.TargetFactory;
+-let Toolbox = devtools.Toolbox;
+-
+-const EXAMPLE_URL = "http://example.com/browser/browser/devtools/timeline/test/";
+-const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
+-
+-// All tests are asynchronous.
+-waitForExplicitFinish();
+-
+-registerCleanupFunction(() => {
+-  info("finish() was called, cleaning up...");
+-  Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
+-  Services.prefs.setBoolPref("devtools.timeline.enabled", gToolEnabled);
+-});
+-
+-// Close the toolbox and all opened tabs automatically.
+-registerCleanupFunction(function*() {
+-  let target = TargetFactory.forTab(gBrowser.selectedTab);
+-  yield gDevTools.closeToolbox(target);
+-
+-  while (gBrowser.tabs.length > 1) {
+-    gBrowser.removeCurrentTab();
+-  }
+-});
+-
+-function addTab(url) {
+-  info("Adding tab: " + url);
+-
+-  let deferred = promise.defer();
+-  let tab = gBrowser.selectedTab = gBrowser.addTab(url);
+-  let linkedBrowser = tab.linkedBrowser;
+-
+-  linkedBrowser.addEventListener("load", function onLoad() {
+-    linkedBrowser.removeEventListener("load", onLoad, true);
+-    info("Tab added and finished loading: " + url);
+-    deferred.resolve(tab);
+-  }, true);
+-
+-  return deferred.promise;
+-}
+-
+-/**
+- * Spawns a new tab and starts up a toolbox with the timeline panel
+- * automatically selected.
+- *
+- * Must be used within a task.
+- *
+- * @param string url
+- *        The location of the new tab to spawn.
+- * @return object
+- *         A promise resolved once the timeline is initialized, with the
+- *         {target, panel} instances.
+- */
+-function* initTimelinePanel(url) {
+-  info("Initializing a timeline pane.");
+-
+-  let tab = yield addTab(url);
+-  let target = TargetFactory.forTab(tab);
+-
+-  yield target.makeRemote();
+-
+-  let toolbox = yield gDevTools.showToolbox(target, "timeline");
+-  let panel = toolbox.getCurrentPanel();
+-  return { target, panel };
+-}
+-
+-/**
+- * Waits until a predicate returns true.
+- *
+- * @param function predicate
+- *        Invoked once in a while until it returns true.
+- * @param number interval [optional]
+- *        How often the predicate is invoked, in milliseconds.
+- */
+-function waitUntil(predicate, interval = 10) {
+-  if (predicate()) {
+-    return promise.resolve(true);
+-  }
+-  let deferred = promise.defer();
+-  setTimeout(function() {
+-    waitUntil(predicate).then(() => deferred.resolve(true));
+-  }, interval);
+-  return deferred.promise;
+-
+-}
+-
+-/**
+- * Wait until next tick.
+- */
+-function nextTick() {
+-  let def = promise.defer();
+-  executeSoon(() => def.resolve())
+-  return def.promise;
+-}
+-
+-/**
+- * Wait for eventName on target.
+- * @param {Object} target An observable object that either supports on/off or
+- * addEventListener/removeEventListener
+- * @param {String} eventName
+- * @param {Boolean} useCapture Optional, for addEventListener/removeEventListener
+- * @return A promise that resolves when the event has been handled
+- */
+-function once(target, eventName, useCapture=false) {
+-  info("Waiting for event: '" + eventName + "' on " + target + ".");
+-
+-  let deferred = promise.defer();
+-
+-  for (let [add, remove] of [
+-    ["addEventListener", "removeEventListener"],
+-    ["addListener", "removeListener"],
+-    ["on", "off"]
+-  ]) {
+-    if ((add in target) && (remove in target)) {
+-      target[add](eventName, function onEvent(...aArgs) {
+-        info("Got event: '" + eventName + "' on " + target + ".");
+-        target[remove](eventName, onEvent, useCapture);
+-        deferred.resolve.apply(deferred, aArgs);
+-      }, useCapture);
+-      break;
+-    }
+-  }
+-
+-  return deferred.promise;
+-}
+-- 
+2.2.1
+

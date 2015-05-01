@@ -1,0 +1,69 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 30 Apr 2015 17:57:11 -0700
+Subject: Bug 1160332 - Correctly check that the mouse is active in graphs to clean up rerender jank, a rebase error from 1157914. r=vp
+
+diff --git a/browser/devtools/performance/modules/graphs.js b/browser/devtools/performance/modules/graphs.js
+index fa23b22..8311974 100644
+--- a/browser/devtools/performance/modules/graphs.js
++++ b/browser/devtools/performance/modules/graphs.js
+@@ -321,16 +321,24 @@ GraphsController.prototype = {
+     return this._getPrimaryLink().setMappedSelection(selection, { mapStart, mapEnd });
+   },
+ 
+   getMappedSelection: function ({ mapStart, mapEnd }) {
+     return this._getPrimaryLink().getMappedSelection({ mapStart, mapEnd });
+   },
+ 
+   /**
++   * Returns an array of graphs that have been created, not necessarily
++   * enabled currently.
++   */
++  getGraphs: function () {
++    return Object.keys(this._graphs).map(name => this._graphs[name]);
++  },
++
++  /**
+    * Drops the selection.
+    */
+   dropSelection: function () {
+     if (this._getPrimaryLink()) {
+       return this._getPrimaryLink().dropSelection();
+     }
+   },
+ 
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 31d236b..c070e37 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -92,19 +92,25 @@ let OverviewView = {
+     yield this.graphs.destroy();
+   }),
+ 
+   /**
+    * Returns true if any of the overview graphs have mouse dragging active,
+    * false otherwise.
+    */
+   get isMouseActive() {
+-    return (this.markersOverview && this.markersOverview.isMouseActive) ||
+-           (this.memoryOverview && this.memoryOverview.isMouseActive) ||
+-           (this.framerateGraph && this.framerateGraph.isMouseActive);
++    // Fetch all graphs currently stored in the GraphsController.
++    // These graphs are not necessarily active, but will not have
++    // an active mouse, in that case.
++    for (let graph of this.graphs.getGraphs()) {
++      if (graph.isMouseActive) {
++        return true;
++      }
++    }
++    return false;
+   },
+ 
+   /**
+    * Disabled in the event we're using a Timeline mock, so we'll have no
+    * timeline, ticks or memory data to show, so just block rendering and hide
+    * the panel.
+    */
+   disable: function () {
+-- 
+2.2.1
+

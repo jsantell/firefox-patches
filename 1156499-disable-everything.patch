@@ -1,0 +1,316 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 30 Apr 2015 15:13:49 -0700
+Subject: Bug 1156499 - Disable all non-profiler/fps components in the performance tools when in aurora, for 40.0 release. r=vp
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index 65186d8..56619a7 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1438,16 +1438,25 @@ pref("devtools.performance.profiler.sample-frequency-khz", 1);
+ pref("devtools.performance.ui.invert-call-tree", true);
+ pref("devtools.performance.ui.invert-flame-graph", false);
+ pref("devtools.performance.ui.flatten-tree-recursion", true);
+ pref("devtools.performance.ui.show-platform-data", false);
+ pref("devtools.performance.ui.show-idle-blocks", true);
+ pref("devtools.performance.ui.enable-memory", false);
+ pref("devtools.performance.ui.enable-framerate", true);
+ pref("devtools.performance.ui.show-jit-optimizations", false);
++// If in aurora (40.0, will revert for 40.1), set default
++// to retro mode.
++// TODO bug 1160313
++#if MOZ_UPDATE_CHANNEL == aurora
++  pref("devtools.performance.ui.retro-mode", true);
++#else
++  pref("devtools.performance.ui.retro-mode", false);
++#endif
++
+ 
+ // The default cache UI setting
+ pref("devtools.cache.disabled", false);
+ 
+ // The default service workers UI setting
+ pref("devtools.serviceWorkers.testing.enabled", false);
+ 
+ // Enable the Network Monitor
+diff --git a/browser/devtools/performance/modules/graphs.js b/browser/devtools/performance/modules/graphs.js
+index fa23b22..a71b2f1 100644
+--- a/browser/devtools/performance/modules/graphs.js
++++ b/browser/devtools/performance/modules/graphs.js
+@@ -21,16 +21,19 @@ loader.lazyRequireGetter(this, "ProfilerGlobal",
+   "devtools/shared/profiler/global");
+ loader.lazyRequireGetter(this, "TimelineGlobal",
+   "devtools/shared/timeline/global");
+ loader.lazyRequireGetter(this, "MarkersOverview",
+   "devtools/shared/timeline/markers-overview", true);
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ 
++// TODO get rid of retro mode in bug 1160313
++loader.lazyRequireGetter(this, "Services");
++
+ /**
+  * For line graphs
+  */
+ const HEIGHT = 35; // px
+ const STROKE_WIDTH = 1; // px
+ const DAMPEN_VALUES = 0.95;
+ const CLIPHEAD_LINE_COLOR = "#666";
+ const SELECTION_LINE_COLOR = "#555";
+@@ -160,29 +163,49 @@ const GRAPH_DEFINITIONS = {
+   timeline: {
+     constructor: TimelineGraph,
+     selector: "#markers-overview",
+     needsBlueprints: true,
+     primaryLink: true
+   }
+ };
+ 
++// TODO get rid of retro mode in bug 1160313
++const GRAPH_DEFINITIONS_RETRO = {
++  memory: {
++    constructor: MemoryGraph,
++    selector: "#memory-overview",
++  },
++  framerate: {
++    constructor: FramerateGraph,
++    selector: "#time-framerate",
++    needsBlueprints: true,
++    primaryLink: true
++  },
++  timeline: {
++    constructor: TimelineGraph,
++    selector: "#markers-overview",
++  }
++};
++
+ /**
+  * A controller for orchestrating the performance's tool overview graphs. Constructs,
+  * syncs, toggles displays and defines the memory, framerate and timeline view.
+  *
+  * @param {object} definition
+  * @param {DOMElement} root
+  * @param {function} getBlueprint
+  * @param {function} getTheme
+  */
+ function GraphsController ({ definition, root, getBlueprint, getTheme }) {
+   this._graphs = {};
+   this._enabled = new Set();
+-  this._definition = definition || GRAPH_DEFINITIONS;
++  // TODO get rid of retro mode in bug 1160313
++  let RETRO_MODE = Services.prefs.getBoolPref("devtools.performance.ui.retro-mode");
++  this._definition = definition || (RETRO_MODE ? GRAPH_DEFINITIONS_RETRO : GRAPH_DEFINITIONS);
+   this._root = root;
+   this._getBlueprint = getBlueprint;
+   this._getTheme = getTheme;
+   this._primaryLink = Object.keys(this._definition).filter(name => this._definition[name].primaryLink)[0];
+   this.$ = root.ownerDocument.querySelector.bind(root.ownerDocument);
+ 
+   EventEmitter.decorate(this);
+   this._onSelecting = this._onSelecting.bind(this);
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index b3a6629..3a5e886 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -279,21 +279,26 @@ let PerformanceController = {
+     this._nonBooleanPrefs[prefName] = prefValue;
+   },
+ 
+   /**
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
++    // Store retro-mode here so we can easily list true/false
++    // values for reverting.
++    // TODO bug 1160313
++    let superMode = !this.getOption("retro-mode");
++
+     let options = {
+-      withMarkers: true,
+-      withMemory: this.getOption("enable-memory"),
++      withMarkers: superMode ? true : false,
++      withMemory: superMode ? this.getOption("enable-memory") : false,
+       withTicks: this.getOption("enable-framerate"),
+-      withAllocations: this.getOption("enable-memory"),
++      withAllocations: superMode ? this.getOption("enable-memory") : false,
+       allocationsSampleProbability: this.getPref("memory-sample-probability"),
+       allocationsMaxLogLength: this.getPref("memory-max-log-length"),
+       bufferSize: this.getPref("profiler-buffer-size"),
+       sampleFrequency: this.getPref("profiler-sample-frequency")
+     };
+ 
+     this.emit(EVENTS.RECORDING_WILL_START);
+ 
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index e090b38..a4dcae3 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -119,8 +119,10 @@ support-files =
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
+ [browser_profiler_tree-view-08.js]
+ [browser_timeline_blueprint.js]
+ [browser_timeline_filters.js]
++# remove in bug 1160313
++[browser_retro-test.js]
+diff --git a/browser/devtools/performance/test/browser_retro-test.js b/browser/devtools/performance/test/browser_retro-test.js
+new file mode 100644
+index 0000000..ad8265e
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_retro-test.js
+@@ -0,0 +1,49 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that only js-calltree view is on, default, and many things are hidden
++ * when in retro mode.
++ */
++const HIDDEN_OPTIONS = ["option-enable-memory", "option-invert-flame-graph", "option-show-jit-optimizations", "option-flatten-tree-recursion"];
++
++Services.prefs.setBoolPref("devtools.performance.ui.retro-mode", true);
++
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, DetailsView, PerformanceController, $, $$, JsCallTreeView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  let model = PerformanceController.getCurrentRecording();
++
++  ok(model.getMemory().length === 0, "model did not record memory.");
++  ok(model.getTicks().length !== 0, "model did get ticks.");
++  ok(model.getAllocations().sites.length === 0, "model did get allocation data.");
++  ok(model.getAllocations().timestamps.length === 0, "model did get allocation data.");
++  ok(model.getAllocations().frames.length === 0, "model did get allocation data.");
++  ok(model.getAllocations().counts.length === 0, "model did get allocation data.");
++
++  ok(DetailsView.isViewSelected(JsCallTreeView),
++    "The jscalltree view is selected by default");
++
++  for (let option of $$("#performance-options-menupopup > menuitem")) {
++    if (HIDDEN_OPTIONS.indexOf(option.id) !== -1) {
++      ok(option.hidden === true, `${option.id} should be hidden.`);
++    } else {
++      ok(option.hidden === false, `${option.id} should be visible.`);
++    }
++  }
++
++  for (let viewbutton of $$("#performance-toolbar-controls-detail-views > toolbarbutton")) {
++    ok (viewbutton.hidden === true, `${viewbutton.id} should be hidden.`);
++  }
++
++  ok($("#markers-overview").hidden, "markers overview should be hidden.");
++  ok($("#memory-overview").hidden, "memory overview should be hidden.");
++  ok(!$("#time-framerate").hidden, "framerate should be shown.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index b255c6a..871d2b1 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -51,27 +51,32 @@ let DEFAULT_PREFS = [
+   "devtools.performance.ui.show-idle-blocks",
+   "devtools.performance.ui.enable-memory",
+   "devtools.performance.ui.enable-framerate",
+   "devtools.performance.ui.show-jit-optimizations",
+   "devtools.performance.memory.sample-probability",
+   "devtools.performance.memory.max-log-length",
+   "devtools.performance.profiler.buffer-size",
+   "devtools.performance.profiler.sample-frequency-khz",
++  "devtools.performance.ui.retro-mode",
+ ].reduce((prefs, pref) => {
+   prefs[pref] = Preferences.get(pref);
+   return prefs;
+ }, {});
+ 
+ // Enable the new performance panel for all tests.
+ Services.prefs.setBoolPref("devtools.performance.enabled", true);
+ // Enable logging for all the tests. Both the debugger server and frontend will
+ // be affected by this pref.
+ Services.prefs.setBoolPref("devtools.debugger.log", false);
+ 
++// Disable retro mode.
++// TODO bug 1160313
++Services.prefs.setBoolPref("devtools.performance.ui.retro-mode", false);
++
+ /**
+  * Call manually in tests that use frame script utils after initializing
+  * the tool. Must be called after initializing so we can detect
+  * whether or not `content` is a CPOW or not. Call after init but before navigating
+  * to different pages.
+  */
+ function loadFrameScripts () {
+   mm = gBrowser.selectedBrowser.messageManager;
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+index 0ce1825..35c1353 100644
+--- a/browser/devtools/performance/views/details.js
++++ b/browser/devtools/performance/views/details.js
+@@ -89,19 +89,22 @@ let DetailsView = {
+    * if currently selected. Called when a preference changes in `devtools.performance.ui.`.
+    */
+   setAvailableViews: Task.async(function* () {
+     let recording = PerformanceController.getCurrentRecording();
+     let isRecording = recording && recording.isRecording();
+     let invalidCurrentView = false;
+ 
+     for (let [name, { view }] of Iterator(this.components)) {
+-      let isSupported = this._isViewSupported(name, false);
++      // TODO bug 1160313 get rid of retro mode checks.
++      let isRetro = PerformanceController.getOption("retro-mode");
++      let isSupported = isRetro ? name === "js-calltree" : this._isViewSupported(name, false);
+ 
+-      $(`toolbarbutton[data-view=${name}]`).hidden = !isSupported;
++      // TODO bug 1160313 hide all view buttons, but let js-calltree still be "supported"
++      $(`toolbarbutton[data-view=${name}]`).hidden = isRetro ? true : !isSupported;
+ 
+       // If the view is currently selected and not supported, go back to the
+       // default view.
+       if (!isSupported && this.isViewSelected(view)) {
+         invalidCurrentView = true;
+       }
+     }
+ 
+diff --git a/browser/devtools/performance/views/toolbar.js b/browser/devtools/performance/views/toolbar.js
+index 4df1322..05770b8 100644
+--- a/browser/devtools/performance/views/toolbar.js
++++ b/browser/devtools/performance/views/toolbar.js
+@@ -16,16 +16,29 @@ let ToolbarView = {
+     this._onHiddenMarkersChanged = this._onHiddenMarkersChanged.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+ 
+     this.optionsView = new OptionsView({
+       branchName: BRANCH_NAME,
+       menupopup: $("#performance-options-menupopup")
+     });
+ 
++    // TODO bug 1160313 get rid of retro mode checks
++    // hide option buttons here, and any other buttons in the toolbar
++    // (details.js takes care of view buttons)
++    if (PerformanceController.getOption("retro-mode")) {
++      let RETRO_ELEMENTS = [
++        "#option-flatten-tree-recursion", "#option-enable-memory", "#option-invert-flame-graph",
++        "#option-show-jit-optimizations", "#filter-button"
++      ];
++      for (let selector of RETRO_ELEMENTS) {
++        $(selector).hidden = true;
++      }
++    }
++
+     yield this.optionsView.initialize();
+     this.optionsView.on("pref-changed", this._onPrefChanged);
+ 
+     this._buildMarkersFilterPopup();
+     this._updateHiddenMarkersPopup();
+     $("#performance-filter-menupopup").addEventListener("popupshowing", this._onFilterPopupShowing);
+     $("#performance-filter-menupopup").addEventListener("popuphiding",  this._onFilterPopupHiding);
+   }),
+-- 
+2.2.1
+

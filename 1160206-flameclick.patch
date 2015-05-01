@@ -1,0 +1,241 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 30 Apr 2015 13:58:18 -0700
+Subject: Bug 1160206 - clicking a block in the flame graph opens the frame in the debugger. r=vp
+
+diff --git a/browser/devtools/performance/views/details-js-flamegraph.js b/browser/devtools/performance/views/details-js-flamegraph.js
+index 8c1a7dc..8afcde9 100644
+--- a/browser/devtools/performance/views/details-js-flamegraph.js
++++ b/browser/devtools/performance/views/details-js-flamegraph.js
+@@ -24,19 +24,21 @@ let JsFlameGraphView = Heritage.extend(DetailsSubview, {
+ 
+     this.graph = new FlameGraph($("#js-flamegraph-view"));
+     this.graph.timelineTickUnits = L10N.getStr("graphs.ms");
+     this.graph.setTheme(PerformanceController.getTheme());
+     yield this.graph.ready();
+ 
+     this._onRangeChangeInGraph = this._onRangeChangeInGraph.bind(this);
+     this._onThemeChanged = this._onThemeChanged.bind(this);
++    this._onBlockClicked = this._onBlockClicked.bind(this);
+ 
+     PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     this.graph.on("selecting", this._onRangeChangeInGraph);
++    this.graph.on("block-clicked", this._onBlockClicked);
+   }),
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: Task.async(function* () {
+     DetailsSubview.destroy.call(this);
+ 
+@@ -93,16 +95,27 @@ let JsFlameGraphView = Heritage.extend(DetailsSubview, {
+   _onRerenderPrefChanged: function() {
+     let recording = PerformanceController.getCurrentRecording();
+     let profile = recording.getProfile();
+     let samples = profile.threads[0].samples;
+     FlameGraphUtils.removeFromCache(samples);
+   },
+ 
+   /**
++   * Called when a block in the flamegraph is clicked.
++   * Opens block in the debugger.
++   */
++  _onBlockClicked: function (_, block) {
++    let { parsedLocation: { url, line }} = block;
++    if (url && line) {
++      gToolbox.viewSourceInDebugger(url, line);
++    }
++  },
++
++  /**
+    * Called when `devtools.theme` changes.
+    */
+   _onThemeChanged: function (_, theme) {
+     this.graph.setTheme(theme);
+     this.graph.refresh({ force: true });
+   },
+ 
+   toString: () => "[object JsFlameGraphView]"
+diff --git a/browser/devtools/shared/widgets/FlameGraph.js b/browser/devtools/shared/widgets/FlameGraph.js
+index ede7852..df1e9e8 100644
+--- a/browser/devtools/shared/widgets/FlameGraph.js
++++ b/browser/devtools/shared/widgets/FlameGraph.js
+@@ -10,16 +10,17 @@ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { getColor } = require("devtools/shared/theme");
+ const EventEmitter = require("devtools/toolkit/event-emitter");
+ const FrameUtils = require("devtools/shared/profiler/frame-utils");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ const GRAPH_SRC = "chrome://browser/content/devtools/graphs-frame.xhtml";
+ const L10N = new ViewHelpers.L10N();
+ 
++const CLICK_VS_DRAG_TIMER = 300; // ms
+ const GRAPH_RESIZE_EVENTS_DRAIN = 100; // ms
+ 
+ const GRAPH_WHEEL_ZOOM_SENSITIVITY = 0.00035;
+ const GRAPH_WHEEL_SCROLL_SENSITIVITY = 0.5;
+ const GRAPH_MIN_SELECTION_WIDTH = 0.001; // ms
+ 
+ const GRAPH_HORIZONTAL_PAN_THRESHOLD = 10; // px
+ const GRAPH_VERTICAL_PAN_THRESHOLD = 30; // px
+@@ -468,23 +469,23 @@ FlameGraph.prototype = {
+    *        Offsets and scales the data source by the specified amount.
+    *        This is used for scrolling the visualization.
+    */
+   _drawPyramid: function(dataSource, verticalOffset, dataOffset, dataScale) {
+     let ctx = this._ctx;
+ 
+     let fontSize = FLAME_GRAPH_BLOCK_TEXT_FONT_SIZE * this._pixelRatio;
+     let fontFamily = FLAME_GRAPH_BLOCK_TEXT_FONT_FAMILY;
+-    let visibleBlocksInfo = this._drawPyramidFill(dataSource, verticalOffset, dataOffset, dataScale);
++    this._visibleBlocksInfo = this._drawPyramidFill(dataSource, verticalOffset, dataOffset, dataScale);
+ 
+     ctx.textBaseline = "middle";
+     ctx.font = fontSize + "px " + fontFamily;
+     ctx.fillStyle = this.blockTextColor;
+ 
+-    this._drawPyramidText(visibleBlocksInfo, verticalOffset, dataOffset, dataScale);
++    this._drawPyramidText(this._visibleBlocksInfo, verticalOffset, dataOffset, dataScale);
+   },
+ 
+   /**
+    * Fills all block inside this graph's pyramid.
+    * @see FlameGraph.prototype._drawPyramid
+    */
+   _drawPyramidFill: function(dataSource, verticalOffset, dataOffset, dataScale) {
+     let visibleBlocksInfoStore = [];
+@@ -793,29 +794,49 @@ FlameGraph.prototype = {
+ 
+     this._verticalOffsetDragger.origin = mouseY;
+     this._verticalOffsetDragger.anchor = this._verticalOffset;
+ 
+     this._horizontalDragEnabled = false;
+     this._verticalDragEnabled = false;
+ 
+     this._canvas.setAttribute("input", "adjusting-view-area");
++
++    // Use a timer to track when a mousedown event occurs, and again
++    // in _onMouseUp to see if we should simulate a "click" event, or if this
++    // is more similar to a drag gesture.
++    this._mouseDownHolding = false;
++    setNamedTimeout("flamegraph-mouse-down", CLICK_VS_DRAG_TIMER, () => this._mouseDownHolding = true);
+   },
+ 
+   /**
+    * Listener for the "mouseup" event on the graph's container.
+    */
+-  _onMouseUp: function() {
++  _onMouseUp: function(e) {
++    let offset = this._getContainerOffset();
++    let mouseX = (e.clientX - offset.left) * this._pixelRatio;
++    let mouseY = (e.clientY - offset.top) * this._pixelRatio;
+     this._selectionDragger.origin = null;
+     this._verticalOffsetDragger.origin = null;
+     this._horizontalDragEnabled = false;
+     this._horizontalDragDirection = 0;
+     this._verticalDragEnabled = false;
+     this._verticalDragDirection = 0;
+     this._canvas.removeAttribute("input");
++ 
++    // Check to see if mousedown just occurred CLICK_VS_DRAG_TIMER ms ago,
++    // or if this is more of a "drag" and hold gesture
++    if (!this._visibleBlocksInfo || this._mouseDownHolding) {
++      return;
++    }
++    
++    let block = findBlockFromPosition(this._visibleBlocksInfo, { x: mouseX, y: mouseY });
++    if (block) {
++      this._onBlockClick(block);
++    }
+   },
+ 
+   /**
+    * Listener for the "wheel" event on the graph's container.
+    */
+   _onMouseWheel: function(e) {
+     let offset = this._getContainerOffset();
+     let mouseX = (e.clientX - offset.left) * this._pixelRatio;
+@@ -943,17 +964,24 @@ FlameGraph.prototype = {
+ 
+   /**
+    * Listener for the "resize" event on the graph's parent node.
+    */
+   _onResize: function() {
+     if (this.hasData()) {
+       setNamedTimeout(this._uid, GRAPH_RESIZE_EVENTS_DRAIN, this.refresh);
+     }
+-  }
++  },
++
++  /**
++   * Fired by _onMouseUp when it appears to be a click rather than a drag.
++   */
++  _onBlockClick: function (block) {
++    this.emit("block-clicked", block);
++  },
+ };
+ 
+ const FLAME_GRAPH_BLOCK_HEIGHT = 12; // px
+ 
+ const PALLETTE_SIZE = 10;
+ const PALLETTE_HUE_OFFSET = Math.random() * 90;
+ const PALLETTE_HUE_RANGE = 270;
+ const PALLETTE_SATURATION = 100;
+@@ -1059,16 +1087,17 @@ let FlameGraphUtils = {
+         // using a simple location based salt for picking a color.
+         else {
+           let hash = this._getStringHash(location);
+           let color = COLOR_PALLETTE[hash % PALLETTE_SIZE];
+           let bucket = buckets.get(color);
+ 
+           bucket.push(prevFrames[frameIndex] = {
+             srcData: { startTime: prevTime, rawLocation: location },
++            parsedLocation: FrameUtils.parseLocation(frame),
+             x: prevTime,
+             y: frameIndex * FLAME_GRAPH_BLOCK_HEIGHT,
+             width: time - prevTime,
+             height: FLAME_GRAPH_BLOCK_HEIGHT,
+             text: this._formatLabel(frame)
+           });
+         }
+ 
+@@ -1149,22 +1178,36 @@ let FlameGraphUtils = {
+    */
+   _formatLabel: function (frame) {
+     // If an idle block, just return the location which will just be "(idle)" text
+     // anyway.
+     if (frame.idle) {
+       return frame.location;
+     }
+ 
++    // This will pull from the FrameUtils cache as it was handled
++    // by _formatLabel's caller for `parsedLocation` data.
+     let { functionName, fileName, line } = FrameUtils.parseLocation(frame);
+     let label = functionName;
+ 
+     if (fileName) {
+       label += ` (${fileName}${line != null ? (":" + line) : ""})`;
+     }
+ 
+     return label;
+   }
+ };
+ 
++function findBlockFromPosition (blocks, { x, y }) {
++  for (let { block, rect } of blocks) {
++    if (rect.rectLeft < x &&
++        (rect.rectLeft + rect.rectWidth) > x &&
++        rect.rectTop < y &&
++        (rect.rectTop + rect.rectHeight) > y) {
++      return block;
++    }
++  }
++  return null;
++}
++
+ exports.FlameGraph = FlameGraph;
+ exports.FlameGraphUtils = FlameGraphUtils;
+ exports.FLAME_GRAPH_BLOCK_HEIGHT = FLAME_GRAPH_BLOCK_HEIGHT;
+-- 
+2.2.1
+
