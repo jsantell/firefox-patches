@@ -3,10 +3,46 @@ Date: Thu, 30 Apr 2015 17:57:11 -0700
 Subject: Bug 1160332 - Correctly check that the mouse is active in graphs to clean up rerender jank, a rebase error from 1157914. r=vp
 
 diff --git a/browser/devtools/performance/modules/graphs.js b/browser/devtools/performance/modules/graphs.js
-index fa23b22..8311974 100644
+index a71b2f1..5a0f24a 100644
 --- a/browser/devtools/performance/modules/graphs.js
 +++ b/browser/devtools/performance/modules/graphs.js
-@@ -321,16 +321,24 @@ GraphsController.prototype = {
+@@ -261,30 +261,30 @@ GraphsController.prototype = {
+     }
+ 
+     // If there was rendering, wait until the most recent render cycle
+     // has finished
+     if (this._rendering) {
+       yield this._rendering.promise;
+     }
+ 
+-    for (let graphName in this._graphs) {
+-      yield this._graphs[graphName].destroy();
++    for (let graph of this.getWidgets()) {
++      yield graph.destroy();
+     }
+   }),
+ 
+   /**
+    * Applies the theme to the underlying graphs. Optionally takes
+    * a `redraw` boolean in the options to force redraw.
+    */
+   setTheme: function (options={}) {
+     let theme = options.theme || this._getTheme();
+-    for (let graph in this._graphs) {
+-      this._graphs[graph].setTheme(theme);
+-      this._graphs[graph].refresh({ force: options.redraw });
++    for (let graph of this.getWidgets()) {
++      graph.setTheme(theme);
++      graph.refresh({ force: options.redraw });
+     }
+   },
+ 
+   /**
+    * Sets up the graph, if needed. Returns a promise resolving
+    * to the graph if it is enabled once it's ready, or otherwise returns
+    * null if disabled.
+    */
+@@ -344,16 +344,24 @@ GraphsController.prototype = {
      return this._getPrimaryLink().setMappedSelection(selection, { mapStart, mapEnd });
    },
  
@@ -18,7 +54,7 @@ index fa23b22..8311974 100644
 +   * Returns an array of graphs that have been created, not necessarily
 +   * enabled currently.
 +   */
-+  getGraphs: function () {
++  getWidgets: function () {
 +    return Object.keys(this._graphs).map(name => this._graphs[name]);
 +  },
 +
@@ -31,11 +67,100 @@ index fa23b22..8311974 100644
      }
    },
  
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index b9b27f2..e6d160b 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -38,16 +38,17 @@ support-files =
+ [browser_perf-details-memory-calltree-render.js]
+ [browser_perf-details-memory-flamegraph-render.js]
+ [browser_perf-details-waterfall-render.js]
+ [browser_perf-details-01.js]
+ [browser_perf-details-02.js]
+ [browser_perf-details-03.js]
+ [browser_perf-details-04.js]
+ [browser_perf-details-05.js]
++[browser_perf-details-06.js]
+ [browser_perf-events-calltree.js]
+ [browser_perf-front-basic-profiler-01.js]
+ [browser_perf-front-basic-timeline-01.js]
+ #[browser_perf-front-profiler-01.js] bug 1077464
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+diff --git a/browser/devtools/performance/test/browser_perf-details-06.js b/browser/devtools/performance/test/browser_perf-details-06.js
+new file mode 100644
+index 0000000..0a33bb2
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-details-06.js
+@@ -0,0 +1,61 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the views with `shouldUpdateWhileMouseIsActive` works as intended.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController, OverviewView, DetailsView, WaterfallView, JsFlameGraphView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  // Set the debounce on WaterfallView and JsFlameGraphView to 0
++  WaterfallView.rangeChangeDebounceTime = 0;
++  JsFlameGraphView.rangeChangeDebounceTime = 0;
++
++  yield DetailsView.selectView("js-flamegraph");
++  let duration = PerformanceController.getCurrentRecording().getDuration();
++
++  // Fake an active mouse
++  Object.defineProperty(OverviewView, "isMouseActive", { value: true });
++
++  // Flame Graph should update on every selection, debounced, while mouse is down
++  let flamegraphRendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
++  OverviewView.emit(EVENTS.OVERVIEW_RANGE_SELECTED, { startTime: 0, endTime: duration });
++  yield flamegraphRendered;
++  ok(true, "FlameGraph rerenders when mouse is active (1)");
++
++  flamegraphRendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
++  OverviewView.emit(EVENTS.OVERVIEW_RANGE_SELECTED, { startTime: 0, endTime: duration });
++  yield flamegraphRendered;
++  ok(true, "FlameGraph rerenders when mouse is active (2)");
++
++  ok(OverviewView.isMouseActive, "Fake mouse is still active");
++
++  // Fake an inactive mouse for rerender
++  Object.defineProperty(OverviewView, "isMouseActive", { value: false });
++  yield DetailsView.selectView("waterfall");
++
++  // Fake an active mouse for rerender
++  Object.defineProperty(OverviewView, "isMouseActive", { value: true });
++
++  let oneSecondElapsed = false;
++  let waterfallRendered = false;
++
++  WaterfallView.on(EVENTS.WATERFALL_RENDERED, () => waterfallRendered = true);
++
++  // Keep firing range selection events for one second
++  idleWait(1000).then(() => oneSecondElapsed = true);
++  yield waitUntil(() => {
++    OverviewView.emit(EVENTS.OVERVIEW_RANGE_SELECTED, { startTime: 0, endTime: duration });
++    return oneSecondElapsed;
++  });
++
++  ok(OverviewView.isMouseActive, "Fake mouse is still active");
++  ok(!waterfallRendered, "the waterfall view should not have been rendered while mouse is active.");
++
++  yield teardown(panel);
++  finish();
++}
 diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
-index 31d236b..c070e37 100644
+index 31d236b..7077d75 100644
 --- a/browser/devtools/performance/views/overview.js
 +++ b/browser/devtools/performance/views/overview.js
-@@ -92,19 +92,25 @@ let OverviewView = {
+@@ -92,19 +92,20 @@ let OverviewView = {
      yield this.graphs.destroy();
    }),
  
@@ -50,12 +175,7 @@ index 31d236b..c070e37 100644
 +    // Fetch all graphs currently stored in the GraphsController.
 +    // These graphs are not necessarily active, but will not have
 +    // an active mouse, in that case.
-+    for (let graph of this.graphs.getGraphs()) {
-+      if (graph.isMouseActive) {
-+        return true;
-+      }
-+    }
-+    return false;
++    return !!this.graphs.getWidgets().some(e => e.isMouseActive);
    },
  
    /**
