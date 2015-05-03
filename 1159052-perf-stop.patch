@@ -1,0 +1,1466 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Sat, 2 May 2015 16:47:41 -0700
+Subject: Bug 1159052 - Performance recording should stop rendering and recording as soon as the recording stops. r=vp
+
+diff --git a/browser/devtools/performance/modules/actors.js b/browser/devtools/performance/modules/actors.js
+index 61fec66..26fd96f 100644
+--- a/browser/devtools/performance/modules/actors.js
++++ b/browser/devtools/performance/modules/actors.js
+@@ -218,20 +218,27 @@ MemoryFrontFacade.prototype = {
+    */
+   start: Task.async(function *(options) {
+     if (!options.withAllocations) {
+       return 0;
+     }
+ 
+     yield this.attach();
+ 
+-    let startTime = yield this.startRecordingAllocations({
+-      probability: options.allocationsSampleProbability,
+-      maxLogLength: options.allocationsMaxLogLength
+-    });
++    // Reconstruct our options because the server actor fails when being passed
++    // undefined values in objects.
++    let allocationOptions = {};
++    if (options.allocationsSampleProbability !== void 0) {
++      allocationOptions.probability = options.allocationsSampleProbability;
++    }
++    if (options.allocationsMaxLogLength !== void 0) {
++      allocationOptions.maxLogLength = options.allocationsMaxLogLength;
++    }
++
++    let startTime = yield this.startRecordingAllocations(allocationOptions);
+ 
+     yield this._pullAllocationSites();
+ 
+     return startTime;
+   }),
+ 
+   /**
+    * Stops polling for allocation information.
+diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
+index 0ce6e83..73a5a67 100644
+--- a/browser/devtools/performance/modules/front.js
++++ b/browser/devtools/performance/modules/front.js
+@@ -22,19 +22,18 @@ loader.lazyImporter(this, "Promise",
+   "resource://gre/modules/Promise.jsm");
+ 
+ 
+ // How often do we pull allocation sites from the memory actor.
+ const DEFAULT_ALLOCATION_SITES_PULL_TIMEOUT = 200; // ms
+ 
+ // Events to pipe from PerformanceActorsConnection to the PerformanceFront
+ const CONNECTION_PIPE_EVENTS = [
+-  "console-profile-start", "console-profile-ending", "console-profile-end",
+   "timeline-data", "profiler-already-active", "profiler-activated",
+-  "recording-started", "recording-stopped"
++  "recording-starting", "recording-started", "recording-stopping", "recording-stopped"
+ ];
+ 
+ /**
+  * A cache of all PerformanceActorsConnection instances.
+  * The keys are Target objects.
+  */
+ let SharedPerformanceActors = new WeakMap();
+ 
+@@ -222,18 +221,16 @@ PerformanceActorsConnection.prototype = {
+     // This is to ensure that there is a front to receive the events for
+     // the console profiles.
+     yield gDevTools.getToolbox(this._target).loadTool("performance");
+ 
+     let model = yield this.startRecording(extend(getRecordingModelPrefs(), {
+       console: true,
+       label: profileLabel
+     }));
+-
+-    this.emit("console-profile-start", model);
+   }),
+ 
+   /**
+    * Invoked whenever `console.profileEnd` is called.
+    *
+    * @param string profileLabel
+    *        The provided string argument if available; undefined otherwise.
+    * @param number currentTime
+@@ -266,19 +263,17 @@ PerformanceActorsConnection.prototype = {
+ 
+     // If `profileEnd()` was called with a label, and there are no matching
+     // sessions, abort.
+     if (!model) {
+       Cu.reportError("console.profileEnd() called with label that does not match a recording.");
+       return;
+     }
+ 
+-    this.emit("console-profile-ending", model);
+     yield this.stopRecording(model);
+-    this.emit("console-profile-end", model);
+   }),
+ 
+  /**
+   * TODO handle bug 1144438
+   */
+   _onProfilerUnexpectedlyStopped: function () {
+     Cu.reportError("Profiler unexpectedly stopped.", arguments);
+   },
+@@ -304,16 +299,18 @@ PerformanceActorsConnection.prototype = {
+    * @param object options
+    *        An options object to pass to the actors. Supported properties are
+    *        `withTicks`, `withMemory` and `withAllocations`, `probability`, and `maxLogLength`.
+    * @return object
+    *         A promise that is resolved once recording has started.
+    */
+   startRecording: Task.async(function*(options = {}) {
+     let model = new RecordingModel(options);
++    this.emit("recording-starting", model);
++
+     // All actors are started asynchronously over the remote debugging protocol.
+     // Get the corresponding start times from each one of them.
+     // The timeline and memory actors are target-dependent, so start those as well,
+     // even though these are mocked in older Geckos (FF < 35)
+     let profilerStartTime = yield this._profiler.start(options);
+     let timelineStartTime = yield this._timeline.start(options);
+     let memoryStartTime = yield this._memory.start(options);
+ 
+@@ -338,16 +335,23 @@ PerformanceActorsConnection.prototype = {
+    */
+   stopRecording: Task.async(function*(model) {
+     // If model isn't in the PerformanceActorsConnections internal store,
+     // then do nothing.
+     if (this._recordings.indexOf(model) === -1) {
+       return;
+     }
+ 
++    // Flag the recording as no longer recording, so that `model.isRecording()`
++    // is false. Do this before we fetch all the data, and then subsequently
++    // the recording can be considered "completed".
++    let endTime = Date.now();
++    model._onStoppingRecording(endTime);
++    this.emit("recording-stopping", model);
++
+     // Currently there are two ways profiles stop recording. Either manually in the
+     // performance tool, or via console.profileEnd. Once a recording is done,
+     // we want to deliver the model to the performance tool (either as a return
+     // from the PerformanceFront or via `console-profile-end` event) and then
+     // remove it from the internal store.
+     //
+     // In the case where a console.profile is generated via the console (so the tools are
+     // open), we initialize the Performance tool so it can listen to those events.
+@@ -480,17 +484,19 @@ PerformanceFront.prototype = {
+    * Interacts with the connection's actors. Should only be used in tests.
+    */
+   _request: function (actorName, method, ...args) {
+     if (!gDevTools.testing) {
+       throw new Error("PerformanceFront._request may only be used in tests.");
+     }
+     let actor = this._connection[`_${actorName}`];
+     return actor[method].apply(actor, args);
+-  }
++  },
++
++  toString: () => "[object PerformanceFront]"
+ };
+ 
+ /**
+  * Creates an object of configurations based off of preferences for a RecordingModel.
+  */
+ function getRecordingModelPrefs () {
+   return {
+     withMarkers: true,
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index 6d92bc9..bd29ff7 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -33,16 +33,17 @@ const RecordingModel = function (options={}) {
+   };
+ };
+ 
+ RecordingModel.prototype = {
+   // Private fields, only needed when a recording is started or stopped.
+   _console: false,
+   _imported: false,
+   _recording: false,
++  _completed: false,
+   _profilerStartTime: 0,
+   _timelineStartTime: 0,
+   _memoryStartTime: 0,
+   _configuration: {},
+ 
+   // Serializable fields, necessary and sufficient for import and export.
+   _label: "",
+   _duration: 0,
+@@ -89,43 +90,54 @@ RecordingModel.prototype = {
+    * Sets up the instance with data from the SharedPerformanceConnection when
+    * starting a recording. Should only be called by SharedPerformanceConnection.
+    */
+   populate: function (info) {
+     // Times must come from the actor in order to be self-consistent.
+     // However, we also want to update the view with the elapsed time
+     // even when the actor is not generating data. To do this we get
+     // the local time and use it to compute a reasonable elapsed time.
+-    this._localStartTime = Date.now()
++    this._localStartTime = Date.now();
+ 
+     this._profilerStartTime = info.profilerStartTime;
+     this._timelineStartTime = info.timelineStartTime;
+     this._memoryStartTime = info.memoryStartTime;
+     this._recording = true;
+ 
+     this._markers = [];
+     this._frames = [];
+     this._memory = [];
+     this._ticks = [];
+     this._allocations = { sites: [], timestamps: [], frames: [], counts: [] };
+   },
+ 
+   /**
++   * Called when the signal was sent to the front to no longer record more
++   * data, and begin fetching the data. There's some delay during fetching,
++   * even though the recording is stopped, the model is not yet completed until
++   * all the data is fetched.
++   */
++  _onStoppingRecording: function (endTime) {
++    this._duration = endTime - this._localStartTime;
++    this._recording = false;
++  },
++
++  /**
+    * Sets results available from stopping a recording from SharedPerformanceConnection.
+    * Should only be called by SharedPerformanceConnection.
+    */
+   _onStopRecording: Task.async(function *(info) {
+     this._profile = info.profile;
+-    this._duration = info.profilerEndTime - this._profilerStartTime;
+-    this._recording = false;
++    this._completed = true;
+ 
+     // We filter out all samples that fall out of current profile's range
+     // since the profiler is continuously running. Because of this, sample
+     // times are not guaranteed to have a zero epoch, so offset the
+     // timestamps.
++    // TODO move this into FakeProfilerFront in ./actors.js after bug 1154115
+     RecordingUtils.offsetSampleTimes(this._profile, this._profilerStartTime);
+ 
+     // Markers need to be sorted ascending by time, to be properly displayed
+     // in a waterfall view.
+     this._markers = this._markers.sort((a, b) => (a.start > b.start));
+   }),
+ 
+   /**
+@@ -245,29 +257,41 @@ RecordingModel.prototype = {
+    * was started via a `console.profile` call.
+    */
+   isConsole: function () {
+     return this._console;
+   },
+ 
+   /**
+    * Returns a boolean indicating whether or not this recording model
++   * has finished recording.
++   * There is some delay in fetching data between when the recording stops, and
++   * when the recording is considered completed once it has all the profiler and timeline data.
++   */
++  isCompleted: function () {
++    return this._completed || this.isImported();
++  },
++
++  /**
++   * Returns a boolean indicating whether or not this recording model
+    * is recording.
++   * A model may no longer be recording, yet still not have the profiler data. In that
++   * case, use `isCompleted()`.
+    */
+   isRecording: function () {
+     return this._recording;
+   },
+ 
+   /**
+    * Fired whenever the PerformanceFront emits markers, memory or ticks.
+    */
+   addTimelineData: function (eventName, ...data) {
+     // If this model isn't currently recording,
+     // ignore the timeline data.
+-    if (!this._recording) {
++    if (!this.isRecording()) {
+       return;
+     }
+ 
+     let config = this.getConfiguration();
+ 
+     switch (eventName) {
+       // Accumulate timeline markers into an array. Furthermore, the timestamps
+       // do not have a zero epoch, so offset all of them by the start time.
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 3a5e886..2fb57bb 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -58,23 +58,16 @@ const BRANCH_NAME = "devtools.performance.ui.";
+ // Events emitted by various objects in the panel.
+ const EVENTS = {
+   // Fired by the PerformanceController and OptionsView when a pref changes.
+   PREF_CHANGED: "Performance:PrefChanged",
+ 
+   // Fired by the PerformanceController when the devtools theme changes.
+   THEME_CHANGED: "Performance:ThemeChanged",
+ 
+-  // When the SharedPerformanceConnection handles profiles created via `console.profile()`,
+-  // the controller handles those events and emits the below events for consumption
+-  // by other views.
+-  CONSOLE_RECORDING_STARTED: "Performance:ConsoleRecordingStarted",
+-  CONSOLE_RECORDING_WILL_STOP: "Performance:ConsoleRecordingWillStop",
+-  CONSOLE_RECORDING_STOPPED: "Performance:ConsoleRecordingStopped",
+-
+   // Emitted by the PerformanceView when the state (display mode) changes,
+   // for example when switching between "empty", "recording" or "recorded".
+   // This causes certain panels to be hidden or visible.
+   UI_STATE_CHANGED: "Performance:UI:StateChanged",
+ 
+   // Emitted by the PerformanceView on clear button click
+   UI_CLEAR_RECORDINGS: "Performance:UI:ClearRecordings",
+ 
+@@ -185,37 +178,36 @@ let PerformanceController = {
+     this.startRecording = this.startRecording.bind(this);
+     this.stopRecording = this.stopRecording.bind(this);
+     this.importRecording = this.importRecording.bind(this);
+     this.exportRecording = this.exportRecording.bind(this);
+     this.clearRecordings = this.clearRecordings.bind(this);
+     this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+     this._onThemeChanged = this._onThemeChanged.bind(this);
+-    this._onConsoleProfileStart = this._onConsoleProfileStart.bind(this);
+-    this._onConsoleProfileEnd = this._onConsoleProfileEnd.bind(this);
+-    this._onConsoleProfileEnding = this._onConsoleProfileEnding.bind(this);
++    this._onRecordingStateChange = this._onRecordingStateChange.bind(this);
+ 
+     // All boolean prefs should be handled via the OptionsView in the
+     // ToolbarView, so that they may be accessible via the "gear" menu.
+     // Every other pref should be registered here.
+     this._nonBooleanPrefs = new ViewHelpers.Prefs("devtools.performance", {
+       "hidden-markers": ["Json", "timeline.hidden-markers"],
+       "memory-sample-probability": ["Float", "memory.sample-probability"],
+       "memory-max-log-length": ["Int", "memory.max-log-length"],
+       "profiler-buffer-size": ["Int", "profiler.buffer-size"],
+       "profiler-sample-frequency": ["Int", "profiler.sample-frequency-khz"],
+     });
+ 
+     this._nonBooleanPrefs.registerObserver();
+     this._nonBooleanPrefs.on("pref-changed", this._onPrefChanged);
+ 
+-    gFront.on("console-profile-start", this._onConsoleProfileStart);
+-    gFront.on("console-profile-ending", this._onConsoleProfileEnding);
+-    gFront.on("console-profile-end", this._onConsoleProfileEnd);
++    gFront.on("recording-starting", this._onRecordingStateChange);
++    gFront.on("recording-started", this._onRecordingStateChange);
++    gFront.on("recording-stopping", this._onRecordingStateChange);
++    gFront.on("recording-stopped", this._onRecordingStateChange);
+     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.on(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.on(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+@@ -224,19 +216,20 @@ let PerformanceController = {
+ 
+   /**
+    * Remove events handled by the PerformanceController
+    */
+   destroy: function() {
+     this._nonBooleanPrefs.unregisterObserver();
+     this._nonBooleanPrefs.off("pref-changed", this._onPrefChanged);
+ 
+-    gFront.off("console-profile-start", this._onConsoleProfileStart);
+-    gFront.off("console-profile-ending", this._onConsoleProfileEnding);
+-    gFront.off("console-profile-end", this._onConsoleProfileEnd);
++    gFront.off("recording-starting", this._onRecordingStateChange);
++    gFront.off("recording-started", this._onRecordingStateChange);
++    gFront.off("recording-stopping", this._onRecordingStateChange);
++    gFront.off("recording-stopped", this._onRecordingStateChange);
+     ToolbarView.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.off(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.off(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+@@ -295,34 +288,27 @@ let PerformanceController = {
+       withTicks: this.getOption("enable-framerate"),
+       withAllocations: superMode ? this.getOption("enable-memory") : false,
+       allocationsSampleProbability: this.getPref("memory-sample-probability"),
+       allocationsMaxLogLength: this.getPref("memory-max-log-length"),
+       bufferSize: this.getPref("profiler-buffer-size"),
+       sampleFrequency: this.getPref("profiler-sample-frequency")
+     };
+ 
+-    this.emit(EVENTS.RECORDING_WILL_START);
+-
+-    let recording = yield gFront.startRecording(options);
+-    this._recordings.push(recording);
+-
+-    this.emit(EVENTS.RECORDING_STARTED, recording);
++    yield gFront.startRecording(options);
+   }),
+ 
+   /**
+    * Stops recording with the PerformanceFront. Emits `EVENTS.RECORDING_STOPPED`
+    * when the front has stopped recording.
+    */
+   stopRecording: Task.async(function *() {
+     let recording = this.getLatestManualRecording();
+ 
+-    this.emit(EVENTS.RECORDING_WILL_STOP, recording);
+     yield gFront.stopRecording(recording);
+-    this.emit(EVENTS.RECORDING_STOPPED, recording);
+   }),
+ 
+   /**
+    * Saves the given recording to a file. Emits `EVENTS.RECORDING_EXPORTED`
+    * when the file was saved.
+    *
+    * @param RecordingModel recording
+    *        The model that holds the recording data.
+@@ -339,16 +325,21 @@ let PerformanceController = {
+    * Emits `EVENTS.RECORDINGS_CLEARED` when complete so other components can clean up.
+    */
+   clearRecordings: Task.async(function* () {
+     let latest = this.getLatestManualRecording();
+ 
+     if (latest && latest.isRecording()) {
+       yield this.stopRecording();
+     }
++    // If last recording is not recording, but finalizing itself,
++    // wait for that to finish
++    if (latest && !latest.isCompleted()) {
++      yield this.once(EVENTS.RECORDING_STOPPED);
++    }
+ 
+     this._recordings.length = 0;
+     this.setCurrentRecording(null);
+     this.emit(EVENTS.RECORDINGS_CLEARED);
+   }),
+ 
+   /**
+    * Loads a recording from a file, adding it to the recordings list. Emits
+@@ -434,38 +425,38 @@ let PerformanceController = {
+     // but this could change in the future.
+     if (data.pref !== "devtools.theme") {
+       return;
+     }
+ 
+     this.emit(EVENTS.THEME_CHANGED, data.newValue);
+   },
+ 
+-  /**
+-   * Fired when `console.profile()` is executed.
+-   */
+-  _onConsoleProfileStart: function (_, recording) {
+-    this._recordings.push(recording);
+-    this.emit(EVENTS.CONSOLE_RECORDING_STARTED, recording);
+-  },
+-
+-  /**
+-   * Fired when `console.profileEnd()` is executed, and the profile
+-   * is stopping soon, as it fetches profiler data.
+-   */
+-  _onConsoleProfileEnding: function (_, recording) {
+-    this.emit(EVENTS.CONSOLE_RECORDING_WILL_STOP, recording);
+-  },
+-
+-  /**
+-   * Fired when `console.profileEnd()` is executed, and
+-   * has a corresponding `console.profile()` session.
+-   */
+-  _onConsoleProfileEnd: function (_, recording) {
+-    this.emit(EVENTS.CONSOLE_RECORDING_STOPPED, recording);
++  _onRecordingStateChange: function (state, model) {
++    switch (state) {
++      // Fired when a RecordingModel was just created from the front
++      case "recording-starting":
++        // When a recording is just starting, store it internally
++        this._recordings.push(model);
++        this.emit(EVENTS.RECORDING_WILL_START, model);
++        break;
++      // Fired when a RecordingModel has started recording
++      case "recording-started":
++        this.emit(EVENTS.RECORDING_STARTED, model);
++        break;
++      // Fired when a RecordingModel is no longer recording, and
++      // starting to fetch all the profiler data
++      case "recording-stopping":
++        this.emit(EVENTS.RECORDING_WILL_STOP, model);
++        break;
++      // Fired when a RecordingModel is finished fetching all of its data
++      case "recording-stopped":
++        this.emit(EVENTS.RECORDING_STOPPED, model);
++        break;
++    }
+   },
+ 
+   /**
+    * Returns the internal store of recording models.
+    */
+   getRecordings: function () {
+     return this._recordings;
+   },
+@@ -475,31 +466,31 @@ let PerformanceController = {
+    * in recording item, as well as the actor support on the server, returning a boolean
+    * indicating if the requirements pass or not. Used to toggle features' visibility mostly.
+    *
+    * @option {Array<string>} features
+    *         An array of strings indicating what configuration is needed on the recording
+    *         model, like `withTicks`, or `withMemory`.
+    * @option {Array<string>} actors
+    *         An array of strings indicating what actors must exist.
+-   * @option {boolean} isRecording
+-   *         A boolean indicating whether the recording must be either recording or not
+-   *         recording. Setting to undefined will allow either state.
++   * @option {boolean} mustBeCompleted
++   *         A boolean indicating whether the recording must be either completed or not.
++   *         Setting to undefined will allow either state.
+    * @param {RecordingModel} recording
+    *        An optional recording model to use instead of the currently selected.
+    *
+    * @return boolean
+    */
+-  isFeatureSupported: function ({ features, actors, isRecording: shouldBeRecording }, recording) {
++  isFeatureSupported: function ({ features, actors, mustBeCompleted }, recording) {
+     recording = recording || this.getCurrentRecording();
+     let recordingConfig = recording ? recording.getConfiguration() : {};
+-    let currentRecordingState = recording ? recording.isRecording() : void 0;
++    let currentCompletedState = recording ? recording.isCompleted() : void 0;
+     let actorsSupported = gFront.getActorSupport();
+ 
+-    if (shouldBeRecording != null && shouldBeRecording !== currentRecordingState) {
++    if (mustBeCompleted != null && mustBeCompleted !== currentCompletedState) {
+       return false;
+     }
+     if (actors && !actors.every(a => actorsSupported[a])) {
+       return false;
+     }
+     if (features && !features.every(f => recordingConfig[f])) {
+       return false;
+     }
+diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
+index 91b1198..6f1fc80 100644
+--- a/browser/devtools/performance/performance-view.js
++++ b/browser/devtools/performance/performance-view.js
+@@ -40,31 +40,27 @@ let PerformanceView = {
+ 
+     this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
+     this._onImportButtonClick = this._onImportButtonClick.bind(this);
+     this._onClearButtonClick = this._onClearButtonClick.bind(this);
+     this._lockRecordButton = this._lockRecordButton.bind(this);
+     this._unlockRecordButton = this._unlockRecordButton.bind(this);
+     this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
+-    this._onRecordingWillStop = this._onRecordingWillStop.bind(this);
+-    this._onRecordingWillStart = this._onRecordingWillStart.bind(this);
++    this._onRecordingStarted = this._onRecordingStarted.bind(this);
+ 
+     for (let button of $$(".record-button")) {
+       button.addEventListener("click", this._onRecordButtonClick);
+     }
+     this._importButton.addEventListener("click", this._onImportButtonClick);
+     this._clearButton.addEventListener("click", this._onClearButtonClick);
+ 
+     // Bind to controller events to unlock the record button
+-    PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+-    PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+-    PerformanceController.on(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
++    PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+ 
+     this.setState("empty");
+ 
+     // Initialize the ToolbarView first, because other views may need access
+     // to the OptionsView via the controller, to read prefs.
+     yield ToolbarView.initialize();
+     yield RecordingsView.initialize();
+@@ -77,21 +73,18 @@ let PerformanceView = {
+    */
+   destroy: Task.async(function* () {
+     for (let button of $$(".record-button")) {
+       button.removeEventListener("click", this._onRecordButtonClick);
+     }
+     this._importButton.removeEventListener("click", this._onImportButtonClick);
+     this._clearButton.removeEventListener("click", this._onClearButtonClick);
+ 
+-    PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+-    PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+-    PerformanceController.off(EVENTS.RECORDING_STARTED, this._unlockRecordButton);
++    PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+ 
+     yield ToolbarView.destroy();
+     yield RecordingsView.destroy();
+     yield OverviewView.destroy();
+     yield DetailsView.destroy();
+   }),
+ 
+@@ -126,40 +119,39 @@ let PerformanceView = {
+     return this._state;
+   },
+ 
+   /**
+    * Adds the `locked` attribute on the record button. This prevents it
+    * from being clicked while recording is started or stopped.
+    */
+   _lockRecordButton: function () {
+-    this._recordButton.setAttribute("locked", "true");
++    for (let button of $$(".record-button")) {
++      button.setAttribute("locked", "true");
++    }
+   },
+ 
+   /**
+    * Removes the `locked` attribute on the record button.
+    */
+   _unlockRecordButton: function () {
+-    this._recordButton.removeAttribute("locked");
+-  },
+-
+-  /**
+-   * Fired when a recording is starting, but not yet completed.
+-   */
+-  _onRecordingWillStart: function () {
+-    this._lockRecordButton();
+-    this._recordButton.setAttribute("checked", "true");
++    for (let button of $$(".record-button")) {
++      button.removeAttribute("locked");
++    }
+   },
+ 
+   /**
+-   * Fired when a recording is stopping, but not yet completed.
++   * When a recording has started.
+    */
+-  _onRecordingWillStop: function () {
+-    this._lockRecordButton();
+-    this._recordButton.removeAttribute("checked");
++  _onRecordingStarted: function (_, recording) {
++    // A stopped recording can be from `console.profileEnd` -- only unlock
++    // the button if it's the main recording that was started via UI.
++    if (!recording.isConsole()) {
++      this._unlockRecordButton();
++    }
+   },
+ 
+   /**
+    * When a recording is complete.
+    */
+   _onRecordingStopped: function (_, recording) {
+     // A stopped recording can be from `console.profileEnd` -- only unlock
+     // the button if it's the main recording that was started via UI.
+@@ -182,17 +174,25 @@ let PerformanceView = {
+   },
+ 
+   /**
+    * Handler for clicking the record button.
+    */
+   _onRecordButtonClick: function (e) {
+     if (this._recordButton.hasAttribute("checked")) {
+       this.emit(EVENTS.UI_STOP_RECORDING);
++      this._lockRecordButton();
++      for (let button of $$(".record-button")) {
++        button.removeAttribute("checked");
++      }
+     } else {
++      this._lockRecordButton();
++      for (let button of $$(".record-button")) {
++        button.setAttribute("checked", "true");
++      }
+       this.emit(EVENTS.UI_START_RECORDING);
+     }
+   },
+ 
+   /**
+    * Handler for clicking the import button.
+    */
+   _onImportButtonClick: function(e) {
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 6b6c729..426bad8 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -72,17 +72,17 @@
+ 
+   <hbox class="theme-body" flex="1">
+     <vbox id="recordings-pane">
+       <toolbar id="recordings-toolbar"
+                class="devtools-toolbar">
+         <hbox id="recordings-controls"
+               class="devtools-toolbarbutton-group">
+           <toolbarbutton id="main-record-button"
+-                         class="devtools-toolbarbutton record-button"
++                         class="devtools-toolbarbutton record-button devtools-thobber"
+                          tooltiptext="&profilerUI.recordButton.tooltip;"/>
+           <toolbarbutton id="import-button"
+                          class="devtools-toolbarbutton"
+                          label="&profilerUI.importButton;"/>
+           <toolbarbutton id="clear-button"
+                          class="devtools-toolbarbutton"
+                          label="&profilerUI.clearButton;"/>
+         </hbox>
+@@ -154,18 +154,17 @@
+           <deck id="details-pane-container" flex="1">
+             <hbox id="recording-notice"
+                   class="notice-container"
+                   align="center"
+                   pack="center"
+                   flex="1">
+               <label value="&profilerUI.stopNotice1;"/>
+               <button class="devtools-toolbarbutton record-button"
+-                      standalone="true"
+-                      checked="true" />
++                      standalone="true" />
+               <label value="&profilerUI.stopNotice2;"/>
+             </hbox>
+             <hbox id="console-recording-notice"
+                   class="notice-container"
+                   align="center"
+                   pack="center"
+                   flex="1">
+                   <vbox>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index e6d160b..c0196c7 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -84,16 +84,17 @@ support-files =
+ [browser_perf-overview-selection-02.js]
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-overview-time-interval.js]
+ [browser_perf-shared-connection-02.js]
+ [browser_perf-shared-connection-03.js]
+ [browser_perf-states.js]
+ [browser_perf-refresh.js]
+ [browser_perf-ui-recording.js]
++[browser_perf-recording-model-01.js]
+ [browser_perf-recording-notices-01.js]
+ [browser_perf-recording-notices-02.js]
+ [browser_perf_recordings-io-01.js]
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
+ [browser_perf-range-changed-render.js]
+ [browser_perf-recording-selected-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-01.js b/browser/devtools/performance/test/browser_perf-console-record-01.js
+index 852ed6b..5752438 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-01.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-01.js
+@@ -10,22 +10,22 @@ let { getPerformanceActorsConnection } = devtools.require("devtools/performance/
+ let WAIT_TIME = 10;
+ 
+ function spawnTest () {
+   let profilerConnected = waitForProfilerConnection();
+   let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
+   yield profilerConnected;
+   let connection = getPerformanceActorsConnection(target);
+ 
+-  let profileStart = once(connection, "console-profile-start");
++  let profileStart = once(connection, "recording-started");
+   console.profile("rust");
+   yield profileStart;
+ 
+   busyWait(WAIT_TIME);
+-  let profileEnd = once(connection, "console-profile-end");
++  let profileEnd = once(connection, "recording-stopped");
+   console.profileEnd("rust");
+   yield profileEnd;
+ 
+   yield gDevTools.showToolbox(target, "performance");
+   let panel = toolbox.getCurrentPanel();
+   let { panelWin: { PerformanceController, RecordingsView }} = panel;
+ 
+   let recordings = PerformanceController.getRecordings();
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-02.js b/browser/devtools/performance/test/browser_perf-console-record-02.js
+index aa569c7..f5693f0 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-02.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-02.js
+@@ -10,20 +10,20 @@ let { getPerformanceActorsConnection } = devtools.require("devtools/performance/
+ let WAIT_TIME = 10;
+ 
+ function spawnTest () {
+   let profilerConnected = waitForProfilerConnection();
+   let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
+   yield profilerConnected;
+   let connection = getPerformanceActorsConnection(target);
+ 
+-  let profileStart = once(connection, "console-profile-start");
++  let profileStart = once(connection, "recording-started");
+   console.profile("rust");
+   yield profileStart;
+-  profileStart = once(connection, "console-profile-start");
++  profileStart = once(connection, "recording-started");
+   console.profile("rust2");
+   yield profileStart;
+ 
+   yield gDevTools.showToolbox(target, "performance");
+   let panel = toolbox.getCurrentPanel();
+   let { panelWin: { PerformanceController, RecordingsView }} = panel;
+ 
+   let recordings = PerformanceController.getRecordings();
+@@ -33,18 +33,18 @@ function spawnTest () {
+   is(recordings[0].isRecording(), true, "recording is still recording (1).");
+   is(recordings[1].isConsole(), true, "recording came from console.profile (2).");
+   is(recordings[1].getLabel(), "rust2", "correct label in the recording model (2).");
+   is(recordings[1].isRecording(), true, "recording is still recording (2).");
+ 
+   is(RecordingsView.selectedItem.attachment, recordings[0],
+     "The first console recording should be selected.");
+ 
+-  let profileEnd = once(connection, "console-profile-end");
++  let profileEnd = once(connection, "recording-stopped");
+   console.profileEnd("rust");
+   yield profileEnd;
+-  profileEnd = once(connection, "console-profile-end");
++  profileEnd = once(connection, "recording-stopped");
+   console.profileEnd("rust2");
+   yield profileEnd;
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-03.js b/browser/devtools/performance/test/browser_perf-console-record-03.js
+index 2d9ddee..00686d5 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-03.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-03.js
+@@ -10,25 +10,25 @@ let { getPerformanceActorsConnection } = devtools.require("devtools/performance/
+ let WAIT_TIME = 10;
+ 
+ function spawnTest () {
+   let profilerConnected = waitForProfilerConnection();
+   let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
+   yield profilerConnected;
+   let connection = getPerformanceActorsConnection(target);
+ 
+-  let profileStart = once(connection, "console-profile-start");
++  let profileStart = once(connection, "recording-started");
+   console.profile("rust");
+   yield profileStart;
+ 
+-  let profileEnd = once(connection, "console-profile-end");
++  let profileEnd = once(connection, "recording-stopped");
+   console.profileEnd("rust");
+   yield profileEnd;
+ 
+-  profileStart = once(connection, "console-profile-start");
++  profileStart = once(connection, "recording-started");
+   console.profile("rust2");
+   yield profileStart;
+ 
+   yield gDevTools.showToolbox(target, "performance");
+   let panel = toolbox.getCurrentPanel();
+   let { panelWin: { PerformanceController, RecordingsView }} = panel;
+ 
+   let recordings = PerformanceController.getRecordings();
+@@ -38,15 +38,15 @@ function spawnTest () {
+   is(recordings[0].isRecording(), false, "recording is still recording (1).");
+   is(recordings[1].isConsole(), true, "recording came from console.profile (2).");
+   is(recordings[1].getLabel(), "rust2", "correct label in the recording model (2).");
+   is(recordings[1].isRecording(), true, "recording is still recording (2).");
+ 
+   is(RecordingsView.selectedItem.attachment, recordings[0],
+     "The first console recording should be selected.");
+ 
+-  profileEnd = once(connection, "console-profile-end");
++  profileEnd = once(connection, "recording-stopped");
+   console.profileEnd("rust2");
+   yield profileEnd;
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-highlighted.js b/browser/devtools/performance/test/browser_perf-highlighted.js
+index 6b01743..f4dcfc5 100644
+--- a/browser/devtools/performance/test/browser_perf-highlighted.js
++++ b/browser/devtools/performance/test/browser_perf-highlighted.js
+@@ -10,24 +10,24 @@ let { getPerformanceActorsConnection } = devtools.require("devtools/performance/
+ 
+ function spawnTest () {
+   let profilerConnected = waitForProfilerConnection();
+   let { target, toolbox, console } = yield initConsole(SIMPLE_URL);
+   yield profilerConnected;
+   let connection = getPerformanceActorsConnection(target);
+   let tab = toolbox.doc.getElementById("toolbox-tab-performance");
+ 
+-  let profileStart = once(connection, "console-profile-start");
++  let profileStart = once(connection, "recording-started");
+   console.profile("rust");
+   yield profileStart;
+ 
+   ok(tab.hasAttribute("highlighted"),
+     "performance tab is highlighted during recording from console.profile when unloaded");
+ 
+-  let profileEnd = once(connection, "console-profile-end");
++  let profileEnd = once(connection, "recording-stopped");
+   console.profileEnd("rust");
+   yield profileEnd;
+ 
+   ok(!tab.hasAttribute("highlighted"),
+     "performance tab is no longer highlighted when console.profile recording finishes");
+ 
+   yield gDevTools.showToolbox(target, "performance");
+   let panel = toolbox.getCurrentPanel();
+diff --git a/browser/devtools/performance/test/browser_perf-recording-model-01.js b/browser/devtools/performance/test/browser_perf-recording-model-01.js
+new file mode 100644
+index 0000000..1652990
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-recording-model-01.js
+@@ -0,0 +1,62 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the state of a recording rec from start to finish for recording,
++ * completed, and rec data.
++ */
++
++function spawnTest () {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, gFront: front, PerformanceController } = panel.panelWin;
++
++  let rec = yield front.startRecording({ withMarkers: true, withTicks: true, withMemory: true });
++  ok(rec.isRecording(), "RecordingModel is recording when created");
++  yield busyWait(100);
++  yield waitUntil(() => rec.getMemory().length);
++  ok(true, "RecordingModel populates memory while recording");
++  yield waitUntil(() => rec.getTicks().length);
++  ok(true, "RecordingModel populates ticks while recording");
++  yield waitUntil(() => rec.getMarkers().length);
++  ok(true, "RecordingModel populates markers while recording");
++
++  ok(!rec.isCompleted(), "RecordingModel is not completed when still recording");
++
++  let stopping = once(front, "recording-stopping");
++  let stopped = once(front, "recording-stopped");
++  front.stopRecording(rec);
++
++  yield stopping;
++  ok(!rec.isRecording(), "on 'recording-stopping', model is no longer recording");
++  // This handler should be called BEFORE "recording-stopped" is called, as
++  // there is some delay, but in the event where "recording-stopped" finishes
++  // before we check here, ensure that we're atleast in the right state
++  if (rec.getProfile()) {
++    ok(rec.isCompleted(), "recording is completed once it has profile data");
++  } else {
++    ok(!rec.isCompleted(), "recording is not yet completed on 'recording-stopping'");
++  }
++
++  yield stopped;
++  ok(!rec.isRecording(), "on 'recording-stopped', model is still no longer recording");
++  ok(rec.isCompleted(), "on 'recording-stopped', model is considered 'complete'");
++
++  // Export and import a rec, and ensure it has the correct state.
++  let file = FileUtils.getFile("TmpD", ["tmpprofile.json"]);
++  file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("666", 8));
++  let exported = once(PerformanceController, EVENTS.RECORDING_EXPORTED);
++  yield PerformanceController.exportRecording("", rec, file);
++  yield exported;
++
++  let imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
++  yield PerformanceController.importRecording("", file);
++
++  yield imported;
++  let importedModel = PerformanceController.getCurrentRecording();
++
++  ok(importedModel.isCompleted(), "All imported recordings should be completed");
++  ok(!importedModel.isRecording(), "All imported recordings should not be recording");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 871d2b1..900308e 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -137,27 +137,28 @@ function removeTab(aTab, aWindow) {
+ }
+ 
+ function handleError(aError) {
+   ok(false, "Got an error: " + aError.message + "\n" + aError.stack);
+   finish();
+ }
+ 
+ function once(aTarget, aEventName, aUseCapture = false, spread = false) {
+-  info("Waiting for event: '" + aEventName + "' on " + aTarget + ".");
++  info(`Waiting for event: '${aEventName}' on ${aTarget}`);
+ 
+   let deferred = Promise.defer();
+ 
+   for (let [add, remove] of [
+     ["on", "off"], // Use event emitter before DOM events for consistency
+     ["addEventListener", "removeEventListener"],
+     ["addListener", "removeListener"]
+   ]) {
+     if ((add in aTarget) && (remove in aTarget)) {
+       aTarget[add](aEventName, function onEvent(...aArgs) {
++        info(`Received event: '${aEventName}' on ${aTarget}`);
+         aTarget[remove](aEventName, onEvent, aUseCapture);
+         deferred.resolve(spread ? aArgs : aArgs[0]);
+       }, aUseCapture);
+       break;
+     }
+   }
+ 
+   return deferred.promise;
+@@ -300,23 +301,23 @@ function consoleMethod (...args) {
+   // Differences between empty string and undefined are tested on the front itself.
+   if (args[1] == null) {
+     args[1] = "";
+   }
+   mm.sendAsyncMessage("devtools:test:console", args);
+ }
+ 
+ function* consoleProfile(win, label) {
+-  let profileStart = once(win.PerformanceController, win.EVENTS.CONSOLE_RECORDING_STARTED);
++  let profileStart = once(win.PerformanceController, win.EVENTS.RECORDING_STARTED);
+   consoleMethod("profile", label);
+   yield profileStart;
+ }
+ 
+ function* consoleProfileEnd(win, label) {
+-  let ended = once(win.PerformanceController, win.EVENTS.CONSOLE_RECORDING_STOPPED);
++  let ended = once(win.PerformanceController, win.EVENTS.RECORDING_STOPPED);
+   consoleMethod("profileEnd", label);
+   yield ended;
+ }
+ 
+ function command (button) {
+   let ev = button.ownerDocument.createEvent("XULCommandEvent");
+   ev.initCommandEvent("command", true, true, button.ownerDocument.defaultView, 0, false, false, false, false, null);
+   button.dispatchEvent(ev);
+diff --git a/browser/devtools/performance/views/details-abstract-subview.js b/browser/devtools/performance/views/details-abstract-subview.js
+index 5309ead..6f92c6d 100644
+--- a/browser/devtools/performance/views/details-abstract-subview.js
++++ b/browser/devtools/performance/views/details-abstract-subview.js
+@@ -12,32 +12,30 @@ let DetailsSubview = {
+    */
+   initialize: function () {
+     this._onRecordingStoppedOrSelected = this._onRecordingStoppedOrSelected.bind(this);
+     this._onOverviewRangeChange = this._onOverviewRangeChange.bind(this);
+     this._onDetailsViewSelected = this._onDetailsViewSelected.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+ 
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_SELECTED, this._onOverviewRangeChange);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_CLEARED, this._onOverviewRangeChange);
+     DetailsView.on(EVENTS.DETAILS_VIEW_SELECTED, this._onDetailsViewSelected);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     clearNamedTimeout("range-change-debounce");
+ 
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_SELECTED, this._onOverviewRangeChange);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_CLEARED, this._onOverviewRangeChange);
+     DetailsView.off(EVENTS.DETAILS_VIEW_SELECTED, this._onDetailsViewSelected);
+   },
+ 
+   /**
+@@ -76,17 +74,17 @@ let DetailsSubview = {
+    * area is actively being dragged by the mouse.
+    */
+   shouldUpdateWhileMouseIsActive: false,
+ 
+   /**
+    * Called when recording stops or is selected.
+    */
+   _onRecordingStoppedOrSelected: function(_, recording) {
+-    if (!recording || recording.isRecording()) {
++    if (!recording || !recording.isCompleted()) {
+       return;
+     }
+     if (DetailsView.isViewSelected(this) || this.canUpdateWhileHidden) {
+       this.render();
+     } else {
+       this.shouldUpdateWhenShown = true;
+     }
+   },
+@@ -126,17 +124,17 @@ let DetailsSubview = {
+   _onPrefChanged: function (_, prefName) {
+     if (~this.observedPrefs.indexOf(prefName) && this._onObservedPrefChange) {
+       this._onObservedPrefChange(_, prefName);
+     }
+ 
+     // All detail views require a recording to be complete, so do not
+     // attempt to render if recording is in progress or does not exist.
+     let recording = PerformanceController.getCurrentRecording();
+-    if (!recording || recording.isRecording()) {
++    if (!recording || !recording.isCompleted()) {
+       return;
+     }
+ 
+     if (!~this.rerenderPrefs.indexOf(prefName)) {
+       return;
+     }
+ 
+     if (this._onRerenderPrefChanged) {
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+index 35c1353..76f1e85 100644
+--- a/browser/devtools/performance/views/details.js
++++ b/browser/devtools/performance/views/details.js
+@@ -54,17 +54,16 @@ let DetailsView = {
+     this.setAvailableViews = this.setAvailableViews.bind(this);
+ 
+     for (let button of $$("toolbarbutton[data-view]", this.toolbar)) {
+       button.addEventListener("command", this._onViewToggle);
+     }
+ 
+     yield this.setAvailableViews();
+ 
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.PREF_CHANGED, this.setAvailableViews);
+   }),
+ 
+   /**
+    * Unbinds events, destroys subviews.
+    */
+@@ -72,71 +71,70 @@ let DetailsView = {
+     for (let button of $$("toolbarbutton[data-view]", this.toolbar)) {
+       button.removeEventListener("command", this._onViewToggle);
+     }
+ 
+     for (let [_, component] of Iterator(this.components)) {
+       component.initialized && (yield component.view.destroy());
+     }
+ 
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.PREF_CHANGED, this.setAvailableViews);
+   }),
+ 
+   /**
+    * Sets the possible views based off of recording features and server actor support
+    * by hiding/showing the buttons that select them and going to default view
+    * if currently selected. Called when a preference changes in `devtools.performance.ui.`.
+    */
+   setAvailableViews: Task.async(function* () {
+     let recording = PerformanceController.getCurrentRecording();
+-    let isRecording = recording && recording.isRecording();
++    let isCompleted = recording && recording.isCompleted();
+     let invalidCurrentView = false;
+ 
+     for (let [name, { view }] of Iterator(this.components)) {
+       // TODO bug 1160313 get rid of retro mode checks.
+       let isRetro = PerformanceController.getOption("retro-mode");
+-      let isSupported = isRetro ? name === "js-calltree" : this._isViewSupported(name, false);
++      let isSupported = isRetro ? name === "js-calltree" : this._isViewSupported(name, true);
+ 
+       // TODO bug 1160313 hide all view buttons, but let js-calltree still be "supported"
+       $(`toolbarbutton[data-view=${name}]`).hidden = isRetro ? true : !isSupported;
+ 
+       // If the view is currently selected and not supported, go back to the
+       // default view.
+       if (!isSupported && this.isViewSelected(view)) {
+         invalidCurrentView = true;
+       }
+     }
+ 
+     // Two scenarios in which we select the default view.
+     //
+     // 1: If we currently have selected a view that is no longer valid due
+     // to feature support, and this isn't the first view, and the current recording
+-    // is not recording.
++    // is completed.
+     //
+     // 2. If we have a finished recording and no panel was selected yet,
+     // use a default now that we have the recording configurations
+-    if ((this._initialized  && !isRecording && invalidCurrentView) ||
+-        (!this._initialized && !isRecording && recording)) {
++    if ((this._initialized  && isCompleted && invalidCurrentView) ||
++        (!this._initialized && isCompleted && recording)) {
+       yield this.selectDefaultView();
+     }
+   }),
+ 
+   /**
+    * Takes a view name and optionally if there must be a currently recording in progress.
+    *
+    * @param {string} viewName
+-   * @param {boolean?} isRecording
++   * @param {boolean?} mustBeCompleted
+    * @return {boolean}
+    */
+-  _isViewSupported: function (viewName, isRecording) {
++  _isViewSupported: function (viewName, mustBeCompleted) {
+     let { features, actors } = this.components[viewName];
+-    return PerformanceController.isFeatureSupported({ features, actors, isRecording });
++    return PerformanceController.isFeatureSupported({ features, actors, mustBeCompleted });
+   },
+ 
+   /**
+    * Select one of the DetailView's subviews to be rendered,
+    * hiding the others.
+    *
+    * @param String viewName
+    *        Name of the view to be shown.
+@@ -233,17 +231,17 @@ let DetailsView = {
+     component.initialized = true;
+     yield component.view.initialize();
+ 
+     // If this view is initialized *after* a recording is shown, it won't display
+     // any data. Make sure it's populated by setting `shouldUpdateWhenShown`.
+     // All detail views require a recording to be complete, so do not
+     // attempt to render if recording is in progress or does not exist.
+     let recording = PerformanceController.getCurrentRecording();
+-    if (recording && !recording.isRecording()) {
++    if (recording && recording.isCompleted()) {
+       component.view.shouldUpdateWhenShown = true;
+     }
+   }),
+ 
+   /**
+    * Called when recording stops or is selected.
+    */
+   _onRecordingStoppedOrSelected: function(_, recording) {
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 7077d75..7760c7c 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -61,37 +61,31 @@ let OverviewView = {
+     // based off of prefs.
+     PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_WILL_STOP, this._onRecordingWillStop);
+     this.graphs.on("selecting", this._onGraphSelecting);
+     this.graphs.on("rendered", this._onGraphRendered);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: Task.async(function*() {
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceController.off(EVENTS.THEME_CHANGED, this._onThemeChanged);
+     PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_WILL_STOP, this._onRecordingWillStop);
+     this.graphs.off("selecting", this._onGraphSelecting);
+     this.graphs.off("rendered", this._onGraphRendered);
+     yield this.graphs.destroy();
+   }),
+ 
+   /**
+    * Returns true if any of the overview graphs have mouse dragging active,
+    * false otherwise.
+@@ -202,84 +196,60 @@ let OverviewView = {
+     }
+   },
+ 
+   /**
+    * Called when recording will start. No recording because it does not
+    * exist yet, but can just disable from here. This will only trigger for
+    * manual recordings.
+    */
+-  _onRecordingWillStart: Task.async(function* () {
+-    this._onRecordingStateChange();
++  _onRecordingWillStart: OverviewViewOnStateChange(Task.async(function* () {
+     yield this._checkSelection();
+     this.graphs.dropSelection();
+-  }),
++  })),
+ 
+   /**
+    * Called when recording actually starts.
+    */
+-  _onRecordingStarted: function (_, recording) {
+-    this._onRecordingStateChange();
+-  },
++  _onRecordingStarted: OverviewViewOnStateChange(),
+ 
+   /**
+    * Called when recording will stop.
+    */
+-  _onRecordingWillStop: function(_, recording) {
+-    this._onRecordingStateChange();
+-  },
++  _onRecordingWillStop: OverviewViewOnStateChange(),
+ 
+   /**
+    * Called when recording actually stops.
+    */
+-  _onRecordingStopped: Task.async(function* (_, recording) {
+-    this._onRecordingStateChange();
++  _onRecordingStopped: OverviewViewOnStateChange(Task.async(function* (_, recording) {
+     // Check to see if the recording that just stopped is the current recording.
+     // If it is, render the high-res graphs. For manual recordings, it will also
+     // be the current recording, but profiles generated by `console.profile` can stop
+     // while having another profile selected -- in this case, OverviewView should keep
+     // rendering the current recording.
+     if (recording !== PerformanceController.getCurrentRecording()) {
+       return;
+     }
+     this.render(FRAMERATE_GRAPH_HIGH_RES_INTERVAL);
+     yield this._checkSelection(recording);
+-  }),
++  })),
+ 
+   /**
+    * Called when a new recording is selected.
+    */
+-  _onRecordingSelected: Task.async(function* (_, recording) {
+-    if (!recording) {
+-      return;
+-    }
+-    this._onRecordingStateChange();
++  _onRecordingSelected: OverviewViewOnStateChange(Task.async(function* (_, recording) {
+     this._setGraphVisibilityFromRecordingFeatures(recording);
+ 
+     // If this recording is complete, render the high res graph
+-    if (!recording.isRecording()) {
++    if (recording.isCompleted()) {
+       yield this.render(FRAMERATE_GRAPH_HIGH_RES_INTERVAL);
+     }
+     yield this._checkSelection(recording);
+     this.graphs.dropSelection();
+-  }),
+-
+-  /**
+-   * Called when a recording is starting, stopping, or about to start/stop.
+-   * Checks the current recording displayed to determine whether or not
+-   * the polling for rendering the overview graph needs to start or stop.
+-   */
+-  _onRecordingStateChange: function () {
+-    let currentRecording = PerformanceController.getCurrentRecording();
+-    if (!currentRecording || (this.isRendering() && !currentRecording.isRecording())) {
+-      this._stopPolling();
+-    } else if (currentRecording.isRecording() && !this.isRendering()) {
+-      this._startPolling();
+-    }
+-  },
++  })),
+ 
+   /**
+    * Start the polling for rendering the overview graph.
+    */
+   _startPolling: function () {
+     this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
+   },
+ 
+@@ -298,17 +268,17 @@ let OverviewView = {
+     return !!this._timeoutId;
+   },
+ 
+   /**
+    * Makes sure the selection is enabled or disabled in all the graphs,
+    * based on whether a recording currently exists and is not in progress.
+    */
+   _checkSelection: Task.async(function* (recording) {
+-    let isEnabled = recording ? !recording.isRecording() : false;
++    let isEnabled = recording ? recording.isCompleted() : false;
+     yield this.graphs.selectionEnabled(isEnabled);
+   }),
+ 
+   /**
+    * Fired when the graph selection has changed. Called by
+    * mouseup and scroll events.
+    */
+   _onGraphSelecting: function () {
+@@ -370,10 +340,40 @@ let OverviewView = {
+    */
+   _onThemeChanged: function (_, theme) {
+     this.graphs.setTheme({ theme, redraw: true });
+   },
+ 
+   toString: () => "[object OverviewView]"
+ };
+ 
++/**
++ * Utility that can wrap a method of OverviewView that
++ * handles a recording state change like when a recording is starting,
++ * stopping, or about to start/stop, and determines whether or not
++ * the polling for rendering the overview graphs needs to start or stop.
++ * Must be called with the OverviewView context.
++ *
++ * @param {function?} fn
++ * @return {function}
++ */
++function OverviewViewOnStateChange (fn) {
++  return function _onRecordingStateChange () {
++    let currentRecording = PerformanceController.getCurrentRecording();
++
++    // All these methods require a recording to exist.
++    if (!currentRecording) {
++      return;
++    }
++
++    if (this.isRendering() && !currentRecording.isRecording()) {
++      this._stopPolling();
++    } else if (currentRecording.isRecording() && !this.isRendering()) {
++      this._startPolling();
++    }
++    if (fn) {
++      fn.apply(this, arguments);
++    }
++  }
++}
++
+ // Decorates the OverviewView as an EventEmitter
+ EventEmitter.decorate(OverviewView);
+diff --git a/browser/devtools/performance/views/recordings.js b/browser/devtools/performance/views/recordings.js
+index de8d919..ec4b061 100644
+--- a/browser/devtools/performance/views/recordings.js
++++ b/browser/devtools/performance/views/recordings.js
+@@ -19,31 +19,27 @@ let RecordingsView = Heritage.extend(WidgetMethods, {
+     this._onRecordingImported = this._onRecordingImported.bind(this);
+     this._onSaveButtonClick = this._onSaveButtonClick.bind(this);
+     this._onRecordingsCleared = this._onRecordingsCleared.bind(this);
+ 
+     this.emptyText = L10N.getStr("noRecordingsText");
+ 
+     PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
+-    PerformanceController.on(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_IMPORTED, this._onRecordingImported);
+     PerformanceController.on(EVENTS.RECORDINGS_CLEARED, this._onRecordingsCleared);
+     this.widget.addEventListener("select", this._onSelect, false);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STARTED, this._onRecordingStarted);
+-    PerformanceController.off(EVENTS.CONSOLE_RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_IMPORTED, this._onRecordingImported);
+     PerformanceController.off(EVENTS.RECORDINGS_CLEARED, this._onRecordingsCleared);
+     this.widget.removeEventListener("select", this._onSelect, false);
+   },
+ 
+   /**
+    * Adds an empty recording to this container.
+    *
+-- 
+2.2.1
+
