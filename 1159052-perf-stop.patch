@@ -290,7 +290,7 @@ index 6d92bc9..bd29ff7 100644
        // Accumulate timeline markers into an array. Furthermore, the timestamps
        // do not have a zero epoch, so offset all of them by the start time.
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index 3a5e886..2fb57bb 100644
+index 3a5e886..189a705 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
 @@ -58,23 +58,16 @@ const BRANCH_NAME = "devtools.performance.ui.";
@@ -442,8 +442,7 @@ index 3a5e886..2fb57bb 100644
  
    /**
     * Loads a recording from a file, adding it to the recordings list. Emits
-@@ -434,38 +425,38 @@ let PerformanceController = {
-     // but this could change in the future.
+@@ -435,37 +426,43 @@ let PerformanceController = {
      if (data.pref !== "devtools.theme") {
        return;
      }
@@ -451,7 +450,7 @@ index 3a5e886..2fb57bb 100644
      this.emit(EVENTS.THEME_CHANGED, data.newValue);
    },
  
--  /**
+   /**
 -   * Fired when `console.profile()` is executed.
 -   */
 -  _onConsoleProfileStart: function (_, recording) {
@@ -470,7 +469,11 @@ index 3a5e886..2fb57bb 100644
 -  /**
 -   * Fired when `console.profileEnd()` is executed, and
 -   * has a corresponding `console.profile()` session.
--   */
++   * Fired when a recording model changes state.
++   *
++   * @param {string} state
++   * @param {RecordingModel} model
+    */
 -  _onConsoleProfileEnd: function (_, recording) {
 -    this.emit(EVENTS.CONSOLE_RECORDING_STOPPED, recording);
 +  _onRecordingStateChange: function (state, model) {
@@ -503,7 +506,7 @@ index 3a5e886..2fb57bb 100644
    getRecordings: function () {
      return this._recordings;
    },
-@@ -475,31 +466,31 @@ let PerformanceController = {
+@@ -475,31 +472,31 @@ let PerformanceController = {
     * in recording item, as well as the actor support on the server, returning a boolean
     * indicating if the requirements pass or not. Used to toggle features' visibility mostly.
     *
@@ -542,16 +545,22 @@ index 3a5e886..2fb57bb 100644
        return false;
      }
 diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
-index 91b1198..6f1fc80 100644
+index 91b1198..64b38f0 100644
 --- a/browser/devtools/performance/performance-view.js
 +++ b/browser/devtools/performance/performance-view.js
-@@ -40,31 +40,27 @@ let PerformanceView = {
+@@ -36,35 +36,31 @@ let PerformanceView = {
+   initialize: Task.async(function* () {
+     this._recordButton = $("#main-record-button");
+     this._importButton = $("#import-button");
+     this._clearButton = $("#clear-button");
  
      this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
      this._onImportButtonClick = this._onImportButtonClick.bind(this);
      this._onClearButtonClick = this._onClearButtonClick.bind(this);
-     this._lockRecordButton = this._lockRecordButton.bind(this);
-     this._unlockRecordButton = this._unlockRecordButton.bind(this);
+-    this._lockRecordButton = this._lockRecordButton.bind(this);
+-    this._unlockRecordButton = this._unlockRecordButton.bind(this);
++    this._lockRecordButtons = this._lockRecordButtons.bind(this);
++    this._unlockRecordButtons = this._unlockRecordButtons.bind(this);
      this._onRecordingSelected = this._onRecordingSelected.bind(this);
      this._onRecordingStopped = this._onRecordingStopped.bind(this);
 -    this._onRecordingWillStop = this._onRecordingWillStop.bind(this);
@@ -602,7 +611,8 @@ index 91b1198..6f1fc80 100644
      yield DetailsView.destroy();
    }),
  
-@@ -126,40 +119,39 @@ let PerformanceView = {
+@@ -125,51 +118,50 @@ let PerformanceView = {
+   getState: function () {
      return this._state;
    },
  
@@ -610,8 +620,9 @@ index 91b1198..6f1fc80 100644
     * Adds the `locked` attribute on the record button. This prevents it
     * from being clicked while recording is started or stopped.
     */
-   _lockRecordButton: function () {
+-  _lockRecordButton: function () {
 -    this._recordButton.setAttribute("locked", "true");
++  _lockRecordButtons: function () {
 +    for (let button of $$(".record-button")) {
 +      button.setAttribute("locked", "true");
 +    }
@@ -620,7 +631,7 @@ index 91b1198..6f1fc80 100644
    /**
     * Removes the `locked` attribute on the record button.
     */
-   _unlockRecordButton: function () {
+-  _unlockRecordButton: function () {
 -    this._recordButton.removeAttribute("locked");
 -  },
 -
@@ -630,6 +641,7 @@ index 91b1198..6f1fc80 100644
 -  _onRecordingWillStart: function () {
 -    this._lockRecordButton();
 -    this._recordButton.setAttribute("checked", "true");
++  _unlockRecordButtons: function () {
 +    for (let button of $$(".record-button")) {
 +      button.removeAttribute("locked");
 +    }
@@ -646,7 +658,7 @@ index 91b1198..6f1fc80 100644
 +    // A stopped recording can be from `console.profileEnd` -- only unlock
 +    // the button if it's the main recording that was started via UI.
 +    if (!recording.isConsole()) {
-+      this._unlockRecordButton();
++      this._unlockRecordButtons();
 +    }
    },
  
@@ -656,6 +668,17 @@ index 91b1198..6f1fc80 100644
    _onRecordingStopped: function (_, recording) {
      // A stopped recording can be from `console.profileEnd` -- only unlock
      // the button if it's the main recording that was started via UI.
+     if (!recording.isConsole()) {
+-      this._unlockRecordButton();
++      this._unlockRecordButtons();
+     }
+ 
+     // If the currently selected recording is the one that just stopped,
+     // switch state to "recorded".
+     if (recording === PerformanceController.getCurrentRecording()) {
+       this.setState("recorded");
+     }
+   },
 @@ -182,17 +174,25 @@ let PerformanceView = {
    },
  
@@ -665,12 +688,12 @@ index 91b1198..6f1fc80 100644
    _onRecordButtonClick: function (e) {
      if (this._recordButton.hasAttribute("checked")) {
        this.emit(EVENTS.UI_STOP_RECORDING);
-+      this._lockRecordButton();
++      this._lockRecordButtons();
 +      for (let button of $$(".record-button")) {
 +        button.removeAttribute("checked");
 +      }
      } else {
-+      this._lockRecordButton();
++      this._lockRecordButtons();
 +      for (let button of $$(".record-button")) {
 +        button.setAttribute("checked", "true");
 +      }

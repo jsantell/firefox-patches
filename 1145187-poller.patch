@@ -1,18 +1,18 @@
-From: Jordan Santell <jsantell@gmail.com>
-Date: Sun, 3 May 2015 12:03:21 -0700
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 4 May 2015 11:46:30 -0700
 Subject: Bug 1145187 - Add a Poller utility object for togglign on polling functions. r=jryans
 
 diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
-index 1c63f8e..3d6fb86 100644
+index f6bc389..9f473be 100644
 --- a/browser/devtools/shared/moz.build
 +++ b/browser/devtools/shared/moz.build
-@@ -49,16 +49,17 @@ EXTRA_JS_MODULES.devtools.shared += [
-     'autocomplete-popup.js',
+@@ -50,16 +50,17 @@ EXTRA_JS_MODULES.devtools.shared += [
      'devices.js',
      'doorhanger.js',
      'frame-script-utils.js',
      'getjson.js',
      'inplace-editor.js',
+     'node-attribute-parser.js',
      'observable-object.js',
      'options-view.js',
 +    'poller.js',
@@ -26,10 +26,10 @@ index 1c63f8e..3d6fb86 100644
  EXTRA_JS_MODULES.devtools.shared.widgets += [
 diff --git a/browser/devtools/shared/poller.js b/browser/devtools/shared/poller.js
 new file mode 100644
-index 0000000..d6f8efe
+index 0000000..6a773f5
 --- /dev/null
 +++ b/browser/devtools/shared/poller.js
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,115 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -80,6 +80,9 @@ index 0000000..d6f8efe
 + * @return {Poller}
 + */
 +Poller.prototype.on = function pollerOn () {
++  if (this._destroyed) {
++    throw Error("Poller cannot be turned on after destruction.");
++  }
 +  if (this._timer) {
 +    this.off();
 +  }
@@ -108,6 +111,17 @@ index 0000000..d6f8efe
 +    resolve();
 +  }
 +  return promise;
++};
++
++/**
++ * Turns off polling and removes the reference to the poller function.
++ * Resolves when the last outstanding `fn` call finishes if it's an async function.
++ */
++Poller.prototype.destroy = function pollerDestroy () {
++  return this.off().then(() => {
++    this._destroyed = true;
++    this._fn = null
++  });
 +};
 +
 +Poller.prototype._preparePoll = function pollerPrepare () {
@@ -155,10 +169,10 @@ index 2d1bd5f..c7cf6c8 100644
  [browser_tableWidget_mouse_interaction.js]
 diff --git a/browser/devtools/shared/test/browser_poller.js b/browser/devtools/shared/test/browser_poller.js
 new file mode 100644
-index 0000000..f509f65
+index 0000000..07230eb
 --- /dev/null
 +++ b/browser/devtools/shared/test/browser_poller.js
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,131 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -259,6 +273,36 @@ index 0000000..f509f65
 +  yield asyncPoller.off();
 +  ok(inflightFinished, "off() method does not resolve until remaining inflight poll calls finish");
 +  is(pollCalls, 1, "should only be one poll call to occur before turning off polling");
++});
++
++add_task(function *() {
++  // Create a poller that returns a promise. This poll call
++  // is called immediately, and then subsequently turned off.
++  // The call to `off` should not resolve until the inflight call
++  // finishes.
++  let inflightFinished = null;
++  let pollCalls = 0;
++  let asyncPoller = new Poller(function () {
++    pollCalls++;
++    return new Promise(function (resolve, reject) {
++      setTimeout(() => {
++        inflightFinished = true;
++        resolve();
++      }, 1000);
++    });
++  }, 1, true);
++  asyncPoller.on();
++
++  yield asyncPoller.destroy();
++  ok(inflightFinished, "destroy() method does not resolve until remaining inflight poll calls finish");
++  is(pollCalls, 1, "should only be one poll call to occur before destroying polling");
++  
++  try {
++    asyncPoller.on();
++    ok(false, "Calling on() after destruction should throw");
++  } catch (e) {
++    ok(true, "Calling on() after destruction should throw");
++  }
 +});
 diff --git a/browser/devtools/shared/test/head.js b/browser/devtools/shared/test/head.js
 index c4ded15..b15ce09 100644
