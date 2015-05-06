@@ -1,0 +1,486 @@
+From 98d103429803951cd48415ae215b364b59b6e3fb Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 5 May 2015 14:14:42 -0700
+Subject: [PATCH] workify recording-utils
+
+---
+ .../performance/modules/recording-model.js         |  12 +-
+ .../performance/modules/recording-utils.js         |   4 +
+ .../performance/modules/recording-utils2.js        | 138 +++++++++++++++++++++
+ browser/devtools/performance/modules/worker.js     | 126 +++++++++++++++++++
+ browser/devtools/performance/moz.build             |   2 +
+ 5 files changed, 276 insertions(+), 6 deletions(-)
+ create mode 100644 browser/devtools/performance/modules/recording-utils2.js
+ create mode 100644 browser/devtools/performance/modules/worker.js
+
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index bd29ff7..ceb9e4a 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -4,17 +4,17 @@
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ 
+ loader.lazyRequireGetter(this, "PerformanceIO",
+   "devtools/performance/io", true);
+ loader.lazyRequireGetter(this, "RecordingUtils",
+-  "devtools/performance/recording-utils", true);
++  "devtools/performance/recording-utils2", true);
+ 
+ /**
+  * Model for a wholistic profile, containing the duration, profiling data,
+  * frames data, timeline (marker, tick, memory) data, and methods to mark
+  * a recording as 'in progress' or 'finished'.
+  */
+ 
+ const RecordingModel = function (options={}) {
+@@ -128,17 +128,17 @@ RecordingModel.prototype = {
+     this._profile = info.profile;
+     this._completed = true;
+ 
+     // We filter out all samples that fall out of current profile's range
+     // since the profiler is continuously running. Because of this, sample
+     // times are not guaranteed to have a zero epoch, so offset the
+     // timestamps.
+     // TODO move this into FakeProfilerFront in ./actors.js after bug 1154115
+-    RecordingUtils.offsetSampleTimes(this._profile, this._profilerStartTime);
++    this._profile = yield RecordingUtils.offsetSampleTimes(this._profile, this._profilerStartTime);
+ 
+     // Markers need to be sorted ascending by time, to be properly displayed
+     // in a waterfall view.
+     this._markers = this._markers.sort((a, b) => (a.start > b.start));
+   }),
+ 
+   /**
+    * Gets the profile's start time.
+@@ -278,32 +278,32 @@ RecordingModel.prototype = {
+    */
+   isRecording: function () {
+     return this._recording;
+   },
+ 
+   /**
+    * Fired whenever the PerformanceFront emits markers, memory or ticks.
+    */
+-  addTimelineData: function (eventName, ...data) {
++  addTimelineData: Task.async(function *(eventName, ...data) {
+     // If this model isn't currently recording,
+     // ignore the timeline data.
+     if (!this.isRecording()) {
+       return;
+     }
+ 
+     let config = this.getConfiguration();
+ 
+     switch (eventName) {
+       // Accumulate timeline markers into an array. Furthermore, the timestamps
+       // do not have a zero epoch, so offset all of them by the start time.
+       case "markers": {
+         if (!config.withMarkers) { break; }
+         let [markers] = data;
+-        RecordingUtils.offsetMarkerTimes(markers, this._timelineStartTime);
++        markers = yield RecordingUtils.offsetMarkerTimes(markers, this._timelineStartTime);
+         Array.prototype.push.apply(this._markers, markers);
+         break;
+       }
+       // Accumulate stack frames into an array.
+       case "frames": {
+         if (!config.withMarkers) { break; }
+         let [, frames] = data;
+         Array.prototype.push.apply(this._frames, frames);
+@@ -330,20 +330,20 @@ RecordingModel.prototype = {
+       // Accumulate allocation sites into an array. Furthermore, the timestamps
+       // do not have a zero epoch, and are microseconds instead of milliseconds,
+       // so offset all of them by the start time, also converting from µs to ms.
+       case "allocations": {
+         if (!config.withAllocations) { break; }
+         let [{ sites, timestamps, frames, counts }] = data;
+         let timeOffset = this._memoryStartTime * 1000;
+         let timeScale = 1000;
+-        RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
++        timestamps = yield RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
+         Array.prototype.push.apply(this._allocations.sites, sites);
+         Array.prototype.push.apply(this._allocations.timestamps, timestamps);
+         Array.prototype.push.apply(this._allocations.frames, frames);
+         Array.prototype.push.apply(this._allocations.counts, counts);
+         break;
+       }
+     }
+-  }
++  })
+ };
+ 
+ exports.RecordingModel = RecordingModel;
+diff --git a/browser/devtools/performance/modules/recording-utils.js b/browser/devtools/performance/modules/recording-utils.js
+index 1b570f3..c2bb159 100644
+--- a/browser/devtools/performance/modules/recording-utils.js
++++ b/browser/devtools/performance/modules/recording-utils.js
+@@ -22,47 +22,50 @@ exports.RecordingUtils = {};
+  *        The earliest acceptable sample time (in milliseconds).
+  */
+ exports.RecordingUtils.filterSamples = function(profile, profilerStartTime) {
+   let firstThread = profile.threads[0];
+ 
+   firstThread.samples = firstThread.samples.filter(e => {
+     return e.time >= profilerStartTime;
+   });
++  return profile;
+ }
+ 
+ /**
+  * Offsets all the samples in the provided profiler data by the specified time.
+  *
+  * @param object profile
+  *        The profiler data received from the backend.
+  * @param number timeOffset
+  *        The amount of time to offset by (in milliseconds).
+  */
+ exports.RecordingUtils.offsetSampleTimes = function(profile, timeOffset) {
+   let firstThread = profile.threads[0];
+ 
+   for (let sample of firstThread.samples) {
+     sample.time -= timeOffset;
+   }
++  return profile;
+ }
+ 
+ /**
+  * Offsets all the markers in the provided timeline data by the specified time.
+  *
+  * @param array markers
+  *        The markers array received from the backend.
+  * @param number timeOffset
+  *        The amount of time to offset by (in milliseconds).
+  */
+ exports.RecordingUtils.offsetMarkerTimes = function(markers, timeOffset) {
+   for (let marker of markers) {
+     marker.start -= timeOffset;
+     marker.end -= timeOffset;
+   }
++  return markers;
+ }
+ 
+ /**
+  * Offsets and scales all the timestamps in the provided array by the
+  * specified time and scale factor.
+  *
+  * @param array array
+  *        A list of timestamps received from the backend.
+@@ -71,16 +74,17 @@ exports.RecordingUtils.offsetMarkerTimes = function(markers, timeOffset) {
+  * @param number timeScale
+  *        The factor to scale by, after offsetting.
+  */
+ exports.RecordingUtils.offsetAndScaleTimestamps = function(timestamps, timeOffset, timeScale) {
+   for (let i = 0, len = timestamps.length; i < len; i++) {
+     timestamps[i] -= timeOffset;
+     timestamps[i] /= timeScale;
+   }
++  return timestamps;
+ }
+ 
+ /**
+  * Cache used in `RecordingUtils.getSamplesFromAllocations`.
+  */
+ let gSamplesFromAllocationCache = new WeakMap();
+ 
+ /**
+diff --git a/browser/devtools/performance/modules/recording-utils2.js b/browser/devtools/performance/modules/recording-utils2.js
+new file mode 100644
+index 0000000..b2e9b54
+--- /dev/null
++++ b/browser/devtools/performance/modules/recording-utils2.js
+@@ -0,0 +1,138 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { DevToolsWorker } = require("devtools/shared/worker");
++/**
++ * Utility functions for managing recording models and their internal data,
++ * such as filtering profile samples or offsetting timestamps.
++ */
++
++exports.RecordingUtils = {};
++const worker = new DevToolsWorker("resource:///modules/devtools/performance/worker.js");
++/**
++ * Filters all the samples in the provided profiler data to be more recent
++ * than the specified start time.
++ *
++ * @param object profile
++ *        The profiler data received from the backend.
++ * @param number profilerStartTime
++ *        The earliest acceptable sample time (in milliseconds).
++ */
++exports.RecordingUtils.filterSamples = function(profile, profilerStartTime) {
++  return worker.performTask("filterSamples", { profile, profilerStartTime });
++}
++
++/**
++ * Offsets all the samples in the provided profiler data by the specified time.
++ *
++ * @param object profile
++ *        The profiler data received from the backend.
++ * @param number timeOffset
++ *        The amount of time to offset by (in milliseconds).
++ */
++exports.RecordingUtils.offsetSampleTimes = function(profile, timeOffset) {
++  return worker.performTask("offsetSampleTimes", { profile, timeOffset });
++}
++
++/**
++ * Offsets all the markers in the provided timeline data by the specified time.
++ *
++ * @param array markers
++ *        The markers array received from the backend.
++ * @param number timeOffset
++ *        The amount of time to offset by (in milliseconds).
++ */
++exports.RecordingUtils.offsetMarkerTimes = function(markers, timeOffset) {
++  return worker.performTask("offsetMarkerTimes", { markers, timeOffset });
++}
++
++/**
++ * Offsets and scales all the timestamps in the provided array by the
++ * specified time and scale factor.
++ *
++ * @param array array
++ *        A list of timestamps received from the backend.
++ * @param number timeOffset
++ *        The amount of time to offset by (in milliseconds).
++ * @param number timeScale
++ *        The factor to scale by, after offsetting.
++ */
++exports.RecordingUtils.offsetAndScaleTimestamps = function(timestamps, timeOffset, timeScale) {
++  return worker.performTask("offsetAndScaleTimestamps", { timestamps, timeScale, timeOffset });
++}
++
++/**
++ * Cache used in `RecordingUtils.getSamplesFromAllocations`.
++ */
++let gSamplesFromAllocationCache = new WeakMap();
++
++/**
++ * Converts allocation data from the memory actor to something that follows
++ * the same structure as the samples data received from the profiler.
++ *
++ * @see MemoryActor.prototype.getAllocations for more information.
++ *
++ * @param object allocations
++ *        A list of { sites, timestamps, frames, counts } arrays.
++ * @return array
++ *         The samples data.
++ */
++exports.RecordingUtils.getSamplesFromAllocations = function(allocations) {
++  let cached = gSamplesFromAllocationCache.get(allocations);
++  if (cached) {
++    return cached;
++  }
++  return worker.performTask("offsetAndScaleTimestamps", { timestamps, timeScale, timeOffset }).then(val => {
++    gSamplesFromAllocationCache.set(allocations, val);
++    return val;
++  });
++};
++
++/**
++ * Gets the current timeline blueprint without the hidden markers.
++ *
++ * @param blueprint
++ *        The default timeline blueprint.
++ * @param array hiddenMarkers
++ *        A list of hidden markers' names.
++ * @return object
++ *         The filtered timeline blueprint.
++ */
++exports.RecordingUtils.getFilteredBlueprint = function({ blueprint, hiddenMarkers }) {
++  let filteredBlueprint = Cu.cloneInto(blueprint, {});
++  let maybeRemovedGroups = new Set();
++  let removedGroups = new Set();
++
++  // 1. Remove hidden markers from the blueprint.
++
++  for (let hiddenMarkerName of hiddenMarkers) {
++    maybeRemovedGroups.add(filteredBlueprint[hiddenMarkerName].group);
++    delete filteredBlueprint[hiddenMarkerName];
++  }
++
++  // 2. Get a list of all the groups that will be removed.
++
++  for (let maybeRemovedGroup of maybeRemovedGroups) {
++    let markerNames = Object.keys(filteredBlueprint);
++    let isGroupRemoved = markerNames.every(e => filteredBlueprint[e].group != maybeRemovedGroup);
++    if (isGroupRemoved) {
++      removedGroups.add(maybeRemovedGroup);
++    }
++  }
++
++  // 3. Offset groups so that their indices are consecutive.
++
++  for (let removedGroup of removedGroups) {
++    let markerNames = Object.keys(filteredBlueprint);
++    for (let markerName of markerNames) {
++      let markerDetails = filteredBlueprint[markerName];
++      if (markerDetails.group > removedGroup) {
++        markerDetails.group--;
++      }
++    }
++  }
++
++  return filteredBlueprint;
++};
+diff --git a/browser/devtools/performance/modules/worker.js b/browser/devtools/performance/modules/worker.js
+new file mode 100644
+index 0000000..1f0bffc
+--- /dev/null
++++ b/browser/devtools/performance/modules/worker.js
+@@ -0,0 +1,126 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * Import `createTask` to communicate with `devtools/shared/worker`.
++ */
++importScripts("resource://gre/modules/workers/require.js");
++const { createTask } = require("resource:///modules/devtools/shared/worker-helper");
++
++/**
++ * @see LineGraphWidget.prototype.setDataFromTimestamps in Graphs.jsm
++ * @param number id
++ * @param array timestamps
++ * @param number interval
++ * @param number duration
++ */
++createTask(self, "filterSamples", function ({ profile, profilerStartTime}, callback) {
++  let firstThread = profile.threads[0];
++
++  firstThread.samples = firstThread.samples.filter(e => {
++    return e.time >= profilerStartTime;
++  });
++  callback(null, profile);
++})
++
++/**
++ * Offsets all the samples in the provided profiler data by the specified time.
++ *
++ * @param object profile
++ *        The profiler data received from the backend.
++ * @param number timeOffset
++ *        The amount of time to offset by (in milliseconds).
++ */
++createTask(self, "offsetSampleTimes", function ({ profile, timeOffset}, callback) {
++  let firstThread = profile.threads[0];
++
++  for (let sample of firstThread.samples) {
++    sample.time -= timeOffset;
++  }
++  callback(null, profile);
++})
++
++/**
++ * Offsets all the markers in the provided timeline data by the specified time.
++ *
++ * @param array markers
++ *        The markers array received from the backend.
++ * @param number timeOffset
++ *        The amount of time to offset by (in milliseconds).
++ */
++createTask(self, "offsetMarkerTimes", function ({ markers, timeOffset}, callback) {
++  for (let marker of markers) {
++    marker.start -= timeOffset;
++    marker.end -= timeOffset;
++  }
++  callback(null, markers);
++})
++
++/**
++ * Offsets and scales all the timestamps in the provided array by the
++ * specified time and scale factor.
++ *
++ * @param array array
++ *        A list of timestamps received from the backend.
++ * @param number timeOffset
++ *        The amount of time to offset by (in milliseconds).
++ * @param number timeScale
++ *        The factor to scale by, after offsetting.
++ */
++createTask(self, "offsetAndScaleTimestamps", function ({ timestamps, timeScale, timeOffset}, callback) {
++  for (let i = 0, len = timestamps.length; i < len; i++) {
++    timestamps[i] -= timeOffset;
++    timestamps[i] /= timeScale;
++  }
++  callback(null, timestamps);
++})
++
++/**
++ * Cache used in `RecordingUtils.getSamplesFromAllocations`.
++ */
++
++/**
++ * Converts allocation data from the memory actor to something that follows
++ * the same structure as the samples data received from the profiler.
++ *
++ * @see MemoryActor.prototype.getAllocations for more information.
++ *
++ * @param object allocations
++ *        A list of { sites, timestamps, frames, counts } arrays.
++ * @return array
++ *         The samples data.
++ */
++createTask(self, "getSamplesFromAllocations", function ({ allocations }, callback) {
++  let { sites, timestamps, frames, counts } = allocations;
++  let samples = [];
++
++  for (let i = 0, len = sites.length; i < len; i++) {
++    let site = sites[i];
++    let timestamp = timestamps[i];
++    let frame = frames[site];
++    let count = counts[site];
++
++    let sample = { time: timestamp, frames: [] };
++    samples.push(sample);
++
++    while (frame) {
++      let source = frame.source + ":" + frame.line + ":" + frame.column;
++      let funcName = frame.functionDisplayName || "";
++
++      sample.frames.push({
++        location: funcName ? funcName + " (" + source + ")" : source,
++        allocations: count
++      });
++
++      site = frame.parent;
++      frame = frames[site];
++      count = counts[site];
++    }
++
++    sample.frames.reverse();
++  }
++
++  callback(null, samples);
++})
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index 0662e08..4986ff9 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -6,12 +6,14 @@
+ EXTRA_JS_MODULES.devtools.performance += [
+     'modules/actors.js',
+     'modules/compatibility.js',
+     'modules/front.js',
+     'modules/graphs.js',
+     'modules/io.js',
+     'modules/recording-model.js',
+     'modules/recording-utils.js',
++    'modules/recording-utils2.js',
++    'modules/worker.js',
+     'panel.js'
+ ]
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+-- 
+2.2.1
+

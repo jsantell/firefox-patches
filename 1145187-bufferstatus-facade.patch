@@ -1,9 +1,9 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Mon, 4 May 2015 12:16:32 -0700
+Date: Tue, 5 May 2015 17:12:49 -0700
 Subject: Bug 1145187 - Implement polling for buffer status on performance actor facades. r=vp
 
 diff --git a/browser/devtools/performance/modules/actors.js b/browser/devtools/performance/modules/actors.js
-index 61fec66..3f15357 100644
+index 26fd96f..1696a6f 100644
 --- a/browser/devtools/performance/modules/actors.js
 +++ b/browser/devtools/performance/modules/actors.js
 @@ -14,24 +14,27 @@ const {
@@ -37,7 +37,7 @@ index 61fec66..3f15357 100644
  ];
  
  const PROFILER_ACTOR_METHODS = [
-@@ -40,89 +43,130 @@ const PROFILER_ACTOR_METHODS = [
+@@ -40,16 +43,19 @@ const PROFILER_ACTOR_METHODS = [
  ];
  
  /**
@@ -57,18 +57,7 @@ index 61fec66..3f15357 100644
  
    // Connects to the targets underlying real ProfilerFront.
    connect: Task.async(function*() {
-     let target = this._target;
-     this._actor = yield getProfiler(target);
- 
-     // Fetch and store information about the SPS profiler and
-     // server profiler.
-     this.traits = {};
-     this.traits.filterable = target.getTrait("profilerDataFilterable");
-+    this.traits.bufferStatus = target.getTrait("profilerBufferStatus");
- 
-     // Directly register to event notifications when connected
-     // to hook into `console.profile|profileEnd` calls.
-     yield this.registerEventNotifications({ events: this.EVENTS });
+@@ -67,46 +73,71 @@ ProfilerFrontFacade.prototype = {
      // TODO bug 1159389, listen directly to actor if supporting new front
      target.client.addListener("eventNotification", this._onProfilerEvent);
    }),
@@ -106,14 +95,13 @@ index 61fec66..3f15357 100644
      // nsIPerformance module will be kept recording, because it's the same instance
      // for all targets and interacts with the whole platform, so we don't want
      // to affect other clients by stopping (or restarting) it.
-     let profilerStatus = yield this.isActive();
-     if (profilerStatus.isActive) {
-+      // Get the buffer status at the starting point
-+      let bufferStatus = yield this.getBufferInfo();
-+
+-    let profilerStatus = yield this.isActive();
+-    if (profilerStatus.isActive) {
++    let { isActive, currentTime, position, generation, totalSize } = yield this.isActive();
++    if (isActive) {
        this.emit("profiler-already-active");
 -      return profilerStatus.currentTime;
-+      return { startTime: profilerStatus.currentTime, bufferStatus };
++      return { startTime: currentTime, position, generation, totalSize };
      }
  
      // Translate options from the recording model into profiler-specific
@@ -124,12 +112,10 @@ index 61fec66..3f15357 100644
      };
  
      yield this.startProfiler(profilerOptions);
-+    // Get the buffer status at the starting point
-+    let bufferStatus = yield this.getBufferInfo();
  
      this.emit("profiler-activated");
 -    return 0;
-+    return { startTime: 0, bufferStatus };
++    return { startTime: 0, position, generation, totalSize };
 +  }),
 +
 +  /**
@@ -147,30 +133,7 @@ index 61fec66..3f15357 100644
    getProfile: Task.async(function *(options) {
      let profilerData = yield (actorCompatibilityBridge("getProfile").call(this, options));
      // If the backend does not support filtering by start and endtime on platform (< Fx40),
-     // do it on the client (much slower).
-     if (!this.traits.filterable) {
-       RecordingUtils.filterSamples(profilerData.profile, options.startTime || 0);
-     }
- 
-     return profilerData;
-   }),
- 
-+  getBufferInfo: Task.async(function *() {
-+    if (!this.traits.bufferStatus) {
-+      return null;
-+    }
-+    return (yield actorCompatibilityBridge("getBufferInfo").call(this));
-+  }),
-+
-   /**
-    * Invoked whenever a registered event was emitted by the profiler actor.
-    *
-    * @param object response
-    *        The data received from the backend.
-    */
-   _onProfilerEvent: function (_, { topic, subject, details }) {
-     if (topic === "console-api-profiler") {
-@@ -131,16 +175,20 @@ ProfilerFrontFacade.prototype = {
+@@ -131,16 +162,20 @@ ProfilerFrontFacade.prototype = {
        } else if (subject.action === "profileEnd") {
          this.emit("console-profile-end", details);
        }
@@ -180,7 +143,7 @@ index 61fec66..3f15357 100644
    },
  
 +  _checkBufferStatus: Task.async(function *() {
-+    this.emit("buffer-status", (yield this.getBufferInfo()));
++    this.emit("buffer-status", (yield this.isActive()));
 +  }),
 +
    toString: () => "[object ProfilerFrontFacade]"
@@ -191,7 +154,7 @@ index 61fec66..3f15357 100644
  exports.ProfilerFront = ProfilerFrontFacade;
  
  /**
-@@ -195,45 +243,61 @@ TIMELINE_ACTOR_METHODS.forEach(method => TimelineFrontFacade.prototype[method] =
+@@ -195,30 +230,41 @@ TIMELINE_ACTOR_METHODS.forEach(method => TimelineFrontFacade.prototype[method] =
  exports.TimelineFront = TimelineFrontFacade;
  
  /**
@@ -233,11 +196,14 @@ index 61fec66..3f15357 100644
      }
  
      yield this.attach();
+@@ -230,17 +276,22 @@ MemoryFrontFacade.prototype = {
+       allocationOptions.probability = options.allocationsSampleProbability;
+     }
+     if (options.allocationsMaxLogLength !== void 0) {
+       allocationOptions.maxLogLength = options.allocationsMaxLogLength;
+     }
  
-     let startTime = yield this.startRecordingAllocations({
-       probability: options.allocationsSampleProbability,
-       maxLogLength: options.allocationsMaxLogLength
-     });
+     let startTime = yield this.startRecordingAllocations(allocationOptions);
  
 -    yield this._pullAllocationSites();
 +    if (!this._poller) {
@@ -254,7 +220,7 @@ index 61fec66..3f15357 100644
     * Stops polling for allocation information.
     */
    stop: Task.async(function *(options) {
-@@ -241,18 +305,18 @@ MemoryFrontFacade.prototype = {
+@@ -248,18 +299,18 @@ MemoryFrontFacade.prototype = {
        return 0;
      }
  
@@ -274,7 +240,7 @@ index 61fec66..3f15357 100644
    }),
  
    /**
-@@ -275,18 +339,16 @@ MemoryFrontFacade.prototype = {
+@@ -282,18 +333,16 @@ MemoryFrontFacade.prototype = {
      // being the event name, and the second argument describing the type.
      this.emit("timeline-data", "allocations", {
        sites: memoryData.allocations,
@@ -322,10 +288,10 @@ index fd79287..b34e77b 100644
      // we will need it for backwards compat
      if (this.IS_MOCK || this._actor.request) {
 diff --git a/browser/devtools/performance/modules/front.js b/browser/devtools/performance/modules/front.js
-index 0ce6e83..df375b1 100644
+index 73a5a67..4048caa 100644
 --- a/browser/devtools/performance/modules/front.js
 +++ b/browser/devtools/performance/modules/front.js
-@@ -16,25 +16,21 @@ loader.lazyRequireGetter(this, "DevToolsUtils",
+@@ -16,24 +16,21 @@ loader.lazyRequireGetter(this, "DevToolsUtils",
  loader.lazyRequireGetter(this, "actors",
    "devtools/performance/actors");
  
@@ -340,10 +306,10 @@ index 0ce6e83..df375b1 100644
 -
  // Events to pipe from PerformanceActorsConnection to the PerformanceFront
  const CONNECTION_PIPE_EVENTS = [
-   "console-profile-start", "console-profile-ending", "console-profile-end",
    "timeline-data", "profiler-already-active", "profiler-activated",
--  "recording-started", "recording-stopped"
-+  "recording-started", "recording-stopped", "buffer-status"
+-  "recording-starting", "recording-started", "recording-stopping", "recording-stopped"
++  "recording-starting", "recording-started", "recording-stopping", "recording-stopped",
++  "buffer-status"
  ];
  
  /**
@@ -352,7 +318,7 @@ index 0ce6e83..df375b1 100644
   */
  let SharedPerformanceActors = new WeakMap();
  
-@@ -75,16 +71,17 @@ function PerformanceActorsConnection(target) {
+@@ -74,16 +71,17 @@ function PerformanceActorsConnection(target) {
    this._pendingConsoleRecordings = [];
    this._sitesPullTimeout = 0;
    this._recordings = [];
@@ -370,7 +336,7 @@ index 0ce6e83..df375b1 100644
  PerformanceActorsConnection.prototype = {
  
    // Properties set based off of server actor support
-@@ -169,29 +166,31 @@ PerformanceActorsConnection.prototype = {
+@@ -168,29 +166,31 @@ PerformanceActorsConnection.prototype = {
    _registerListeners: function () {
      this._timeline.on("timeline-data", this._onTimelineData);
      this._memory.on("timeline-data", this._onTimelineData);
@@ -402,7 +368,7 @@ index 0ce6e83..df375b1 100644
    _disconnectActors: Task.async(function* () {
      yield Promise.all([
        this._profiler.destroy(),
-@@ -289,44 +288,57 @@ PerformanceActorsConnection.prototype = {
+@@ -284,46 +284,64 @@ PerformanceActorsConnection.prototype = {
     * - frames
     * - memory
     * - ticks
@@ -422,7 +388,9 @@ index 0ce6e83..df375b1 100644
 +  _onBufferStatus: function (_, data) {
 +    // If no buffer data emitted (whether from an older actor being destroyed
 +    // from a previous test, or the server does not support it), just ignore.
-+    if (!data) {
++    // Also check for a value of buffer status (`position`) to see if it's
++    // because of an unsupported server.
++    if (!data || data.position === void 0) {
 +      return;
 +    }
 +    this._recordings.forEach(e => e._addBufferStatusData.call(e, data));
@@ -440,17 +408,22 @@ index 0ce6e83..df375b1 100644
     */
    startRecording: Task.async(function*(options = {}) {
      let model = new RecordingModel(options);
+     this.emit("recording-starting", model);
+ 
      // All actors are started asynchronously over the remote debugging protocol.
      // Get the corresponding start times from each one of them.
      // The timeline and memory actors are target-dependent, so start those as well,
      // even though these are mocked in older Geckos (FF < 35)
 -    let profilerStartTime = yield this._profiler.start(options);
-+    let { startTime: profilerStartTime, bufferStatus } = yield this._profiler.start(options);
++    let { startTime, position, generation, totalSize } = yield this._profiler.start(options);
      let timelineStartTime = yield this._timeline.start(options);
      let memoryStartTime = yield this._memory.start(options);
  
 -    let data = { profilerStartTime, timelineStartTime, memoryStartTime };
-+    let data = { profilerStartTime, timelineStartTime, memoryStartTime, bufferStatus };
++    let data = {
++      profilerStartTime: startTime, timelineStartTime, memoryStartTime,
++      generation, position, totalSize
++    };
  
      // Signify to the model that the recording has started,
      // populate with data and store the recording model here.
@@ -464,7 +437,7 @@ index 0ce6e83..df375b1 100644
  
    /**
     * Manually ends the recording session for the corresponding RecordingModel.
-@@ -359,16 +371,17 @@ PerformanceActorsConnection.prototype = {
+@@ -363,16 +381,19 @@ PerformanceActorsConnection.prototype = {
      let memoryEndTime = Date.now();
      let timelineEndTime = Date.now();
  
@@ -473,6 +446,8 @@ index 0ce6e83..df375b1 100644
      // juse use Date.now() for the memory and timeline end times, as those
      // are only used in tests.
      if (!this.isRecording()) {
++      // This doesn't stop the profiler, just turns off polling for
++      // events, and also turns off events on memory/timeline actors.
 +      yield this._profiler.stop();
        memoryEndTime = yield this._memory.stop(config);
        timelineEndTime = yield this._timeline.stop(config);
@@ -482,15 +457,42 @@ index 0ce6e83..df375b1 100644
      model._onStopRecording({
        // Data available only at the end of a recording.
        profile: profilerData.profile,
+diff --git a/browser/devtools/performance/modules/graphs.js b/browser/devtools/performance/modules/graphs.js
+index 5a0f24a..81720fb 100644
+--- a/browser/devtools/performance/modules/graphs.js
++++ b/browser/devtools/performance/modules/graphs.js
+@@ -340,17 +340,21 @@ GraphsController.prototype = {
+    * Sets a mapped selection on the graph that is the main controller
+    * for keeping the graphs' selections in sync.
+    */
+   setMappedSelection: function (selection, { mapStart, mapEnd }) {
+     return this._getPrimaryLink().setMappedSelection(selection, { mapStart, mapEnd });
+   },
+ 
+   getMappedSelection: function ({ mapStart, mapEnd }) {
+-    return this._getPrimaryLink().getMappedSelection({ mapStart, mapEnd });
++    if (this._getPrimaryLink()) {
++      return this._getPrimaryLink().getMappedSelection({ mapStart, mapEnd });
++    } else {
++      return null;
++    }
+   },
+ 
+   /**
+    * Returns an array of graphs that have been created, not necessarily
+    * enabled currently.
+    */
+   getWidgets: function () {
+     return Object.keys(this._graphs).map(name => this._graphs[name]);
 diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
-index 6d92bc9..a9f92b1 100644
+index bd29ff7..1ce5d29 100644
 --- a/browser/devtools/performance/modules/recording-model.js
 +++ b/browser/devtools/performance/modules/recording-model.js
-@@ -37,16 +37,18 @@ RecordingModel.prototype = {
-   // Private fields, only needed when a recording is started or stopped.
+@@ -38,16 +38,18 @@ RecordingModel.prototype = {
    _console: false,
    _imported: false,
    _recording: false,
+   _completed: false,
    _profilerStartTime: 0,
    _timelineStartTime: 0,
    _memoryStartTime: 0,
@@ -505,7 +507,7 @@ index 6d92bc9..a9f92b1 100644
    _frames: null,
    _memory: null,
    _ticks: null,
-@@ -84,26 +86,27 @@ RecordingModel.prototype = {
+@@ -85,26 +87,32 @@ RecordingModel.prototype = {
      let recordingData = this.getAllData();
      yield PerformanceIO.saveRecordingToFile(recordingData, file);
    }),
@@ -520,12 +522,17 @@ index 6d92bc9..a9f92b1 100644
      // However, we also want to update the view with the elapsed time
      // even when the actor is not generating data. To do this we get
      // the local time and use it to compute a reasonable elapsed time.
-     this._localStartTime = Date.now()
+     this._localStartTime = Date.now();
  
      this._profilerStartTime = info.profilerStartTime;
      this._timelineStartTime = info.timelineStartTime;
      this._memoryStartTime = info.memoryStartTime;
-+    this._originalBufferStatus = info.bufferStatus;
++    this._originalBufferStatus = {
++      position: info.position,
++      totalSize: info.totalSize,
++      generation: info.generation
++    };
++
      this._recording = true;
  
      this._markers = [];
@@ -534,9 +541,9 @@ index 6d92bc9..a9f92b1 100644
      this._ticks = [];
      this._allocations = { sites: [], timestamps: [], frames: [], counts: [] };
    },
-@@ -252,19 +255,45 @@ RecordingModel.prototype = {
-    * Returns a boolean indicating whether or not this recording model
-    * is recording.
+@@ -276,19 +284,45 @@ RecordingModel.prototype = {
+    * A model may no longer be recording, yet still not have the profiler data. In that
+    * case, use `isCompleted()`.
     */
    isRecording: function () {
      return this._recording;
@@ -575,13 +582,13 @@ index 6d92bc9..a9f92b1 100644
 +  _addTimelineData: function (eventName, ...data) {
      // If this model isn't currently recording,
      // ignore the timeline data.
-     if (!this._recording) {
+     if (!this.isRecording()) {
        return;
      }
  
      let config = this.getConfiguration();
  
-@@ -314,12 +343,14 @@ RecordingModel.prototype = {
+@@ -338,12 +372,14 @@ RecordingModel.prototype = {
          RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
          Array.prototype.push.apply(this._allocations.sites, sites);
          Array.prototype.push.apply(this._allocations.timestamps, timestamps);
@@ -598,7 +605,7 @@ index 6d92bc9..a9f92b1 100644
  
  exports.RecordingModel = RecordingModel;
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index e6d160b..6f0687d 100644
+index c0196c7..ccf7785 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
 @@ -14,16 +14,17 @@ support-files =
@@ -619,8 +626,7 @@ index e6d160b..6f0687d 100644
  [browser_perf-console-record-02.js]
  [browser_perf-console-record-03.js]
  [browser_perf-console-record-04.js]
-@@ -84,16 +85,17 @@ support-files =
- [browser_perf-overview-selection-02.js]
+@@ -85,16 +86,17 @@ support-files =
  [browser_perf-overview-selection-03.js]
  [browser_perf-overview-time-interval.js]
  [browser_perf-shared-connection-02.js]
@@ -628,6 +634,7 @@ index e6d160b..6f0687d 100644
  [browser_perf-states.js]
  [browser_perf-refresh.js]
  [browser_perf-ui-recording.js]
+ [browser_perf-recording-model-01.js]
 +[browser_perf-recording-model-02.js]
  [browser_perf-recording-notices-01.js]
  [browser_perf-recording-notices-02.js]
@@ -639,10 +646,10 @@ index e6d160b..6f0687d 100644
  [browser_perf-recording-selected-01.js]
 diff --git a/browser/devtools/performance/test/browser_perf-compatibility-06.js b/browser/devtools/performance/test/browser_perf-compatibility-06.js
 new file mode 100644
-index 0000000..2a6d0fe
+index 0000000..6b2d894
 --- /dev/null
 +++ b/browser/devtools/performance/test/browser_perf-compatibility-06.js
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,46 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -656,17 +663,28 @@ index 0000000..2a6d0fe
 +  let { target, front } = yield initBackend(SIMPLE_URL, { TEST_MOCK_BUFFER_CHECK_TIMER: 10 });
 +  let frontBufferStatusCalled = false;
 +
-+  // Explicitly override the profiler's trait `bufferStatus`
-+  front._connection._profiler.traits.bufferStatus = false;
++  // Explicitly override the profiler's `isActive` method, where
++  // all the buffer info is retrieved, and delete the buffer properties.
++  let isActive = front._connection._profiler.isActive;
++  front._connection._profiler.isActive = function () {
++    return isActive.apply(front._connection._profiler, arguments).then(res => {
++      return { isActive: res.isActive, currentTime: res.currentTime };
++    });
++  };
 +
 +  front.on("buffer-status", () => frontBufferStatusCalled = true);
 +  let model = yield front.startRecording();
 +  let [_, stats] = yield onceSpread(front._connection._profiler, "buffer-status");
-+  is(stats, null, "buffer-status from profiler should emit `null`");
++  is(stats.generation, void 0, "buffer-status has void `generation`");
++  is(stats.totalSize, void 0, "buffer-status has void `totalSize`");
++  is(stats.position, void 0, "buffer-status has void `position`");
 +
 +  let count = 0;
 +  while (count < 5) {
-+    yield once(front._connection._profiler, "buffer-status");
++    let [_, stats] = yield onceSpread(front._connection._profiler, "buffer-status");
++    is(stats.generation, void 0, "buffer-status has void `generation`");
++    is(stats.totalSize, void 0, "buffer-status has void `totalSize`");
++    is(stats.position, void 0, "buffer-status has void `position`");
 +    count++;
 +  }
 +
@@ -680,7 +698,7 @@ index 0000000..2a6d0fe
 +}
 diff --git a/browser/devtools/performance/test/browser_perf-recording-model-02.js b/browser/devtools/performance/test/browser_perf-recording-model-02.js
 new file mode 100644
-index 0000000..4749a54
+index 0000000..3bd3ea0
 --- /dev/null
 +++ b/browser/devtools/performance/test/browser_perf-recording-model-02.js
 @@ -0,0 +1,41 @@
@@ -716,7 +734,7 @@ index 0000000..4749a54
 +    yield once(front, "buffer-status");
 +  }
 +
-+  ok(checkCount > 2, "atleast 3 events were fired until the buffer was filled");
++  ok(checkCount >= 1, "atleast 1 event were fired until the buffer was filled");
 +  is(lastBufferStatus, 1, "buffer usage cannot surpass 100%");
 +  yield front.stopRecording(model);
 +
@@ -726,10 +744,10 @@ index 0000000..4749a54
 +  finish();
 +}
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 871d2b1..ec0032a 100644
+index 900308e..6f473c7 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
-@@ -189,16 +189,17 @@ function initBackend(aUrl, targetOps={}) {
+@@ -190,16 +190,17 @@ function initBackend(aUrl, targetOps={}) {
  
      yield target.makeRemote();
  
@@ -747,6 +765,382 @@ index 871d2b1..ec0032a 100644
      let front = new PerformanceFront(connection);
      return { target, front };
    });
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 7760c7c..8721495 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -150,16 +150,21 @@ let OverviewView = {
+       throw new Error("A recording should be available in order to get the selection.");
+     }
+     if (this.isDisabled()) {
+       return { startTime: 0, endTime: recording.getDuration() };
+     }
+     let mapStart = () => 0;
+     let mapEnd = () => recording.getDuration();
+     let selection = this.graphs.getMappedSelection({ mapStart, mapEnd });
++    // If no selection returned, this means the overview graphs have not been rendered
++    // yet, so act as if we have no selection (the full recording).
++    if (!selection) {
++      return { startTime: 0, endTime: recording.getDuration() };
++    }
+     return { startTime: selection.min, endTime: selection.max };
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering the overview graphs.
+    *
+    * @param number resolution
+    *        The fps graph resolution. @see Graphs.jsm
+diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
+index 380741e..f693cea 100644
+--- a/toolkit/devtools/server/actors/profiler.js
++++ b/toolkit/devtools/server/actors/profiler.js
+@@ -54,17 +54,22 @@ ProfilerActor.prototype = {
+    * Returns an array of feature strings, describing the profiler features
+    * that are available on this platform. Can be called while the profiler
+    * is stopped.
+    */
+   onGetFeatures: function() {
+     return { features: nsIProfilerModule.GetFeatures([]) };
+   },
+ 
+-  onGetBufferInfo: function(request) {
++  /**
++   * Returns an object with the values of the current status of the
++   * circular buffer in the profiler, returning `position`, `totalSize`,
++   * and the current `generation` of the buffer.
++   */
++  onGetBufferInfo: function() {
+     let position = {}, totalSize = {}, generation = {};
+     nsIProfilerModule.GetBufferInfo(position, totalSize, generation);
+     return {
+       position: position.value,
+       totalSize: totalSize.value,
+       generation: generation.value
+     }
+   },
+@@ -97,18 +102,19 @@ ProfilerActor.prototype = {
+     nsIProfilerModule.StartProfiler(
+       options.entries,
+       options.interval,
+       options.features,
+       options.features.length,
+       options.threadFilters,
+       options.threadFilters.length
+     );
++    let { position, totalSize, generation } = this.onGetBufferInfo();
+ 
+-    return { started: true };
++    return { started: true, position, totalSize, generation };
+   },
+ 
+   /**
+    * Stops the nsIProfiler module, if no other client is using it.
+    */
+   onStopProfiler: function() {
+     // Actually stop the profiler only if the last client has stopped profiling.
+     // Since this is a root actor, and the profiler module interacts with the
+@@ -122,17 +128,18 @@ ProfilerActor.prototype = {
+ 
+   /**
+    * Verifies whether or not the nsIProfiler module has started.
+    * If already active, the current time is also returned.
+    */
+   onIsActive: function() {
+     let isActive = nsIProfilerModule.IsActive();
+     let elapsedTime = isActive ? nsIProfilerModule.getElapsedTime() : undefined;
+-    return { isActive: isActive, currentTime: elapsedTime };
++    let { position, totalSize, generation } = this.onGetBufferInfo();
++    return { isActive: isActive, currentTime: elapsedTime, position, totalSize, generation };
+   },
+ 
+   /**
+    * Returns a stringified JSON object that describes the shared libraries
+    * which are currently loaded into our process. Can be called while the
+    * profiler is stopped.
+    */
+   onGetSharedLibraryInformation: function() {
+diff --git a/toolkit/devtools/server/actors/root.js b/toolkit/devtools/server/actors/root.js
+index 7a146bc..98f1669 100644
+--- a/toolkit/devtools/server/actors/root.js
++++ b/toolkit/devtools/server/actors/root.js
+@@ -166,20 +166,17 @@ RootActor.prototype = {
+     // if allocChromeProcess is defined, but not true, it means that root actor
+     // no longer expose tab actors, but also that getProcess forbids
+     // exposing actors for security reasons
+     get allowChromeProcess() {
+       return DebuggerServer.allowChromeProcess;
+     },
+     // Whether or not `getProfile()` supports specifying a `startTime`
+     // and `endTime` to filter out samples. Fx40+
+-    profilerDataFilterable: true,
+-    // Whether or not the profiler has a `getBufferInfo` method
+-    // necessary as the profiler does not use the ActorFront class.
+-    profilerBufferStatus: true,
++    profilerDataFilterable: true
+   },
+ 
+   /**
+    * Return a 'hello' packet as specified by the Remote Debugging Protocol.
+    */
+   sayHello: function() {
+     return {
+       from: this.actorID,
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_activation-01.js b/toolkit/devtools/server/tests/unit/test_profiler_activation-01.js
+index 0ad40e8..30519c3 100644
+--- a/toolkit/devtools/server/tests/unit/test_profiler_activation-01.js
++++ b/toolkit/devtools/server/tests/unit/test_profiler_activation-01.js
+@@ -4,16 +4,17 @@
+ "use strict";
+ 
+ /**
+  * Tests whether the profiler module and actor have the correct state on
+  * initialization, activation, and when a clients' connection closes.
+  */
+ 
+ const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++const MAX_PROFILER_ENTRIES = 10000000;
+ 
+ function run_test()
+ {
+   // Ensure the profiler is not running when the test starts (it could
+   // happen if the MOZ_PROFILER_STARTUP environment variable is set).
+   Profiler.StopProfiler();
+ 
+   get_chrome_actors((client1, form1) => {
+@@ -30,27 +31,40 @@ function run_test()
+ }
+ 
+ function test_activate(client1, actor1, client2, actor2, callback) {
+   // Profiler should be inactive at this point.
+   client1.request({ to: actor1, type: "isActive" }, response => {
+     do_check_false(Profiler.IsActive());
+     do_check_false(response.isActive);
+     do_check_eq(response.currentTime, undefined);
++    do_check_true(typeof response.position === "number");
++    do_check_true(typeof response.totalSize === "number");
++    do_check_true(typeof response.generation === "number");
+ 
+     // Start the profiler on the first connection....
+-    client1.request({ to: actor1, type: "startProfiler" }, response => {
++    client1.request({ to: actor1, type: "startProfiler", entries: MAX_PROFILER_ENTRIES }, response => {
+       do_check_true(Profiler.IsActive());
+       do_check_true(response.started);
++      do_check_true(typeof response.position === "number");
++      do_check_true(typeof response.totalSize === "number");
++      do_check_true(typeof response.generation === "number");
++      do_check_true(response.position >= 0 && response.position < response.totalSize);
++      do_check_true(response.totalSize === MAX_PROFILER_ENTRIES);
+ 
+       // On the next connection just make sure the actor has been instantiated.
+       client2.request({ to: actor2, type: "isActive" }, response => {
+         do_check_true(Profiler.IsActive());
+         do_check_true(response.isActive);
+         do_check_true(response.currentTime > 0);
++        do_check_true(typeof response.position === "number");
++        do_check_true(typeof response.totalSize === "number");
++        do_check_true(typeof response.generation === "number");
++        do_check_true(response.position >= 0 && response.position < response.totalSize);
++        do_check_true(response.totalSize === MAX_PROFILER_ENTRIES);
+ 
+         let origConnectionClosed = DebuggerServer._connectionClosed;
+ 
+         DebuggerServer._connectionClosed = function(conn) {
+           origConnectionClosed.call(this, conn);
+ 
+           // The first client is the only actor that started the profiler,
+           // however the second client can request the accumulated profile data
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_bufferstatus.js b/toolkit/devtools/server/tests/unit/test_profiler_bufferstatus.js
+new file mode 100644
+index 0000000..979f84c
+--- /dev/null
++++ b/toolkit/devtools/server/tests/unit/test_profiler_bufferstatus.js
+@@ -0,0 +1,127 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++"use strict";
++
++/**
++ * Tests if the profiler actor returns its buffer status via getBufferInfo.
++ */
++
++const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++const INITIAL_WAIT_TIME = 100; // ms
++const MAX_WAIT_TIME = 20000; // ms
++const MAX_PROFILER_ENTRIES = 10000000;
++
++function run_test()
++{
++  // Ensure the profiler is not running when the test starts (it could
++  // happen if the MOZ_PROFILER_STARTUP environment variable is set).
++  Profiler.StopProfiler();
++
++  get_chrome_actors((client, form) => {
++    let actor = form.profilerActor;
++    check_empty_buffer(client, actor, () => {
++      activate_profiler(client, actor, startTime => {
++        wait_for_samples(client, actor, () => {
++          check_buffer(client, actor, () => {
++            deactivate_profiler(client, actor, () => {
++              client.close(do_test_finished);
++            });
++          });
++        });
++      });
++    });
++  })
++
++  do_test_pending();
++}
++
++function check_buffer(client, actor, callback)
++{
++  client.request({ to: actor, type: "isActive" }, response => {
++    do_check_true(typeof response.position === "number");
++    do_check_true(typeof response.totalSize === "number");
++    do_check_true(typeof response.generation === "number");
++    do_check_true(response.position > 0 && response.position < response.totalSize);
++    do_check_true(response.totalSize === MAX_PROFILER_ENTRIES);
++    // There's no way we'll fill the buffer in this test.
++    do_check_true(response.generation === 0);
++
++    callback();
++  });
++}
++
++function check_empty_buffer(client, actor, callback)
++{
++  client.request({ to: actor, type: "isActive" }, response => {
++    do_check_false(Profiler.IsActive());
++    do_check_false(response.isActive);
++    do_check_true(response.position === void 0);
++    do_check_true(response.totalSize === void 0);
++    do_check_true(response.generation === void 0);
++    do_check_false(response.isActive);
++    do_check_eq(response.currentTime, undefined);
++    calback();
++  });
++}
++
++function activate_profiler(client, actor, callback)
++{
++  client.request({ to: actor, type: "startProfiler", entries: MAX_PROFILER_ENTRIES }, response => {
++    do_check_true(response.started);
++    client.request({ to: actor, type: "isActive" }, response => {
++      do_check_true(response.isActive);
++      callback(response.currentTime);
++    });
++  });
++}
++
++function deactivate_profiler(client, actor, callback)
++{
++  client.request({ to: actor, type: "stopProfiler" }, response => {
++    do_check_false(response.started);
++    client.request({ to: actor, type: "isActive" }, response => {
++      do_check_false(response.isActive);
++      callback();
++    });
++  });
++}
++
++function wait_for_samples(client, actor, callback)
++{
++  function attempt(delay)
++  {
++    // No idea why, but Components.stack.sourceLine returns null.
++    let funcLine = Components.stack.lineNumber - 3;
++
++    // Spin for the requested time, then take a sample.
++    let start = Date.now();
++    let stack;
++    do_print("Attempt: delay = " + delay);
++    while (Date.now() - start < delay) { stack = Components.stack; }
++    do_print("Attempt: finished waiting.");
++
++    client.request({ to: actor, type: "getProfile" }, response => {
++      // At this point, we may or may not have samples, depending on
++      // whether the spin loop above has given the profiler enough time
++      // to get started.
++      if (response.profile.threads[0].samples.length == 0) {
++        if (delay < MAX_WAIT_TIME) {
++          // Double the spin-wait time and try again.
++          do_print("Attempt: no samples, going around again.");
++          return attempt(delay * 2);
++        } else {
++          // We've waited long enough, so just fail.
++          do_print("Attempt: waited a long time, but no samples were collected.");
++          do_print("Giving up.");
++          do_check_true(false);
++          return;
++        }
++      }
++      callback();
++    });
++  }
++
++  // Start off with a 100 millisecond delay.
++  attempt(INITIAL_WAIT_TIME);
++}
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_getbufferinfo.js b/toolkit/devtools/server/tests/unit/test_profiler_getbufferinfo.js
+index 26d9e71..7aa078b 100644
+--- a/toolkit/devtools/server/tests/unit/test_profiler_getbufferinfo.js
++++ b/toolkit/devtools/server/tests/unit/test_profiler_getbufferinfo.js
+@@ -9,32 +9,48 @@
+ 
+ const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+ const INITIAL_WAIT_TIME = 100; // ms
+ const MAX_WAIT_TIME = 20000; // ms
+ const MAX_PROFILER_ENTRIES = 10000000;
+ 
+ function run_test()
+ {
++  // Ensure the profiler is not running when the test starts (it could
++  // happen if the MOZ_PROFILER_STARTUP environment variable is set).
++  Profiler.StopProfiler();
++
+   get_chrome_actors((client, form) => {
+     let actor = form.profilerActor;
+-    activate_profiler(client, actor, startTime => {
+-      wait_for_samples(client, actor, () => {
+-        check_buffer(client, actor, () => {
+-          deactivate_profiler(client, actor, () => {
+-            client.close(do_test_finished);
++    check_empty_buffer(client, actor, () => {
++      activate_profiler(client, actor, startTime => {
++        wait_for_samples(client, actor, () => {
++          check_buffer(client, actor, () => {
++            deactivate_profiler(client, actor, () => {
++              client.close(do_test_finished);
++            });
+           });
+         });
+       });
+     });
+   })
+ 
+   do_test_pending();
+ }
+ 
++function check_empty_buffer(client, actor, callback)
++{
++  client.request({ to: actor, type: "getBufferInfo" }, response => {
++    do_check_true(response.position === 0);
++    do_check_true(response.totalSize === 0);
++    do_check_true(response.generation === 0);
++    callback();
++  });
++}
++
+ function check_buffer(client, actor, callback)
+ {
+   client.request({ to: actor, type: "getBufferInfo" }, response => {
+     do_check_true(typeof response.position === "number");
+     do_check_true(typeof response.totalSize === "number");
+     do_check_true(typeof response.generation === "number");
+     do_check_true(response.position > 0 && response.position < response.totalSize);
+     do_check_true(response.totalSize === MAX_PROFILER_ENTRIES);
 -- 
 2.2.1
 
