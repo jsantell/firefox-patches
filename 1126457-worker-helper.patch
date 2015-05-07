@@ -26,7 +26,7 @@ index 9f473be..cf02174 100644
      'widgets/FilterWidget.js',
      'widgets/FlameGraph.js',
 diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
-index c7cf6c8..ca98ac6 100644
+index 1f06ec5..db693f12 100644
 --- a/browser/devtools/shared/test/browser.ini
 +++ b/browser/devtools/shared/test/browser.ini
 @@ -20,16 +20,19 @@ support-files =
@@ -51,10 +51,10 @@ index c7cf6c8..ca98ac6 100644
  [browser_filter-editor-08.js]
 diff --git a/browser/devtools/shared/test/browser_devtools-worker-01.js b/browser/devtools/shared/test/browser_devtools-worker-01.js
 new file mode 100644
-index 0000000..bdaf8bf
+index 0000000..ded0c8b
 --- /dev/null
 +++ b/browser/devtools/shared/test/browser_devtools-worker-01.js
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,44 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -76,12 +76,12 @@ index 0000000..bdaf8bf
 +
 +add_task(function*() {
 +  // Test both CJS and JSM versions
-+  yield testWorker(() => Cu.import("resource:///modules/devtools/shared/worker.js", {}));
-+  yield testWorker(() => devtools.require("devtools/shared/worker"));
++  yield testWorker("JSM", () => Cu.import("resource:///modules/devtools/shared/worker.js", {}));
++  yield testWorker("CommonJS", () => devtools.require("devtools/shared/worker"));
 +});
 +
-+function *testWorker (workerFactory) {
-+  let { DevToolsWorker } = workerFactory();
++function *testWorker (context, workerFactory) {
++  let { DevToolsWorker, workerify } = workerFactory();
 +  let worker = new DevToolsWorker(WORKER_URL);
 +  let results = yield worker.performTask("plotTimestampsGraph", {
 +    timestamps: WORKER_DATA,
@@ -89,7 +89,13 @@ index 0000000..bdaf8bf
 +    duration: DURATION
 +  });
 +
-+  ok(results.plottedData.length, "worker should have returned an object with array properties");
++  ok(results.plottedData.length,
++    `worker should have returned an object with array properties in ${context}`);
++  
++  let fn = workerify(function (x) { return x * x });
++  is((yield fn(5)), 25, `workerify works in ${context}`);
++  fn.destroy();
++
 +
 +  worker.destroy();
 +}
@@ -146,16 +152,15 @@ index 0000000..788bb6bf
 +});
 diff --git a/browser/devtools/shared/test/browser_devtools-worker-03.js b/browser/devtools/shared/test/browser_devtools-worker-03.js
 new file mode 100644
-index 0000000..bffa97b
+index 0000000..b5534bc
 --- /dev/null
 +++ b/browser/devtools/shared/test/browser_devtools-worker-03.js
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,52 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
 +// Tests that the devtools/shared/worker can handle:
 +// returned primitives (or promise or Error)
-+// callback returns (with primitive, promise, or Error)
 +//
 +// And tests `workerify` by doing so.
 +
@@ -164,32 +169,12 @@ index 0000000..bffa97b
 +  return x * x;
 +}
 +
-+function squareCallback (x, done) {
-+  setTimeout(() => done(x*x), 10);
-+}
-+
 +function squarePromise (x) {
 +  return new Promise((resolve) => resolve(x*x));
 +}
 +
-+function squareCallbackPromise (x, done) {
-+  setTimeout(() => done(new Promise(resolve => resolve(x*x))), 10);
-+}
-+
 +function squareError (x) {
 +  return new Error("Nope");
-+}
-+
-+function squareCallbackPromiseReject (x, done) {
-+  setTimeout(() => done(new Promise((_,reject) => reject("Nope"))), 10);
-+}
-+
-+function squareCallbackError (x, done) {
-+  setTimeout(() => done(new Error("Nope")), 10);
-+}
-+
-+function squarePromiseError (x) {
-+  return new Promise((resolve) => resolve(new Error("Nope")));
 +}
 +
 +function squarePromiseReject (x) {
@@ -201,61 +186,16 @@ index 0000000..bffa97b
 +  is((yield fn(5)), 25, "return primitives successful");
 +  fn.destroy();
 +
-+  fn = workerify(squareCallback);
-+  var { resolve, promise } = defer();
-+  fn(5, function (val) {
-+    is(val, 25, "callback primitives successful");
-+    resolve();
-+  });
-+  yield promise;
-+  fn.destroy();
-+
 +  fn = workerify(squarePromise);
 +  is((yield fn(5)), 25, "promise primitives successful");
-+  fn.destroy();
-+
-+  fn = workerify(squareCallbackPromise);
-+  var { resolve, promise } = defer();
-+  is((yield fn(5, function (val) {
-+    is(val, 25, "callback promise successful (in calling callback too)");
-+    resolve();
-+  })), 25, "callback promise successful");
-+  yield promise;
 +  fn.destroy();
 +
 +  fn = workerify(squareError);
 +  try {
 +    yield fn(5);
-+    ok(false, "return error should throw");
++    ok(false, "return error should reject");
 +  } catch (e) {
-+    ok(true, "return error should throw");
-+  }
-+  fn.destroy();
-+
-+  fn = workerify(squareCallbackPromiseReject);
-+  try {
-+    yield fn(5, () => {});
-+    ok(false, "callback with rejected promise should reject");
-+  } catch (e) {
-+    ok(true, "callback with rejected promise should reject");
-+  }
-+  fn.destroy();
-+
-+  fn = workerify(squareCallbackError);
-+  try {
-+    yield fn(5, () => {});
-+    ok(false, "callback with error rejected");
-+  } catch (e) {
-+    ok(true, "callback with error rejected");
-+  }
-+  fn.destroy();
-+
-+  fn = workerify(squarePromiseError);
-+  try {
-+    yield fn(5);
-+    ok(false, "returned promise with error rejects");
-+  } catch (e) {
-+    ok(true, "returned promise with error rejects");
++    ok(true, "return error should reject");
 +  }
 +  fn.destroy();
 +
@@ -302,7 +242,7 @@ index b15ce09..b69179b 100644
 -
 -// EventUtils just doesn't work!
 diff --git a/browser/devtools/shared/widgets/Graphs.jsm b/browser/devtools/shared/widgets/Graphs.jsm
-index 67d815d..dd18b94 100644
+index 7c5aefe..cc9acb6 100644
 --- a/browser/devtools/shared/widgets/Graphs.jsm
 +++ b/browser/devtools/shared/widgets/Graphs.jsm
 @@ -4,16 +4,17 @@
@@ -323,7 +263,7 @@ index 67d815d..dd18b94 100644
    "GraphAreaResizer",
    "AbstractCanvasGraph",
    "LineGraphWidget",
-@@ -2118,50 +2119,24 @@ this.CanvasGraphUtils = {
+@@ -2143,50 +2144,24 @@ this.CanvasGraphUtils = {
      });
    },
  
@@ -436,10 +376,10 @@ index b231e58..ffa295b 100644
   */
 diff --git a/browser/devtools/shared/worker-helper.js b/browser/devtools/shared/worker-helper.js
 new file mode 100644
-index 0000000..574d9f8
+index 0000000..16de0bf
 --- /dev/null
 +++ b/browser/devtools/shared/worker-helper.js
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,100 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -450,22 +390,12 @@ index 0000000..574d9f8
 + * a `createTask` function to workers to register tasks for communication
 + * back to `devtools/shared/worker`.
 + *
-+ * Tasks can be send their responses in several ways.
-+ *
-+ * 1) Return primitive value
-+ * If the task is synchronously executed, it can just use the return value.
-+ * Note that we do not use the optional second argument callback function,
-+ * this is necessary to note that this is a synchronous function.
++ * Tasks can be send their responses via a return value, either a primitive
++ * or a promise.
 + *
 + * createTask(self, "average", function (data) {
 + *   return data.reduce((sum, val) => sum + val, 0) / data.length;
 + * });
-+ *
-+ * 2) Return promise value
-+ * If using promises in the worker, you can return a promise from the function.
-+ * Again, you must not specify a second argument callback in the function.
-+ * The promise's resolution will indicate whether or not the DevToolsWorker
-+ * response will resolve or reject as well.
 + *
 + * createTask(self, "average", function (data) {
 + *   return new Promise((resolve, reject) => {
@@ -473,32 +403,18 @@ index 0000000..574d9f8
 + *   });
 + * });
 + *
-+ * 3) Callback
-+ * If using callbacks, you can specify a second argument to your worker task
-+ * that should be called with a result value. Callbacks can also take
-+ * promises and they are handled the same way as in (2).
-+ *
-+ * createTask(self, "average", function (data, callback) {
-+ *   sumArray(data, function (sum) {
-+ *     callback(sum / data.length);
-+ *   });
-+ * });
-+ *
 + *
 + * Errors:
 + *
-+ * If responding with a promise, or calling the callback with a promise, any rejected
-+ * promise will propagate to the DevToolsWorker. Same with passing an Error object
-+ * to the callback, or returning an error object synchronously, and same
-+ * with resolving a promise with an Error object.
++ * Returning an Error value, or if the returned promise is rejected, this
++ * propagates to the DevToolsWorker as a rejected promise. If an error is
++ * thrown in a synchronous function, that error is also propagated.
 + */
 +
 +/**
 + * Takes a worker's `self` object, a task name, and a function to
 + * be called when that task is called. The task is called with the
-+ * passed in data as the first argument, and a node-style callback as the second
-+ * argument. Pass in an error as the first argument, or the response as the second
-+ * argument in the callback.
++ * passed in data as the first argument
 + *
 + * @param {object} self
 + * @param {string} name
@@ -539,18 +455,7 @@ index 0000000..574d9f8
 +
 +    try {
 +      let results;
-+      // Handle case when function is synchronous by only having
-+      // one or no argument in the function. Process the return value,
-+      // whether a primitive or promise.
-+      if (taskFn.length < 2) {
-+        handleResponse(taskFn(data));
-+      }
-+      // If the function argument signature has more than one
-+      // argument, the task is called with a callback function
-+      // as the second argument to be passed in the results.
-+      else {
-+        taskFn(data, handleResponse);
-+      }
++      handleResponse(taskFn(data));
 +    } catch (e) {
 +      handleError(e);
 +    }
@@ -558,7 +463,7 @@ index 0000000..574d9f8
 +    function handleResponse (response) {
 +      // If a promise
 +      if (response && typeof response.then === "function") {
-+        response.then(handleResponse, handleError);
++        response.then(val => self.postMessage({ id, response: val }), handleError);
 +      }
 +      // If an error object
 +      else if (response instanceof Error) {
@@ -577,10 +482,10 @@ index 0000000..574d9f8
 +}
 diff --git a/browser/devtools/shared/worker.js b/browser/devtools/shared/worker.js
 new file mode 100644
-index 0000000..a21eb41
+index 0000000..9ecadff
 --- /dev/null
 +++ b/browser/devtools/shared/worker.js
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,134 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -595,12 +500,13 @@ index 0000000..a21eb41
 +      const { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
 +      this.isWorker = false;
 +      this.Promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
++      this.console = Cu.import("resource://gre/modules/devtools/Console.jsm", {}).console;
 +      factory.call(this, devtools.require, this, { exports: this }, { Cc, Ci }, ChromeWorker);
 +      this.EXPORTED_SYMBOLS = ["DevToolsWorker"];
 +  }
 +}).call(this, function (require, exports, module, { Ci, Cc }, ChromeWorker ) {
 +
-+let INC = 0;
++let MESSAGE_COUNTER = 0;
 +
 +/**
 + * Creates a wrapper around a ChromeWorker, providing easy
@@ -633,7 +539,7 @@ index 0000000..a21eb41
 +    return Promise.reject("Cannot call performTask on a destroyed DevToolsWorker");
 +  }
 +  let worker = this._worker;
-+  let id = ++INC;
++  let id = ++MESSAGE_COUNTER;
 +  worker.postMessage({ task, id, data });
 +
 +  return new Promise(function (resolve, reject) {
@@ -663,15 +569,16 @@ index 0000000..a21eb41
 +/**
 + * Takes a function and returns a Worker-wrapped version of the same function.
 + * Returns a promise upon resolution.
++ * @see `./browser/devtools/shared/test/browser_devtools-worker-03.js
 + *
 + * * * * ! ! ! This should only be used for tests or A/B testing performance ! ! ! * * * * * *
 + *
 + * The original function must:
-+ * 
++ *
 + * Be a pure function, that is, not use any variables not declared within the
 + * function, or its arguments.
 + *
-+ * Return a value or a promise. (There are callback-versions, but those are weird.)
++ * Return a value or a promise.
 + *
 + * Note any state change in the worker will not affect the callee's context.
 + *
@@ -679,6 +586,8 @@ index 0000000..a21eb41
 + * @return {function}
 + */
 +function workerify (fn) {
++  console.warn(`\`workerify\` should only be used in tests or measuring performance.
++  This creates an object URL on the browser window, and should not be used in production.`)
 +  // Fetch via window/utils here as we don't want to include
 +  // this module normally.
 +  let { getMostRecentBrowserWindow } = require("sdk/window/utils");
@@ -688,16 +597,7 @@ index 0000000..a21eb41
 +  let url = URL.createObjectURL(blob);
 +  let worker = new DevToolsWorker(url);
 +
-+  let wrapperFn = function (data, callback) {
-+    if (callback) {
-+      return worker.performTask("workerifiedTask", data).then(result => {
-+        callback(result);
-+        return result;
-+      });
-+    } else {
-+      return worker.performTask("workerifiedTask", data);
-+    }
-+  };
++  let wrapperFn = data => worker.performTask("workerifiedTask", data);
 +
 +  wrapperFn.destroy = function () {
 +    URL.revokeObjectURL(url);

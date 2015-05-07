@@ -1,0 +1,93 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 6 May 2015 17:14:19 -0700
+Subject: Bug 1160828 - Return null when attempting to get the current selection from a graph that is not yet ready. r=vp
+
+diff --git a/browser/devtools/performance/modules/graphs.js b/browser/devtools/performance/modules/graphs.js
+index 81720fb..3b9057d 100644
+--- a/browser/devtools/performance/modules/graphs.js
++++ b/browser/devtools/performance/modules/graphs.js
+@@ -339,19 +339,24 @@ GraphsController.prototype = {
+   /**
+    * Sets a mapped selection on the graph that is the main controller
+    * for keeping the graphs' selections in sync.
+    */
+   setMappedSelection: function (selection, { mapStart, mapEnd }) {
+     return this._getPrimaryLink().setMappedSelection(selection, { mapStart, mapEnd });
+   },
+ 
++  /**
++   * Fetches the currently mapped selection. If graphs are not yet rendered,
++   * (which throws in Graphs.jsm), return null.
++   */
+   getMappedSelection: function ({ mapStart, mapEnd }) {
+-    if (this._getPrimaryLink()) {
+-      return this._getPrimaryLink().getMappedSelection({ mapStart, mapEnd });
++    let primary = this._getPrimaryLink();
++    if (primary && primary.hasData()) {
++      return primary.getMappedSelection({ mapStart, mapEnd });
+     } else {
+       return null;
+     }
+   },
+ 
+   /**
+    * Returns an array of graphs that have been created, not necessarily
+    * enabled currently.
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-01.js b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+index a3d884a..bee1bd8 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-01.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+@@ -1,18 +1,18 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the performance tool is able to save and load recordings.
+  */
+ 
+ let test = Task.async(function*() {
+-  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, PerformanceController, DetailsView, DetailsSubview } = panel.panelWin;
++  var { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  var { EVENTS, PerformanceController, DetailsView, DetailsSubview } = panel.panelWin;
+ 
+   // Enable memory to test the memory-calltree and memory-flamegraph.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(FRAMERATE_PREF, true);
+ 
+   // Need to allow widgets to be updated while hidden, otherwise we can't use
+   // `waitForWidgetsRendered`.
+   DetailsSubview.canUpdateWhileHidden = true;
+@@ -76,10 +76,29 @@ let test = Task.async(function*() {
+   is(importedData.profile.toSource(), originalData.profile.toSource(),
+     "The imported data is identical to the original data (7).");
+   is(importedData.configuration.withTicks, originalData.configuration.withTicks,
+     "The imported data is identical to the original data (8).");
+   is(importedData.configuration.withMemory, originalData.configuration.withMemory,
+     "The imported data is identical to the original data (9).");
+ 
+   yield teardown(panel);
++
++  // Test that when importing and no graphs rendered yet,
++  // we do not get a getMappedSelection error
++  // bug 1160828
++  var { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  var { EVENTS, PerformanceController, DetailsView, DetailsSubview, OverviewView, WaterfallView } = panel.panelWin;
++  yield PerformanceController.clearRecordings();
++
++  rerendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
++  yield PerformanceController.importRecording("", file);
++
++  yield imported;
++  ok(true, "The recording data appears to have been successfully imported.");
++
++  yield rerendered;
++  ok(true, "The imported data was re-rendered.");
++
++  yield teardown(panel);
+   finish();
+ });
+-- 
+2.2.1
+
