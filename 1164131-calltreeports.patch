@@ -1,0 +1,262 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 12 May 2015 15:34:55 -0700
+Subject: Bug 1164131 - [regression] parse urls with port numbers correctly in the call tree, and display the host (hostName+port), not just hostName. r=shu
+
+diff --git a/browser/devtools/performance/test/browser_profiler-frame-utils-01.js b/browser/devtools/performance/test/browser_profiler-frame-utils-01.js
+index ccf49e2..d05f392 100644
+--- a/browser/devtools/performance/test/browser_profiler-frame-utils-01.js
++++ b/browser/devtools/performance/test/browser_profiler-frame-utils-01.js
+@@ -9,16 +9,25 @@
+ const CONTENT_LOCATIONS = [
+   "hello/<.world (https://foo/bar.js:123:987)",
+   "hello/<.world (http://foo/bar.js:123:987)",
+   "hello/<.world (http://foo/bar.js:123)",
+   "hello/<.world (http://foo/bar.js#baz:123:987)",
+   "hello/<.world (http://foo/#bar:123:987)",
+   "hello/<.world (http://foo/:123:987)",
+   "hello/<.world (app://myfxosapp/file.js:100:1)",
++
++  // Test scripts with port numbers (bug 1164131)
++  "hello/<.world (http://localhost:8888/file.js:100:1)",
++  "hello/<.world (http://localhost:8888/file.js:100)",
++
++  // Occurs when executing an inline script on a root html page with port
++  // (I've never seen it with a column number but check anyway) bug 1164131
++  "hello/<.world (http://localhost:8888/:1",
++  "hello/<.world (http://localhost:8888/:100:50",
+ ].map(argify);
+ 
+ const CHROME_LOCATIONS = [
+   { location: "Startup::XRE_InitChildProcess", line: 456, column: 123 },
+   { location: "chrome://browser/content/content.js", line: 456, column: 123 },
+   "setTimeout_timer (resource://gre/foo.js:123:434)",
+   "hello/<.world (jar:file://Users/mcurie/Dev/jetpacks.js)",
+   "hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)",
+@@ -32,41 +41,45 @@ function test() {
+     ok(isContent.apply(null, frameify(frame)), `${frame[0]} should be considered a content frame.`);
+   }
+ 
+   for (let frame of CHROME_LOCATIONS) {
+     ok(!isContent.apply(null, frameify(frame)), `${frame[0]} should not be considered a content frame.`);
+   }
+ 
+   // functionName, fileName, hostName, url, line, column
+-  const FIELDS = ["functionName", "fileName", "hostName", "url", "line", "column"];
++  const FIELDS = ["functionName", "fileName", "hostName", "url", "line", "column", "host", "port"];
+   const PARSED_CONTENT = [
+-    ["hello/<.world", "bar.js", "foo", "https://foo/bar.js", 123, 987],
+-    ["hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, 987],
+-    ["hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, null],
+-    ["hello/<.world", "bar.js#baz", "foo", "http://foo/bar.js#baz", 123, 987],
+-    ["hello/<.world", "#bar", "foo", "http://foo/#bar", 123, 987],
+-    ["hello/<.world", "/", "foo", "http://foo/", 123, 987],
+-    ["hello/<.world", "file.js", "myfxosapp", "app://myfxosapp/file.js", 100, 1],
++    ["hello/<.world", "bar.js", "foo", "https://foo/bar.js", 123, 987, "foo", null],
++    ["hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, 987, "foo", null],
++    ["hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, null, "foo", null],
++    ["hello/<.world", "bar.js#baz", "foo", "http://foo/bar.js#baz", 123, 987, "foo", null],
++    ["hello/<.world", "#bar", "foo", "http://foo/#bar", 123, 987, "foo", null],
++    ["hello/<.world", "/", "foo", "http://foo/", 123, 987, "foo", null],
++    ["hello/<.world", "file.js", "myfxosapp", "app://myfxosapp/file.js", 100, 1, "myfxosapp", null],
++    ["hello/<.world", "file.js", "localhost", "http://localhost:8888/file.js", 100, 1, "localhost:8888", 8888],
++    ["hello/<.world", "file.js", "localhost", "http://localhost:8888/file.js", 100, null, "localhost:8888", 8888],
++    ["hello/<.world", "/", "localhost", "http://localhost:8888/", 1, null, "localhost:8888", 8888],
++    ["hello/<.world", "/", "localhost", "http://localhost:8888/", 100, 50, "localhost:8888", 8888],
+   ];
+ 
+   for (let i = 0; i < PARSED_CONTENT.length; i++) {
+     let parsed = parseLocation.apply(null, CONTENT_LOCATIONS[i]);
+     for (let j = 0; j < FIELDS.length; j++) {
+       is(parsed[FIELDS[j]], PARSED_CONTENT[i][j], `${CONTENT_LOCATIONS[i]} was parsed to correct ${FIELDS[j]}`);
+     }
+   }
+ 
+   const PARSED_CHROME = [
+-    ["Startup::XRE_InitChildProcess", null, null, null, 456, 123],
+-    ["chrome://browser/content/content.js", null, null, null, 456, 123],
+-    ["setTimeout_timer", "foo.js", null, "resource://gre/foo.js", 123, 434],
+-    ["hello/<.world (jar:file://Users/mcurie/Dev/jetpacks.js)", null, null, null, null, null],
+-    ["hello/<.world", "baz.js", "bar", "http://bar/baz.js", 123, 987],
+-    ["EnterJIT", null, null, null, null, null],
++    ["Startup::XRE_InitChildProcess", null, null, null, 456, 123, null, null],
++    ["chrome://browser/content/content.js", null, null, null, 456, 123, null, null],
++    ["setTimeout_timer", "foo.js", null, "resource://gre/foo.js", 123, 434, null, null],
++    ["hello/<.world (jar:file://Users/mcurie/Dev/jetpacks.js)", null, null, null, null, null, null, null],
++    ["hello/<.world", "baz.js", "bar", "http://bar/baz.js", 123, 987, "bar", null],
++    ["EnterJIT", null, null, null, null, null, null, null],
+   ];
+ 
+   for (let i = 0; i < PARSED_CHROME.length; i++) {
+     let parsed = parseLocation.apply(null, CHROME_LOCATIONS[i]);
+     for (let j = 0; j < FIELDS.length; j++) {
+       is(parsed[FIELDS[j]], PARSED_CHROME[i][j], `${CHROME_LOCATIONS[i]} was parsed to correct ${FIELDS[j]}`);
+     }
+   }
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-frame-node.js b/browser/devtools/performance/test/browser_profiler_tree-frame-node.js
+index 7bfabf3..9f36431 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-frame-node.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-frame-node.js
+@@ -209,10 +209,39 @@ function test() {
+   let frame9 = new FrameNode("hello/<.world (resource://gre/foo.js:123:434)", {
+     location: "hello/<.world (resource://gre/foo.js:123:434)",
+     line: 456
+   }, false);
+ 
+   is(frame9.getInfo().hostName, null,
+     "The ninth frame node has the correct host name.");
+ 
++  let frame10 = new FrameNode("main (http://localhost:8888/file.js:123:987)", {
++    location: "main (http://localhost:8888/file.js:123:987)",
++    line: 123,
++    isContent: FrameNode.isContent({
++      location: "main (http://localhost:8888/file.js:123:987)"
++    })
++  }, false);
++
++  is(frame10.getInfo().nodeType, "Frame",
++    "The tenth frame node has the correct type.");
++  is(frame10.getInfo().functionName, "main",
++    "The tenth frame node has the correct function name.");
++  is(frame10.getInfo().fileName, "file.js",
++    "The tenth frame node has the correct file name.");
++  is(frame10.getInfo().hostName, "localhost",
++    "The tenth frame node has the correct host name.");
++  is(frame10.getInfo().url, "http://localhost:8888/file.js",
++    "The tenth frame node has the correct url.");
++  is(frame10.getInfo().line, 123,
++    "The tenth frame node has the correct line.");
++  is(frame10.getInfo().column, 987,
++    "The tenth frame node has the correct column.");
++  is(frame10.getInfo().isContent, true,
++    "The tenth frame node has the correct content flag.");
++  is(frame10.getInfo().host, "localhost:8888",
++    "The tenth frame node has the correct host.");
++  is(frame10.getInfo().port, 8888,
++    "The tenth frame node has the correct port.");
++
+   finish();
+ }
+diff --git a/browser/devtools/shared/profiler/frame-utils.js b/browser/devtools/shared/profiler/frame-utils.js
+index 379670c..219dd8c 100644
+--- a/browser/devtools/shared/profiler/frame-utils.js
++++ b/browser/devtools/shared/profiler/frame-utils.js
+@@ -94,16 +94,23 @@ exports.parseLocation = function parseLocation(location, fallbackLine, fallbackC
+         }
+ 
+         let start = ++i;
+         let length = 1;
+         while (isNumeric(location.charCodeAt(++i))) {
+           length++;
+         }
+ 
++        // Discard port numbers
++        if (location.charCodeAt(i) === CHAR_CODE_SLASH) {
++          lineAndColumnIndex = -1;
++          --i;
++          continue;
++        }
++
+         if (!line) {
+           line = location.substr(start, length);
+ 
+           // Unwind a character due to the isNumeric loop above.
+           --i;
+ 
+           // There still might be a column number, continue looking.
+           continue;
+@@ -121,36 +128,42 @@ exports.parseLocation = function parseLocation(location, fallbackLine, fallbackC
+   if (lineAndColumnIndex > 0) {
+     let resource = location.substring(firstParenIndex + 1, lineAndColumnIndex);
+     url = resource.split(" -> ").pop();
+     if (url) {
+       uri = nsIURL(url);
+     }
+   }
+ 
+-  let functionName, fileName, hostName;
++  let functionName, fileName, hostName, port, host;
++  line = line || fallbackLine;
++  column = column || fallbackColumn;
+ 
+   // If the URI digged out from the `location` is valid, this is a JS frame.
+   if (uri) {
+     functionName = location.substring(0, firstParenIndex - 1);
+     fileName = (uri.fileName + (uri.ref ? "#" + uri.ref : "")) || "/";
+     hostName = getHost(url, uri.host);
++    // nsIURL throws when accessing a piece of a URL that doesn't
++    // exist, because we can't have nice things. Only check this if hostName
++    // exists, to save an extra try/catch.
++    if (hostName) {
++      try {
++        port = uri.port === -1 ? null : uri.port;
++        host = port !== null ? `${hostName}:${port}` : hostName;
++      } catch (e) {
++        host = hostName;
++      }
++    }
+   } else {
+     functionName = location;
+     url = null;
+   }
+ 
+-  return {
+-    functionName: functionName,
+-    fileName: fileName,
+-    hostName: hostName,
+-    url: url,
+-    line: line || fallbackLine,
+-    column: column || fallbackColumn
+-  };
++  return { functionName, fileName, hostName, host, port, url, line, column };
+ };
+ 
+ /**
+  * Checks if the specified function represents a chrome or content frame.
+  *
+  * @param string location
+  *        The location of the frame.
+  * @param number category [optional]
+@@ -296,16 +309,17 @@ function nsIURL(url) {
+     uri = Services.io.newURI(url, null, null).QueryInterface(Ci.nsIURL);
+     // Access the host, because the constructor doesn't necessarily throw
+     // if it's invalid, but accessing the host can throw as well
+     uri.host;
+   } catch(e) {
+     // The passed url string is invalid.
+     uri = null;
+   }
++
+   gNSURLStore.set(url, uri);
+   return uri;
+ };
+ 
+ /**
+  * Takes a `host` string from an nsIURL instance and
+  * returns the same string, or null, if it's an invalid host.
+  */
+diff --git a/browser/devtools/shared/profiler/tree-view.js b/browser/devtools/shared/profiler/tree-view.js
+index 88f7f9c..936ed6e 100644
+--- a/browser/devtools/shared/profiler/tree-view.js
++++ b/browser/devtools/shared/profiler/tree-view.js
+@@ -311,17 +311,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+ 
+       let columnNode = this.document.createElement("label");
+       columnNode.className = "plain call-tree-column";
+       columnNode.setAttribute("value", frameInfo.column ? ":" + frameInfo.column : "");
+       cell.appendChild(columnNode);
+ 
+       let hostNode = this.document.createElement("label");
+       hostNode.className = "plain call-tree-host";
+-      hostNode.setAttribute("value", frameInfo.hostName || "");
++      hostNode.setAttribute("value", frameInfo.host || "");
+       cell.appendChild(hostNode);
+ 
+       let spacerNode = this.document.createElement("spacer");
+       spacerNode.setAttribute("flex", "10000");
+       cell.appendChild(spacerNode);
+ 
+       let categoryNode = this.document.createElement("label");
+       categoryNode.className = "plain call-tree-category";
+-- 
+2.2.1
+
