@@ -1,0 +1,721 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 15 May 2015 15:32:22 -0700
+Subject: Bug 1165504 - Refactor out marker details view into utilities, make marker definitions more declaritive. r=vp
+
+diff --git a/browser/devtools/performance/modules/recording-utils.js b/browser/devtools/performance/modules/recording-utils.js
+index 0252ea8..1841488 100644
+--- a/browser/devtools/performance/modules/recording-utils.js
++++ b/browser/devtools/performance/modules/recording-utils.js
+@@ -204,17 +204,18 @@ exports.RecordingUtils.getProfileThreadFromAllocations = function(allocations) {
+  * @param blueprint
+  *        The default timeline blueprint.
+  * @param array hiddenMarkers
+  *        A list of hidden markers' names.
+  * @return object
+  *         The filtered timeline blueprint.
+  */
+ exports.RecordingUtils.getFilteredBlueprint = function({ blueprint, hiddenMarkers }) {
+-  let filteredBlueprint = Cu.cloneInto(blueprint, {});
++  // Clone functions here just to prevent an error; we don't need them here.
++  let filteredBlueprint = Cu.cloneInto(blueprint, {}, { cloneFunctions: true });
+   let maybeRemovedGroups = new Set();
+   let removedGroups = new Set();
+ 
+   // 1. Remove hidden markers from the blueprint.
+ 
+   for (let hiddenMarkerName of hiddenMarkers) {
+     maybeRemovedGroups.add(filteredBlueprint[hiddenMarkerName].group);
+     delete filteredBlueprint[hiddenMarkerName];
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index b2722ea..519675f 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -6,16 +6,17 @@ support-files =
+   doc_innerHTML.html
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
+ # that need to be moved over to performance tool
+ 
+ [browser_perf-aaa-run-first-leaktest.js]
++[browser_marker-utils.js]
+ [browser_markers-gc.js]
+ [browser_markers-parse-html.js]
+ [browser_markers-timestamp.js]
+ [browser_perf-allocations-to-samples.js]
+ [browser_perf-categories-js-calltree.js]
+ [browser_perf-compatibility-01.js]
+ [browser_perf-compatibility-02.js]
+ [browser_perf-compatibility-03.js]
+diff --git a/browser/devtools/performance/test/browser_marker-utils.js b/browser/devtools/performance/test/browser_marker-utils.js
+new file mode 100644
+index 0000000..0f0f004
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_marker-utils.js
+@@ -0,0 +1,37 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the marker utils methods.
++ */
++
++function spawnTest () {
++  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/shared/timeline/global");
++  let Utils = devtools.require("devtools/shared/timeline/marker-utils");
++
++  is(Utils.getMarkerLabel({ name: "DOMEvent" }), "DOM Event",
++    "getMarkerLabel() returns a simple label");
++  is(Utils.getMarkerLabel({ name: "Javascript", causeName: "js" }), "js",
++    "getMarkerLabel() returns a label defined via function");
++
++  ok(Utils.getMarkerFields({ name: "Paint" }).length === 0,
++    "getMarkerFields() returns an empty array when no fields defined");
++
++  let fields = Utils.getMarkerFields({ name: "ConsoleTime", causeName: "snowstorm" });
++  is(fields[0].label, "Timer Name:", "getMarkerFields() returns an array with proper label");
++  is(fields[0].value, "snowstorm", "getMarkerFields() returns an array with proper value");
++
++  fields = Utils.getMarkerFields({ name: "DOMEvent", type: "mouseclick" });
++  is(fields.length, 1, "getMarkerFields() ignores fields that are not found on marker");
++  is(fields[0].label, "Event Type:", "getMarkerFields() returns an array with proper label");
++  is(fields[0].value, "mouseclick", "getMarkerFields() returns an array with proper value");
++
++  fields = Utils.getMarkerFields({ name: "DOMEvent", eventPhase: Ci.nsIDOMEvent.AT_TARGET, type: "mouseclick" });
++  is(fields.length, 2, "getMarkerFields() returns multiple fields when they exist");
++  is(fields[0].label, "Event Type:", "getMarkerFields() returns an array with proper label (ordered)");
++  is(fields[0].value, "mouseclick", "getMarkerFields() returns an array with proper value (ordered)");
++  is(fields[1].label, "Phase:", "getMarkerFields() returns an array with proper label (ordered)");
++  is(fields[1].value, "Target", "getMarkerFields() uses the `formatter` function when available");
++
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js b/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
+index ee608b1..d26520b 100644
+--- a/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
++++ b/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
+@@ -4,16 +4,17 @@
+ /**
+  * Tests if the sidebar is properly updated when a marker is selected.
+  */
+ 
+ function spawnTest () {
+   let { target, panel } = yield initPerformance(SIMPLE_URL);
+   let { $, $$, EVENTS, PerformanceController, OverviewView } = panel.panelWin;
+   let { L10N, TIMELINE_BLUEPRINT } = devtools.require("devtools/shared/timeline/global");
++  let { getMarkerLabel } = devtools.require("devtools/shared/timeline/marker-utils");
+ 
+   yield startRecording(panel);
+   ok(true, "Recording has started.");
+ 
+   yield waitUntil(() => {
+     // Wait until we get 3 different markers.
+     let markers = PerformanceController.getCurrentRecording().getMarkers();
+     return markers.some(m => m.name == "Styles") &&
+@@ -33,27 +34,21 @@ function spawnTest () {
+   ok(bars.length > 2, "got at least 3 markers");
+ 
+   let sidebar = $("#waterfall-details");
+   for (let i = 0; i < bars.length; i++) {
+     let bar = bars[i];
+     bar.click();
+     let m = markers[i];
+ 
+-    let name = TIMELINE_BLUEPRINT[m.name].label;
+-
+-    is($("#waterfall-details .marker-details-type").getAttribute("value"), name,
++    is($("#waterfall-details .marker-details-type").getAttribute("value"), getMarkerLabel(m),
+       "sidebar title matches markers name");
+ 
+-    let printedStartTime = $(".marker-details-start .marker-details-labelvalue").getAttribute("value");
+-    let printedEndTime = $(".marker-details-end .marker-details-labelvalue").getAttribute("value");
+-    let printedDuration= $(".marker-details-duration .marker-details-labelvalue").getAttribute("value");
++    let printedDuration = $(".marker-details-duration .marker-details-labelvalue").getAttribute("value");
+ 
+     let toMs = ms => L10N.getFormatStrWithNumbers("timeline.tick", ms);
+ 
+     // Values are rounded. We don't use a strict equality.
+-    is(toMs(m.start), printedStartTime, "sidebar start time is valid");
+-    is(toMs(m.end), printedEndTime, "sidebar end time is valid");
+     is(toMs(m.end - m.start), printedDuration, "sidebar duration is valid");
+   }
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index bfc31e6..3d64b94 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -36,16 +36,17 @@ EXTRA_JS_MODULES.devtools.shared.profiler += [
+     'profiler/jit.js',
+     'profiler/tree-model.js',
+     'profiler/tree-view.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared.timeline += [
+     'timeline/global.js',
+     'timeline/marker-details.js',
++    'timeline/marker-utils.js',
+     'timeline/markers-overview.js',
+     'timeline/waterfall.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+     'autocomplete-popup.js',
+     'devices.js',
+     'doorhanger.js',
+diff --git a/browser/devtools/shared/timeline/global.js b/browser/devtools/shared/timeline/global.js
+index a5095c1..f25b08d3 100644
+--- a/browser/devtools/shared/timeline/global.js
++++ b/browser/devtools/shared/timeline/global.js
+@@ -11,76 +11,136 @@ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+  * Localization convenience methods.
+  */
+ const STRINGS_URI = "chrome://browser/locale/devtools/timeline.properties";
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ 
+ /**
+  * A simple schema for mapping markers to the timeline UI. The keys correspond
+  * to marker names, while the values are objects with the following format:
++ *
+  *   - group: the row index in the timeline overview graph; multiple markers
+  *            can be added on the same row. @see <overview.js/buildGraphImage>
+- *   - label: the label used in the waterfall to identify the marker
+- *   - colorName: the name of the DevTools color used for this marker. If adding
++ *   - label: the label used in the waterfall to identify the marker. Can be a
++ *           string or just a function that accepts the marker and returns a string,
++ *           if you want to use a dynamic property for the main label.
++ *   - colorName: the label of the DevTools color used for this marker. If adding
+  *                a new color, be sure to check that there's an entry for
+  *                `.marker-details-bullet.{COLORNAME}` for the equivilent entry
+  *                in ./browser/themes/shared/devtools/performance.inc.css
+  *                https://developer.mozilla.org/en-US/docs/Tools/DevToolsColors
++ *   - fields: An optional array of marker properties you wish to display in the
++ *             marker details view. For example, a field of
++ *             { property: "aCauseName", label: "Cause" }
++ *             would render a field like `Cause: ${marker.aCauseName}`.
++ *             Each `field` item may take the following properties:
++ *
++ *             - property: The property that must exist on the marker to render, and
++ *                         the value of the property will be displayed.
++ *             - label: The name of the property that should be displayed.
++ *             - formatter: If a formatter is provided, instead of directly using the `property`
++ *                          property on the marker, the marker is passed into the formatter
++ *                          function to determine the display value.
+  *
+  * Whenever this is changed, browser_timeline_waterfall-styles.js *must* be
+  * updated as well.
+  */
+ const TIMELINE_BLUEPRINT = {
++  /* Group 0 - Reflow and Rendering pipeline */
+   "Styles": {
+     group: 0,
+     colorName: "highlight-pink",
+     label: L10N.getStr("timeline.label.styles2")
+   },
+   "Reflow": {
+     group: 0,
+     colorName: "highlight-pink",
+     label: L10N.getStr("timeline.label.reflow2")
+   },
+   "Paint": {
+     group: 0,
+     colorName: "highlight-green",
+     label: L10N.getStr("timeline.label.paint")
+   },
++
++  /* Group 1 - JS */
+   "DOMEvent": {
+     group: 1,
+     colorName: "highlight-lightorange",
+-    label: L10N.getStr("timeline.label.domevent")
++    label: L10N.getStr("timeline.label.domevent"),
++    fields: [{
++      property: "type",
++      label: L10N.getStr("timeline.markerDetail.DOMEventType")
++    }, {
++      property: "eventPhase",
++      label: L10N.getStr("timeline.markerDetail.DOMEventPhase"),
++      formatter: getEventPhaseName
++    }]
+   },
+   "Javascript": {
+     group: 1,
+     colorName: "highlight-lightorange",
+-    label: L10N.getStr("timeline.label.javascript2")
++    label: (marker) => marker.causeName,
+   },
+   "Parse HTML": {
+     group: 1,
+     colorName: "highlight-lightorange",
+     label: L10N.getStr("timeline.label.parseHTML")
+   },
+   "Parse XML": {
+     group: 1,
+     colorName: "highlight-lightorange",
+     label: L10N.getStr("timeline.label.parseXML")
+   },
+   "GarbageCollection": {
+     group: 1,
+     colorName: "highlight-red",
+-    label: L10N.getStr("timeline.label.garbageCollection")
++    label: getGCLabel,
++    fields: [
++      { property: "causeName", label: "Reason:" },
++      { property: "nonincrementalReason", label: "Non-incremental Reason:" }
++    ]
+   },
++
++  /* Group 2 - User Controlled? */
+   "ConsoleTime": {
+     group: 2,
+     colorName: "highlight-bluegrey",
+-    label: L10N.getStr("timeline.label.consoleTime")
++    label: L10N.getStr("timeline.label.consoleTime"),
++    fields: [{
++      property: "causeName",
++      label: L10N.getStr("timeline.markerDetail.consoleTimerName")
++    }]
+   },
+   "TimeStamp": {
+     group: 2,
+     colorName: "highlight-purple",
+     label: L10N.getStr("timeline.label.timestamp")
+   },
+ };
+ 
++/**
++ * A series of formatters used by the blueprint.
++ */
++
++function getEventPhaseName (marker) {
++  if (marker.eventPhase === Ci.nsIDOMEvent.AT_TARGET) {
++    return L10N.getStr("timeline.markerDetail.DOMEventTargetPhase");
++  } else if (marker.eventPhase === Ci.nsIDOMEvent.CAPTURING_PHASE) {
++    return L10N.getStr("timeline.markerDetail.DOMEventCapturingPhase");
++  } else if (marker.eventPhase === Ci.nsIDOMEvent.BUBBLING_PHASE) {
++    return L10N.getStr("timeline.markerDetail.DOMEventBubblingPhase");
++  }
++}
++
++function getGCLabel (marker) {
++  let label = L10N.getStr("timeline.label.garbageCollection");
++  // Only if a `nonincrementalReason` exists, do we want to label
++  // this as a non incremental GC event.
++  if ("nonincrementalReason" in marker) {
++    label = `${label} (Non-incremental)`;
++  }
++  return label;
++}
++
+ // Exported symbols.
+ exports.L10N = L10N;
+ exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
+diff --git a/browser/devtools/shared/timeline/marker-details.js b/browser/devtools/shared/timeline/marker-details.js
+index 849c687..18ad866 100644
+--- a/browser/devtools/shared/timeline/marker-details.js
++++ b/browser/devtools/shared/timeline/marker-details.js
+@@ -11,16 +11,18 @@ let WebConsoleUtils = require("devtools/toolkit/webconsole/utils").Utils;
+  */
+ 
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/shared/timeline/global", true);
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/shared/timeline/global", true);
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
++loader.lazyRequireGetter(this, "MarkerUtils",
++  "devtools/shared/timeline/marker-utils");
+ 
+ /**
+  * A detailed view for one single marker.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the view.
+  * @param nsIDOMNode splitter
+  *        The splitter node that the resize event is bound to.
+@@ -46,108 +48,36 @@ MarkerDetails.prototype = {
+   /**
+    * Clears the view.
+    */
+   empty: function() {
+     this._parent.innerHTML = "";
+   },
+ 
+   /**
+-   * Builds the label representing marker's type.
+-   *
+-   * @param string type
+-   *        Could be "Paint", "Reflow", "Styles", ...
+-   *        See TIMELINE_BLUEPRINT in widgets/global.js
+-   */
+-  buildMarkerTypeLabel: function(type) {
+-    let blueprint = TIMELINE_BLUEPRINT[type];
+-
+-    let hbox = this._document.createElement("hbox");
+-    hbox.setAttribute("align", "center");
+-
+-    let bullet = this._document.createElement("hbox");
+-    bullet.className = `marker-details-bullet ${blueprint.colorName}`;
+-
+-    let label = this._document.createElement("label");
+-    label.className = "marker-details-type";
+-    label.setAttribute("value", blueprint.label);
+-
+-    hbox.appendChild(bullet);
+-    hbox.appendChild(label);
+-
+-    return hbox;
+-  },
+-
+-  /**
+-   * Builds labels for name:value pairs. Like "Start: 100ms",
+-   * "Duration: 200ms", ...
+-   *
+-   * @param string l10nName
+-   *        String identifier for label's name.
+-   * @param string value
+-   *        Label's value.
+-   */
+-  buildNameValueLabel: function(l10nName, value) {
+-    let hbox = this._document.createElement("hbox");
+-    let labelName = this._document.createElement("label");
+-    let labelValue = this._document.createElement("label");
+-    labelName.className = "plain marker-details-labelname";
+-    labelValue.className = "plain marker-details-labelvalue";
+-    labelName.setAttribute("value", L10N.getStr(l10nName));
+-    labelValue.setAttribute("value", value);
+-    hbox.appendChild(labelName);
+-    hbox.appendChild(labelValue);
+-    return hbox;
+-  },
+-
+-  /**
+    * Populates view with marker's details.
+    *
+    * @param object params
+    *        An options object holding:
+    *        toolbox - The toolbox.
+    *        marker - The marker to display.
+    *        frames - Array of stack frame information; see stack.js.
+    */
+   render: function({toolbox: toolbox, marker: marker, frames: frames}) {
+     this.empty();
+ 
+     // UI for any marker
+ 
+-    let title = this.buildMarkerTypeLabel(marker.name);
+-
+-    let toMs = ms => L10N.getFormatStrWithNumbers("timeline.tick", ms);
+-
+-    let start = this.buildNameValueLabel("timeline.markerDetail.start", toMs(marker.start));
+-    let end = this.buildNameValueLabel("timeline.markerDetail.end", toMs(marker.end));
+-    let duration = this.buildNameValueLabel("timeline.markerDetail.duration", toMs(marker.end - marker.start));
+-
+-    start.classList.add("marker-details-start");
+-    end.classList.add("marker-details-end");
+-    duration.classList.add("marker-details-duration");
++    let title = MarkerUtils.DOM.buildTitle(this._document, marker);
++    let duration = MarkerUtils.DOM.buildDuration(this._document, marker);
++    let fields = MarkerUtils.DOM.buildFields(this._document, marker);
+ 
+     this._parent.appendChild(title);
+-    this._parent.appendChild(start);
+-    this._parent.appendChild(end);
+     this._parent.appendChild(duration);
+-
+-    // UI for specific markers
+-
+-    switch (marker.name) {
+-      case "ConsoleTime":
+-        this.renderConsoleTimeMarker(this._parent, marker);
+-        break;
+-      case "DOMEvent":
+-        this.renderDOMEventMarker(this._parent, marker);
+-        break;
+-      case "Javascript":
+-        this.renderJavascriptMarker(this._parent, marker);
+-        break;
+-      default:
+-    }
++    fields.forEach(field => this._parent.appendChild(field));
+ 
+     if (marker.stack) {
+       let property = "timeline.markerDetail.stack";
+       if (marker.endStack) {
+         property = "timeline.markerDetail.startStack";
+       }
+       this.renderStackTrace({toolbox: toolbox, parent: this._parent, property: property,
+                              frameIndex: marker.stack, frames: frames});
+@@ -237,71 +167,11 @@ MarkerDetails.prototype = {
+       if (frame.asyncParent) {
+         frameIndex = frame.asyncParent;
+         wasAsyncParent = true;
+       } else {
+         frameIndex = frame.parent;
+       }
+     }
+   },
+-
+-  /**
+-   * Render details of a console marker (console.time).
+-   *
+-   * @param nsIDOMNode parent
+-   *        The parent node holding the view.
+-   * @param object marker
+-   *        The marker to display.
+-   */
+-  renderConsoleTimeMarker: function(parent, marker) {
+-    if ("causeName" in marker) {
+-      let timerName = this.buildNameValueLabel("timeline.markerDetail.consoleTimerName", marker.causeName);
+-      this._parent.appendChild(timerName);
+-    }
+-  },
+-
+-  /**
+-   * Render details of a DOM Event marker.
+-   *
+-   * @param nsIDOMNode parent
+-   *        The parent node holding the view.
+-   * @param object marker
+-   *        The marker to display.
+-   */
+-  renderDOMEventMarker: function(parent, marker) {
+-    if ("type" in marker) {
+-      let type = this.buildNameValueLabel("timeline.markerDetail.DOMEventType", marker.type);
+-      this._parent.appendChild(type);
+-    }
+-    if ("eventPhase" in marker) {
+-      let phaseL10NProp;
+-      if (marker.eventPhase == Ci.nsIDOMEvent.AT_TARGET) {
+-        phaseL10NProp = "timeline.markerDetail.DOMEventTargetPhase";
+-      }
+-      if (marker.eventPhase == Ci.nsIDOMEvent.CAPTURING_PHASE) {
+-        phaseL10NProp = "timeline.markerDetail.DOMEventCapturingPhase";
+-      }
+-      if (marker.eventPhase == Ci.nsIDOMEvent.BUBBLING_PHASE) {
+-        phaseL10NProp = "timeline.markerDetail.DOMEventBubblingPhase";
+-      }
+-      let phase = this.buildNameValueLabel("timeline.markerDetail.DOMEventPhase", L10N.getStr(phaseL10NProp));
+-      this._parent.appendChild(phase);
+-    }
+-  },
+-
+-  /**
+-   * Render details of a Javascript marker.
+-   *
+-   * @param nsIDOMNode parent
+-   *        The parent node holding the view.
+-   * @param object marker
+-   *        The marker to display.
+-   */
+-  renderJavascriptMarker: function(parent, marker) {
+-    if ("causeName" in marker) {
+-      let cause = this.buildNameValueLabel("timeline.markerDetail.causeName", marker.causeName);
+-      this._parent.appendChild(cause);
+-    }
+-  },
+-
+ };
+ 
+ exports.MarkerDetails = MarkerDetails;
+diff --git a/browser/devtools/shared/timeline/marker-utils.js b/browser/devtools/shared/timeline/marker-utils.js
+new file mode 100644
+index 0000000..c1f4b48
+--- /dev/null
++++ b/browser/devtools/shared/timeline/marker-utils.js
+@@ -0,0 +1,141 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * This file contains utilities for creating elements for markers to be displayed,
++ * and parsing out the blueprint to generate correct values for markers.
++ */
++
++loader.lazyRequireGetter(this, "L10N",
++  "devtools/shared/timeline/global", true);
++loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
++  "devtools/shared/timeline/global", true);
++
++/**
++ * Returns the correct label to display for passed in marker, based
++ * off of the blueprints.
++ *
++ * @param {ProfileTimelineMarker} marker
++ * @return {string}
++ */
++function getMarkerLabel (marker) {
++  let blueprint = TIMELINE_BLUEPRINT[marker.name];
++  // Either use the label function in the blueprint, or use it directly
++  // as a string.
++  return typeof blueprint.label === "function" ? blueprint.label(marker) : blueprint.label;
++}
++exports.getMarkerLabel = getMarkerLabel;
++
++/**
++ * Returns an array of objects with key/value pairs of what should be rendered
++ * in the marker details view.
++ *
++ * @param {ProfileTimelineMarker} marker
++ * @return {Array<object>}
++ */
++function getMarkerFields (marker) {
++  let blueprint = TIMELINE_BLUEPRINT[marker.name];
++  return (blueprint.fields || []).reduce((fields, field) => {
++    // Ensure this marker has this field present
++    if (field.property in marker) {
++      let label = field.label;
++      let value = marker[field.property];
++      // If a formatter function defined, use it to get the
++      // value we actually want to display.
++      if (typeof field.formatter === "function") {
++        value = field.formatter(marker);
++      }
++      fields.push({ label, value });
++    }
++    return fields;
++  }, []);
++}
++exports.getMarkerFields = getMarkerFields;
++
++/**
++ * Utilites for creating elements for markers.
++ */
++const DOM = exports.DOM = {
++  /**
++   * Builds all the fields possible for the given marker. Returns an
++   * array of elements to be appended to a parent element.
++   *
++   * @param {Document} doc
++   * @param {ProfileTimelineMarker} marker
++   * @return {Array<Element>}
++   */
++  buildFields: function (doc, marker) {
++    let blueprint = TIMELINE_BLUEPRINT[marker.name];
++    let fields = getMarkerFields(marker);
++
++    return fields.map(({ label, value }) => DOM.buildNameValueLabel(doc, label, value));
++  },
++
++  /**
++   * Builds the label representing marker's type.
++   *
++   * @param {Document} doc
++   * @param {ProfileTimelineMarker}
++   * @return {Element}
++   */
++  buildTitle: function (doc, marker) {
++    let blueprint = TIMELINE_BLUEPRINT[marker.name];
++
++    let hbox = doc.createElement("hbox");
++    hbox.setAttribute("align", "center");
++
++    let bullet = doc.createElement("hbox");
++    bullet.className = `marker-details-bullet ${blueprint.colorName}`;
++
++    let title = getMarkerLabel(marker);
++    let label = doc.createElement("label");
++    label.className = "marker-details-type";
++    label.setAttribute("value", title);
++
++    hbox.appendChild(bullet);
++    hbox.appendChild(label);
++
++    return hbox;
++  },
++
++  /**
++   * Builds the duration element, like "Duration: 200ms".
++   *
++   * @param {Document} doc
++   * @param {ProfileTimelineMarker} marker
++   * @return {Element}
++   */
++  buildDuration: function (doc, marker) {
++    let label = L10N.getStr("timeline.markerDetail.duration");
++    let value = L10N.getFormatStrWithNumbers("timeline.tick", marker.end - marker.start);
++    let el = DOM.buildNameValueLabel(doc, label, value);
++    el.classList.add("marker-details-duration");
++    return el;
++  },
++
++  /**
++   * Builds labels for name:value pairs. Like "Start: 100ms",
++   * "Duration: 200ms", ...
++   *
++   * @param {Document} doc
++   * @param string field
++   *        String identifier for label's name.
++   * @param string value
++   *        Label's value.
++   * @return {Element}
++   */
++  buildNameValueLabel: function (doc, field, value) {
++    let hbox = doc.createElement("hbox");
++    let labelName = doc.createElement("label");
++    let labelValue = doc.createElement("label");
++    labelName.className = "plain marker-details-labelname";
++    labelValue.className = "plain marker-details-labelvalue";
++    labelName.setAttribute("value", field);
++    labelValue.setAttribute("value", value);
++    hbox.appendChild(labelName);
++    hbox.appendChild(labelValue);
++    return hbox;
++  },
++};
+diff --git a/browser/devtools/shared/timeline/waterfall.js b/browser/devtools/shared/timeline/waterfall.js
+index d82d037..4d54e1f 100644
+--- a/browser/devtools/shared/timeline/waterfall.js
++++ b/browser/devtools/shared/timeline/waterfall.js
+@@ -14,16 +14,18 @@ loader.lazyRequireGetter(this, "L10N",
+   "devtools/shared/timeline/global", true);
+ 
+ loader.lazyImporter(this, "setNamedTimeout",
+   "resource:///modules/devtools/ViewHelpers.jsm");
+ loader.lazyImporter(this, "clearNamedTimeout",
+   "resource:///modules/devtools/ViewHelpers.jsm");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
++loader.lazyRequireGetter(this, "MarkerUtils",
++  "devtools/shared/timeline/marker-utils");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ 
+ const WATERFALL_SIDEBAR_WIDTH = 200; // px
+ 
+ const WATERFALL_IMMEDIATE_DRAW_MARKERS_COUNT = 30;
+ const WATERFALL_FLUSH_OUTSTANDING_MARKERS_DELAY = 75; // ms
+ 
+@@ -436,24 +438,17 @@ Waterfall.prototype = {
+     bullet.setAttribute("type", marker.name);
+     sidebar.appendChild(bullet);
+ 
+     let name = this._document.createElement("label");
+     name.setAttribute("crop", "end");
+     name.setAttribute("flex", "1");
+     name.className = "plain waterfall-marker-name";
+ 
+-    let label;
+-    if (marker.causeName) {
+-      label = this._l10n.getFormatStr("timeline.markerDetailFormat",
+-                                      blueprint.label,
+-                                      marker.causeName);
+-    } else {
+-      label = blueprint.label;
+-    }
++    let label = MarkerUtils.getMarkerLabel(marker);
+     name.setAttribute("value", label);
+     name.setAttribute("tooltiptext", label);
+     sidebar.appendChild(name);
+ 
+     container.appendChild(sidebar);
+   },
+ 
+   /**
+-- 
+2.2.1
+
