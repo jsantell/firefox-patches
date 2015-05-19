@@ -1,12 +1,12 @@
-From: Jordan Santell <jsantell@gmail.com>
-Date: Fri, 15 May 2015 16:16:37 -0700
-Subject: Bug 1164338 - Move styles markers to be generated in DoProcessRestyles rather than when the Flush_Style queue is flushed.  r=pbrosset
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 18 May 2015 16:03:04 -0700
+Subject: Bug 1164338 - Move styles markers to be generated in DoProcessRestyles rather than when the Flush_Style queue is flushed.  r=smaug,heycam
 
 diff --git a/dom/webidl/ProfileTimelineMarker.webidl b/dom/webidl/ProfileTimelineMarker.webidl
-index 0640b7e..50b0e72 100644
+index 0640b7e..6de59cf 100644
 --- a/dom/webidl/ProfileTimelineMarker.webidl
 +++ b/dom/webidl/ProfileTimelineMarker.webidl
-@@ -20,9 +20,12 @@ dictionary ProfileTimelineMarker {
+@@ -20,9 +20,11 @@ dictionary ProfileTimelineMarker {
    DOMString causeName;
    /* For ConsoleTime markers.  */
    object? endStack = null;
@@ -16,11 +16,10 @@ index 0640b7e..50b0e72 100644
    /* For Paint markers.  */
    sequence<ProfileTimelineLayerRect> rectangles;
 +  /* For Style markers. */
-+  DOMString changeHint;
 +  DOMString restyleHint;
  };
 diff --git a/layout/base/RestyleManager.cpp b/layout/base/RestyleManager.cpp
-index bf938c6..088d7d4 100644
+index bf938c6..525fdcf 100644
 --- a/layout/base/RestyleManager.cpp
 +++ b/layout/base/RestyleManager.cpp
 @@ -4181,17 +4181,16 @@ RestyleManager::StructsToLog()
@@ -41,10 +40,10 @@ index bf938c6..088d7d4 100644
    const char* names[] = { "Self", "Subtree", "LaterSiblings", "CSSTransitions",
                            "CSSAnimations", "SVGAttrAnimations", "StyleAttribute",
                            "StyleAttribute_Animations", "Force", "ForceDescendants" };
-@@ -4277,16 +4276,17 @@ RestyleManager::ChangeHintToString(nsChangeHint aHint)
+@@ -4214,16 +4213,17 @@ RestyleManager::RestyleHintToString(nsRestyleHint aHint)
    } else {
      if (!any) {
-       result.AppendLiteral("NS_STYLE_HINT_NONE");
+       result.AppendLiteral("0");
      }
    }
    return result;
@@ -52,18 +51,18 @@ index bf938c6..088d7d4 100644
  
 +#ifdef DEBUG
  /* static */ nsCString
- RestyleManager::StructNamesToString(uint32_t aSIDs)
+ RestyleManager::ChangeHintToString(nsChangeHint aHint)
  {
    nsCString result;
    bool any = false;
-   for (nsStyleStructID sid = nsStyleStructID(0);
-        sid < nsStyleStructID_Length;
-        sid = nsStyleStructID(sid + 1)) {
+   const char* names[] = {
+     "RepaintFrame", "NeedReflow", "ClearAncestorIntrinsics",
+     "ClearDescendantIntrinsics", "NeedDirtyReflow", "SyncFrameView",
 diff --git a/layout/base/RestyleManager.h b/layout/base/RestyleManager.h
-index 0aeb4c6..bd014a9 100644
+index 0aeb4c6..80d1b1c 100644
 --- a/layout/base/RestyleManager.h
 +++ b/layout/base/RestyleManager.h
-@@ -343,20 +343,18 @@ public:
+@@ -343,18 +343,19 @@ public:
      PostRestyleEventInternal(true);
    }
  
@@ -74,62 +73,21 @@ index 0aeb4c6..bd014a9 100644
  
 -#ifdef DEBUG
    static nsCString RestyleHintToString(nsRestyleHint aHint);
++
++#ifdef DEBUG
    static nsCString ChangeHintToString(nsChangeHint aHint);
--#endif
+ #endif
  
  private:
    void PostRestyleEventInternal(bool aForLazyConstruction);
  
  public:
    /**
-    * Asynchronously clear style data from the root frame downwards and ensure
-    * it will all be rebuilt. This is safe to call anytime; it will schedule
-@@ -404,18 +402,18 @@ public:
- 
-   // Set MOZ_DEBUG_RESTYLE_STRUCTS to a comma-separated string of
-   // style struct names -- such as "Font,SVGReset" -- to log the style context
-   // tree and those cached struct pointers before each restyle.  This
-   // function returns a bitfield of the structs named in the
-   // environment variable.
-   static uint32_t StructsToLog();
- 
--  static nsCString StructNamesToString(uint32_t aSIDs);
-   int32_t& LoggingDepth() { return mLoggingDepth; }
-+  static nsCString StructNamesToString(uint32_t aSIDs);
- #endif
- 
- private:
-   /* aMinHint is the minimal change that should be made to the element */
-   // XXXbz do we really need the aPrimaryFrame argument here?
-   void RestyleElement(Element*        aElement,
-                       nsIFrame*       aPrimaryFrame,
-                       nsChangeHint    aMinHint,
-@@ -686,19 +684,17 @@ private:
-     eNotifyShown,
-     eNotifyHidden
-   };
- 
- #ifdef RESTYLE_LOGGING
-   int32_t& LoggingDepth() { return mLoggingDepth; }
- #endif
- 
--#ifdef DEBUG
--  static nsCString RestyleResultToString(RestyleResult aRestyleResult);
--#endif
-+static nsCString RestyleResultToString(RestyleResult aRestyleResult);
- 
- private:
-   nsPresContext* const mPresContext;
-   nsIFrame* const mFrame;
-   nsIContent* const mParentContent;
-   // |mContent| is the node that we used for rule matching of
-   // normal elements (not pseudo-elements) and for which we generate
-   // framechange hints if we need them.
 diff --git a/layout/base/RestyleTracker.cpp b/layout/base/RestyleTracker.cpp
-index 9ee2a40..b98f0b3 100644
+index 9ee2a40..dcc5e42 100644
 --- a/layout/base/RestyleTracker.cpp
 +++ b/layout/base/RestyleTracker.cpp
-@@ -91,16 +91,49 @@ struct RestyleEnumerateData : RestyleTracker::Hints {
+@@ -91,16 +91,40 @@ struct RestyleEnumerateData : RestyleTracker::Hints {
  struct RestyleCollector {
    RestyleTracker* tracker;
    RestyleEnumerateData** restyleArrayPtr;
@@ -143,32 +101,23 @@ index 9ee2a40..b98f0b3 100644
 +public:
 +  RestyleTimelineMarker(nsDocShell* aDocShell,
 +                        TracingMetadata aMetaData,
-+                        nsRestyleHint aRestyleHint,
-+                        nsChangeHint aChangeHint)
++                        nsRestyleHint aRestyleHint)
 +    : TimelineMarker(aDocShell, "Styles", aMetaData)
 +  {
 +    if (aRestyleHint) {
 +      mRestyleHint.AssignWithConversion(RestyleManager::RestyleHintToString(aRestyleHint));
-+    }
-+    if (aChangeHint) {
-+      mChangeHint.AssignWithConversion(RestyleManager::ChangeHintToString(aChangeHint));
 +    }
 +  }
 +
 +  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) override
 +  {
 +    if (GetMetaData() == TRACING_INTERVAL_START) {
-+      aMarker.mRestyleHint.Construct(GetRestyleHintString());
-+      aMarker.mChangeHint.Construct(GetChangeHintString());
++      aMarker.mRestyleHint.Construct(mRestyleHint);
 +    }
 +  }
 +
-+  const nsString GetRestyleHintString() const { return mRestyleHint; }
-+  const nsString GetChangeHintString() const { return mChangeHint; }
-+
 +private:
 +  nsAutoString mRestyleHint;
-+  nsAutoString mChangeHint;
 +};
 +
  static PLDHashOperator
@@ -179,7 +128,7 @@ index 9ee2a40..b98f0b3 100644
    dom::Element* element =
      static_cast<dom::Element*>(aElement);
    RestyleCollector* collector =
-@@ -197,16 +230,22 @@ RestyleTracker::ProcessOneRestyle(Element* aElement,
+@@ -197,16 +221,23 @@ RestyleTracker::ProcessOneRestyle(Element* aElement,
  }
  
  void
@@ -189,7 +138,8 @@ index 9ee2a40..b98f0b3 100644
      js::ProfileEntry::Category::CSS);
  
 +  bool isTimelineRecording = false;
-+  nsDocShell* docShell = static_cast<nsDocShell*>(mRestyleManager->PresContext()->GetDocShell());
++  nsDocShell* docShell =
++    static_cast<nsDocShell*>(mRestyleManager->PresContext()->GetDocShell());
 +  if (docShell) {
 +    docShell->GetRecordProfileTimelineMarkers(&isTimelineRecording);
 +  }
@@ -202,7 +152,7 @@ index 9ee2a40..b98f0b3 100644
    // might (if mDoRebuildAllStyleData is true) do substantial amounts of
    // restyle processing.
    //
-@@ -306,24 +345,42 @@ RestyleTracker::DoProcessRestyles()
+@@ -306,24 +337,40 @@ RestyleTracker::DoProcessRestyles()
          }
  
          nsAutoPtr<RestyleData> data;
@@ -214,9 +164,8 @@ index 9ee2a40..b98f0b3 100644
 +        if (isTimelineRecording) {
 +          mozilla::UniquePtr<TimelineMarker> marker =
 +            MakeUnique<RestyleTimelineMarker>(docShell,
-+                                             TRACING_INTERVAL_START,
-+                                             data->mRestyleHint,
-+                                             data->mChangeHint);
++                                              TRACING_INTERVAL_START,
++                                              data->mRestyleHint);
 +          docShell->AddProfileTimelineMarker(Move(marker));
 +        }
 +
@@ -232,9 +181,8 @@ index 9ee2a40..b98f0b3 100644
 +        if (isTimelineRecording) {
 +          mozilla::UniquePtr<TimelineMarker> marker =
 +            MakeUnique<RestyleTimelineMarker>(docShell,
-+                                             TRACING_INTERVAL_END,
-+                                             data->mRestyleHint,
-+                                             data->mChangeHint);
++                                              TRACING_INTERVAL_END,
++                                              data->mRestyleHint);
 +          docShell->AddProfileTimelineMarker(Move(marker));
 +        }
        }
@@ -245,7 +193,7 @@ index 9ee2a40..b98f0b3 100644
        }
  
        // Now we only have entries with change hints left.  To be safe in
-@@ -354,19 +411,37 @@ RestyleTracker::DoProcessRestyles()
+@@ -354,19 +401,35 @@ RestyleTracker::DoProcessRestyles()
            LOG_RESTYLE_INDENT();
  
  #if defined(MOZ_ENABLE_PROFILER_SPS) && !defined(MOZILLA_XPCOMRT_API)
@@ -257,9 +205,8 @@ index 9ee2a40..b98f0b3 100644
 +          if (isTimelineRecording) {
 +            mozilla::UniquePtr<TimelineMarker> marker =
 +              MakeUnique<RestyleTimelineMarker>(docShell,
-+                                               TRACING_INTERVAL_START,
-+                                               currentRestyle->mRestyleHint,
-+                                               currentRestyle->mChangeHint);
++                                                TRACING_INTERVAL_START,
++                                                currentRestyle->mRestyleHint);
 +            docShell->AddProfileTimelineMarker(Move(marker));
 +          }
 +
@@ -270,9 +217,8 @@ index 9ee2a40..b98f0b3 100644
 +          if (isTimelineRecording) {
 +            mozilla::UniquePtr<TimelineMarker> marker =
 +              MakeUnique<RestyleTimelineMarker>(docShell,
-+                                               TRACING_INTERVAL_END,
-+                                               currentRestyle->mRestyleHint,
-+                                               currentRestyle->mChangeHint);
++                                                TRACING_INTERVAL_END,
++                                                currentRestyle->mRestyleHint);
 +            docShell->AddProfileTimelineMarker(Move(marker));
 +          }
          }
@@ -331,5 +277,5 @@ index 9c08d0a..b605453 100644
  
        if (!nsLayoutUtils::AreAsyncAnimationsEnabled()) {
 -- 
-2.3.2 (Apple Git-55)
+2.2.1
 

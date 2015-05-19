@@ -1,0 +1,577 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 18 May 2015 17:44:49 -0700
+Subject: Bug 1162583 - Disable realtime rendering in performance tools when e10s is not on. r=vp
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index e00373e..cfdb847 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -95,16 +95,17 @@ browser.jar:
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/webaudioeditor/views/properties.js        (webaudioeditor/views/properties.js)
+     content/browser/devtools/webaudioeditor/views/automation.js        (webaudioeditor/views/automation.js)
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
++*   content/browser/devtools/performance/system.js                     (performance/system.js)
+     content/browser/devtools/performance/performance-controller.js     (performance/performance-controller.js)
+     content/browser/devtools/performance/performance-view.js           (performance/performance-view.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
+     content/browser/devtools/performance/views/toolbar.js              (performance/views/toolbar.js)
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/details-subview.js      (performance/views/details-abstract-subview.js)
+     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
+     content/browser/devtools/performance/views/details-js-call-tree.js      (performance/views/details-js-call-tree.js)
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 64dadf2..4d32266 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -186,16 +186,21 @@ let PerformanceController = {
+     this.exportRecording = this.exportRecording.bind(this);
+     this.clearRecordings = this.clearRecordings.bind(this);
+     this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+     this._onThemeChanged = this._onThemeChanged.bind(this);
+     this._onRecordingStateChange = this._onRecordingStateChange.bind(this);
+     this._onProfilerStatusUpdated = this._onProfilerStatusUpdated.bind(this);
+ 
++    // Store data regarding if e10s is enabled.
++    this._e10s = Services.appinfo.browserTabsRemoteAutostart;
++
++    this._setMultiprocessAttributes();
++
+     // All boolean prefs should be handled via the OptionsView in the
+     // ToolbarView, so that they may be accessible via the "gear" menu.
+     // Every other pref should be registered here.
+     this._nonBooleanPrefs = new ViewHelpers.Prefs("devtools.performance", {
+       "hidden-markers": ["Json", "timeline.hidden-markers"],
+       "memory-sample-probability": ["Float", "memory.sample-probability"],
+       "memory-max-log-length": ["Int", "memory.max-log-length"],
+       "profiler-buffer-size": ["Int", "profiler.buffer-size"],
+@@ -508,16 +513,54 @@ let PerformanceController = {
+       return false;
+     }
+     if (features && !features.every(f => recordingConfig[f])) {
+       return false;
+     }
+     return true;
+   },
+ 
++  /**
++   * Returns an object with `supported` and `enabled` properties indicating
++   * whether or not the platform is capable of turning on e10s and whether or not
++   * it's already enabled, respectively.
++   *
++   * @return {object}
++   */
++  getMultiprocessStatus: function () {
++    // If testing, set both supported and enabled to true so we
++    // have realtime rendering tests in non-e10s. This function is
++    // overridden wholesale in tests when we want to test multiprocess support
++    // specifically.
++    if (gDevTools.testing) {
++      return { supported: true, enabled: true };
++    }
++    let supported = SYSTEM.MULTIPROCESS_SUPPORTED;
++    // This is only checked on tool startup -- requires a restart if
++    // e10s subsequently enabled.
++    let enabled = this._e10s;
++    return { supported, enabled };
++  },
++
++  /**
++   * Called on init, sets an `e10s` attribute on the main view container with
++   * "disabled" if e10s is possible on the platform and just not on, or "unsupported"
++   * if e10s is not possible on the platform. If e10s is on, no attribute is set.
++   */
++  _setMultiprocessAttributes: function () {
++    let { enabled, supported } = this.getMultiprocessStatus();
++    if (!enabled && supported) {
++      $("#performance-view").setAttribute("e10s", "disabled");
++    }
++    // Could be a chance where the directive goes away yet e10s is still on
++    else if (!enabled && !supported) {
++      $("#performance-view").setAttribute("e10s", "unsupported");
++    }
++  },
++
+   toString: () => "[object PerformanceController]"
+ };
+ 
+ /**
+  * Convenient way of emitting events from the controller.
+  */
+ EventEmitter.decorate(PerformanceController);
+ 
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index d9931c1..57c145b 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -9,16 +9,17 @@
+ <?xml-stylesheet href="chrome://browser/skin/devtools/performance.css" type="text/css"?>
+ <!DOCTYPE window [
+   <!ENTITY % profilerDTD SYSTEM "chrome://browser/locale/devtools/profiler.dtd">
+   %profilerDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
++  <script type="application/javascript" src="performance/system.js"/>
+   <script type="application/javascript" src="performance/performance-controller.js"/>
+   <script type="application/javascript" src="performance/performance-view.js"/>
+   <script type="application/javascript" src="performance/recording-model.js"/>
+   <script type="application/javascript" src="performance/views/overview.js"/>
+   <script type="application/javascript" src="performance/views/toolbar.js"/>
+   <script type="application/javascript" src="performance/views/details-subview.js"/>
+   <script type="application/javascript" src="performance/views/details-waterfall.js"/>
+   <script type="application/javascript" src="performance/views/details-js-call-tree.js"/>
+@@ -168,16 +169,20 @@
+                   pack="center"
+                   flex="1">
+               <vbox>
+                 <hbox class="devtools-toolbarbutton-group"
+                       pack="center">
+                   <toolbarbutton class="devtools-toolbarbutton record-button"
+                                  label="&profilerUI.stopRecording;" />
+                 </hbox>
++                <label class="realtime-disabled-message"
++                       value="Realtime recording data disabled on non-multiprocess Firefox."/>
++                <label class="realtime-disabled-on-e10s-message"
++                       value="Enable multiprocess Firefox in preferences for rendering recording data in realtime."/>
+                 <label class="buffer-status-message"
+                        tooltiptext="&profilerUI.bufferStatusTooltip;"/>
+                 <label class="buffer-status-message-full"
+                        value="&profilerUI.bufferStatusFull;"/>
+               </vbox>
+             </hbox>
+             <hbox id="console-recording-notice"
+                   class="notice-container"
+@@ -190,16 +195,20 @@
+                       <label class="console-profile-command" />
+                       <label value="&profilerUI.console.recordingNoticeEnd;" />
+                     </hbox>
+                     <hbox class="console-profile-stop-notice">
+                       <label value="&profilerUI.console.stopCommandStart;" />
+                       <label class="console-profile-command" />
+                       <label value="&profilerUI.console.stopCommandEnd;" />
+                     </hbox>
++                    <label class="realtime-disabled-message"
++                           value="Realtime recording data disabled on non-multiprocess Firefox."/>
++                    <label class="realtime-disabled-on-e10s-message"
++                           value="Enable multiprocess Firefox in preferences for rendering recording data in realtime."/>
+                     <label class="buffer-status-message"
+                            tooltiptext="&profilerUI.bufferStatusTooltip;"/>
+                     <label class="buffer-status-message-full"
+                            value="&profilerUI.bufferStatusFull;"/>
+                   </vbox>
+             </hbox>
+             <deck id="details-pane" flex="1">
+               <hbox id="waterfall-view" flex="1">
+diff --git a/browser/devtools/performance/system.js b/browser/devtools/performance/system.js
+new file mode 100644
+index 0000000..2aebcd0
+--- /dev/null
++++ b/browser/devtools/performance/system.js
+@@ -0,0 +1,16 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * A dump file to attach preprocessing directives consumable to the controller
++ * without littering our code with directives.
++ */
++
++const SYSTEM = {};
++
++// If e10s is possible on the platform.
++#ifdef E10S_TESTING_ONLY
++SYSTEM.MULTIPROCESS_SUPPORTED = true;
++#endif
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 80e92b6..1218c0a 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -84,31 +84,33 @@ support-files =
+ [browser_perf-options-enable-memory-01.js]
+ [browser_perf-options-enable-memory-02.js]
+ [browser_perf-options-enable-framerate.js]
+ [browser_perf-options-allocations.js]
+ [browser_perf-options-profiler.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
+ [browser_perf-overview-render-03.js]
++[browser_perf-overview-render-04.js]
+ [browser_perf-overview-selection-01.js]
+ [browser_perf-overview-selection-02.js]
+ [browser_perf-overview-selection-03.js]
+ [browser_perf-overview-time-interval.js]
+ [browser_perf-shared-connection-02.js]
+ [browser_perf-shared-connection-03.js]
+ [browser_perf-states.js]
+ [browser_perf-refresh.js]
+ [browser_perf-ui-recording.js]
+ [browser_perf-recording-model-01.js]
+ [browser_perf-recording-model-02.js]
+ [browser_perf-recording-notices-01.js]
+ [browser_perf-recording-notices-02.js]
+ [browser_perf-recording-notices-03.js]
+ [browser_perf-recording-notices-04.js]
++[browser_perf-recording-notices-05.js]
+ [browser_perf_recordings-io-01.js]
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
+ [browser_perf-range-changed-render.js]
+ [browser_perf-recording-selected-01.js]
+ [browser_perf-recording-selected-02.js]
+ [browser_perf-recording-selected-03.js]
+diff --git a/browser/devtools/performance/test/browser_perf-overview-render-04.js b/browser/devtools/performance/test/browser_perf-overview-render-04.js
+new file mode 100644
+index 0000000..fd4b967
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-overview-render-04.js
+@@ -0,0 +1,52 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the overview graphs do not render when realtime rendering is off
++ * due to lack of e10s.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, PerformanceController, OverviewView, RecordingsView } = panel.panelWin;
++
++  let updated = 0;
++  OverviewView.on(EVENTS.OVERVIEW_RENDERED, () => updated++);
++  OverviewView.OVERVIEW_UPDATE_INTERVAL = 1;
++
++  // Set realtime rendering off.
++  OverviewView.isRealtimeRenderingEnabled = () => false;
++
++  yield startRecording(panel, { waitForOverview: false, waitForStateChange: true });
++  is($("#overview-pane").hidden, true, "overview graphs hidden");
++  is(updated, 0, "Overview graphs have still not been updated");
++  yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length);
++  yield waitUntil(() => PerformanceController.getCurrentRecording().getTicks().length);
++  is(updated, 0, "Overview graphs have still not been updated");
++
++  yield stopRecording(panel);
++
++  let markers = OverviewView.graphs.get("timeline");
++  let framerate = OverviewView.graphs.get("framerate");
++
++  ok(markers.width > 0,
++    "The overview's markers graph has a width.");
++  ok(framerate.width > 0,
++    "The overview's framerate graph has a width.");
++
++  is(updated, 1, "Overview graphs rendered upon completion.");
++  is($("#overview-pane").hidden, false, "overview graphs no longer hidden");
++
++  yield startRecording(panel, { waitForOverview: false, waitForStateChange: true });
++  is($("#overview-pane").hidden, true, "overview graphs hidden again when starting new recording");
++
++  RecordingsView.selectedIndex = 0;
++  is($("#overview-pane").hidden, false, "overview graphs no longer hidden when switching back to complete recording.");
++  RecordingsView.selectedIndex = 1;
++  is($("#overview-pane").hidden, true, "overview graphs hidden again when going back to inprogress recording.");
++
++  yield stopRecording(panel);
++  is($("#overview-pane").hidden, false, "overview graphs no longer hidden when recording finishes");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/browser_perf-recording-notices-05.js b/browser/devtools/performance/test/browser_perf-recording-notices-05.js
+new file mode 100644
+index 0000000..70a2276
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-recording-notices-05.js
+@@ -0,0 +1,43 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that when a recording overlaps the circular buffer, that
++ * a class is assigned to the recording notices.
++ */
++function spawnTest () {
++  let { panel } = yield initPerformance(SIMPLE_URL, void 0, { TEST_MOCK_PROFILER_CHECK_TIMER: 10 });
++  let { EVENTS, $, PerformanceController, PerformanceView } = panel.panelWin;
++
++  let supported = false;
++  let enabled = false;
++
++  PerformanceController.getMultiprocessStatus = () => {
++    return { supported, enabled };
++  };
++
++  PerformanceController._setMultiprocessAttributes();
++  ok($("#performance-view").getAttribute("e10s"), "unsupported",
++    "when e10s is disabled and no option to turn on, container has [e10s=unsupported]");
++
++  supported = true;
++  enabled = false;
++  PerformanceController._setMultiprocessAttributes();
++  ok($("#performance-view").getAttribute("e10s"), "disabled",
++    "when e10s is disabled and but is supported, container has [e10s=disabled]");
++
++  supported = false;
++  enabled = true;
++  PerformanceController._setMultiprocessAttributes();
++  ok($("#performance-view").getAttribute("e10s"), "",
++    "when e10s is enabled, but not supported, this probably means we no longer have E10S_TESTING_ONLY, and we have no e10s attribute.");
++
++  supported = true;
++  enabled = true;
++  PerformanceController._setMultiprocessAttributes();
++  ok($("#performance-view").getAttribute("e10s"), "",
++    "when e10s is enabled and supported, there should be no e10s attribute.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index 8721495..acd5cc9 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -26,31 +26,40 @@ const GRAPH_REQUIREMENTS = {
+ 
+ /**
+  * View handler for the overview panel's time view, displaying
+  * framerate, timeline and memory over time.
+  */
+ let OverviewView = {
+ 
+   /**
++   * How frequently we attempt to render the graphs. Overridden
++   * in tests.
++   */
++  OVERVIEW_UPDATE_INTERVAL: OVERVIEW_UPDATE_INTERVAL,
++
++  /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     this.graphs = new GraphsController({
+       root: $("#overview-pane"),
+       getBlueprint: () => PerformanceController.getTimelineBlueprint(),
+       getTheme: () => PerformanceController.getTheme(),
+     });
+ 
+     // If no timeline support, shut it all down.
+     if (!gFront.getActorSupport().timeline) {
+       this.disable();
+       return;
+     }
+ 
++    // Store info on multiprocess support.
++    this._multiprocessData = PerformanceController.getMultiprocessStatus();
++
+     this._onRecordingWillStart = this._onRecordingWillStart.bind(this);
+     this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingWillStop = this._onRecordingWillStop.bind(this);
+     this._onRecordingStopped = this._onRecordingStopped.bind(this);
+     this._onRecordingSelected = this._onRecordingSelected.bind(this);
+     this._onRecordingTick = this._onRecordingTick.bind(this);
+     this._onGraphSelecting = this._onGraphSelecting.bind(this);
+     this._onGraphRendered = this._onGraphRendered.bind(this);
+@@ -168,16 +177,17 @@ let OverviewView = {
+    *
+    * @param number resolution
+    *        The fps graph resolution. @see Graphs.jsm
+    */
+   render: Task.async(function *(resolution) {
+     if (this.isDisabled()) {
+       return;
+     }
++
+     let recording = PerformanceController.getCurrentRecording();
+     yield this.graphs.render(recording.getAllData(), resolution);
+ 
+     // Finished rendering all graphs in this overview.
+     this.emit(EVENTS.OVERVIEW_RENDERED, resolution);
+   }),
+ 
+   /**
+@@ -192,17 +202,17 @@ let OverviewView = {
+ 
+   /**
+    * Called to refresh the timer to keep firing _onRecordingTick.
+    */
+   _prepareNextTick: function () {
+     // Check here to see if there's still a _timeoutId, incase
+     // `stop` was called before the _prepareNextTick call was executed.
+     if (this.isRendering()) {
+-      this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
++      this._timeoutId = setTimeout(this._onRecordingTick, this.OVERVIEW_UPDATE_INTERVAL);
+     }
+   },
+ 
+   /**
+    * Called when recording will start. No recording because it does not
+    * exist yet, but can just disable from here. This will only trigger for
+    * manual recordings.
+    */
+@@ -250,17 +260,17 @@ let OverviewView = {
+     yield this._checkSelection(recording);
+     this.graphs.dropSelection();
+   })),
+ 
+   /**
+    * Start the polling for rendering the overview graph.
+    */
+   _startPolling: function () {
+-    this._timeoutId = setTimeout(this._onRecordingTick, OVERVIEW_UPDATE_INTERVAL);
++    this._timeoutId = setTimeout(this._onRecordingTick, this.OVERVIEW_UPDATE_INTERVAL);
+   },
+ 
+   /**
+    * Stop the polling for rendering the overview graph.
+    */
+   _stopPolling: function () {
+     clearTimeout(this._timeoutId);
+     this._timeoutId = null;
+@@ -336,16 +346,45 @@ let OverviewView = {
+ 
+   _setGraphVisibilityFromRecordingFeatures: function (recording) {
+     for (let [graphName, requirements] of Iterator(GRAPH_REQUIREMENTS)) {
+       this.graphs.enable(graphName, PerformanceController.isFeatureSupported(requirements));
+     }
+   },
+ 
+   /**
++   * Fetch the multiprocess status and if e10s is not currently on, disable
++   * realtime rendering.
++   *
++   * @return {boolean}
++   */
++  isRealtimeRenderingEnabled: function () {
++    return this._multiprocessData.enabled;
++  },
++
++  /**
++   * Show the graphs overview panel when a recording is finished
++   * when non-realtime graphs are enabled. Also set the graph visibility
++   * so the performance graphs know which graphs to render.
++   *
++   * @param {RecordingModel} recording
++   */
++  _showGraphsPanel: function (recording) {
++    this._setGraphVisibilityFromRecordingFeatures(recording);
++    $("#overview-pane").hidden = false;
++  },
++
++  /**
++   * Hide the graphs container completely.
++   */
++  _hideGraphsPanel: function () {
++    $("#overview-pane").hidden = true;
++  },
++
++  /**
+    * Called when `devtools.theme` changes.
+    */
+   _onThemeChanged: function (_, theme) {
+     this.graphs.setTheme({ theme, redraw: true });
+   },
+ 
+   toString: () => "[object OverviewView]"
+ };
+@@ -356,24 +395,38 @@ let OverviewView = {
+  * stopping, or about to start/stop, and determines whether or not
+  * the polling for rendering the overview graphs needs to start or stop.
+  * Must be called with the OverviewView context.
+  *
+  * @param {function?} fn
+  * @return {function}
+  */
+ function OverviewViewOnStateChange (fn) {
+-  return function _onRecordingStateChange () {
++  return function _onRecordingStateChange (eventName, recording) {
+     let currentRecording = PerformanceController.getCurrentRecording();
+ 
+-    // All these methods require a recording to exist.
+-    if (!currentRecording) {
++    // All these methods require a recording to exist selected and
++    // from the event name, since there is a delay between starting
++    // a recording and changing the selection.
++    if (!currentRecording || !recording) {
+       return;
+     }
+ 
++    // If realtime rendering is not enabed (e10s not on), then
++    // show the disabled message, or the full graphs if the recording is completed
++    if (!this.isRealtimeRenderingEnabled()) {
++      if (recording.isRecording()) {
++        this._hideGraphsPanel();
++        // Abort, as we do not want to change polling status.
++        return;
++      } else {
++        this._showGraphsPanel(recording);
++      }
++    }
++
+     if (this.isRendering() && !currentRecording.isRecording()) {
+       this._stopPolling();
+     } else if (currentRecording.isRecording() && !this.isRendering()) {
+       this._startPolling();
+     }
+     if (fn) {
+       fn.apply(this, arguments);
+     }
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index b7b08d6..5e6e4cb 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -96,22 +96,42 @@
+ 
+ #performance-view toolbarbutton.record-button {
+   margin: 5px;
+   padding: 5px;
+   cursor: pointer;
+   text-shadow: none;
+ }
+ 
++#performance-view .realtime-message {
++  opacity: 0.5;
++  display: block;
++}
++
+ #performance-view toolbarbutton.record-button[checked],
+ #performance-view toolbarbutton.record-button[checked] {
+   color: var(--theme-selection-color);
+   background: var(--theme-selection-background);
+ }
+ 
++#performance-view .realtime-disabled-message,
++#performance-view .realtime-disabled-on-e10s-message {
++  display: none;
++}
++
++#performance-view[e10s="disabled"] .realtime-disabled-on-e10s-message {
++  display: block;
++  opacity: 0.5;
++
++}
++#performance-view[e10s="unsupported"] .realtime-disabled-message {
++  display: block;
++  opacity: 0.5;
++}
++
+ #details-pane-container .buffer-status-message,
+ #details-pane-container .buffer-status-message-full {
+   display: none;
+ }
+ 
+ #details-pane-container[buffer-status="in-progress"] .buffer-status-message {
+   display: block;
+   opacity: 0.5;
+-- 
+2.2.1
+
