@@ -1,0 +1,119 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 19 May 2015 15:06:59 -0700
+Subject: Bug 1165885 - Handle scenario when clearing out recordings while a console profile is recording. r=pbrosset
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 4d32266..41fbd5a 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -447,16 +447,21 @@ let PerformanceController = {
+ 
+   /**
+    * Fired when a recording model changes state.
+    *
+    * @param {string} state
+    * @param {RecordingModel} model
+    */
+   _onRecordingStateChange: function (state, model) {
++    // If we get a state change for a recording that isn't being tracked in the front,
++    // just ignore it. This can occur when stopping a profile via console that was cleared.
++    if (state !== "recording-starting" && this.getRecordings().indexOf(model) === -1) {
++      return;
++    }
+     switch (state) {
+       // Fired when a RecordingModel was just created from the front
+       case "recording-starting":
+         // When a recording is just starting, store it internally
+         this._recordings.push(model);
+         this.emit(EVENTS.RECORDING_WILL_START, model);
+         break;
+       // Fired when a RecordingModel has started recording
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 1218c0a..428e558 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -32,16 +32,17 @@ support-files =
+ [browser_perf-console-record-01.js]
+ [browser_perf-console-record-02.js]
+ [browser_perf-console-record-03.js]
+ [browser_perf-console-record-04.js]
+ [browser_perf-console-record-05.js]
+ [browser_perf-console-record-06.js]
+ [browser_perf-console-record-07.js]
+ [browser_perf-console-record-08.js]
++[browser_perf-console-record-09.js]
+ [browser_perf-data-massaging-01.js]
+ [browser_perf-data-samples.js]
+ [browser_perf-details-calltree-render.js]
+ [browser_perf-details-flamegraph-render.js]
+ [browser_perf-details-memory-calltree-render.js]
+ [browser_perf-details-memory-flamegraph-render.js]
+ [browser_perf-details-waterfall-render.js]
+ [browser_perf-details-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-09.js b/browser/devtools/performance/test/browser_perf-console-record-09.js
+new file mode 100644
+index 0000000..ece63f9
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-console-record-09.js
+@@ -0,0 +1,31 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that an error is not thrown when clearing out the recordings if there's
++ * an in-progress console profile.
++ */
++
++function spawnTest () {
++  loadFrameScripts();
++  let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
++  let win = panel.panelWin;
++  let { gFront, PerformanceController } = win;
++
++  info("Starting console.profile()...");
++  yield consoleProfile(win);
++  yield PerformanceController.clearRecordings();
++
++  info("Ending console.profileEnd()...");
++  consoleMethod("profileEnd");
++  // Wait for the front to receive the stopped event
++  yield once(gFront, "recording-stopped");
++
++  // Wait an extra tick or two since the above promise will be resolved
++  // the same time as _onRecordingStateChange, which should not cause any throwing
++  yield idleWait(100);
++  ok(true, "Stopping an in-progress console profile after clearing recordings does not throw.");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index acd5cc9..e5a7bdb 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -402,16 +402,22 @@ let OverviewView = {
+ function OverviewViewOnStateChange (fn) {
+   return function _onRecordingStateChange (eventName, recording) {
+     let currentRecording = PerformanceController.getCurrentRecording();
+ 
+     // All these methods require a recording to exist selected and
+     // from the event name, since there is a delay between starting
+     // a recording and changing the selection.
+     if (!currentRecording || !recording) {
++      // If no recording (this can occur when having a console.profile recording, and
++      // we do not stop it from the backend), and we are still rendering updates,
++      // stop that.
++      if (this.isRendering()) {
++        this._stopPolling();
++      }
+       return;
+     }
+ 
+     // If realtime rendering is not enabed (e10s not on), then
+     // show the disabled message, or the full graphs if the recording is completed
+     if (!this.isRealtimeRenderingEnabled()) {
+       if (recording.isRecording()) {
+         this._hideGraphsPanel();
+-- 
+2.2.1
+
