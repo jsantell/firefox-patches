@@ -1,0 +1,570 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 21 May 2015 02:28:56 -0700
+Subject: Bug 1167006 - Refactor marker details to not handle stack traces explicitly, and move logic into marker utils. Separate out some source link styles. r=vp
+
+diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
+index 07a3163..49764ca 100644
+--- a/browser/devtools/performance/views/details-waterfall.js
++++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -1,13 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
++const MARKER_DETAILS_WIDTH = 300;
++
+ /**
+  * Waterfall view containing the timeline markers, controlled by DetailsView.
+  */
+ let WaterfallView = Heritage.extend(DetailsSubview, {
+ 
+   observedPrefs: [
+     "hidden-markers"
+   ],
+@@ -19,16 +21,19 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+   rangeChangeDebounceTime: 75, // ms
+ 
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     DetailsSubview.initialize.call(this);
+ 
++    // TODO bug 1167093 save the previously set width, and ensure minimum width
++    $("#waterfall-details").setAttribute("width", MARKER_DETAILS_WIDTH);
++
+     this.waterfall = new Waterfall($("#waterfall-breakdown"), $("#waterfall-view"));
+     this.details = new MarkerDetails($("#waterfall-details"), $("#waterfall-view > splitter"));
+ 
+     this._onMarkerSelected = this._onMarkerSelected.bind(this);
+     this._onResize = this._onResize.bind(this);
+     this._onViewSource = this._onViewSource.bind(this);
+ 
+     this.waterfall.on("selected", this._onMarkerSelected);
+diff --git a/browser/devtools/shared/timeline/marker-details.js b/browser/devtools/shared/timeline/marker-details.js
+index 18ad866..3056ff7 100644
+--- a/browser/devtools/shared/timeline/marker-details.js
++++ b/browser/devtools/shared/timeline/marker-details.js
+@@ -1,16 +1,13 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-let { Ci } = require("chrome");
+-let WebConsoleUtils = require("devtools/toolkit/webconsole/utils").Utils;
+-
+ /**
+  * This file contains the rendering code for the marker sidebar.
+  */
+ 
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/shared/timeline/global", true);
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/shared/timeline/global", true);
+@@ -24,20 +21,22 @@ loader.lazyRequireGetter(this, "MarkerUtils",
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the view.
+  * @param nsIDOMNode splitter
+  *        The splitter node that the resize event is bound to.
+  */
+ function MarkerDetails(parent, splitter) {
+   EventEmitter.decorate(this);
++  this._onClick = this._onClick.bind(this);
+   this._document = parent.ownerDocument;
+   this._parent = parent;
+   this._splitter = splitter;
+   this._splitter.addEventListener("mouseup", () => this.emit("resize"));
++  this._parent.addEventListener("click", this._onClick);
+ }
+ 
+ MarkerDetails.prototype = {
+   /**
+    * Removes any node references from this view.
+    */
+   destroy: function() {
+     this.empty();
+@@ -52,126 +51,77 @@ MarkerDetails.prototype = {
+     this._parent.innerHTML = "";
+   },
+ 
+   /**
+    * Populates view with marker's details.
+    *
+    * @param object params
+    *        An options object holding:
+-   *        toolbox - The toolbox.
+    *        marker - The marker to display.
+    *        frames - Array of stack frame information; see stack.js.
+    */
+-  render: function({toolbox: toolbox, marker: marker, frames: frames}) {
++  render: function({ marker, frames }) {
+     this.empty();
+ 
+-    // UI for any marker
+-
+-    let title = MarkerUtils.DOM.buildTitle(this._document, marker);
+-    let duration = MarkerUtils.DOM.buildDuration(this._document, marker);
+-    let fields = MarkerUtils.DOM.buildFields(this._document, marker);
+-
+-    this._parent.appendChild(title);
+-    this._parent.appendChild(duration);
+-    fields.forEach(field => this._parent.appendChild(field));
++    let elements = [];
++    elements.push(MarkerUtils.DOM.buildTitle(this._document, marker));
++    elements.push(MarkerUtils.DOM.buildDuration(this._document, marker));
++    MarkerUtils.DOM.buildFields(this._document, marker).forEach(field => elements.push(field));
+ 
++    // Build a stack element -- and use the "startStack" label if
++    // we have both a start and endStack.
+     if (marker.stack) {
+-      let property = "timeline.markerDetail.stack";
+-      if (marker.endStack) {
+-        property = "timeline.markerDetail.startStack";
+-      }
+-      this.renderStackTrace({toolbox: toolbox, parent: this._parent, property: property,
+-                             frameIndex: marker.stack, frames: frames});
++      let type = marker.endStack ? "startStack" : "stack";
++      elements.push(MarkerUtils.DOM.buildStackTrace(this._document, {
++        frameIndex: marker.stack, frames, type
++      }));
+     }
+ 
+     if (marker.endStack) {
+-      this.renderStackTrace({toolbox: toolbox, parent: this._parent, property: "timeline.markerDetail.endStack",
+-                             frameIndex: marker.endStack, frames: frames});
++      elements.push(MarkerUtils.DOM.buildStackTrace(this._document, {
++        frameIndex: marker.endStack, frames, type: "endStack"
++      }));
+     }
++
++    elements.forEach(el => this._parent.appendChild(el));
+   },
+ 
+   /**
+-   * Render a stack trace.
+-   *
+-   * @param object params
+-   *        An options object with the following members:
+-   *        object toolbox - The toolbox.
+-   *        nsIDOMNode parent - The parent node holding the view.
+-   *        string property - String identifier for label's name.
+-   *        integer frameIndex - The index of the topmost stack frame.
+-   *        array frames - Array of stack frames.
++   * Handles clicking in the marker details view. Based on the target,
++   * can handle different actions -- only supporting view source links
++   * for the moment.
+    */
+-  renderStackTrace: function({toolbox: toolbox, parent: parent,
+-                              property: property, frameIndex: frameIndex,
+-                              frames: frames}) {
+-    let labelName = this._document.createElement("label");
+-    labelName.className = "plain marker-details-labelname";
+-    labelName.setAttribute("value", L10N.getStr(property));
+-    parent.appendChild(labelName);
+-
+-    let wasAsyncParent = false;
+-    while (frameIndex > 0) {
+-      let frame = frames[frameIndex];
+-      let url = frame.source;
+-      let displayName = frame.functionDisplayName;
+-      let line = frame.line;
+-
+-      // If the previous frame had an async parent, then the async
+-      // cause is in this frame and should be displayed.
+-      if (wasAsyncParent) {
+-        let asyncBox = this._document.createElement("hbox");
+-        let asyncLabel = this._document.createElement("label");
+-        asyncLabel.className = "devtools-monospace";
+-        asyncLabel.setAttribute("value", L10N.getFormatStr("timeline.markerDetail.asyncStack",
+-                                                           frame.asyncCause));
+-        asyncBox.appendChild(asyncLabel);
+-        parent.appendChild(asyncBox);
+-        wasAsyncParent = false;
+-      }
+-
+-      let hbox = this._document.createElement("hbox");
+-
+-      if (displayName) {
+-        let functionLabel = this._document.createElement("label");
+-        functionLabel.className = "devtools-monospace";
+-        functionLabel.setAttribute("value", displayName);
+-        hbox.appendChild(functionLabel);
+-      }
+-
+-      if (url) {
+-        let aNode = this._document.createElement("a");
+-        aNode.className = "waterfall-marker-location theme-link devtools-monospace";
+-        aNode.href = url;
+-        aNode.draggable = false;
+-        aNode.setAttribute("title", url);
+-
+-        let text = WebConsoleUtils.abbreviateSourceURL(url) + ":" + line;
+-        let label = this._document.createElement("label");
+-        label.setAttribute("value", text);
+-        aNode.appendChild(label);
+-        hbox.appendChild(aNode);
+-
+-        aNode.addEventListener("click", (event) => {
+-          event.preventDefault();
+-          this.emit("view-source", url, line);
+-        });
+-      }
+-
+-      if (!displayName && !url) {
+-        let label = this._document.createElement("label");
+-        label.setAttribute("value", L10N.getStr("timeline.markerDetail.unknownFrame"));
+-        hbox.appendChild(label);
+-      }
+-
+-      parent.appendChild(hbox);
++  _onClick: function (e) {
++    let data = findActionFromEvent(e.target);
++    if (!data) {
++      return;
++    }
+ 
+-      if (frame.asyncParent) {
+-        frameIndex = frame.asyncParent;
+-        wasAsyncParent = true;
+-      } else {
+-        frameIndex = frame.parent;
+-      }
++    if (data.action === "view-source") {
++      this.emit("view-source", data.url, data.line);
+     }
+   },
+ };
+ 
++/**
++ * Take an element from an event `target`, and ascend through
++ * the DOM, looking for an element with a `data-action` attribute. Return
++ * the parsed `data-action` value found, or null if none found before
++ * reaching the parent `container`.
++ *
++ * @param {Element} target
++ * @param {Element} container
++ * @return {object?}
++ */
++function findActionFromEvent (target, container) {
++  let el = target;
++  let action;
++  while (el !== container) {
++    if (action = el.getAttribute("data-action")) {
++      return JSON.parse(action);
++    }
++    el = el.parentNode;
++  }
++  return null;
++}
++
+ exports.MarkerDetails = MarkerDetails;
+diff --git a/browser/devtools/shared/timeline/marker-utils.js b/browser/devtools/shared/timeline/marker-utils.js
+index e308f1e..667db84 100644
+--- a/browser/devtools/shared/timeline/marker-utils.js
++++ b/browser/devtools/shared/timeline/marker-utils.js
+@@ -7,16 +7,18 @@
+  * This file contains utilities for creating elements for markers to be displayed,
+  * and parsing out the blueprint to generate correct values for markers.
+  */
+ 
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/shared/timeline/global", true);
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/shared/timeline/global", true);
++loader.lazyRequireGetter(this, "WebConsoleUtils",
++  "devtools/toolkit/webconsole/utils");
+ 
+ /**
+  * Returns the correct label to display for passed in marker, based
+  * off of the blueprints.
+  *
+  * @param {ProfileTimelineMarker} marker
+  * @return {string}
+  */
+@@ -165,9 +167,100 @@ const DOM = exports.DOM = {
+     labelName.className = "plain marker-details-labelname";
+     labelValue.className = "plain marker-details-labelvalue";
+     labelName.setAttribute("value", field);
+     labelValue.setAttribute("value", value);
+     hbox.appendChild(labelName);
+     hbox.appendChild(labelValue);
+     return hbox;
+   },
++
++  /**
++   * Builds a stack trace in an element.
++   *
++   * @param {Document} doc
++   * @param object params
++   *        An options object with the following members:
++   *        string type - String identifier for type of stack ("stack", "startStack" or "endStack")
++   *        integer frameIndex - The index of the topmost stack frame.
++   *        array frames - Array of stack frames.
++   * @return {Element}
++   */
++  buildStackTrace: function (doc, { type, frameIndex, frames }) {
++    let container = doc.createElement("vbox");
++    let labelName = doc.createElement("label");
++    labelName.className = "plain marker-details-labelname";
++    labelName.setAttribute("value", L10N.getStr(`timeline.markerDetail.${type}`));
++    container.appendChild(labelName);
++
++    let wasAsyncParent = false;
++    while (frameIndex > 0) {
++      let frame = frames[frameIndex];
++      let url = frame.source;
++      let displayName = frame.functionDisplayName;
++      let line = frame.line;
++
++      // If the previous frame had an async parent, then the async
++      // cause is in this frame and should be displayed.
++      if (wasAsyncParent) {
++        let asyncBox = doc.createElement("hbox");
++        let asyncLabel = doc.createElement("label");
++        asyncLabel.className = "devtools-monospace";
++        asyncLabel.setAttribute("value", L10N.getFormatStr("timeline.markerDetail.asyncStack",
++                                                           frame.asyncCause));
++        asyncBox.appendChild(asyncLabel);
++        container.appendChild(asyncBox);
++        wasAsyncParent = false;
++      }
++
++      let hbox = doc.createElement("hbox");
++
++      if (displayName) {
++        let functionLabel = doc.createElement("label");
++        functionLabel.className = "devtools-monospace";
++        functionLabel.setAttribute("value", displayName);
++        hbox.appendChild(functionLabel);
++      }
++
++      if (url) {
++        let aNode = doc.createElement("a");
++        aNode.className = "waterfall-marker-location devtools-source-link";
++        aNode.href = url;
++        aNode.draggable = false;
++        aNode.setAttribute("title", url);
++
++        let urlNode = doc.createElement("label");
++        urlNode.className = "filename";
++        urlNode.setAttribute("value", WebConsoleUtils.Utils.abbreviateSourceURL(url));
++        let lineNode = doc.createElement("label");
++        lineNode.className = "line-number";
++        lineNode.setAttribute("value", `:${line}`);
++
++        aNode.appendChild(urlNode);
++        aNode.appendChild(lineNode);
++        hbox.appendChild(aNode);
++
++        // Clicking here will bubble up to the parent,
++        // which handles the view source
++        aNode.setAttribute("data-action", JSON.stringify({
++          url, line, action: "view-source"
++        }));
++      }
++
++      if (!displayName && !url) {
++        let label = doc.createElement("label");
++        label.setAttribute("value", L10N.getStr("timeline.markerDetail.unknownFrame"));
++        hbox.appendChild(label);
++      }
++
++      container.appendChild(hbox);
++
++      if (frame.asyncParent) {
++        frameIndex = frame.asyncParent;
++        wasAsyncParent = true;
++      } else {
++        frameIndex = frame.parent;
++      }
++    }
++
++    return container;
++  },
+ };
+diff --git a/browser/themes/shared/devtools/common.css b/browser/themes/shared/devtools/common.css
+index 420bc1c..4f7e574 100644
+--- a/browser/themes/shared/devtools/common.css
++++ b/browser/themes/shared/devtools/common.css
+@@ -1,26 +1,27 @@
+ %if 0
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ %endif
+ 
+ :root {
+   font: message-box;
+-}
+-
+-.devtools-monospace {
+ %ifdef XP_MACOSX
+-  font-family: Menlo, monospace;
++  --monospace-font-family: Menlo, monospace;
+ %elifdef XP_WIN
+-  font-family: Consolas, monospace;
++  --monospace-font-family: Consolas, monospace;
+ %else
+-  font-family: monospace;
++  --monospace-font-family: monospace;
+ %endif
++}
++
++.devtools-monospace {
++  font-family: var(--monospace-font-family);
+ %if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_QT)
+   font-size: 80%;
+ %endif
+ }
+ 
+ /* Splitters */
+ .devtools-horizontal-splitter {
+   -moz-appearance: none;
+@@ -242,8 +243,47 @@
+ .devtools-eyedropper-panel {
+   pointer-events: none;
+   -moz-appearance: none;
+   width: 156px;
+   height: 120px;
+   background-color: transparent;
+   border: none;
+ }
++
++/* Links to source code, like displaying `myfile.js:45` */
++
++/*
++ * Unsure if :visited is necessary still
++ * @see http://bugzil.la/575675
++ */
++.devtools-source-link,
++.devtools-source-link:visited {
++  font-family: var(--monospace-font-family);
++  color: var(--theme-highlight-blue);
++  cursor: pointer;
++  white-space: nowrap;
++  display: flex;
++  align-self: flex-start;
++  text-decoration: none;
++  font-size: 11px;
++  width: 12em; /* probably should be changed for each tool */
++}
++
++.devtools-source-link:hover {
++  text-decoration: underline;
++}
++
++.devtools-source-link > .filename {
++  text-overflow: ellipsis;
++  text-align: end;
++  overflow: hidden;
++  margin: 2px 0px;
++  cursor: pointer;
++}
++
++.devtools-source-link > .line-number {
++  flex: none;
++  margin: 2px 0px;
++  cursor: pointer;
++}
++
++%include toolbars.inc.css
+diff --git a/browser/themes/shared/devtools/dark-theme.css b/browser/themes/shared/devtools/dark-theme.css
+index 4dac6e5..fee648b 100644
+--- a/browser/themes/shared/devtools/dark-theme.css
++++ b/browser/themes/shared/devtools/dark-theme.css
+@@ -61,25 +61,27 @@
+   color: var(--theme-selection-color);
+ }
+ 
+ .theme-bg-contrast,
+ .variable-or-property:not([overridden])[changed] {
+   background: var(--theme-contrast-background);
+ }
+ 
++.source-link,
+ .theme-link,
+ .cm-s-mozilla .cm-link {
+   color: var(--theme-highlight-blue);
+ }
+ 
+ /*
+  * FIXME: http://bugzil.la/575675 CSS links without :visited set cause assertion
+  * failures in debug builds.
+  */
++.source-link:visited,
+ .theme-link:visited,
+ .cm-s-mozilla .cm-link:visited,
+ .CodeMirror-Tern-type {
+   color: var(--theme-highlight-blue);
+ }
+ 
+ 
+ .theme-comment,
+@@ -397,10 +399,31 @@ div.CodeMirror span.eval-text {
+ 
+ .CodeMirror-hints,
+ .CodeMirror-Tern-tooltip {
+   box-shadow: 0 0 4px rgba(255, 255, 255, .3);
+   background-color: #0f171f;
+   color: var(--theme-body-color);
+ }
+ 
++.theme-link,
++.cm-s-mozilla .cm-link,
++.CodeMirror-Tern-type {
++  color: var(--theme-highlight-blue);
++}
++
++/*
++ * FIXME: http://bugzil.la/575675 CSS links without :visited set cause assertion
++ * failures in debug builds.
++ */
++.theme-link:visited,
++.cm-s-mozilla .cm-link:visited {
++.source-link > .filename {
++  text-overflow: ellipsis;
++  text-align: end;
++  overflow: hidden;
++}
++
++.source-link > .line-number {
++  flex: none;
++}
+ 
+ %include toolbars.inc.css
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 5e6e4cb..d5d338d 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -465,25 +465,16 @@
+ }
+ 
+ .waterfall-marker-container.selected > .waterfall-sidebar,
+ .waterfall-marker-container.selected > .waterfall-marker-item {
+   background-color: var(--theme-selection-background);
+   color: var(--theme-selection-color);
+ }
+ 
+-.waterfall-marker-location {
+-   color: -moz-nativehyperlinktext;
+-}
+-
+-.waterfall-marker-location:hover,
+-.waterfall-marker-location:focus {
+-   text-decoration: underline;
+-}
+-
+ #waterfall-details {
+   -moz-padding-start: 8px;
+   -moz-padding-end: 8px;
+   padding-top: 2vh;
+   overflow: auto;
+   min-width: 50px;
+ }
+ 
+-- 
+2.2.1
+
