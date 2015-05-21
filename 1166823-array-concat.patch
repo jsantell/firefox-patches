@@ -1,0 +1,83 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 20 May 2015 12:14:33 -0700
+Subject: Bug 1166823 - Merge arrays in performance's recording model one element at a time for performance increase and get over the Array.prototype.push.apply 500000 element limit. r=fitzgen
+
+diff --git a/browser/devtools/performance/modules/recording-model.js b/browser/devtools/performance/modules/recording-model.js
+index 5b11e28..1f013a6 100644
+--- a/browser/devtools/performance/modules/recording-model.js
++++ b/browser/devtools/performance/modules/recording-model.js
+@@ -330,24 +330,24 @@ RecordingModel.prototype = {
+ 
+     switch (eventName) {
+       // Accumulate timeline markers into an array. Furthermore, the timestamps
+       // do not have a zero epoch, so offset all of them by the start time.
+       case "markers": {
+         if (!config.withMarkers) { break; }
+         let [markers] = data;
+         RecordingUtils.offsetMarkerTimes(markers, this._timelineStartTime);
+-        Array.prototype.push.apply(this._markers, markers);
++        pushAll(this._markers, markers);
+         break;
+       }
+       // Accumulate stack frames into an array.
+       case "frames": {
+         if (!config.withMarkers) { break; }
+         let [, frames] = data;
+-        Array.prototype.push.apply(this._frames, frames);
++        pushAll(this._frames, frames);
+         break;
+       }
+       // Accumulate memory measurements into an array. Furthermore, the timestamp
+       // does not have a zero epoch, so offset it by the actor's start time.
+       case "memory": {
+         if (!config.withMemory) { break; }
+         let [currentTime, measurement] = data;
+         this._memory.push({
+@@ -367,21 +367,40 @@ RecordingModel.prototype = {
+       // do not have a zero epoch, and are microseconds instead of milliseconds,
+       // so offset all of them by the start time, also converting from µs to ms.
+       case "allocations": {
+         if (!config.withAllocations) { break; }
+         let [{ sites, timestamps, frames, counts }] = data;
+         let timeOffset = this._memoryStartTime * 1000;
+         let timeScale = 1000;
+         RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
+-        Array.prototype.push.apply(this._allocations.sites, sites);
+-        Array.prototype.push.apply(this._allocations.timestamps, timestamps);
+-        Array.prototype.push.apply(this._allocations.frames, frames);
+-        Array.prototype.push.apply(this._allocations.counts, counts);
++        pushAll(this._allocations.sites, sites);
++        pushAll(this._allocations.timestamps, timestamps);
++        pushAll(this._allocations.frames, frames);
++        pushAll(this._allocations.counts, counts);
+         break;
+       }
+     }
+   },
+ 
+   toString: () => "[object RecordingModel]"
+ };
+ 
++/**
++ * Push all elements of src array into dest array. Marker data will come in small chunks
++ * and add up over time, whereas allocation arrays can be > 500000 elements (and
++ * Function.prototype.apply throws if applying more than 500000 elements, which
++ * is what spawned this separate function), so iterate one element at a time.
++ * @see bug 1166823
++ * @see http://jsperf.com/concat-large-arrays
++ * @see http://jsperf.com/concat-large-arrays/2
++ *
++ * @param {Array} dest
++ * @param {Array} src
++ */
++function pushAll (dest, src) {
++  let length = src.length;
++  for (let i = 0; i < length; i++) {
++    dest.push(src[i]);
++  }
++}
++
+ exports.RecordingModel = RecordingModel;
+-- 
+2.2.1
+

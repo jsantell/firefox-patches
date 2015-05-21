@@ -1,12 +1,12 @@
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Sun, 10 May 2015 01:20:56 -0700
-Subject: Bug 1058898 - Enable e10s tests on the performance tool. r=ejpbruel
+Subject: Bug 1058898 - Enable e10s tests on the performance tool. r=vp
 
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index e31f2b2..4a43b7e 100644
+index 1218c0a..69afbab 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -1,11 +1,10 @@
+@@ -1,23 +1,23 @@
  [DEFAULT]
  tags = devtools
 -skip-if = e10s # Handle in Bug 1077464 for profiler
@@ -18,11 +18,30 @@ index e31f2b2..4a43b7e 100644
  
  # Commented out tests are profiler tests
  # that need to be moved over to performance tool
+ 
+-[browser_perf-aaa-run-first-leaktest.js]
++[browser_aaa-run-first-leaktest.js]
+ [browser_marker-utils.js]
+ [browser_markers-gc.js]
++skip-if = e10s # GC events seem unreliable in multiprocess
+ [browser_markers-parse-html.js]
+ [browser_markers-styles.js]
+ [browser_markers-timestamp.js]
+ [browser_perf-allocations-to-samples.js]
+ [browser_perf-categories-js-calltree.js]
+ [browser_perf-compatibility-01.js]
+ [browser_perf-compatibility-02.js]
+ [browser_perf-compatibility-03.js]
+diff --git a/browser/devtools/performance/test/browser_perf-aaa-run-first-leaktest.js b/browser/devtools/performance/test/browser_aaa-run-first-leaktest.js
+similarity index 100%
+rename from browser/devtools/performance/test/browser_perf-aaa-run-first-leaktest.js
+rename to browser/devtools/performance/test/browser_aaa-run-first-leaktest.js
 diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-02.js b/browser/devtools/performance/test/browser_perf-front-profiler-02.js
-index 04bf949..6606c06 100644
+index 04bf949..2f65a09 100644
 --- a/browser/devtools/performance/test/browser_perf-front-profiler-02.js
 +++ b/browser/devtools/performance/test/browser_perf-front-profiler-02.js
-@@ -6,32 +6,32 @@
+@@ -5,33 +5,37 @@
+  * Tests if the profiler connection front does not activate the built-in
   * profiler module if not necessary, and doesn't deactivate it when
   * a recording is stopped.
   */
@@ -30,6 +49,7 @@ index 04bf949..6606c06 100644
  let test = Task.async(function*() {
    let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
    let front = panel.panelWin.gFront;
++  loadFrameScripts();
  
 -  ok(!nsIProfilerModule.IsActive(),
 +  ok(!(yield isProfilerActive()),
@@ -51,48 +71,74 @@ index 04bf949..6606c06 100644
 +  ok((yield isProfilerActive()),
      "The built-in profiler module should still be active (2).");
  
-   yield teardown(panel);
- 
+-  yield teardown(panel);
+-
 -  ok(!nsIProfilerModule.IsActive(),
+-    "The built-in profiler module should have been automatically stoped.");
++  // Manually tear down so we can check profiler status
++  let tab = panel.target.tab;
++  yield panel._toolbox.destroy();
 +  ok(!(yield isProfilerActive()),
-     "The built-in profiler module should have been automatically stoped.");
++    "The built-in profiler module should no longer be active.");
++  yield removeTab(tab);
++  tab = null;
  
    finish();
  });
 diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-03.js b/browser/devtools/performance/test/browser_perf-front-profiler-03.js
-index c93c3a7..cf2959c 100644
+index c93c3a7..c1d4469 100644
 --- a/browser/devtools/performance/test/browser_perf-front-profiler-03.js
 +++ b/browser/devtools/performance/test/browser_perf-front-profiler-03.js
-@@ -17,17 +17,17 @@ let test = Task.async(function*() {
+@@ -11,23 +11,30 @@ let test = Task.async(function*() {
+   let firstFront = firstPanel.panelWin.gFront;
+ 
+   let activated = firstFront.once("profiler-activated");
+   yield firstFront.startRecording();
+   yield activated;
+ 
    let { panel: secondPanel } = yield initPerformance(SIMPLE_URL);
    let secondFront = secondPanel.panelWin.gFront;
++  loadFrameScripts();
  
    let alreadyActive = secondFront.once("profiler-already-active");
    yield secondFront.startRecording();
    yield alreadyActive;
  
-   yield teardown(firstPanel);
+-  yield teardown(firstPanel);
 -  ok(nsIProfilerModule.IsActive(),
++  // Manually teardown the tabs so we can check profiler status
++  let tab1 = firstPanel.target.tab;
++  let tab2 = secondPanel.target.tab;
++  yield firstPanel._toolbox.destroy();
++  yield removeTab(tab1);
 +  ok((yield isProfilerActive()),
      "The built-in profiler module should still be active.");
  
-   yield teardown(secondPanel);
+-  yield teardown(secondPanel);
 -  ok(!nsIProfilerModule.IsActive(),
+-    "The built-in profiler module should have been automatically stoped.");
++  yield secondPanel._toolbox.destroy();
 +  ok(!(yield isProfilerActive()),
-     "The built-in profiler module should have been automatically stoped.");
++    "The built-in profiler module should no longer be active.");
++  yield removeTab(tab2);
++  tab1 = tab2 = null;
  
    finish();
  });
 diff --git a/browser/devtools/performance/test/browser_perf-front-profiler-04.js b/browser/devtools/performance/test/browser_perf-front-profiler-04.js
-index 470fb5a..e496206 100644
+index 470fb5a..4d78381 100644
 --- a/browser/devtools/performance/test/browser_perf-front-profiler-04.js
 +++ b/browser/devtools/performance/test/browser_perf-front-profiler-04.js
-@@ -8,17 +8,17 @@
+@@ -5,20 +5,21 @@
+  * Tests if the built-in profiler module is not reactivated if no other
+  * consumer was using it over the remote debugger protocol, and ensures
+  * that the actor will work properly even in such cases (e.g. the Gecko Profiler
   * addon was installed and automatically activated the profiler module).
   */
  
  let test = Task.async(function*() {
    // Ensure the profiler is already running when the test starts.
++  loadFrameScripts();
    let ENTRIES = 1000000;
    let INTERVAL = 1;
    let FEATURES = ["js"];
@@ -106,7 +152,7 @@ index 470fb5a..e496206 100644
    let recording = yield firstFront.startRecording();
    yield firstAlreadyActive;
    ok(recording._profilerStartTime > 0, "The profiler was not restarted.");
-@@ -27,17 +27,17 @@ let test = Task.async(function*() {
+@@ -27,17 +28,17 @@ let test = Task.async(function*() {
    let secondFront = secondPanel.panelWin.gFront;
  
    let secondAlreadyActive = secondFront.once("profiler-already-active");
@@ -127,10 +173,11 @@ index 470fb5a..e496206 100644
    finish();
  });
 diff --git a/browser/devtools/performance/test/browser_perf-recording-notices-04.js b/browser/devtools/performance/test/browser_perf-recording-notices-04.js
-index 6a3cd64..25a419a 100644
+index 6a3cd64..0e0d2fa 100644
 --- a/browser/devtools/performance/test/browser_perf-recording-notices-04.js
 +++ b/browser/devtools/performance/test/browser_perf-recording-notices-04.js
-@@ -2,17 +2,17 @@
+@@ -1,23 +1,24 @@
+ /* Any copyright is dedicated to the Public Domain.
     http://creativecommons.org/publicdomain/zero/1.0/ */
  
  /**
@@ -138,22 +185,31 @@ index 6a3cd64..25a419a 100644
   * a class is assigned to the recording notices.
   */
  function spawnTest () {
-   // Make sure the profiler module is stopped so we can set a new buffer limit
+-  // Make sure the profiler module is stopped so we can set a new buffer limit
 -  nsIProfilerModule.StopProfiler();
-+  yield stopProfiler();
-   Services.prefs.setIntPref(PROFILER_BUFFER_SIZE_PREF, 1000);
- 
+-  Services.prefs.setIntPref(PROFILER_BUFFER_SIZE_PREF, 1000);
+-
    let { panel } = yield initPerformance(SIMPLE_URL, void 0, { TEST_MOCK_PROFILER_CHECK_TIMER: 10 });
    let { EVENTS, $, PerformanceController, PerformanceView } = panel.panelWin;
  
++  // Make sure the profiler module is stopped so we can set a new buffer limit
++  loadFrameScripts();
++  yield stopProfiler();
++  Services.prefs.setIntPref(PROFILER_BUFFER_SIZE_PREF, 1000);
++
    yield startRecording(panel);
  
    let percent = 0;
+   while (percent < 100) {
+     [,percent] = yield onceSpread(PerformanceView, EVENTS.UI_BUFFER_UPDATED);
+   }
+ 
+   let bufferUsage = PerformanceController.getCurrentRecording().getBufferUsage();
 diff --git a/browser/devtools/performance/test/browser_perf-shared-connection-03.js b/browser/devtools/performance/test/browser_perf-shared-connection-03.js
-index 4db576b..531fe8f 100644
+index 4db576b..27d18c1 100644
 --- a/browser/devtools/performance/test/browser_perf-shared-connection-03.js
 +++ b/browser/devtools/performance/test/browser_perf-shared-connection-03.js
-@@ -4,26 +4,26 @@
+@@ -4,26 +4,28 @@
  /**
   * Tests if the shared PerformanceActorsConnection can properly send requests.
   */
@@ -163,6 +219,8 @@ index 4db576b..531fe8f 100644
    let front = panel.panelWin.gFront;
  
 -  ok(!nsIProfilerModule.IsActive(),
++  loadFrameScripts();
++
 +  ok(!(yield isProfilerActive()),
      "The built-in profiler module should not have been automatically started.");
  
@@ -184,10 +242,11 @@ index 4db576b..531fe8f 100644
    finish();
  }
 diff --git a/browser/devtools/performance/test/browser_perf-ui-recording.js b/browser/devtools/performance/test/browser_perf-ui-recording.js
-index e876d94..afb1881 100644
+index e876d94..8ced7da 100644
 --- a/browser/devtools/performance/test/browser_perf-ui-recording.js
 +++ b/browser/devtools/performance/test/browser_perf-ui-recording.js
-@@ -7,25 +7,25 @@
+@@ -6,26 +6,27 @@
+  * in the UI.
   */
  let WAIT_TIME = 10;
  
@@ -195,6 +254,7 @@ index e876d94..afb1881 100644
    let { panel } = yield initPerformance(SIMPLE_URL);
    let { EVENTS, PerformanceController } = panel.panelWin;
    let front = panel.panelWin.gFront;
++  loadFrameScripts();
  
 -  ok(!nsIProfilerModule.IsActive(),
 +  ok(!(yield isProfilerActive()),
@@ -217,10 +277,11 @@ index e876d94..afb1881 100644
    finish();
  }
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index e44c7ad..e269281 100644
+index 4dd4e9a..0b75dc4 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
-@@ -9,18 +9,18 @@ let { Preferences } = Cu.import("resource://gre/modules/Preferences.jsm", {});
+@@ -8,20 +8,20 @@ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ let { Preferences } = Cu.import("resource://gre/modules/Preferences.jsm", {});
  let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
  let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
  let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
@@ -228,11 +289,12 @@ index e44c7ad..e269281 100644
  let { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
  let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
  let { merge } = devtools.require("sdk/util/object");
++let { generateUUID } = Cc["@mozilla.org/uuid-generator;1"].getService(Ci.nsIUUIDGenerator);
  let { getPerformanceActorsConnection, PerformanceFront } = devtools.require("devtools/performance/front");
-+let PMM = Cc["@mozilla.org/parentprocessmessagemanager;1"].getService(Ci.nsIMessageBroadcaster);
- 
+-
 -let nsIProfilerModule = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
  let TargetFactory = devtools.TargetFactory;
++
  let mm = null;
  
  const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
@@ -240,7 +302,28 @@ index e44c7ad..e269281 100644
  const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
  
  const MEMORY_SAMPLE_PROB_PREF = "devtools.performance.memory.sample-probability";
-@@ -88,19 +88,17 @@ registerCleanupFunction(() => {
+ const MEMORY_MAX_LOG_LEN_PREF = "devtools.performance.memory.max-log-length";
+@@ -66,37 +66,32 @@ let DEFAULT_PREFS = [
+ // Enable the new performance panel for all tests.
+ Services.prefs.setBoolPref("devtools.performance.enabled", true);
+ // Enable logging for all the tests. Both the debugger server and frontend will
+ // be affected by this pref.
+ Services.prefs.setBoolPref("devtools.debugger.log", false);
+ 
+ /**
+  * Call manually in tests that use frame script utils after initializing
+- * the tool. Must be called after initializing so we can detect
+- * whether or not `content` is a CPOW or not. Call after init but before navigating
+- * to different pages.
++ * the tool. Must be called after initializing (once we have a tab).
+  */
+ function loadFrameScripts () {
+   mm = gBrowser.selectedBrowser.messageManager;
+   mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
+ }
+ 
+ registerCleanupFunction(() => {
+   gDevTools.testing = false;
    info("finish() was called, cleaning up...");
  
    // Rollback any pref changes
@@ -248,11 +331,10 @@ index e44c7ad..e269281 100644
      Preferences.set(pref, DEFAULT_PREFS[pref]);
    });
  
-   // Make sure the profiler module is stopped when the test finishes.
+-  // Make sure the profiler module is stopped when the test finishes.
 -  nsIProfilerModule.StopProfiler();
 -
--  Cu.forceGC();
-+  return stopProfiler().then(() => Cu.forceGC());
+   Cu.forceGC();
  });
  
  function addTab(aUrl, aWindow) {
@@ -260,93 +342,101 @@ index e44c7ad..e269281 100644
  
    let deferred = Promise.defer();
    let targetWindow = aWindow || window;
-   let targetBrowser = targetWindow.gBrowser;
-@@ -376,16 +374,36 @@ function* startRecording(panel, options = {
-     "The current state is 'recording'.");
+@@ -572,8 +567,44 @@ function synthesizeProfileForTest(samples) {
+   });
  
-   ok(button.hasAttribute("checked"),
-     "The record button should still be checked.");
-   ok(!button.hasAttribute("locked"),
-     "The record button should not be locked.");
+   let uniqueStacks = new RecordingUtils.UniqueStacks();
+   return RecordingUtils.deflateThread({
+     samples: samples,
+     markers: []
+   }, uniqueStacks);
  }
- 
-+function sendProfilerCommand (method, args=[]) {
-+  let { promise, resolve } = Promise.defer();
-+  PMM.addMessageListener("devtools-profiler-command:response", function handler ({ data }) {
-+    if (data.method === method) {
-+      PMM.removeMessageListener("devtools-profiler-command:response", handler);
-+      resolve(data.result);
-+    }
-+  });
-+  PMM.broadcastAsyncMessage("devtools-profiler-command:request", { method, args });
-+  return promise;
-+}
 +
 +function isProfilerActive () {
 +  return sendProfilerCommand("IsActive");
 +}
 +
 +function stopProfiler () {
-+  return sendProfilerCommand("StopProfiler");
++  return Task.spawn(function*() {
++    let isActive = (yield sendProfilerCommand("IsActive")).isActive;
++    if (isActive) {
++      return sendProfilerCommand("StopProfiler");
++    }
++  });
 +}
 +
- function* stopRecording(panel, options = {
-   waitForOverview: true,
-   waitForStateChanged: true
- }) {
-   let win = panel.panelWin;
-   let clicked = panel.panelWin.PerformanceView.once(win.EVENTS.UI_STOP_RECORDING);
-   let willStop = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_WILL_STOP);
-   let hasStopped = panel.panelWin.PerformanceController.once(win.EVENTS.RECORDING_STOPPED);
-diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
-index f693cea..198de55 100644
---- a/toolkit/devtools/server/actors/profiler.js
-+++ b/toolkit/devtools/server/actors/profiler.js
-@@ -1,16 +1,17 @@
- /* This Source Code Form is subject to the terms of the Mozilla Public
-  * License, v. 2.0. If a copy of the MPL was not distributed with this
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- "use strict";
++function sendProfilerCommand (method, args=[]) {
++  let deferred = Promise.defer();
++
++  if (!mm) {
++    throw new Error("`loadFrameScripts()` must be called when using MessageManager.");
++  }
++
++  let id = generateUUID().toString();
++  mm.addMessageListener("devtools:test:profiler:response", handler);
++  mm.sendAsyncMessage("devtools:test:profiler", { method, args, id });
++
++  function handler ({ data }) {
++    if (id !== data.id) {
++      return;
++    }
++
++    mm.removeMessageListener("devtools:test:profiler:response", handler);
++    deferred.resolve(data.data);
++  }
++
++  return deferred.promise;
++}
+diff --git a/browser/devtools/shared/frame-script-utils.js b/browser/devtools/shared/frame-script-utils.js
+index aeee2a6..65dbd9b 100644
+--- a/browser/devtools/shared/frame-script-utils.js
++++ b/browser/devtools/shared/frame-script-utils.js
+@@ -6,16 +6,19 @@
+ const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
+ const { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ devtools.lazyImporter(this, "promise", "resource://gre/modules/Promise.jsm", "Promise");
+ devtools.lazyImporter(this, "Task", "resource://gre/modules/Task.jsm", "Task");
+ const loader = Cc["@mozilla.org/moz/jssubscript-loader;1"]
+             .getService(Ci.mozIJSSubScriptLoader);
+ let EventUtils = {};
+ loader.loadSubScript("chrome://marionette/content/EventUtils.js", EventUtils);
++devtools.lazyGetter(this, "nsIProfilerModule", () => {
++  return Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++});
  
- const {Cc, Ci, Cu, Cr} = require("chrome");
- const Services = require("Services");
- const DevToolsUtils = require("devtools/toolkit/DevToolsUtils.js");
-+const PMM = Cc["@mozilla.org/childprocessmessagemanager;1"].getService(Ci.nsISyncMessageSender);
- 
- let DEFAULT_PROFILER_OPTIONS = {
-   // When using the DevTools Performance Tools, this will be overridden
-   // by the pref `devtools.performance.profiler.buffer-size`.
-   entries: Math.pow(10, 7),
-   // When using the DevTools Performance Tools, this will be overridden
-   // by the pref `devtools.performance.profiler.sample-rate-khz`.
-   interval: 1,
-@@ -25,16 +26,26 @@ let DEFAULT_PROFILER_OPTIONS = {
-  */
- let gProfilerConsumers = 0;
- 
- loader.lazyGetter(this, "nsIProfilerModule", () => {
-   return Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+ addMessageListener("devtools:test:history", function ({ data }) {
+   content.history[data.direction]();
  });
  
- /**
-+ * Register a multiprocess observer to `devtools-profiler-command:request` to communicate
-+ * with chrome processes.
-+ * Used mostly for tests in multiprocess Firefox without requiring an RDP connection.
-+ */
-+PMM.addMessageListener("devtools-profiler-command:request", function ({ data: { method, args }}) {
-+  let result = nsIProfilerModule[method].apply(nsIProfilerModule, args || []);
-+  PMM.sendAsyncMessage("devtools-profiler-command:response", { method, result });
+ addMessageListener("devtools:test:navigate", function ({ data }) {
+   content.location = data.location;
+ });
+@@ -98,16 +101,25 @@ addMessageListener("devtools:test:xhr", Task.async(function* ({ data }) {
+   for (let request of requests) {
+     let response = yield promiseXHR(request);
+     responses.push(response);
+   }
+ 
+   sendAsyncMessage("devtools:test:xhr", responses);
+ }));
+ 
++addMessageListener("devtools:test:profiler", function ({ data: { method, args, id }}) {
++  let result = nsIProfilerModule[method](...args);
++  sendAsyncMessage("devtools:test:profiler:response", {
++    data: result,
++    id: id
++  });
 +});
 +
-+/**
-  * The profiler actor provides remote access to the built-in nsIProfiler module.
-  */
- function ProfilerActor() {
-   gProfilerConsumers++;
-   this._observedEvents = new Set();
- }
- 
- ProfilerActor.prototype = {
++
+ // To eval in content, look at `evalInDebuggee` in the head.js of canvasdebugger
+ // for an example.
+ addMessageListener("devtools:test:eval", function ({ data }) {
+   sendAsyncMessage("devtools:test:eval:response", {
+     value: content.eval(data.script),
+     id: data.id
+   });
+ });
 -- 
 2.2.1
 
