@@ -1,0 +1,1161 @@
+From dd1701585e2f1d1eaa181f3ad609b0fcd89c209e Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 22 May 2015 13:42:03 -0700
+Subject: [PATCH] Bug 1147143 - Inverted call trees should have total times
+ that add up to the sample leaf (implicitly implying (root) node costs), and
+ only sample leaves should have self costs. r=fitzgen,vp
+
+---
+ .../performance/modules/logic/frame-utils.js       |  32 ++++
+ .../performance/modules/logic/tree-model.js        | 168 ++++++++++++++++++++-
+ .../performance/modules/widgets/tree-view.js       | 119 ++++++++++++---
+ browser/devtools/performance/test/browser.ini      |   2 +
+ .../test/browser_profiler-frame-utils-01.js        |  11 +-
+ .../test/browser_profiler_tree-model-01.js         |   8 +-
+ .../test/browser_profiler_tree-model-05.js         | 107 +++++++------
+ .../test/browser_profiler_tree-model-08.js         | 139 +++++++++++++++++
+ .../test/browser_profiler_tree-view-10.js          | 151 ++++++++++++++++++
+ 9 files changed, 656 insertions(+), 81 deletions(-)
+ create mode 100644 browser/devtools/performance/test/browser_profiler_tree-model-08.js
+ create mode 100644 browser/devtools/performance/test/browser_profiler_tree-view-10.js
+
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index bc212f1..56ba866 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -239,16 +239,17 @@ exports.getOrAddInflatedFrame = function getOrAddInflatedFrame(cache, index, fra
+ function InflatedFrame(index, frameTable, stringTable, allocationsTable) {
+   const LOCATION_SLOT = frameTable.schema.location;
+   const OPTIMIZATIONS_SLOT = frameTable.schema.optimizations;
+   const LINE_SLOT = frameTable.schema.line;
+   const CATEGORY_SLOT = frameTable.schema.category;
+ 
+   let frame = frameTable.data[index];
+   let category = frame[CATEGORY_SLOT];
++  this.index = index;
+   this.location = stringTable[frame[LOCATION_SLOT]];
+   this.optimizations = frame[OPTIMIZATIONS_SLOT];
+   this.line = frame[LINE_SLOT];
+   this.column = undefined;
+   this.category = category;
+   this.metaCategory = category || CATEGORY_OTHER;
+   this.allocations = allocationsTable ? allocationsTable[index] : 0;
+   this.isContent = isContent(this);
+@@ -415,8 +416,39 @@ function isChromeScheme(location, i) {
+   default:
+     return false;
+   }
+ }
+ 
+ function isNumeric(c) {
+   return c >= CHAR_CODE_0 && c <= CHAR_CODE_9;
+ }
++
++/**
++ * Takes an observed stack of frameIndexes and checks to see if the passed
++ * in currentStack matches the same call history. currentStack can terminate
++ * before observedStack, as we check each caller one at time moving towards the root.
++ *
++ * [1,2,3] stack matches [1,2,3,4,5]
++ * [1,2,3] stack does not match [1,2]
++ * [1,2,3] stack does not match [1,3,4]
++ *
++ * @param {Array<number>} observedStack
++ * @param {Array<number>} currentStack
++ */
++function foundInObservedStack (observedStack, currentStack) {
++  let currentLength = currentStack.length;
++  let observedLength = observedStack.length;
++
++  // Abort in this simple case to save time
++  if (currentLength > observedLength) {
++    return false;
++  }
++
++  for (let i = 0; i < currentLength; i++) {
++    if (currentStack[i] !== observedStack[i]) {
++      return false;
++    }
++  }
++
++  return true;
++}
++exports.foundInObservedStack = foundInObservedStack;
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index fc1c5f8..f7a909e 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -138,16 +138,17 @@ ThreadNode.prototype = {
+ 
+     // Caches.
+     let inflatedFrameCache = FrameUtils.getInflatedFrameCache(frameTable);
+     let leafTable = Object.create(null);
+ 
+     let startTime = options.startTime || 0
+     let endTime = options.endTime || Infinity;
+     let flattenRecursion = options.flattenRecursion;
++    let invertTree = options.invertTree;
+ 
+     // Take the timestamp of the first sample as prevSampleTime. 0 is
+     // incorrect due to circular buffer wraparound. If wraparound happens,
+     // then the first sample will have an incorrect, large duration.
+     let prevSampleTime = samplesData[0][SAMPLE_TIME_SLOT];
+ 
+     // Reused options object passed to InflatedFrame.prototype.getFrameKey.
+     let mutableFrameKeyOptions = {
+@@ -175,16 +176,21 @@ ThreadNode.prototype = {
+ 
+       let sampleDuration = sampleTime - prevSampleTime;
+       let stackIndex = sample[SAMPLE_STACK_SLOT];
+       let calls = this.calls;
+       let prevCalls = this.calls;
+       let prevFrameKey;
+       let isLeaf = mutableFrameKeyOptions.isLeaf = true;
+ 
++      // Track the stack of samples via frameIndex, so we can count
++      // how many times different stacks occur in leaf nodes.
++      let stack = [];
++      let currentLeaf = null;
++
+       // Inflate the stack and build the FrameNode call tree directly.
+       //
+       // In the profiler data, each frame's stack is referenced by an index
+       // into stackTable.
+       //
+       // Each entry in stackTable is a pair [ prefixIndex, frameIndex ]. The
+       // prefixIndex is itself an index into stackTable, referencing the
+       // prefix of the current stack (that is, the younger frames). In other
+@@ -211,23 +217,30 @@ ThreadNode.prototype = {
+       // loop. This is important for performance as it avoids intermediate
+       // structures and multiple passes.
+       while (stackIndex !== null) {
+         let stackEntry = stacksData[stackIndex];
+         let frameIndex = stackEntry[STACK_FRAME_SLOT];
+ 
+         // Fetch the stack prefix (i.e. older frames) index.
+         stackIndex = stackEntry[STACK_PREFIX_SLOT];
++        mutableFrameKeyOptions.isRoot = stackIndex === null;
++
++        // Do not include the (root) node in this sample, as the costs of each frame
++        // will make it clear to differentiate (root)->B vs (root)->A->B
++        // when a tree is inverted, a revert of bug 1147604
++        if (invertTree && mutableFrameKeyOptions.isRoot) {
++          continue;
++        }
+ 
+         // Inflate the frame.
+         let inflatedFrame = getOrAddInflatedFrame(inflatedFrameCache, frameIndex, frameTable,
+                                                   stringTable, allocationsTable);
+ 
+         // Compute the frame key.
+-        mutableFrameKeyOptions.isRoot = stackIndex === null;
+         let frameKey = inflatedFrame.getFrameKey(mutableFrameKeyOptions);
+ 
+         // Leaf frames are never skipped and require self count and duration
+         // bookkeeping.
+         if (isLeaf) {
+           // Tabulate self count and duration for the leaf frame. The frameKey
+           // is never empty for a leaf frame.
+           if (selfCount[frameKey] === undefined) {
+@@ -236,36 +249,54 @@ ThreadNode.prototype = {
+           }
+           selfCount[frameKey]++;
+           selfDuration[frameKey] += sampleDuration;
+         } else {
+           // An empty frame key means this frame should be skipped.
+           if (frameKey === "") {
+             continue;
+           }
++
++          // Build a stack of callers for this sample to calculate
++          // costs in an inverted tree
++          stack.push(frameIndex);
+         }
+ 
+         // If we shouldn't flatten the current frame into the previous one, advance a
+         // level in the call tree.
+         if (!flattenRecursion || frameKey !== prevFrameKey) {
+           calls = prevCalls;
+         }
+ 
+         let frameNode = getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame,
+                                           mutableFrameKeyOptions.isMetaCategoryOut,
+                                           leafTable);
+ 
+         frameNode._countSample(prevSampleTime, sampleTime, inflatedFrame.optimizations,
+                                stringTable);
+ 
++        if (isLeaf) {
++          currentLeaf = frameNode;
++        }
++
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
+       }
+ 
++      // Count the stack found in the sample for the
++      // current leaf
++      if (currentLeaf) {
++        currentLeaf.addStack(stack);
++        // Let currentLeaf take ownership of stack, and create a new one
++        // for the next leaf node.
++        stack = [];
++        currentLeaf = null;
++      }
++
+       this.duration += sampleDuration;
+       this.samples++;
+       prevSampleTime = sampleTime;
+     }
+   },
+ 
+   /**
+    * Uninverts the call tree after its having been built.
+@@ -349,33 +380,36 @@ ThreadNode.prototype = {
+ };
+ 
+ /**
+  * A function call node in a tree.
+  *
+  * @param string frameKey
+  *        The key associated with this frame. The key determines identity of
+  *        the node.
++ * @param number index
++ *        The index of this frame in the original profiler data's frame table
+  * @param string location
+  *        The location of this function call. Note that this isn't sanitized,
+  *        so it may very well (not?) include the function name, url, etc.
+  * @param number line
+  *        The line number inside the source containing this function call.
+  * @param number category
+  *        The category type of this function call ("js", "graphics" etc.).
+  * @param number allocations
+  *        The number of memory allocations performed in this frame.
+  * @param number isContent
+  *        Whether this frame is content.
+  * @param boolean isMetaCategory
+  *        Whether or not this is a platform node that should appear as a
+  *        generalized meta category or not.
+  */
+-function FrameNode(frameKey, { location, line, category, allocations, isContent }, isMetaCategory) {
++function FrameNode(frameKey, { index, location, line, category, allocations, isContent }, isMetaCategory) {
+   this.key = frameKey;
++  this.index = index;
+   this.location = location;
+   this.line = line;
+   this.category = category;
+   this.allocations = allocations;
+   this.samples = 0;
+   this.duration = 0;
+   this.calls = [];
+   this.isContent = isContent;
+@@ -449,16 +483,114 @@ FrameNode.prototype = {
+    *         The computed { name, file, url, line } properties for this
+    *         function call.
+    */
+   getInfo: function() {
+     return this._data || this._computeInfo();
+   },
+ 
+   /**
++   * Takes an array of frame indexes that occurred when this
++   * frame was a leaf node. Stores a reference and records a counter
++   * for that stack.
++   *
++   * Assume we have A -> B -> C in a sample, and this frame, a leaf node, is C.
++   * The passed in stack would be:
++   * [B, A]
++   *
++   * The stack elements are frame indexes, so if A=0, B=1, C=2, we'd have:
++   * [1, 0]
++   *
++   * @param {Array<number>} stack
++   */
++  addStack: function(stack) {
++    if (!this._observedStacks) {
++      this._observedStacks = [];
++    }
++    if (!this._observedStackCount) {
++      this._observedStackCount = [];
++    }
++
++    let stackIndex = indexOfEqualArray(this._observedStacks, stack);
++
++    if (stackIndex === -1) {
++      stackIndex = this._observedStacks.length;
++      this._observedStacks.push(stack);
++    }
++
++    let currentCount = this._observedStackCount[stackIndex];
++    this._observedStackCount[stackIndex] = (currentCount || 0) + 1;
++  },
++
++  /**
++   * Based on a stack of ordered callers (most recent to oldest) by frame index,
++   * determine how many times this frame node was the leaf node while matching
++   * the stack history.
++   *
++   * If we have an inverted tree represented by
++   * +--total--+--self--+--tree-------------+
++   * |   50%   |   50%  |  C
++   * |   25%   |   0    |  -> B
++   * |   25%   |   0    |     -> A
++   * |   25%   |   0    |  -> A'
++   * |
++   * |   25%   |   25%  |  B
++   * |   25%   |   0    |  -> A
++   *
++   * |   25%   |   25%  |  D
++   * |   25%   |   0    |  -> B
++   * |   25%   |   0    |     -> A
++   *
++   * And this leaf node is "C". The other frame nodes pass in their stack
++   * to determine how many times this stack existed while C was a leaf node. We are
++   * only looking at the branch where "C" is the leaf.
++   *
++   * When B frame is trying to determine its total cost, it'll call C frame's `getCallerPercentByStack`,
++   * passing in it's current stack, being:
++   * [B]
++   * Which matches one of C's internal stacks in `this._observedStacks`, being [B, A], returning
++   * how many times that stack was observed divided by C's sample count.
++   *
++   * When A attempts the same, the stack passed in is
++   * [B, A]
++   * Which matches the same observed stack in `this._observedStacks` as B did, [B, A].
++   *
++   * For A', we have a different stack passed in:
++   * [A]
++   *
++   * Which matches a different observed stack, [A], getting a different observed count.
++   *
++   * All elements in these stacks are frameIndexes (numbers), not letters, this
++   * is just for illustration.
++   *
++   * @param {Array<number>} stack
++   * @return {?number}
++   */
++  getCallerPercentByStack: function(stack) {
++    let observed;
++    let count = 0;
++
++    // Iterate over to find all observedStacks that this partial stack matches
++    // and sum up the call counts
++    for (let i = 0; i < this._observedStacks.length; i++) {
++      observed = this._observedStacks[i];
++      if (FrameUtils.foundInObservedStack(observed, stack)) {
++        count += this._observedStackCount[i];
++      }
++    }
++
++    // If we found a stack
++    if (count != void 0) {
++      return count / this.samples;
++    } else {
++      throw new Error(`No stack history found for FrameNode: ${this.key}`);
++    }
++  },
++
++  /**
+    * Parses the raw location of this function call to retrieve the actual
+    * function name and source url.
+    */
+   _computeInfo: function() {
+     // "EnterJIT" pseudoframes are special, not actually on the stack.
+     if (this.location == "EnterJIT") {
+       this.category = CATEGORY_JIT;
+     }
+@@ -497,8 +629,40 @@ FrameNode.prototype = {
+    */
+   getOptimizations: function () {
+     if (!this._optimizations) {
+       return null;
+     }
+     return new JITOptimizations(this._optimizations, this._stringTable);
+   }
+ };
++
++/**
++ * Takes a source array of arrays and another array, `matcher`,
++ * and iterates over the array of arrays to attempt to find
++ * the index of the `matcher` in `arrays`.
++ *
++ * @param {Array<Array>} arrays
++ * @param {Array}
++ * @return {number}
++ */
++function indexOfEqualArray (arrays, matcher) {
++  let length = arrays.length;
++  let valid = false;
++  for (let i = 0; i < length; i++) {
++    let array = arrays[i];
++    let l = array.length;
++    if (l !== matcher.length) {
++      continue;
++    }
++    valid = true;
++    for (let j = 0; j < l; j++) {
++      if (array[j] !== matcher[j]) {
++        valid = false;
++      }
++    }
++
++    if (valid) {
++      return i;
++    }
++  }
++  return -1;
++}
+diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
+index 545697b..0e187f7 100644
+--- a/browser/devtools/performance/modules/widgets/tree-view.js
++++ b/browser/devtools/performance/modules/widgets/tree-view.js
+@@ -16,19 +16,24 @@ const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeI
+ const MILLISECOND_UNITS = L10N.getStr("table.ms");
+ const PERCENTAGE_UNITS = L10N.getStr("table.percentage");
+ const URL_LABEL_TOOLTIP = L10N.getStr("table.url.tooltiptext");
+ const CALL_TREE_INDENTATION = 16; // px
+ 
+ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
+   let dataA = frameA.getDisplayedData();
+   let dataB = frameB.getDisplayedData();
+-  return this.inverted
+-    ? (dataA.selfPercentage < dataB.selfPercentage ? 1 : -1)
+-    : (dataA.samples < dataB.samples ? 1 : -1);
++  if (this.inverted) {
++    // Invert trees, sort by selfPercentage, and then totalPercentage
++    if (dataA.selfPercentage === dataB.selfPercentage) {
++      return dataA.totalPercentage < dataB.totalPercentage ? 1 : -1;
++    }
++    return dataA.selfPercentage < dataB.selfPercentage ? 1 : - 1;
++  }
++  return dataA.samples < dataB.samples ? 1 : -1;
+ };
+ 
+ const DEFAULT_AUTO_EXPAND_DEPTH = 3; // depth
+ const DEFAULT_VISIBLE_CELLS = {
+   duration: true,
+   percentage: true,
+   allocations: false,
+   selfDuration: true,
+@@ -240,17 +245,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+     cell.setAttribute("value", count || 0);
+     return cell;
+   },
+   _createSamplesCell: function(count) {
+     let cell = this.document.createElement("label");
+     cell.className = "plain call-tree-cell";
+     cell.setAttribute("type", "samples");
+     cell.setAttribute("crop", "end");
+-    cell.setAttribute("value", count || "");
++    cell.setAttribute("value", count || 0);
+     return cell;
+   },
+   _createFunctionCell: function(arrowNode, frameName, frameInfo, frameLevel) {
+     let cell = this.document.createElement("hbox");
+     cell.className = "call-tree-cell";
+     cell.style.MozMarginStart = (frameLevel * CALL_TREE_INDENTATION) + "px";
+     cell.setAttribute("type", "function");
+     cell.appendChild(arrowNode);
+@@ -334,46 +339,92 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   getDisplayedData: function() {
+     if (this._cachedDisplayedData) {
+       return this._cachedDisplayedData;
+     }
+ 
+     let data = this._cachedDisplayedData = Object.create(null);
+     let frameInfo = this.frame.getInfo();
+ 
+-    // Self/total duration.
+-    if (this.visibleCells.duration) {
+-      data.totalDuration = this.frame.duration;
+-    }
+-    if (this.visibleCells.selfDuration) {
+-      data.selfDuration = this.root.frame.selfDuration[this.frame.key];
+-    }
+-
+-    // Self/total samples percentage.
+-    if (this.visibleCells.percentage) {
+-      data.totalPercentage = this.frame.samples / this.root.frame.samples * 100;
+-    }
+-    if (this.visibleCells.selfPercentage) {
+-      data.selfPercentage = this.root.frame.selfCount[this.frame.key] / this.root.frame.samples * 100;
++    /**
++     * When inverting call tree, the costs and times are dependent on position
++     * in the tree. We must only count leaf nodes with self cost, and total costs
++     * dependent on how many times the leaf node was found with a full stack path.
++     *
++     *   Total |  Self | Calls | Function
++     * ============================================================================
++     *  100%   |  100% |   100 | ▼ C
++     *   50%   |   0%  |    50 |   ▼ B
++     *   50%   |   0%  |    50 |     ▼ A
++     *   50%   |   0%  |    50 |   ▼ B
++     *
++     * Every instance of a `CallView` represents a row in the call tree. The same
++     * parent node is used for all rows.
++     */
++
++    // Leaf nodes in an inverted tree don't have to do anything special.
++    // Level 0 is our fake root, so level 1 is our top level "leaf frames".
++    let isLeaf = this._level === 0;
++
++    if (this.inverted && !isLeaf && this.parent != null) {
++      let { stack, frame: leafFrame } = this._getLeafAndStack();
++      let percentOfLeafCalls = leafFrame.getCallerPercentByStack(stack);
++
++      // Self/total duration.
++      if (this.visibleCells.duration) {
++        data.totalDuration = leafFrame.duration * percentOfLeafCalls;
++      }
++      if (this.visibleCells.selfDuration) {
++        data.selfDuration = 0;
++      }
++
++      // Self/total samples percentage.
++      if (this.visibleCells.percentage) {
++        data.totalPercentage = leafFrame.samples / this.root.frame.samples * 100 * percentOfLeafCalls;
++      }
++      if (this.visibleCells.selfPercentage) {
++        data.selfPercentage = 0;
++      }
++
++      // Raw samples.
++      if (this.visibleCells.samples) {
++        data.samples = this.frame.samples;
++      }
++    } else {
++      // Self/total duration.
++      if (this.visibleCells.duration) {
++        data.totalDuration = this.frame.duration;
++      }
++      if (this.visibleCells.selfDuration) {
++        data.selfDuration = this.root.frame.selfDuration[this.frame.key];
++      }
++
++      // Self/total samples percentage.
++      if (this.visibleCells.percentage) {
++        data.totalPercentage = this.frame.samples / this.root.frame.samples * 100;
++      }
++      if (this.visibleCells.selfPercentage) {
++        data.selfPercentage = this.root.frame.selfCount[this.frame.key] / this.root.frame.samples * 100;
++      }
++
++      // Raw samples.
++      if (this.visibleCells.samples) {
++        data.samples = this.frame.samples;
++      }
+     }
+ 
+     // Self/total allocations count.
+     if (this.visibleCells.allocations) {
+       let childrenAllocations = this.frame.calls.reduce((acc, node) => acc + node.allocations, 0);
+       data.totalAllocations = this.frame.allocations + childrenAllocations;
+     }
+     if (this.visibleCells.selfAllocations) {
+       data.selfAllocations = this.frame.allocations;
+     }
+ 
+-    // Raw samples.
+-    if (this.visibleCells.samples) {
+-      data.samples = this.frame.samples;
+-    }
+-
+     // Frame name (function location or some meta information).
+     data.name = frameInfo.isMetaCategory
+       ? frameInfo.categoryData.label
+       : frameInfo.functionName || "";
+ 
+     data.tooltiptext = frameInfo.isMetaCategory
+       ? frameInfo.categoryData.label
+       : this.frame.location || "";
+@@ -395,10 +446,30 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+ 
+   /**
+    * Handler for the "click" event on the url node of this call view.
+    */
+   _onUrlClick: function(e) {
+     e.preventDefault();
+     e.stopPropagation();
+     this.root.emit("link", this);
+-  }
++  },
++
++  /**
++   * Find the leaf FrameNode for this tree item in an inverted tree (so the item
++   * below root, and called by this tree item)
++   *
++   * @return {FrameNode}
++   */
++  _getLeafAndStack: function() {
++    let nextItem = this;
++    let stack = [];
++    while (nextItem.parent !== this.root) {
++      stack.push(nextItem.frame.index);
++      nextItem = nextItem.parent;
++    }
++    let frame = nextItem.frame;
++    // Reverse the stack because tree-model creates it from leaf to root, and
++    // here we start somewhere between and work our way towards the leaf.
++    stack.reverse();
++    return { frame, stack };
++  },
+ });
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 6f8f20f..3a1d518 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -126,23 +126,25 @@ skip-if = e10s # GC events seem unreliable in multiprocess
+ [browser_profiler_tree-frame-node.js]
+ [browser_profiler_tree-model-01.js]
+ [browser_profiler_tree-model-02.js]
+ [browser_profiler_tree-model-03.js]
+ [browser_profiler_tree-model-04.js]
+ [browser_profiler_tree-model-05.js]
+ [browser_profiler_tree-model-06.js]
+ [browser_profiler_tree-model-07.js]
++[browser_profiler_tree-model-08.js]
+ [browser_profiler_tree-view-01.js]
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
+ [browser_profiler_tree-view-08.js]
+ [browser_profiler_tree-view-09.js]
++[browser_profiler_tree-view-10.js]
+ [browser_profiler-frame-utils-01.js]
+ [browser_timeline-blueprint.js]
+ [browser_timeline-filters.js]
+ [browser_timeline-waterfall-background.js]
+ [browser_timeline-waterfall-generic.js]
+ [browser_timeline-waterfall-sidebar.js]
+diff --git a/browser/devtools/performance/test/browser_profiler-frame-utils-01.js b/browser/devtools/performance/test/browser_profiler-frame-utils-01.js
+index a72cf19..ffe3db0 100644
+--- a/browser/devtools/performance/test/browser_profiler-frame-utils-01.js
++++ b/browser/devtools/performance/test/browser_profiler-frame-utils-01.js
+@@ -31,17 +31,17 @@ const CHROME_LOCATIONS = [
+   { location: "chrome://browser/content/content.js", line: 456, column: 123 },
+   "setTimeout_timer (resource://gre/foo.js:123:434)",
+   "hello/<.world (jar:file://Users/mcurie/Dev/jetpacks.js)",
+   "hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)",
+   "EnterJIT",
+ ].map(argify);
+ 
+ function test() {
+-  const { isContent, parseLocation } = devtools.require("devtools/performance/frame-utils");
++  const { foundInObservedStack, isContent, parseLocation } = devtools.require("devtools/performance/frame-utils");
+ 
+   for (let frame of CONTENT_LOCATIONS) {
+     ok(isContent.apply(null, frameify(frame)), `${frame[0]} should be considered a content frame.`);
+   }
+ 
+   for (let frame of CHROME_LOCATIONS) {
+     ok(!isContent.apply(null, frameify(frame)), `${frame[0]} should not be considered a content frame.`);
+   }
+@@ -81,16 +81,25 @@ function test() {
+ 
+   for (let i = 0; i < PARSED_CHROME.length; i++) {
+     let parsed = parseLocation.apply(null, CHROME_LOCATIONS[i]);
+     for (let j = 0; j < FIELDS.length; j++) {
+       is(parsed[FIELDS[j]], PARSED_CHROME[i][j], `${CHROME_LOCATIONS[i]} was parsed to correct ${FIELDS[j]}`);
+     }
+   }
+ 
++  // foundInObservedStack()
++
++  ok(foundInObservedStack([1,2,3,4,5], [1,2,3]),
++    "foundInObservedStack() identifies a substack that matches");
++  ok(!foundInObservedStack([1,2], [1,2,3]),
++    "foundInObservedStack() fails if substack matches, but longer than observed stack");
++  ok(!foundInObservedStack([1,3,4], [1,2,3]),
++    "foundInObservedStack() fails if stack histories do not match");
++
+   finish();
+ }
+ 
+ /**
+  * Takes either a string or an object and turns it into an array that
+  * parseLocation.apply expects.
+  */
+ function argify (val) {
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-model-01.js b/browser/devtools/performance/test/browser_profiler_tree-model-01.js
+index ef9de0f..5ad6c0c7 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-model-01.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-model-01.js
+@@ -124,24 +124,18 @@ let gThread = synthesizeProfileForTest([{
+     { location: "B" },
+     { location: "D" }
+   ]
+ }, {
+   time: 5 + 6 + 7,
+   frames: [
+     { location: "(root)" },
+     { location: "A" },
+-    { location: "E" },
+-    { location: "F" }
++    { location: "C" },
+   ]
+ }, {
+   time: 20,
+   frames: [
+     { location: "(root)" },
+     { location: "A" },
+     { location: "B" },
+-    { location: "C" },
+-    { location: "D" },
+-    { location: "E" },
+-    { location: "F" },
+-    { location: "G" }
+   ]
+ }]);
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-model-05.js b/browser/devtools/performance/test/browser_profiler_tree-model-05.js
+index b520c0f..acd8729 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-model-05.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-model-05.js
+@@ -1,79 +1,92 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if an inverted call tree model can be correctly computed from a samples
+  * array.
+  */
+ 
+-let time = 1;
++function test() {
++  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
++
++  let root = new ThreadNode(gThread, { invertTree: true });
++
++  is(root.calls.length, 3,
++     "Should get the 3 youngest frames, not the 1 oldest frame");
++
++  /**
++   * Expected Tree
++   * +--total--+--self--+--tree-------------+
++   * |   50%   |   50%  |  C
++   * |   25%   |   0    |  -> B
++   * |   25%   |   0    |     -> A
++   * |   25%   |   0    |  -> A
++   *
++   * |   25%   |   25%  |  B
++   * |   25%   |   0    |  -> A
++   *
++   * |   25%   |   25%  |  D
++   * |   25%   |   0    |  -> B
++   * |   25%   |   0    |     -> A
++   */
++
++  let C = getFrameNodePath(root, "C");
++  ok(C, "Should have C as a child of the root.");
++
++  is(C.calls.length, 2, "Should have 2 frames that called C.");
++  ok(getFrameNodePath(C, "B"), "B called C.");
++  ok(getFrameNodePath(C, "A"), "A called C.");
++
++  is(getFrameNodePath(C, "B").calls.length, 1);
++  ok(getFrameNodePath(C, "B > A"), "A called B called C");
++  is(getFrameNodePath(C, "A").calls.length, 0);
++
++  let B = getFrameNodePath(root, "B");
++  ok(B, "Should have B as a child of the root.");
++  is(B.calls.length, 1, "Should have 1 frame that called B directly.");
++  ok(getFrameNodePath(B, "A"), "A called B.");
++  is(getFrameNodePath(B, "A").calls.length, 0);
++
++  let D = getFrameNodePath(root, "D");
++  ok(D, "Should have D as a child of the root.");
++
++  is(D.calls.length, 1, "Should have 1 frame that called D.");
++  ok(getFrameNodePath(D, "B"), "B called D.");
++
++  is(getFrameNodePath(D, "B").calls.length, 1);
++  ok(getFrameNodePath(D, "B > A"), "A called B called D");
++
++  finish();
++}
+ 
+ let gThread = synthesizeProfileForTest([{
+-  time: time++,
++  time: 5,
+   frames: [
+     { location: "(root)" },
+     { location: "A" },
+     { location: "B" },
+     { location: "C" }
+   ]
+ }, {
+-  time: time++,
++  time: 10,
+   frames: [
+     { location: "(root)" },
+     { location: "A" },
+-    { location: "D" },
+-    { location: "C" }
++    { location: "B" },
++    { location: "D" }
+   ]
+ }, {
+-  time: time++,
++  time: 15,
+   frames: [
+     { location: "(root)" },
+     { location: "A" },
+-    { location: "E" },
+-    { location: "C" }
+-  ],
++    { location: "C" },
++  ]
+ }, {
+-  time: time++,
++  time: 20,
+   frames: [
+     { location: "(root)" },
+     { location: "A" },
+     { location: "B" },
+-    { location: "F" }
+   ]
+ }]);
+-
+-function test() {
+-  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+-
+-  let root = new ThreadNode(gThread, { invertTree: true });
+-
+-  is(root.calls.length, 2,
+-     "Should get the 2 youngest frames, not the 1 oldest frame");
+-
+-  let C = getFrameNodePath(root, "C");
+-  ok(C, "Should have C as a child of the root.");
+-
+-  is(C.calls.length, 3,
+-     "Should have 3 frames that called C.");
+-  ok(getFrameNodePath(C, "B"), "B called C.");
+-  ok(getFrameNodePath(C, "D"), "D called C.");
+-  ok(getFrameNodePath(C, "E"), "E called C.");
+-
+-  is(getFrameNodePath(C, "B").calls.length, 1);
+-  ok(getFrameNodePath(C, "B > A"), "A called B called C");
+-  is(getFrameNodePath(C, "D").calls.length, 1);
+-  ok(getFrameNodePath(C, "D > A"), "A called D called C");
+-  is(getFrameNodePath(C, "E").calls.length, 1);
+-  ok(getFrameNodePath(C, "E > A"), "A called E called C");
+-
+-  let F = getFrameNodePath(root, "F");
+-  ok(F, "Should have F as a child of the root.");
+-
+-  is(F.calls.length, 1);
+-  ok(getFrameNodePath(F, "B"), "B called F");
+-
+-  is(getFrameNodePath(F, "B").calls.length, 1);
+-  ok(getFrameNodePath(F, "B > A"), "A called B called F");
+-
+-  finish();
+-}
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-model-08.js b/browser/devtools/performance/test/browser_profiler_tree-model-08.js
+new file mode 100644
+index 0000000..b48773d
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_profiler_tree-model-08.js
+@@ -0,0 +1,139 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that FrameNode leaves store observed stacks, and can calculate percentage
++ * of stacks observed based off of a partial stack per leaf node.
++ */
++
++function test() {
++  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
++
++  let root = new ThreadNode(gThread, { invertTree: true });
++
++  /**
++   * Samples
++   *
++   * A->C
++   * A->B
++   * A->B->C x4
++   * A->B->D x4
++   *
++   * Expected Tree
++   * +--total--+--self--+--tree-------------+
++   * |   50%   |   50%  |  C
++   * |   40%   |   0    |  -> B
++   * |   30%   |   0    |     -> A
++   * |   10%   |   0    |  -> A
++   *
++   * |   10%   |   10%  |  B
++   * |   10%   |   0    |  -> A
++   *
++   * |   40%   |   40%  |  D
++   * |   40%   |   0    |  -> B
++   * |   40%   |   0    |     -> A
++   *
++   */
++
++  let TOTAL_SAMPLES = 10;
++  let D = getFrameNodePath(root, "D");
++  let C = getFrameNodePath(root, "C");
++  let B = getFrameNodePath(root, "B");
++  let A = getFrameNodePath(B, "A");
++  // We're testing the percent per leaf node, so get a constant
++  // to convert that percent per leaf node into total tree percent
++  let D_SAMPLES = D.samples / TOTAL_SAMPLES;
++  let C_SAMPLES = C.samples / TOTAL_SAMPLES;
++  let B_SAMPLES = B.samples / TOTAL_SAMPLES;
++
++  is(C.getCallerPercentByStack([B.index]) * C_SAMPLES, 0.4, "C <- B");
++  is(C.getCallerPercentByStack([B.index, A.index]) * C_SAMPLES, 0.3, "C <- B <- A");
++
++  is(C.getCallerPercentByStack([A.index]) * C_SAMPLES, 0.1, "C <- A");
++
++  is(B.getCallerPercentByStack([A.index]) * B_SAMPLES, 0.1, "B <- A");
++
++  is(D.getCallerPercentByStack([B.index]) * D_SAMPLES, 0.4, "D <- B");
++  is(D.getCallerPercentByStack([B.index, A.index]) * D_SAMPLES, 0.4, "D <- B <- A");
++
++  finish();
++}
++
++let gThread = synthesizeProfileForTest([{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 10,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 15,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "C" },
++  ]
++}, {
++  time: 20,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++  ]
++}, {
++  time: 25,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 30,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 35,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 40,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 45,
++  frames: [
++    { location: "(root)" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 50,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}]);
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-10.js b/browser/devtools/performance/test/browser_profiler_tree-view-10.js
+new file mode 100644
+index 0000000..94398e2
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-10.js
+@@ -0,0 +1,151 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler's tree view, when inverted, displays the self and
++ * total costs correctly.
++ */
++
++function test() {
++  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
++  let { CallView } = devtools.require("devtools/performance/tree-view");
++
++  let threadNode = new ThreadNode(gThread, { invertTree: true });
++  let treeRoot = new CallView({ frame: threadNode, inverted: true });
++
++  let container = document.createElement("vbox");
++  treeRoot.attachTo(container);
++
++  // Add 1 to each index to skip the hidden root node
++  let $$fun = i => container.querySelectorAll(".call-tree-cell[type=function]")[i+1];
++  let $$name = i => container.querySelectorAll(".call-tree-cell[type=function] > .call-tree-name")[i+1];
++  let $$percentage = i => container.querySelectorAll(".call-tree-cell[type=percentage]")[i+1];
++  let $$selfpercentage = i => container.querySelectorAll(".call-tree-cell[type='self-percentage']")[i+1];
++
++  /**
++   * Samples
++   *
++   * A->C
++   * A->B
++   * A->B->C x4
++   * A->B->D x4
++   *
++   * Expected Tree
++   * +--total--+--self--+--tree-------------+
++   * |   50%   |   50%  |  C
++   * |   40%   |   0    |  -> B
++   * |   30%   |   0    |     -> A
++   * |   10%   |   0    |  -> A
++   *
++   * |   40%   |   40%  |  D
++   * |   40%   |   0    |  -> B
++   * |   40%   |   0    |     -> A
++   *
++   * |   10%   |   10%  |  B
++   * |   10%   |   0    |  -> A
++   */
++
++  is(container.childNodes.length, 10,
++    "The container node should have all children available.");
++
++  [ // total, self, indent + name
++    [ 50, 50, "C"],
++    [ 40,  0, "  B"],
++    [ 30,  0, "    A"],
++    [ 10,  0, "  A"],
++    [ 40, 40, "D"],
++    [ 40,  0, "  B"],
++    [ 40,  0, "    A"],
++    [ 10, 10, "B"],
++    [ 10,  0, "  A"],
++  ].forEach(function (def, i) {
++    info(`Checking ${i}th tree item`);
++    let [total, self, name] = def;
++    name = name.trim();
++
++    is($$name(i).getAttribute("value"), name, `${name} has correct name.`);
++    is($$percentage(i).getAttribute("value"), `${total}%`, `${name} has correct total percent.`);
++    is($$selfpercentage(i).getAttribute("value"), `${self}%`, `${name} has correct self percent.`);
++  });
++
++  finish();
++}
++
++let gThread = synthesizeProfileForTest([{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 10,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 15,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "C" },
++  ]
++}, {
++  time: 20,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++  ]
++}, {
++  time: 25,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 30,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 35,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 40,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 45,
++  frames: [
++    { location: "(root)" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 50,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}]);
+-- 
+2.2.1
+
