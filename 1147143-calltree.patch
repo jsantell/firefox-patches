@@ -1,0 +1,448 @@
+From 089ac176f6f8b1f7798523114eee8c5e3ef41464 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Sat, 23 May 2015 15:58:56 -0700
+Subject: Bug 1147143 - Inverted call tree times are now based on the context of their position in the tree, non-leaf frames do not have self costs, and total costs add up to their parent. r=shu,fitzgen
+
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index fc1c5f8..2a87694 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -174,16 +174,17 @@ ThreadNode.prototype = {
+       }
+ 
+       let sampleDuration = sampleTime - prevSampleTime;
+       let stackIndex = sample[SAMPLE_STACK_SLOT];
+       let calls = this.calls;
+       let prevCalls = this.calls;
+       let prevFrameKey;
+       let isLeaf = mutableFrameKeyOptions.isLeaf = true;
++      let inverted = options.invertTree;
+ 
+       // Inflate the stack and build the FrameNode call tree directly.
+       //
+       // In the profiler data, each frame's stack is referenced by an index
+       // into stackTable.
+       //
+       // Each entry in stackTable is a pair [ prefixIndex, frameIndex ]. The
+       // prefixIndex is itself an index into stackTable, referencing the
+@@ -205,23 +206,30 @@ ThreadNode.prototype = {
+       //
+       // The frame key is then used to build up the inverted FrameNode call
+       // tree.
+       //
+       // Note that various filtering functions, such as filtering for content
+       // frames or flattening recursion, are inlined into the stack inflation
+       // loop. This is important for performance as it avoids intermediate
+       // structures and multiple passes.
+-      while (stackIndex !== null) {
++      while (true) {
+         let stackEntry = stacksData[stackIndex];
+         let frameIndex = stackEntry[STACK_FRAME_SLOT];
+ 
+         // Fetch the stack prefix (i.e. older frames) index.
+         stackIndex = stackEntry[STACK_PREFIX_SLOT];
+ 
++        // Do not include the (root) node in this sample, as the costs of each frame
++        // will make it clear to differentiate (root)->B vs (root)->A->B
++        // when a tree is inverted, a revert of bug 1147604
++        if (stackIndex === null && inverted) {
++          break;
++        }
++
+         // Inflate the frame.
+         let inflatedFrame = getOrAddInflatedFrame(inflatedFrameCache, frameIndex, frameTable,
+                                                   stringTable, allocationsTable);
+ 
+         // Compute the frame key.
+         mutableFrameKeyOptions.isRoot = stackIndex === null;
+         let frameKey = inflatedFrame.getFrameKey(mutableFrameKeyOptions);
+ 
+@@ -254,16 +262,20 @@ ThreadNode.prototype = {
+                                           leafTable);
+ 
+         frameNode._countSample(prevSampleTime, sampleTime, inflatedFrame.optimizations,
+                                stringTable);
+ 
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
++
++        if (mutableFrameKeyOptions.isRoot) {
++          break;
++        }
+       }
+ 
+       this.duration += sampleDuration;
+       this.samples++;
+       prevSampleTime = sampleTime;
+     }
+   },
+ 
+@@ -495,10 +507,10 @@ FrameNode.prototype = {
+    *
+    * @return {JITOptimizations|null}
+    */
+   getOptimizations: function () {
+     if (!this._optimizations) {
+       return null;
+     }
+     return new JITOptimizations(this._optimizations, this._stringTable);
+-  }
++  },
+ };
+diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
+index 545697b..3d56aac 100644
+--- a/browser/devtools/performance/modules/widgets/tree-view.js
++++ b/browser/devtools/performance/modules/widgets/tree-view.js
+@@ -16,19 +16,24 @@ const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeI
+ const MILLISECOND_UNITS = L10N.getStr("table.ms");
+ const PERCENTAGE_UNITS = L10N.getStr("table.percentage");
+ const URL_LABEL_TOOLTIP = L10N.getStr("table.url.tooltiptext");
+ const CALL_TREE_INDENTATION = 16; // px
+ 
+ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
+   let dataA = frameA.getDisplayedData();
+   let dataB = frameB.getDisplayedData();
+-  return this.inverted
+-    ? (dataA.selfPercentage < dataB.selfPercentage ? 1 : -1)
+-    : (dataA.samples < dataB.samples ? 1 : -1);
++  if (this.inverted) {
++    // Invert trees, sort by selfPercentage, and then totalPercentage
++    if (dataA.selfPercentage === dataB.selfPercentage) {
++      return dataA.totalPercentage < dataB.totalPercentage ? 1 : -1;
++    }
++    return dataA.selfPercentage < dataB.selfPercentage ? 1 : - 1;
++  }
++  return dataA.samples < dataB.samples ? 1 : -1;
+ };
+ 
+ const DEFAULT_AUTO_EXPAND_DEPTH = 3; // depth
+ const DEFAULT_VISIBLE_CELLS = {
+   duration: true,
+   percentage: true,
+   allocations: false,
+   selfDuration: true,
+@@ -240,17 +245,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+     cell.setAttribute("value", count || 0);
+     return cell;
+   },
+   _createSamplesCell: function(count) {
+     let cell = this.document.createElement("label");
+     cell.className = "plain call-tree-cell";
+     cell.setAttribute("type", "samples");
+     cell.setAttribute("crop", "end");
+-    cell.setAttribute("value", count || "");
++    cell.setAttribute("value", count || 0);
+     return cell;
+   },
+   _createFunctionCell: function(arrowNode, frameName, frameInfo, frameLevel) {
+     let cell = this.document.createElement("hbox");
+     cell.className = "call-tree-cell";
+     cell.style.MozMarginStart = (frameLevel * CALL_TREE_INDENTATION) + "px";
+     cell.setAttribute("type", "function");
+     cell.appendChild(arrowNode);
+@@ -334,46 +339,93 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   getDisplayedData: function() {
+     if (this._cachedDisplayedData) {
+       return this._cachedDisplayedData;
+     }
+ 
+     let data = this._cachedDisplayedData = Object.create(null);
+     let frameInfo = this.frame.getInfo();
+ 
+-    // Self/total duration.
+-    if (this.visibleCells.duration) {
+-      data.totalDuration = this.frame.duration;
+-    }
+-    if (this.visibleCells.selfDuration) {
+-      data.selfDuration = this.root.frame.selfDuration[this.frame.key];
+-    }
+-
+-    // Self/total samples percentage.
+-    if (this.visibleCells.percentage) {
+-      data.totalPercentage = this.frame.samples / this.root.frame.samples * 100;
+-    }
+-    if (this.visibleCells.selfPercentage) {
+-      data.selfPercentage = this.root.frame.selfCount[this.frame.key] / this.root.frame.samples * 100;
++    /**
++     * When inverting call tree, the costs and times are dependent on position
++     * in the tree. We must only count leaf nodes with self cost, and total costs
++     * dependent on how many times the leaf node was found with a full stack path.
++     *
++     *   Total |  Self | Calls | Function
++     * ============================================================================
++     *  100%   |  100% |   100 | ▼ C
++     *   50%   |   0%  |    50 |   ▼ B
++     *   50%   |   0%  |    50 |     ▼ A
++     *   50%   |   0%  |    50 |   ▼ B
++     *
++     * Every instance of a `CallView` represents a row in the call tree. The same
++     * parent node is used for all rows.
++     */
++
++    // Leaf nodes in an inverted tree don't have to do anything special.
++    let isLeaf = this._level === 0;
++
++    if (this.inverted && !isLeaf && this.parent != null) {
++      let parentFrame = this.parent.frame;
++      // Percentage of time that this frame called the parent
++      // in this branch
++      let totalPercentage = this.frame.samples / parentFrame.samples;
++
++      // Self/total duration.
++      if (this.visibleCells.duration) {
++        data.totalDuration = parentFrame.duration * totalPercentage;
++      }
++      if (this.visibleCells.selfDuration) {
++        data.selfDuration = 0;
++      }
++
++      // Self/total samples percentage.
++      if (this.visibleCells.percentage) {
++        data.totalPercentage = this.frame.samples / this.root.frame.samples * 100;
++      }
++      if (this.visibleCells.selfPercentage) {
++        data.selfPercentage = 0;
++      }
++
++      // Raw samples.
++      if (this.visibleCells.samples) {
++        data.samples = this.frame.samples;
++      }
++    } else {
++      // Self/total duration.
++      if (this.visibleCells.duration) {
++        data.totalDuration = this.frame.duration;
++      }
++      if (this.visibleCells.selfDuration) {
++        data.selfDuration = this.root.frame.selfDuration[this.frame.key];
++      }
++
++      // Self/total samples percentage.
++      if (this.visibleCells.percentage) {
++        data.totalPercentage = this.frame.samples / this.root.frame.samples * 100;
++      }
++      if (this.visibleCells.selfPercentage) {
++        data.selfPercentage = this.root.frame.selfCount[this.frame.key] / this.root.frame.samples * 100;
++      }
++
++      // Raw samples.
++      if (this.visibleCells.samples) {
++        data.samples = this.frame.samples;
++      }
+     }
+ 
+     // Self/total allocations count.
+     if (this.visibleCells.allocations) {
+       let childrenAllocations = this.frame.calls.reduce((acc, node) => acc + node.allocations, 0);
+       data.totalAllocations = this.frame.allocations + childrenAllocations;
+     }
+     if (this.visibleCells.selfAllocations) {
+       data.selfAllocations = this.frame.allocations;
+     }
+ 
+-    // Raw samples.
+-    if (this.visibleCells.samples) {
+-      data.samples = this.frame.samples;
+-    }
+-
+     // Frame name (function location or some meta information).
+     data.name = frameInfo.isMetaCategory
+       ? frameInfo.categoryData.label
+       : frameInfo.functionName || "";
+ 
+     data.tooltiptext = frameInfo.isMetaCategory
+       ? frameInfo.categoryData.label
+       : this.frame.location || "";
+@@ -395,10 +447,10 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+ 
+   /**
+    * Handler for the "click" event on the url node of this call view.
+    */
+   _onUrlClick: function(e) {
+     e.preventDefault();
+     e.stopPropagation();
+     this.root.emit("link", this);
+-  }
++  },
+ });
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 6f8f20f..f41ea93 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -135,14 +135,15 @@ skip-if = e10s # GC events seem unreliable in multiprocess
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
+ [browser_profiler_tree-view-08.js]
+ [browser_profiler_tree-view-09.js]
++[browser_profiler_tree-view-10.js]
+ [browser_profiler-frame-utils-01.js]
+ [browser_timeline-blueprint.js]
+ [browser_timeline-filters.js]
+ [browser_timeline-waterfall-background.js]
+ [browser_timeline-waterfall-generic.js]
+ [browser_timeline-waterfall-sidebar.js]
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-10.js b/browser/devtools/performance/test/browser_profiler_tree-view-10.js
+new file mode 100644
+index 0000000..40f1d3d
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-10.js
+@@ -0,0 +1,151 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler's tree view, when inverted, displays the self and
++ * total costs correctly.
++ */
++
++function test() {
++  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
++  let { CallView } = devtools.require("devtools/performance/tree-view");
++
++  let threadNode = new ThreadNode(gThread, { invertTree: true });
++  let treeRoot = new CallView({ frame: threadNode, inverted: true, hidden: true });
++
++  let container = document.createElement("vbox");
++  treeRoot.attachTo(container);
++
++  // Add 1 to each index to skip the hidden root node
++  let $$fun = i => container.querySelectorAll(".call-tree-cell[type=function]")[i+1];
++  let $$name = i => container.querySelectorAll(".call-tree-cell[type=function] > .call-tree-name")[i+1];
++  let $$percentage = i => container.querySelectorAll(".call-tree-cell[type=percentage]")[i+1];
++  let $$selfpercentage = i => container.querySelectorAll(".call-tree-cell[type='self-percentage']")[i+1];
++
++  /**
++   * Samples
++   *
++   * A->C
++   * A->B
++   * A->B->C x4
++   * A->B->D x4
++   *
++   * Expected Tree
++   * +--total--+--self--+--tree-------------+
++   * |   50%   |   50%  |  C
++   * |   40%   |   0    |  -> B
++   * |   30%   |   0    |     -> A
++   * |   10%   |   0    |  -> A
++   *
++   * |   40%   |   40%  |  D
++   * |   40%   |   0    |  -> B
++   * |   40%   |   0    |     -> A
++   *
++   * |   10%   |   10%  |  B
++   * |   10%   |   0    |  -> A
++   */
++
++  is(container.childNodes.length, 10,
++    "The container node should have all children available.");
++
++  [ // total, self, indent + name
++    [ 50, 50, "C"],
++    [ 40,  0, "  B"],
++    [ 30,  0, "    A"],
++    [ 10,  0, "  A"],
++    [ 40, 40, "D"],
++    [ 40,  0, "  B"],
++    [ 40,  0, "    A"],
++    [ 10, 10, "B"],
++    [ 10,  0, "  A"],
++  ].forEach(function (def, i) {
++    info(`Checking ${i}th tree item`);
++    let [total, self, name] = def;
++    name = name.trim();
++
++    is($$name(i).getAttribute("value"), name, `${name} has correct name.`);
++    is($$percentage(i).getAttribute("value"), `${total}%`, `${name} has correct total percent.`);
++    is($$selfpercentage(i).getAttribute("value"), `${self}%`, `${name} has correct self percent.`);
++  });
++
++  finish();
++}
++
++let gThread = synthesizeProfileForTest([{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 10,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 15,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "C" },
++  ]
++}, {
++  time: 20,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++  ]
++}, {
++  time: 25,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 30,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 35,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 40,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}, {
++  time: 45,
++  frames: [
++    { location: "(root)" },
++    { location: "B" },
++    { location: "C" }
++  ]
++}, {
++  time: 50,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "D" }
++  ]
++}]);
+-- 
+2.2.1
+
