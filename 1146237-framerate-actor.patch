@@ -1,0 +1,67 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 26 May 2015 15:43:17 -0700
+Subject: Bug 1146237 - FramerateActor should use docShell.now() rather than performance.now so that page refreshes do not break it. r=vp
+
+diff --git a/toolkit/devtools/server/actors/framerate.js b/toolkit/devtools/server/actors/framerate.js
+index a53f6d0..6d5b08e 100644
+--- a/toolkit/devtools/server/actors/framerate.js
++++ b/toolkit/devtools/server/actors/framerate.js
+@@ -35,18 +35,17 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
+    * Starts monitoring framerate, storing the frames per second.
+    */
+   startRecording: method(function() {
+     if (this._recording) {
+       return;
+     }
+     this._recording = true;
+     this._ticks = [];
+-
+-    this._startTime = this._contentWin.performance.now();
++    this._startTime = this.tabActor.docShell.now();
+     this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
+   }, {
+   }),
+ 
+   /**
+    * Stops monitoring framerate, returning the recorded values.
+    */
+   stopRecording: method(function(beginAt = 0, endAt = Number.MAX_SAFE_INTEGER) {
+@@ -103,34 +102,24 @@ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
+   /**
+    * Function invoked along with the refresh driver.
+    */
+   _onRefreshDriverTick: function() {
+     if (!this._recording) {
+       return;
+     }
+     this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
+-
+-    // Store the amount of time passed since the recording started.
+-    let currentTime = this._contentWin.performance.now();
+-
+-    // Store _elapsedTime so we can use this as a new starting time on a page refresh
+-    // to normalize times.
+-    this._elapsedTime = currentTime - this._startTime;
+-    this._ticks.push(this._elapsedTime);
++    this._ticks.push(this.tabActor.docShell.now() - this._startTime);
+   },
+ 
+   /**
+    * When the content window for the tab actor is created.
+    */
+   _onGlobalCreated: function (win) {
+     if (this._recording) {
+-      // Set _startTime to the currently elapsed time so we can get a wholistic
+-      // elapsed time in _onRefreshDriverTick.
+-      this._startTime = -this._elapsedTime;
+       this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
+     }
+   }
+ });
+ 
+ /**
+  * The corresponding Front object for the FramerateActor.
+  */
+-- 
+2.2.1
+

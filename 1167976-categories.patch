@@ -1,0 +1,335 @@
+From 727f8909c464f37b9ae51578de440c1e3a0c7227 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Sun, 24 May 2015 09:10:14 -0700
+Subject: [PATCH] Bug 1167976 - wip
+
+---
+ browser/devtools/performance/modules/global.js     | 40 +++++++++++++------
+ .../performance/modules/logic/frame-utils.js       | 46 ++++++++++++++++++++--
+ .../performance/modules/logic/tree-model.js        | 21 ++++------
+ 3 files changed, 80 insertions(+), 27 deletions(-)
+
+diff --git a/browser/devtools/performance/modules/global.js b/browser/devtools/performance/modules/global.js
+index 839fe41..e3da891 100644
+--- a/browser/devtools/performance/modules/global.js
++++ b/browser/devtools/performance/modules/global.js
+@@ -64,32 +64,44 @@ const CATEGORIES = [{
+ }, {
+   color: "#8fa1b2",
+   abbrev: "storage",
+   label: L10N.getStr("category.storage")
+ }, {
+   color: "#d99b28",
+   abbrev: "events",
+   label: L10N.getStr("category.events")
++}, {
++  color: "#d99b28",
++  abbrev: "idle",
++  label: "Idle",
++}, {
++  color: "#8fa1b2",
++  abbrev: "tools",
++  label: "Tools",
+ }];
+ 
+ /**
+  * Mapping from category bitmasks in the profiler data to additional details.
+  * To be kept in sync with the js::ProfileEntry::Category in ProfilingStack.h
+  */
+ const CATEGORY_MAPPINGS = {
+   "16": CATEGORIES[0],    // js::ProfileEntry::Category::OTHER
+   "32": CATEGORIES[1],    // js::ProfileEntry::Category::CSS
+   "64": CATEGORIES[2],    // js::ProfileEntry::Category::JS
+   "128": CATEGORIES[3],   // js::ProfileEntry::Category::GC
+   "256": CATEGORIES[3],   // js::ProfileEntry::Category::CC
+   "512": CATEGORIES[4],   // js::ProfileEntry::Category::NETWORK
+   "1024": CATEGORIES[5],  // js::ProfileEntry::Category::GRAPHICS
+   "2048": CATEGORIES[6],  // js::ProfileEntry::Category::STORAGE
+   "4096": CATEGORIES[7],  // js::ProfileEntry::Category::EVENTS
++
++  // non-bitmasks for specially-assigned categories
++  "9000": CATEGORIES[8],
++  "9001": CATEGORIES[9],
+ };
+ 
+ /**
+  * A simple schema for mapping markers to the timeline UI. The keys correspond
+  * to marker names, while the values are objects with the following format:
+  *
+  * - group: The row index in the timeline overview graph; multiple markers
+  *          can be added on the same row. @see <overview.js/buildGraphImage>
+@@ -107,20 +119,16 @@ const CATEGORY_MAPPINGS = {
+  * - fields: An optional array of marker properties you wish to display in the
+  *           marker details view. For example, a field in the array such as
+  *           { property: "aCauseName", label: "Cause" } would render a string
+  *           like `Cause: ${marker.aCauseName}` in the marker details view.
+  *           Each `field` item may take the following properties:
+  *           - property: The property that must exist on the marker to render,
+  *                       and the value of the property will be displayed.
+  *           - label: The name of the property that should be displayed.
+- *           - formatter: If a formatter is provided, instead of directly using
+- *                        the `property` property on the marker, the marker is
+- *                        passed into the formatter function to determine the
+- *                        displayed value.
+  *            Can also be a function that returns an object. Each key in the object
+  *            will be rendered as a field, with its value rendering as the value.
+  *
+  * Whenever this is changed, browser_timeline_waterfall-styles.js *must* be
+  * updated as well.
+  */
+ const TIMELINE_BLUEPRINT = {
+   /* Group 0 - Reflow and Rendering pipeline */
+@@ -301,53 +309,63 @@ const [CATEGORY_MASK, CATEGORY_MASK_LIST] = (function () {
+       .filter(mask => CATEGORY_MAPPINGS[mask] == category)
+       .map(mask => +mask)
+       .sort();
+   }
+ 
+   return [
+     function (name, index) {
+       if (!(name in bitmasksForCategory)) {
+-        throw new Error(`Category abbreviation '${name}' does not exist.`);
++        throw new Error(`Category abbreviation "${name}" does not exist.`);
+       }
+       if (arguments.length == 1) {
+         if (bitmasksForCategory[name].length != 1) {
+-          throw new Error(`Expected exactly one category number for '${name}'.`);
++          throw new Error(`Expected exactly one category number for "${name}".`);
+         } else {
+           return bitmasksForCategory[name][0];
+         }
+       } else {
+         if (index > bitmasksForCategory[name].length) {
+-          throw new Error(`Index '${index}' too high for category '${name}'.`);
++          throw new Error(`Index "${index}" too high for category "${name}".`);
+         } else {
+           return bitmasksForCategory[name][index - 1];
+         }
+       }
+     },
+ 
+     function (name) {
+       if (!(name in bitmasksForCategory)) {
+-        throw new Error(`Category abbreviation '${name}' does not exist.`);
++        throw new Error(`Category abbreviation "${name}" does not exist.`);
+       }
+       return bitmasksForCategory[name];
+     }
+   ];
+ })();
+ 
+ // Human-readable "other" category bitmask. Older Geckos don't have all the
+ // necessary instrumentation in the sampling profiler backend for creating
+ // a categories graph, in which case we default to the "other" category.
+-const CATEGORY_OTHER = CATEGORY_MASK('other');
++const CATEGORY_OTHER = CATEGORY_MASK("other");
+ 
+ // Human-readable JIT category bitmask. Certain pseudo-frames in a sample,
+-// like "EnterJIT", don't have any associated `cateogry` information.
+-const CATEGORY_JIT = CATEGORY_MASK('js');
++// like "EnterJIT", don't have any associated `category` information.
++const CATEGORY_JIT = CATEGORY_MASK("js");
++
++// Human-readable "idle" category bitmask. Not emitted from frames themselves,
++// but used manually in the client.
++const CATEGORY_IDLE = CATEGORY_MASK("idle");
++
++// Human-readable "devtools" category bitmask. Not emitted from frames themselves,
++// but used manually in the client.
++const CATEGORY_DEVTOOLS = CATEGORY_MASK("tools");
+ 
+ // Exported symbols.
+ exports.L10N = L10N;
+ exports.PREFS = PREFS;
+ exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
+ exports.CATEGORIES = CATEGORIES;
+ exports.CATEGORY_MAPPINGS = CATEGORY_MAPPINGS;
+ exports.CATEGORY_MASK = CATEGORY_MASK;
+ exports.CATEGORY_MASK_LIST = CATEGORY_MASK_LIST;
+ exports.CATEGORY_OTHER = CATEGORY_OTHER;
+ exports.CATEGORY_JIT = CATEGORY_JIT;
++exports.CATEGORY_IDLE = CATEGORY_IDLE;
++exports.CATEGORY_DEVTOOLS = CATEGORY_DEVTOOLS;
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index bc212f1..d389f50 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -1,18 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ 
+ loader.lazyRequireGetter(this, "Services");
+-loader.lazyRequireGetter(this, "CATEGORY_OTHER",
+-  "devtools/performance/global", true);
++loader.lazyRequireGetter(this, "global",
++  "devtools/performance/global");
+ 
+ // Character codes used in various parsing helper functions.
+ const CHAR_CODE_A = "a".charCodeAt(0);
+ const CHAR_CODE_C = "c".charCodeAt(0);
+ const CHAR_CODE_E = "e".charCodeAt(0);
+ const CHAR_CODE_F = "f".charCodeAt(0);
+ const CHAR_CODE_H = "h".charCodeAt(0);
+ const CHAR_CODE_I = "i".charCodeAt(0);
+@@ -244,17 +244,17 @@ function InflatedFrame(index, frameTable, stringTable, allocationsTable) {
+ 
+   let frame = frameTable.data[index];
+   let category = frame[CATEGORY_SLOT];
+   this.location = stringTable[frame[LOCATION_SLOT]];
+   this.optimizations = frame[OPTIMIZATIONS_SLOT];
+   this.line = frame[LINE_SLOT];
+   this.column = undefined;
+   this.category = category;
+-  this.metaCategory = category || CATEGORY_OTHER;
++  this.metaCategory = category || global.CATEGORY_OTHER;
+   this.allocations = allocationsTable ? allocationsTable[index] : 0;
+   this.isContent = isContent(this);
+ };
+ 
+ /**
+  * Gets the frame key (i.e., equivalence group) according to options. Content
+  * frames are always identified by location. Chrome frames are identified by
+  * location if content-only filtering is off. If content-filtering is on, they
+@@ -415,8 +415,48 @@ function isChromeScheme(location, i) {
+   default:
+     return false;
+   }
+ }
+ 
+ function isNumeric(c) {
+   return c >= CHAR_CODE_0 && c <= CHAR_CODE_9;
+ }
++
++
++/**
++ * Called during initialization, massages a category property
++ * if not content and lacks a category bit on the frame by checking
++ * location, special frame names, and falling back to a default.
++ */
++function getCategory (frame) {
++  if (frame.isContent) {
++    return;
++  }
++
++  // Override these pseudo-frames marked as "Gecko" with
++  // a more descriptive "idle" category
++  if (frame.location == "Startup::XRE_InitChildProcess" ||
++      frame.location == "Startup::XRE_Main") { // Remove "Startup::XRE_Main" once non-e10s is gone
++    return global.CATEGORY_IDLE;
++  }
++
++  // "EnterJIT" pseudoframes are special, not actually on the stack.
++  if (frame.location == "EnterJIT") {
++    return global.CATEGORY_JIT;
++  }
++
++  // If no category defined yet, check to see if its a Chrome JS category
++  if (!frame.category) {
++    if (/resource:\/\/gre\/modules\/devtools/.test(frame.location) ||
++        /resource:\/\/\/modules\/devtools/.test(frame.location)) {
++      console.log("Found DT", frame.location);
++      return global.CATEGORY_DEVTOOLS;
++    }
++  }
++
++  // Since only C++ stack frames have associated category information,
++  // default to an "unknown" category otherwise
++  if (frame.isMetaCategory && !frame.category) {
++    return global.CATEGORY_OTHER;
++  }
++}
++exports.getCategory = getCategory;
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index fc1c5f8..b956e82 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -8,16 +8,20 @@ const { Cc, Ci, Cu, Cr } = require("chrome");
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_MAPPINGS",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "CATEGORIES",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_JIT",
+   "devtools/performance/global", true);
++loader.lazyRequireGetter(this, "CATEGORY_IDLE",
++  "devtools/performance/global", true);
++loader.lazyRequireGetter(this, "CATEGORY_DEVTOOLS",
++  "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_OTHER",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/performance/jit", true);
+ loader.lazyRequireGetter(this, "FrameUtils",
+   "devtools/performance/frame-utils");
+ 
+ exports.ThreadNode = ThreadNode;
+@@ -377,16 +381,19 @@ function FrameNode(frameKey, { location, line, category, allocations, isContent
+   this.allocations = allocations;
+   this.samples = 0;
+   this.duration = 0;
+   this.calls = [];
+   this.isContent = isContent;
+   this._optimizations = null;
+   this._stringTable = null;
+   this.isMetaCategory = isMetaCategory;
++
++  // Check to see if any changes need to be made to the category
++  this.category = FrameUtils.getCategory(this) || this.category;
+ }
+ 
+ FrameNode.prototype = {
+   /**
+    * Count a sample as associated with this node.
+    *
+    * @param number prevSampleTime
+    *               The time when the immediate previous sample was sampled.
+@@ -453,29 +460,17 @@ FrameNode.prototype = {
+     return this._data || this._computeInfo();
+   },
+ 
+   /**
+    * Parses the raw location of this function call to retrieve the actual
+    * function name and source url.
+    */
+   _computeInfo: function() {
+-    // "EnterJIT" pseudoframes are special, not actually on the stack.
+-    if (this.location == "EnterJIT") {
+-      this.category = CATEGORY_JIT;
+-    }
+-
+-    if (this.isMetaCategory && !this.category) {
+-      this.category = CATEGORY_OTHER;
+-    }
+-
+-    // Since only C++ stack frames have associated category information,
+-    // default to an "unknown" category otherwise.
+     let categoryData = CATEGORY_MAPPINGS[this.category] || {};
+-
+     let parsedData = FrameUtils.parseLocation(this.location, this.line, this.column);
+     parsedData.nodeType = "Frame";
+     parsedData.categoryData = categoryData;
+     parsedData.isContent = this.isContent;
+     parsedData.isMetaCategory = this.isMetaCategory;
+ 
+     return this._data = parsedData;
+   },
+@@ -495,10 +490,10 @@ FrameNode.prototype = {
+    *
+    * @return {JITOptimizations|null}
+    */
+   getOptimizations: function () {
+     if (!this._optimizations) {
+       return null;
+     }
+     return new JITOptimizations(this._optimizations, this._stringTable);
+-  }
++  },
+ };
+-- 
+2.2.1
+
