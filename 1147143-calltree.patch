@@ -1,13 +1,12 @@
-From 089ac176f6f8b1f7798523114eee8c5e3ef41464 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Sat, 23 May 2015 15:58:56 -0700
-Subject: Bug 1147143 - Inverted call tree times are now based on the context of their position in the tree, non-leaf frames do not have self costs, and total costs add up to their parent. r=shu,fitzgen
+Subject: Bug 1147143 - Inverted call tree times are now based on the context of their position in the tree, non-leaf frames do not have self costs, and total costs add up to their parent. r=shu
 
 diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
-index fc1c5f8..2a87694 100644
+index 14907bd..7275ee9 100644
 --- a/browser/devtools/performance/modules/logic/tree-model.js
 +++ b/browser/devtools/performance/modules/logic/tree-model.js
-@@ -174,16 +174,17 @@ ThreadNode.prototype = {
+@@ -170,16 +170,17 @@ ThreadNode.prototype = {
        }
  
        let sampleDuration = sampleTime - prevSampleTime;
@@ -16,7 +15,7 @@ index fc1c5f8..2a87694 100644
        let prevCalls = this.calls;
        let prevFrameKey;
        let isLeaf = mutableFrameKeyOptions.isLeaf = true;
-+      let inverted = options.invertTree;
++      let skipRoot = options.invertTree;
  
        // Inflate the stack and build the FrameNode call tree directly.
        //
@@ -25,17 +24,9 @@ index fc1c5f8..2a87694 100644
        //
        // Each entry in stackTable is a pair [ prefixIndex, frameIndex ]. The
        // prefixIndex is itself an index into stackTable, referencing the
-@@ -205,23 +206,30 @@ ThreadNode.prototype = {
-       //
-       // The frame key is then used to build up the inverted FrameNode call
-       // tree.
-       //
-       // Note that various filtering functions, such as filtering for content
-       // frames or flattening recursion, are inlined into the stack inflation
-       // loop. This is important for performance as it avoids intermediate
+@@ -208,16 +209,23 @@ ThreadNode.prototype = {
        // structures and multiple passes.
--      while (stackIndex !== null) {
-+      while (true) {
+       while (stackIndex !== null) {
          let stackEntry = stacksData[stackIndex];
          let frameIndex = stackEntry[STACK_FRAME_SLOT];
  
@@ -45,7 +36,7 @@ index fc1c5f8..2a87694 100644
 +        // Do not include the (root) node in this sample, as the costs of each frame
 +        // will make it clear to differentiate (root)->B vs (root)->A->B
 +        // when a tree is inverted, a revert of bug 1147604
-+        if (stackIndex === null && inverted) {
++        if (stackIndex === null && skipRoot) {
 +          break;
 +        }
 +
@@ -57,28 +48,7 @@ index fc1c5f8..2a87694 100644
          mutableFrameKeyOptions.isRoot = stackIndex === null;
          let frameKey = inflatedFrame.getFrameKey(mutableFrameKeyOptions);
  
-@@ -254,16 +262,20 @@ ThreadNode.prototype = {
-                                           leafTable);
- 
-         frameNode._countSample(prevSampleTime, sampleTime, inflatedFrame.optimizations,
-                                stringTable);
- 
-         prevFrameKey = frameKey;
-         prevCalls = frameNode.calls;
-         isLeaf = mutableFrameKeyOptions.isLeaf = false;
-+
-+        if (mutableFrameKeyOptions.isRoot) {
-+          break;
-+        }
-       }
- 
-       this.duration += sampleDuration;
-       this.samples++;
-       prevSampleTime = sampleTime;
-     }
-   },
- 
-@@ -495,10 +507,10 @@ FrameNode.prototype = {
+@@ -491,13 +499,13 @@ FrameNode.prototype = {
     *
     * @return {JITOptimizations|null}
     */
@@ -90,8 +60,11 @@ index fc1c5f8..2a87694 100644
 -  }
 +  },
  };
+ 
+ exports.ThreadNode = ThreadNode;
+ exports.FrameNode = FrameNode;
 diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
-index 545697b..3d56aac 100644
+index d80cb67..27aace3 100644
 --- a/browser/devtools/performance/modules/widgets/tree-view.js
 +++ b/browser/devtools/performance/modules/widgets/tree-view.js
 @@ -16,19 +16,24 @@ const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeI
@@ -122,12 +95,12 @@ index 545697b..3d56aac 100644
    percentage: true,
    allocations: false,
    selfDuration: true,
-@@ -240,17 +245,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+@@ -236,17 +241,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
      cell.setAttribute("value", count || 0);
      return cell;
    },
-   _createSamplesCell: function(count) {
-     let cell = this.document.createElement("label");
+   _createSamplesCell: function(doc, count) {
+     let cell = doc.createElement("description");
      cell.className = "plain call-tree-cell";
      cell.setAttribute("type", "samples");
      cell.setAttribute("crop", "end");
@@ -135,13 +108,13 @@ index 545697b..3d56aac 100644
 +    cell.setAttribute("value", count || 0);
      return cell;
    },
-   _createFunctionCell: function(arrowNode, frameName, frameInfo, frameLevel) {
-     let cell = this.document.createElement("hbox");
+   _createFunctionCell: function(doc, arrowNode, frameName, frameInfo, frameLevel) {
+     let cell = doc.createElement("hbox");
      cell.className = "call-tree-cell";
      cell.style.MozMarginStart = (frameLevel * CALL_TREE_INDENTATION) + "px";
      cell.setAttribute("type", "function");
      cell.appendChild(arrowNode);
-@@ -334,46 +339,93 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+@@ -330,46 +335,93 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
    getDisplayedData: function() {
      if (this._cachedDisplayedData) {
        return this._cachedDisplayedData;
@@ -177,21 +150,21 @@ index 545697b..3d56aac 100644
 +     *   50%   |   0%  |    50 |   ▼ B
 +     *
 +     * Every instance of a `CallView` represents a row in the call tree. The same
-+     * parent node is used for all rows.
++     * container node is used for all rows.
 +     */
 +
 +    // Leaf nodes in an inverted tree don't have to do anything special.
 +    let isLeaf = this._level === 0;
 +
 +    if (this.inverted && !isLeaf && this.parent != null) {
-+      let parentFrame = this.parent.frame;
-+      // Percentage of time that this frame called the parent
++      let calleeData = this.parent.getDisplayedData();
++      // Percentage of time that this frame called the callee
 +      // in this branch
-+      let totalPercentage = this.frame.samples / parentFrame.samples;
++      let callerPercentage = this.frame.samples / calleeData.samples;
 +
 +      // Self/total duration.
 +      if (this.visibleCells.duration) {
-+        data.totalDuration = parentFrame.duration * totalPercentage;
++        data.totalDuration = calleeData.totalDuration * callerPercentage;
 +      }
 +      if (this.visibleCells.selfDuration) {
 +        data.selfDuration = 0;
@@ -199,7 +172,7 @@ index 545697b..3d56aac 100644
 +
 +      // Self/total samples percentage.
 +      if (this.visibleCells.percentage) {
-+        data.totalPercentage = this.frame.samples / this.root.frame.samples * 100;
++        data.totalPercentage = calleeData.totalPercentage * callerPercentage;
 +      }
 +      if (this.visibleCells.selfPercentage) {
 +        data.selfPercentage = 0;
@@ -254,7 +227,7 @@ index 545697b..3d56aac 100644
      data.tooltiptext = frameInfo.isMetaCategory
        ? frameInfo.categoryData.label
        : this.frame.location || "";
-@@ -395,10 +447,10 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+@@ -391,12 +443,12 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
  
    /**
     * Handler for the "click" event on the url node of this call view.
@@ -266,11 +239,13 @@ index 545697b..3d56aac 100644
 -  }
 +  },
  });
+ 
+ exports.CallView = CallView;
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 6f8f20f..f41ea93 100644
+index ac0f1a8..73a8ef0 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -135,14 +135,15 @@ skip-if = e10s # GC events seem unreliable in multiprocess
+@@ -135,16 +135,17 @@ skip-if = e10s # GC events seem unreliable in multiprocess
  [browser_profiler_tree-view-02.js]
  [browser_profiler_tree-view-03.js]
  [browser_profiler_tree-view-04.js]
@@ -285,7 +260,9 @@ index 6f8f20f..f41ea93 100644
  [browser_timeline-filters.js]
  [browser_timeline-waterfall-background.js]
  [browser_timeline-waterfall-generic.js]
+ [browser_timeline-waterfall-rerender.js]
  [browser_timeline-waterfall-sidebar.js]
+ [browser_waterfall-collapse.js]
 diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-10.js b/browser/devtools/performance/test/browser_profiler_tree-view-10.js
 new file mode 100644
 index 0000000..40f1d3d

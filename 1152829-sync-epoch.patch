@@ -1,0 +1,118 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 28 May 2015 11:20:58 -0700
+Subject: Bug 1152829 - Sync all performance tool sources now that they use the same epoch. r=vp
+
+diff --git a/browser/devtools/performance/modules/logic/actors.js b/browser/devtools/performance/modules/logic/actors.js
+index 0cf3cdc..dde8c58 100644
+--- a/browser/devtools/performance/modules/logic/actors.js
++++ b/browser/devtools/performance/modules/logic/actors.js
+@@ -167,17 +167,17 @@ ProfilerFrontFacade.prototype = {
+   getProfile: Task.async(function *(options) {
+     let profilerData = yield (CompatUtils.actorCompatibilityBridge("getProfile").call(this, options));
+     // If the backend is not deduped, dedupe it ourselves, as rest of the code
+     // expects a deduped profile.
+     if (profilerData.profile.meta.version === 2) {
+       RecordingUtils.deflateProfile(profilerData.profile);
+     }
+ 
+-    // If the backend does not support filtering by start and endtime on platform (< Fx40),
++    // If the backend does not support filtering by start on platform (< Fx40),
+     // do it on the client (much slower).
+     if (!this.traits.filterable) {
+       RecordingUtils.filterSamples(profilerData.profile, options.startTime || 0);
+     }
+ 
+     return profilerData;
+   }),
+ 
+diff --git a/browser/devtools/performance/modules/logic/front.js b/browser/devtools/performance/modules/logic/front.js
+index 621e1d3..ec01f36 100644
+--- a/browser/devtools/performance/modules/logic/front.js
++++ b/browser/devtools/performance/modules/logic/front.js
+@@ -69,16 +69,19 @@ function PerformanceActorsConnection(target) {
+   EventEmitter.decorate(this);
+ 
+   this._target = target;
+   this._client = this._target.client;
+   this._pendingConsoleRecordings = [];
+   this._sitesPullTimeout = 0;
+   this._recordings = [];
+ 
++  this.traits = {};
++  this.traits.globalEpoch = target.getTrait("performanceGlobalEpoch");
++
+   this._pipeToConnection = this._pipeToConnection.bind(this);
+   this._onTimelineData = this._onTimelineData.bind(this);
+   this._onConsoleProfileStart = this._onConsoleProfileStart.bind(this);
+   this._onConsoleProfileEnd = this._onConsoleProfileEnd.bind(this);
+   this._onProfilerStatus = this._onProfilerStatus.bind(this);
+   this._onProfilerUnexpectedlyStopped = this._onProfilerUnexpectedlyStopped.bind(this);
+ 
+   Services.obs.notifyObservers(null, "performance-actors-connection-created", null);
+@@ -325,23 +328,34 @@ PerformanceActorsConnection.prototype = {
+   startRecording: Task.async(function*(options = {}) {
+     let model = new RecordingModel(options);
+     this.emit("recording-starting", model);
+ 
+     // All actors are started asynchronously over the remote debugging protocol.
+     // Get the corresponding start times from each one of them.
+     // The timeline and memory actors are target-dependent, so start those as well,
+     // even though these are mocked in older Geckos (FF < 35)
+-    let { startTime, position, generation, totalSize } = yield this._profiler.start(options);
++    let { startTime: profilerStartTime, position, generation, totalSize } = yield this._profiler.start(options);
+     let timelineStartTime = yield this._timeline.start(options);
+     let memoryStartTime = yield this._memory.start(options);
+ 
++    // If all actors have the same epoch, take the earliest start time
++    // and assign it to all.
++    if (this.traits.globalEpoch) {
++      // Filter out start times that are not actually used (0 or undefined).
++      let startTimes = [profilerStartTime, memoryStartTime, timelineStartTime].filter(Boolean);
++      let globalStartTime = Math.min.apply(Math, startTimes);
++
++      // Assign the global start time to all actor start times.
++      profilerStartTime = memoryStartTime = timelineStartTime = globalStartTime;
++    }
++
+     let data = {
+-      profilerStartTime: startTime, timelineStartTime, memoryStartTime,
+-      generation, position, totalSize
++      profilerStartTime, timelineStartTime, memoryStartTime,
++      generation, position, totalSize,
+     };
+ 
+     // Signify to the model that the recording has started,
+     // populate with data and store the recording model here.
+     model._populate(data);
+     this._recordings.push(model);
+ 
+     this.emit("recording-started", model);
+diff --git a/toolkit/devtools/server/actors/root.js b/toolkit/devtools/server/actors/root.js
+index 98f1669..38709fb 100644
+--- a/toolkit/devtools/server/actors/root.js
++++ b/toolkit/devtools/server/actors/root.js
+@@ -166,17 +166,20 @@ RootActor.prototype = {
+     // if allocChromeProcess is defined, but not true, it means that root actor
+     // no longer expose tab actors, but also that getProcess forbids
+     // exposing actors for security reasons
+     get allowChromeProcess() {
+       return DebuggerServer.allowChromeProcess;
+     },
+     // Whether or not `getProfile()` supports specifying a `startTime`
+     // and `endTime` to filter out samples. Fx40+
+-    profilerDataFilterable: true
++    profilerDataFilterable: true,
++    // Indicates whether all data sources in the performance tool (profiler,
++    // timeline markers, memory allocations) use the same epoch (Fx40+)
++    performanceGlobalEpoch: true,
+   },
+ 
+   /**
+    * Return a 'hello' packet as specified by the Remote Debugging Protocol.
+    */
+   sayHello: function() {
+     return {
+       from: this.actorID,
+-- 
+2.2.1
+

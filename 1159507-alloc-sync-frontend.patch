@@ -1,0 +1,105 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 28 May 2015 11:17:12 -0700
+Subject: Bug 1159507 - Perf front end no longer needs to convert allocation data from micro to milliseconds. r=vp
+
+diff --git a/browser/devtools/performance/modules/logic/recording-model.js b/browser/devtools/performance/modules/logic/recording-model.js
+index 67e2a71..f7ffddd 100644
+--- a/browser/devtools/performance/modules/logic/recording-model.js
++++ b/browser/devtools/performance/modules/logic/recording-model.js
+@@ -93,16 +93,18 @@ RecordingModel.prototype = {
+    */
+   _populate: function (info) {
+     // Times must come from the actor in order to be self-consistent.
+     // However, we also want to update the view with the elapsed time
+     // even when the actor is not generating data. To do this we get
+     // the local time and use it to compute a reasonable elapsed time.
+     this._localStartTime = Date.now();
+ 
++    // If root actor has trait `performanceGlobalEpoch`, then these
++    // start times will all be the equal.
+     this._profilerStartTime = info.profilerStartTime;
+     this._timelineStartTime = info.timelineStartTime;
+     this._memoryStartTime = info.memoryStartTime;
+     this._originalBufferStatus = {
+       position: info.position,
+       totalSize: info.totalSize,
+       generation: info.generation
+     };
+@@ -358,24 +360,23 @@ RecordingModel.prototype = {
+       // Save the accumulated refresh driver ticks.
+       case "ticks": {
+         if (!config.withTicks) { break; }
+         let [, timestamps] = data;
+         this._ticks = timestamps;
+         break;
+       }
+       // Accumulate allocation sites into an array. Furthermore, the timestamps
+-      // do not have a zero epoch, and are microseconds instead of milliseconds,
+-      // so offset all of them by the start time, also converting from µs to ms.
++      // do not have a zero epoch, so offset all of them by the start time.
+       case "allocations": {
+         if (!config.withAllocations) { break; }
+         let [{ sites, timestamps, frames, counts }] = data;
+-        let timeOffset = this._memoryStartTime * 1000;
+-        let timeScale = 1000;
+-        RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
++
++        let timeOffset = this._memoryStartTime;
++        RecordingUtils.offsetTimestamps(timestamps, timeOffset);
+         pushAll(this._allocations.sites, sites);
+         pushAll(this._allocations.timestamps, timestamps);
+         pushAll(this._allocations.frames, frames);
+         pushAll(this._allocations.counts, counts);
+         break;
+       }
+     }
+   },
+diff --git a/browser/devtools/performance/modules/logic/recording-utils.js b/browser/devtools/performance/modules/logic/recording-utils.js
+index af7f7fc..a92a063 100644
+--- a/browser/devtools/performance/modules/logic/recording-utils.js
++++ b/browser/devtools/performance/modules/logic/recording-utils.js
+@@ -62,23 +62,20 @@ function offsetMarkerTimes(markers, timeOffset) {
+ /**
+  * Offsets and scales all the timestamps in the provided array by the
+  * specified time and scale factor.
+  *
+  * @param array array
+  *        A list of timestamps received from the backend.
+  * @param number timeOffset
+  *        The amount of time to offset by (in milliseconds).
+- * @param number timeScale
+- *        The factor to scale by, after offsetting.
+  */
+-function offsetAndScaleTimestamps(timestamps, timeOffset, timeScale) {
++function offsetTimestamps(timestamps, timeOffset) {
+   for (let i = 0, len = timestamps.length; i < len; i++) {
+     timestamps[i] -= timeOffset;
+-    timestamps[i] /= timeScale;
+   }
+ }
+ 
+ /**
+  * Cache used in `RecordingUtils.getProfileThreadFromAllocations`.
+  */
+ let gProfileThreadFromAllocationCache = new WeakMap();
+ 
+@@ -564,15 +561,15 @@ UniqueStacks.prototype.getOrAddStackIndex = function(prefixIndex, frameIndex) {
+ 
+ UniqueStacks.prototype.getOrAddStringIndex = function(s) {
+   return this._uniqueStrings.getOrAddStringIndex(s);
+ };
+ 
+ exports.filterSamples = filterSamples;
+ exports.offsetSampleTimes = offsetSampleTimes;
+ exports.offsetMarkerTimes = offsetMarkerTimes;
+-exports.offsetAndScaleTimestamps = offsetAndScaleTimestamps;
++exports.offsetTimestamps = offsetTimestamps;
+ exports.getProfileThreadFromAllocations = getProfileThreadFromAllocations;
+ exports.getFilteredBlueprint = getFilteredBlueprint;
+ exports.deflateProfile = deflateProfile;
+ exports.deflateThread = deflateThread;
+ exports.UniqueStrings = UniqueStrings;
+ exports.UniqueStacks = UniqueStacks;
+-- 
+2.2.1
+
