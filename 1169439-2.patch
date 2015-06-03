@@ -1,0 +1,1103 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Sun, 31 May 2015 17:55:26 -0700
+Subject: Bug 1169439 - Markers fully eclipsed by another marker should be collapsed within the parent marker. r=vp
+
+diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
+index d93d5dd..c412411 100644
+--- a/browser/devtools/performance/modules/logic/marker-utils.js
++++ b/browser/devtools/performance/modules/logic/marker-utils.js
+@@ -275,69 +275,83 @@ const DOM = {
+ 
+     return container;
+   }
+ };
+ 
+ /**
+  * A series of collapsers used by the blueprint. These functions are
+  * invoked on a moving window of two markers.
++ *
++ * A function determining how markers are collapsed together.
++ * Invoked with 3 arguments: the current parent marker, the
++ * current marker and a method for peeking i markers ahead. If
++ * nothing is returned, the marker is added as a standalone entry
++ * in the waterfall. Otherwise, an object needs to be returned
++ * with the following properties:
++ * - toParent: The marker to be made a new parent. Can use the current
++ *             marker, becoming a parent itself, or make a new marker-esque
++ *             object.
++ * - collapse: Whether or not this current marker should be nested within
++ *             the current parent.
++ * - finalize: Whether or not the current parent should be finalized and popped
++ *        off the stack.
+  */
+-
+ const CollapseFunctions = {
++  /**
++   * Combines similar markers that are consecutive into a meta marker.
++   */
+   identical: function (parent, curr, peek) {
++    let next = peek(1);
+     // If there is a parent marker currently being filled and the current marker
+     // should go into the parent marker, make it so.
+     if (parent && parent.name == curr.name) {
+-      return { toParent: parent.name };
++      let finalize = next && next.name !== curr.name;
++      return { collapse: true, finalize };
+     }
+     // Otherwise if the current marker is the same type as the next marker type,
+     // create a new parent marker containing the current marker.
+-    let next = peek(1);
+     if (next && curr.name == next.name) {
+-      return { toParent: curr.name };
++      return { toParent: { name: curr.name, start: curr.start }, collapse: true };
+     }
+   },
+ 
++  /**
++   * Combines similar markers that are close to each other in time into a meta marker.
++   */
+   adjacent: function (parent, curr, peek) {
+     let next = peek(1);
+     if (next && (next.start < curr.end || next.start - curr.end <= 10 /* ms */)) {
+       return CollapseFunctions.identical(parent, curr, peek);
+     }
+   },
+ 
+-  DOMtoDOMJS: function (parent, curr, peek) {
+-    // If the next marker is a JavaScript marker, create a new meta parent marker
+-    // containing the current marker.
++  /**
++   * Folds this marker in parent marker if parent marker fully eclipses
++   * the current markers' time.
++   */
++  child: function (parent, curr, peek) {
+     let next = peek(1);
+-    if (next && next.name == "Javascript") {
+-      return {
+-        forceNew: true,
+-        toParent: "meta::DOMEvent+JS",
+-        withData: {
+-          type: curr.type,
+-          eventPhase: curr.eventPhase
+-        },
+-      };
++    // If this marker is consumed by current parent, collapse
++    if (parent && curr.end <= parent.end) {
++      let finalize = next && next.end > parent.end;
++      return { collapse: true, finalize };
+     }
+   },
+ 
+-  JStoDOMJS: function (parent, curr, peek) {
+-    // If there is a parent marker currently being filled, and it's the one
+-    // created from a `DOMEvent` via `collapseDOMIntoDOMJS`, then the current
+-    // marker has to go into that one.
+-    if (parent && parent.name == "meta::DOMEvent+JS") {
+-      return {
+-        forceEnd: true,
+-        toParent: "meta::DOMEvent+JS",
+-        withData: {
+-          stack: curr.stack,
+-          endStack: curr.endStack
+-        },
+-      };
++  /**
++   * Turns this marker into a parent marker if the next marker
++   * is fully eclipsed by the current marker.
++   */
++  parent: function (parent, curr, peek) {
++    let next = peek(1);
++    // If the next marker is fully consumed by this marker, make
++    // it a parent (do not collapse, the marker becomes a parent).
++    if (next && curr.end >= next.end) {
++      return { toParent: curr };
+     }
+   },
+ };
+ 
+ /**
+  * Mapping of JS marker causes to a friendlier form. Only
+  * markers that are considered "from content" should be labeled here.
+  */
+diff --git a/browser/devtools/performance/modules/logic/waterfall-utils.js b/browser/devtools/performance/modules/logic/waterfall-utils.js
+index 4308342..b372ea0 100644
+--- a/browser/devtools/performance/modules/logic/waterfall-utils.js
++++ b/browser/devtools/performance/modules/logic/waterfall-utils.js
+@@ -5,137 +5,137 @@
+ 
+ /**
+  * Utility functions for collapsing markers into a waterfall.
+  */
+ 
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/performance/markers", true);
+ 
++// Unique ID for all markers
++let uid = 0;
++
+ /**
+- * Collapses markers into a tree-like structure. Currently, this only goes
+- * one level deep.
++ * Collapses markers into a tree-like structure.
+  * @param object markerNode
+  * @param array markersList
++ * @param ?object blueprint
+  */
+-function collapseMarkersIntoNode({ markerNode, markersList }) {
+-  let [getOrCreateParentNode, getCurrentParentNode, clearParentNode] = makeParentNodeFactory();
+-  let uid = 0;
++function collapseMarkersIntoNode({ markerNode, markersList, blueprint }) {
++  let { getCurrentParentNode, collapseMarker, addParentNode, popParentNode } = createParentNodeFactory(markerNode);
++  blueprint = blueprint || TIMELINE_BLUEPRINT;
+ 
+   for (let i = 0, len = markersList.length; i < len; i++) {
+     let curr = markersList[i];
+ 
+     // Make sure all the markers have an assigned number id. This makes it
+     // easier to find them in a waterfall, for example.
+     curr.uid = ++uid;
+ 
+     let parentNode = getCurrentParentNode();
+-    let blueprint = TIMELINE_BLUEPRINT[curr.name];
+-    let collapse = blueprint.collapseFunc || (() => null);
++    let def = blueprint[curr.name];
++    let collapse = def.collapseFunc || (() => null);
+     let peek = distance => markersList[i + distance];
+-    let collapseInfo = collapse(parentNode, curr, peek);
++    let foundParent = false;
+ 
++    let collapseInfo = collapse(parentNode, curr, peek);
+     if (collapseInfo) {
+-      let { toParent, withData, forceNew, forceEnd } = collapseInfo;
++      let { collapse, toParent, finalize } = collapseInfo;
+ 
+-      // If the `forceNew` prop is set on the collapse info, then a new parent
+-      // marker needs to be created even if there is one already available.
+-      if (forceNew) {
+-        clearParentNode();
++      // If `toParent` is an object, use it as the next parent marker
++      if (typeof toParent === "object") {
++        addParentNode(toParent);
+       }
+-      // If the `toParent` prop is set on the collapse info, then this marker
+-      // can be collapsed into a higher-level parent marker.
+-      if (toParent) {
+-        let parentNode = getOrCreateParentNode({
+-          uid: ++uid,
+-          owner: markerNode,
+-          name: toParent,
+-          start: curr.start,
+-          end: curr.end
+-        });
+-
+-        // A parent marker, even when created, will always have at least one
+-        // child submarker (the one which caused it to be created).
+-        parentNode.submarkers.push(curr);
+-
+-        // Optionally, additional data may be stapled on this parent marker.
+-        for (let key in withData) {
+-          parentNode[key] = withData[key];
+-        }
++
++      if (collapse) {
++        collapseMarker(curr);
+       }
+-      // If the `forceEnd` prop is set on the collapse info, then the higher-level
+-      // parent marker is full and should be finalized.
+-      if (forceEnd) {
+-        clearParentNode();
++
++      // If the marker specifies this parent marker is full,
++      // pop it from the stack.
++      if (finalize) {
++        popParentNode();
+       }
+     } else {
+-      clearParentNode();
+       markerNode.submarkers.push(curr);
+     }
+   }
+ }
+ 
+ /**
+- * Creates an empty parent marker, which functions like a regular marker,
++ * Creates a parent marker, which functions like a regular marker,
+  * but is able to hold additional child markers.
+- * @param string name
+- * @param number uid
+- * @param number start [optional]
+- * @param number end [optional]
++ *
++ * The marker is seeded with values from `marker`.
++ * @param object marker
+  * @return object
+  */
+-function makeEmptyMarkerNode(name, uid, start, end) {
+-  return {
+-    name: name,
+-    uid: uid,
+-    start: start,
+-    end: end,
+-    submarkers: []
+-  };
++function makeParentMarkerNode (marker) {
++  let node = Object.create(null);
++  for (let prop in marker) {
++    node[prop] = marker[prop];
++  }
++  if (!node.uid) {
++    node.uid = ++uid;
++  }
++  node.submarkers = [];
++  return node;
+ }
+ 
+ /**
+- * Creates a factory for markers containing other markers.
+- * @return array[function]
++ * Takes a root marker node and creates a hash of functions used
++ * to manage the creation and nesting of additional parent markers.
++ *
++ * @param {object} root
++ * @return {object}
+  */
+-function makeParentNodeFactory() {
+-  let marker;
+-
+-  return [
++function createParentNodeFactory (root) {
++  let parentMarkers = [];
++  let factory = {
+     /**
+-     * Gets the current parent marker for the given marker name. If it doesn't
+-     * exist, it creates it and appends it to another parent marker.
+-     * @param object owner
+-     * @param string name
+-     * @param number start
+-     * @param number end
+-     * @return object
++     * Pops the most recent parent node off the stack, finalizing it.
++     * Sets the `end` time based on the most recent child if not defined.
+      */
+-    function getOrCreateParentNode({ owner, name, uid, start, end }) {
+-      if (marker && marker.name == name) {
+-        marker.end = end;
+-        return marker;
+-      } else {
+-        marker = makeEmptyMarkerNode(name, uid, start, end);
+-        owner.submarkers.push(marker);
+-        return marker;
++    popParentNode: () => {
++      if (parentMarkers.length === 0) {
++        throw new Error("Cannot pop parent markers when none exist.");
+       }
++
++      let lastParent = parentMarkers.pop();
++      // If this finished parent marker doesn't have an end time,
++      // so probably a synthesized marker, use the last marker's end time.
++      if (lastParent.end == void 0) {
++        lastParent.end = lastParent.submarkers[lastParent.submarkers.length - 1].end;
++      }
++      return lastParent;
+     },
+ 
+     /**
+-     * Gets the current marker marker.
+-     * @return object
++     * Returns the most recent parent node.
++     */
++    getCurrentParentNode: () => parentMarkers.length ? parentMarkers[parentMarkers.length - 1] : null,
++
++    /**
++     * Push a new parent node onto the stack and nest it with the
++     * next most recent parent node, or root if no other parent nodes.
+      */
+-    function getCurrentParentNode() {
+-      return marker;
++    addParentNode: (marker) => {
++      let parentMarker = makeParentMarkerNode(marker);
++      (factory.getCurrentParentNode() || root).submarkers.push(parentMarker);
++      parentMarkers.push(parentMarker);
+     },
+ 
+     /**
+-     * Clears the current marker marker.
++     * Push this marker into the most recent parent node.
+      */
+-    function clearParentNode() {
+-      marker = null;
++    collapseMarker: (marker) => {
++      if (parentMarkers.length === 0) {
++        throw new Error("Cannot collapse marker with no parents.");
++      }
++      factory.getCurrentParentNode().submarkers.push(marker);
+     }
+-  ];
++  };
++
++  return factory;
+ }
+ 
+-exports.makeEmptyMarkerNode = makeEmptyMarkerNode;
++exports.makeParentMarkerNode = makeParentMarkerNode;
+ exports.collapseMarkersIntoNode = collapseMarkersIntoNode;
+diff --git a/browser/devtools/performance/modules/markers.js b/browser/devtools/performance/modules/markers.js
+index 92af448..6f9a4a3 100644
+--- a/browser/devtools/performance/modules/markers.js
++++ b/browser/devtools/performance/modules/markers.js
+@@ -1,15 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { L10N } = require("devtools/performance/global");
+-const { Formatters, CollapseFunctions } = require("devtools/performance/marker-utils");
++const { Formatters, CollapseFunctions: collapse } = require("devtools/performance/marker-utils");
+ 
+ /**
+  * A simple schema for mapping markers to the timeline UI. The keys correspond
+  * to marker names, while the values are objects with the following format:
+  *
+  * - group: The row index in the timeline overview graph; multiple markers
+  *          can be added on the same row. @see <overview.js/buildGraphImage>
+  * - label: The label used in the waterfall to identify the marker. Can be a
+@@ -24,25 +24,23 @@ const { Formatters, CollapseFunctions } = require("devtools/performance/marker-u
+  *              entry in ./browser/themes/shared/devtools/performance.inc.css
+  *              https://developer.mozilla.org/en-US/docs/Tools/DevToolsColors
+  * - collapseFunc: A function determining how markers are collapsed together.
+  *                 Invoked with 3 arguments: the current parent marker, the
+  *                 current marker and a method for peeking i markers ahead. If
+  *                 nothing is returned, the marker is added as a standalone entry
+  *                 in the waterfall. Otherwise, an object needs to be returned
+  *                 with the following properties:
+- *                 - toParent: The parent marker name (needs to be an entry in
+- *                             the `TIMELINE_BLUEPRINT` itself).
+- *                 - withData: An object containing some properties to staple
+- *                             on the parent marker.
+- *                 - forceNew: True if a new parent marker needs to be created
+- *                             even though there is one currently available
+- *                             with the same name.
+- *                 - forceEnd: True if the current parent marker is full after
+- *                             this collapse operation and should be finalized.
++ *                 - toParent: The marker to be made a new parent. Can use the current
++ *                             marker, becoming a parent itself, or make a new marker-esque
++ *                             object.
++ *                 - collapse: Whether or not this current marker should be nested within
++ *                             the current parent.
++ *                 - finalize: Whether or not the current parent should be finalized and popped
++ *                             off the stack.
+  * - fields: An optional array of marker properties you wish to display in the
+  *           marker details view. For example, a field in the array such as
+  *           { property: "aCauseName", label: "Cause" } would render a string
+  *           like `Cause: ${marker.aCauseName}` in the marker details view.
+  *           Each `field` item may take the following properties:
+  *           - property: The property that must exist on the marker to render,
+  *                       and the value of the property will be displayed.
+  *           - label: The name of the property that should be displayed.
+@@ -56,69 +54,64 @@ const { Formatters, CollapseFunctions } = require("devtools/performance/marker-u
+  * Whenever this is changed, browser_timeline_waterfall-styles.js *must* be
+  * updated as well.
+  */
+ const TIMELINE_BLUEPRINT = {
+   /* Group 0 - Reflow and Rendering pipeline */
+   "Styles": {
+     group: 0,
+     colorName: "graphs-purple",
+-    collapseFunc: CollapseFunctions.identical,
++    collapseFunc: collapse.child,
+     label: L10N.getStr("timeline.label.styles2"),
+     fields: Formatters.StylesFields,
+   },
+   "Reflow": {
+     group: 0,
+     colorName: "graphs-purple",
+-    collapseFunc: CollapseFunctions.identical,
++    collapseFunc: collapse.child,
+     label: L10N.getStr("timeline.label.reflow2"),
+   },
+   "Paint": {
+     group: 0,
+     colorName: "graphs-green",
+-    collapseFunc: CollapseFunctions.identical,
++    collapseFunc: collapse.child,
+     label: L10N.getStr("timeline.label.paint"),
+   },
+ 
+   /* Group 1 - JS */
+   "DOMEvent": {
+     group: 1,
+     colorName: "graphs-yellow",
+-    collapseFunc: CollapseFunctions.DOMtoDOMJS,
++    collapseFunc: collapse.parent,
+     label: L10N.getStr("timeline.label.domevent"),
+     fields: Formatters.DOMEventFields,
+   },
+   "Javascript": {
+     group: 1,
+     colorName: "graphs-yellow",
+-    collapseFunc: either(CollapseFunctions.JStoDOMJS, CollapseFunctions.identical),
++    collapseFunc: either(collapse.parent, collapse.child),
+     label: Formatters.JSLabel,
+     fields: Formatters.JSFields
+   },
+-  "meta::DOMEvent+JS": {
+-    colorName: "graphs-yellow",
+-    label: Formatters.DOMJSLabel,
+-    fields: Formatters.DOMJSFields,
+-  },
+   "Parse HTML": {
+     group: 1,
+     colorName: "graphs-yellow",
+-    collapseFunc: CollapseFunctions.identical,
++    collapseFunc: either(collapse.parent, collapse.child),
+     label: L10N.getStr("timeline.label.parseHTML"),
+   },
+   "Parse XML": {
+     group: 1,
+     colorName: "graphs-yellow",
+-    collapseFunc: CollapseFunctions.identical,
++    collapseFunc: either(collapse.parent, collapse.child),
+     label: L10N.getStr("timeline.label.parseXML"),
+   },
+   "GarbageCollection": {
+     group: 1,
+     colorName: "graphs-red",
+-    collapseFunc: CollapseFunctions.adjacent,
++    collapseFunc: either(collapse.parent, collapse.child),
+     label: Formatters.GCLabel,
+     fields: [
+       { property: "causeName", label: "Reason:" },
+       { property: "nonincrementalReason", label: "Non-incremental Reason:" }
+     ],
+   },
+ 
+   /* Group 2 - User Controlled */
+@@ -129,16 +122,17 @@ const TIMELINE_BLUEPRINT = {
+     fields: [{
+       property: "causeName",
+       label: L10N.getStr("timeline.markerDetail.consoleTimerName")
+     }],
+   },
+   "TimeStamp": {
+     group: 2,
+     colorName: "graphs-blue",
++    collapseFunc: collapse.child,
+     label: sublabelForProperty(L10N.getStr("timeline.label.timestamp"), "causeName"),
+     fields: [{
+       property: "causeName",
+       label: "Label:"
+     }],
+   },
+ };
+ 
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index ac8cd12..6588561 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -133,9 +133,8 @@ skip-if = e10s # GC events seem unreliable in multiprocess
+ [browser_profiler_tree-view-10.js]
+ [browser_timeline-blueprint.js]
+ [browser_timeline-filters.js]
+ [browser_timeline-waterfall-background.js]
+ [browser_timeline-waterfall-generic.js]
+ [browser_timeline-waterfall-rerender.js]
+ [browser_timeline-waterfall-sidebar.js]
+ skip-if = os == 'linux' # Bug 1161817
+-[browser_waterfall-collapse.js]
+diff --git a/browser/devtools/performance/test/browser_waterfall-collapse.js b/browser/devtools/performance/test/browser_waterfall-collapse.js
+deleted file mode 100644
+index 0bcea67..0000000
+--- a/browser/devtools/performance/test/browser_waterfall-collapse.js
++++ /dev/null
+@@ -1,392 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the waterfall collapsing logic works properly.
+- */
+-
+-function test() {
+-  const WaterfallUtils = devtools.require("devtools/performance/waterfall-utils");
+-
+-  let rootMarkerNode = WaterfallUtils.makeEmptyMarkerNode("(root)");
+-
+-  WaterfallUtils.collapseMarkersIntoNode({
+-    markerNode: rootMarkerNode,
+-    markersList: gTestMarkers
+-  });
+-
+-  is(rootMarkerNode.toSource(), gExpectedOutput.toSource(),
+-    "The markers didn't collapse properly.");
+-
+-  finish();
+-}
+-
+-const gTestMarkers = [
+-// Test collapsing Style markers
+-{
+-  start: 1,
+-  end: 2,
+-  name: "Styles"
+-},
+-{
+-  start: 3,
+-  end: 4,
+-  name: "Styles"
+-},
+-// Test collapsing Reflow markers
+-{
+-  start: 5,
+-  end: 6,
+-  name: "Reflow"
+-},
+-{
+-  start: 7,
+-  end: 8,
+-  name: "Reflow"
+-},
+-// Test collapsing Paint markers
+-{
+-  start: 9,
+-  end: 10,
+-  name: "Paint"
+-}, {
+-  start: 11,
+-  end: 12,
+-  name: "Paint"
+-},
+-// Test standalone DOMEvent markers followed by a different marker
+-{
+-  start: 13,
+-  end: 14,
+-  name: "DOMEvent",
+-  eventPhase: 1,
+-  type: "foo1"
+-},
+-{
+-  start: 15,
+-  end: 16,
+-  name: "TimeStamp"
+-},
+-// Test a DOMEvent marker followed by a Javascript marker.
+-{
+-  start: 17,
+-  end: 18,
+-  name: "DOMEvent",
+-  eventPhase: 2,
+-  type: "foo2"
+-}, {
+-  start: 19,
+-  end: 20,
+-  name: "Javascript",
+-  stack: 1,
+-  endStack: 2
+-},
+-// Test another DOMEvent marker followed by a Javascript marker.
+-{
+-  start: 21,
+-  end: 22,
+-  name: "DOMEvent",
+-  eventPhase: 3,
+-  type: "foo3"
+-}, {
+-  start: 23,
+-  end: 24,
+-  name: "Javascript",
+-  stack: 3,
+-  endStack: 4
+-},
+-// Test a DOMEvent marker followed by multiple Javascript markers.
+-{
+-  start: 25,
+-  end: 26,
+-  name: "DOMEvent",
+-  eventPhase: 4,
+-  type: "foo4"
+-}, {
+-  start: 27,
+-  end: 28,
+-  name: "Javascript",
+-  stack: 5,
+-  endStack: 6
+-}, {
+-  start: 29,
+-  end: 30,
+-  name: "Javascript",
+-  stack: 7,
+-  endStack: 8
+-}, {
+-  start: 31,
+-  end: 32,
+-  name: "Javascript",
+-  stack: 9,
+-  endStack: 10
+-},
+-// Test multiple DOMEvent markers followed by multiple Javascript markers.
+-{
+-  start: 33,
+-  end: 34,
+-  name: "DOMEvent",
+-  eventPhase: 5,
+-  type: "foo5"
+-}, {
+-  start: 35,
+-  end: 36,
+-  name: "DOMEvent",
+-  eventPhase: 6,
+-  type: "foo6"
+-}, {
+-  start: 37,
+-  end: 38,
+-  name: "DOMEvent",
+-  eventPhase: 7,
+-  type: "foo6"
+-}, {
+-  start: 39,
+-  end: 40,
+-  name: "Javascript",
+-  stack: 11,
+-  endStack: 12
+-}, {
+-  start: 41,
+-  end: 42,
+-  name: "Javascript",
+-  stack: 13,
+-  endStack: 14
+-}, {
+-  start: 43,
+-  end: 44,
+-  name: "Javascript",
+-  stack: 15,
+-  endStack: 16
+-},
+-// Test a lonely marker at the end.
+-{
+-  start: 45,
+-  end: 46,
+-  name: "GarbageCollection"
+-}
+-];
+-
+-const gExpectedOutput = {
+-  name: "(root)",
+-  uid: (void 0),
+-  start: (void 0),
+-  end: (void 0),
+-  submarkers: [{
+-    name: "Styles",
+-    uid: 2,
+-    start: 1,
+-    end: 4,
+-    submarkers: [{
+-      start: 1,
+-      end: 2,
+-      name: "Styles",
+-      uid: 1
+-    }, {
+-      start: 3,
+-      end: 4,
+-      name: "Styles",
+-      uid: 3
+-    }]
+-  }, {
+-    name: "Reflow",
+-    uid: 6,
+-    start: 5,
+-    end: 8,
+-    submarkers: [{
+-      start: 5,
+-      end: 6,
+-      name: "Reflow",
+-      uid: 5
+-    }, {
+-      start: 7,
+-      end: 8,
+-      name: "Reflow",
+-      uid: 7
+-    }]
+-  }, {
+-    name: "Paint",
+-    uid: 10,
+-    start: 9,
+-    end: 12,
+-    submarkers: [{
+-      start: 9,
+-      end: 10,
+-      name: "Paint",
+-      uid: 9
+-    }, {
+-      start: 11,
+-      end: 12,
+-      name: "Paint",
+-      uid: 11
+-    }]
+-  }, {
+-    start: 13,
+-    end: 14,
+-    name: "DOMEvent",
+-    eventPhase: 1,
+-    type: "foo1",
+-    uid: 13
+-  }, {
+-    start: 15,
+-    end: 16,
+-    name: "TimeStamp",
+-    uid: 14
+-  }, {
+-    name: "meta::DOMEvent+JS",
+-    uid: 16,
+-    start: 17,
+-    end: 20,
+-    submarkers: [{
+-      start: 17,
+-      end: 18,
+-      name: "DOMEvent",
+-      eventPhase: 2,
+-      type: "foo2",
+-      uid: 15
+-    }, {
+-      start: 19,
+-      end: 20,
+-      name: "Javascript",
+-      stack: 1,
+-      endStack: 2,
+-      uid: 17
+-    }],
+-    type: "foo2",
+-    eventPhase: 2,
+-    stack: 1,
+-    endStack: 2
+-  }, {
+-    name: "meta::DOMEvent+JS",
+-    uid: 20,
+-    start: 21,
+-    end: 24,
+-    submarkers: [{
+-      start: 21,
+-      end: 22,
+-      name: "DOMEvent",
+-      eventPhase: 3,
+-      type: "foo3",
+-      uid: 19
+-    }, {
+-      start: 23,
+-      end: 24,
+-      name: "Javascript",
+-      stack: 3,
+-      endStack: 4,
+-      uid: 21
+-    }],
+-    type: "foo3",
+-    eventPhase: 3,
+-    stack: 3,
+-    endStack: 4
+-  }, {
+-    name: "meta::DOMEvent+JS",
+-    uid: 24,
+-    start: 25,
+-    end: 28,
+-    submarkers: [{
+-      start: 25,
+-      end: 26,
+-      name: "DOMEvent",
+-      eventPhase: 4,
+-      type: "foo4",
+-      uid: 23
+-    }, {
+-      start: 27,
+-      end: 28,
+-      name: "Javascript",
+-      stack: 5,
+-      endStack: 6,
+-      uid: 25
+-    }],
+-    type: "foo4",
+-    eventPhase: 4,
+-    stack: 5,
+-    endStack: 6
+-  }, {
+-    name: "Javascript",
+-    uid: 28,
+-    start: 29,
+-    end: 32,
+-    submarkers: [{
+-      start: 29,
+-      end: 30,
+-      name: "Javascript",
+-      stack: 7,
+-      endStack: 8,
+-      uid: 27
+-    }, {
+-      start: 31,
+-      end: 32,
+-      name: "Javascript",
+-      stack: 9,
+-      endStack: 10,
+-      uid: 29
+-    }]
+-  }, {
+-    start: 33,
+-    end: 34,
+-    name: "DOMEvent",
+-    eventPhase: 5,
+-    type: "foo5",
+-    uid: 31
+-  }, {
+-    start: 35,
+-    end: 36,
+-    name: "DOMEvent",
+-    eventPhase: 6,
+-    type: "foo6",
+-    uid: 32
+-  }, {
+-    name: "meta::DOMEvent+JS",
+-    uid: 34,
+-    start: 37,
+-    end: 40,
+-    submarkers: [{
+-      start: 37,
+-      end: 38,
+-      name: "DOMEvent",
+-      eventPhase: 7,
+-      type: "foo6",
+-      uid: 33
+-    }, {
+-      start: 39,
+-      end: 40,
+-      name: "Javascript",
+-      stack: 11,
+-      endStack: 12,
+-      uid: 35
+-    }],
+-    type: "foo6",
+-    eventPhase: 7,
+-    stack: 11,
+-    endStack: 12
+-  }, {
+-    name: "Javascript",
+-    uid: 38,
+-    start: 41,
+-    end: 44,
+-    submarkers: [{
+-      start: 41,
+-      end: 42,
+-      name: "Javascript",
+-      stack: 13,
+-      endStack: 14,
+-      uid: 37
+-    }, {
+-      start: 43,
+-      end: 44,
+-      name: "Javascript",
+-      stack: 15,
+-      endStack: 16,
+-      uid: 39
+-    }]
+-  }, {
+-    start: 45,
+-    end: 46,
+-    name: "GarbageCollection",
+-    uid: 41
+-  }]
+-};
+-
+diff --git a/browser/devtools/performance/test/unit/test_waterfall-utils-collapse-01.js b/browser/devtools/performance/test/unit/test_waterfall-utils-collapse-01.js
+new file mode 100644
+index 0000000..db2ae00
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_waterfall-utils-collapse-01.js
+@@ -0,0 +1,67 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the waterfall collapsing logic works properly.
++ */
++
++function test() {
++  const WaterfallUtils = devtools.require("devtools/performance/waterfall-utils");
++
++  let rootMarkerNode = WaterfallUtils.makeParentMarkerNode({ name: "(root)" });
++
++  WaterfallUtils.collapseMarkersIntoNode({
++    markerNode: rootMarkerNode,
++    markersList: gTestMarkers
++  });
++
++  function compare (marker, expected) {
++    for (let prop in expected) {
++      if (prop === "submarkers") {
++        for (let i = 0; i < expected.submarkers.length; i++) {
++          compare(marker.submarkers[i], expected.submarkers[i]);
++        }
++      } else if (prop !== "uid") {
++        is(marker[prop], expected[prop], `${expected.name} matches ${prop}`);
++      }
++    }
++  }
++
++  compare(rootMarkerNode, gExpectedOutput);
++  finish();
++}
++
++const gTestMarkers = [
++  { start: 1, end: 18, name: "DOMEvent" },
++    // Test that JS markers can fold in DOM events and have marker children
++    { start: 2, end: 16, name: "Javascript" },
++      // Test all these markers can be children
++      { start: 3, end: 4, name: "Paint" },
++      { start: 5, end: 6, name: "Reflow" },
++      { start: 7, end: 8, name: "Styles" },
++      { start: 9, end: 9, name: "TimeStamp" },
++      { start: 10, end: 11, name: "Parse HTML" },
++      { start: 12, end: 13, name: "Parse XML" },
++      { start: 14, end: 15, name: "GarbageCollection" },
++  // Test that JS markers can be parents without being a child of DOM events
++  { start: 25, end: 30, name: "JavaScript" },
++    { start: 26, end: 27, name: "Paint" },
++];
++
++const gExpectedOutput = {
++  name: "(root)", submarkers: [
++    { start: 1, end: 18, name: "DOMEvent", submarkers: [
++      { start: 2, end: 16, name: "Javascript", submarkers: [
++        { start: 3, end: 4, name: "Paint" },
++        { start: 5, end: 6, name: "Reflow" },
++        { start: 7, end: 8, name: "Styles" },
++        { start: 9, end: 9, name: "TimeStamp" },
++        { start: 10, end: 11, name: "Parse HTML" },
++        { start: 12, end: 13, name: "Parse XML" },
++        { start: 14, end: 15, name: "GarbageCollection" },
++      ]}
++    ]},
++    { start: 25, end: 30, name: "JavaScript", submarkers: [
++      { start: 26, end: 27, name: "Paint" },
++    ]}
++]};
+diff --git a/browser/devtools/performance/test/unit/test_waterfall-utils-collapse-02.js b/browser/devtools/performance/test/unit/test_waterfall-utils-collapse-02.js
+new file mode 100644
+index 0000000..ac6ac4d
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_waterfall-utils-collapse-02.js
+@@ -0,0 +1,78 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the waterfall collapsing logic works properly for console.time/console.timeEnd
++ * markers, as they should ignore any sort of collapsing.
++ */
++
++function test() {
++  const WaterfallUtils = devtools.require("devtools/performance/waterfall-utils");
++
++  let rootMarkerNode = WaterfallUtils.makeParentMarkerNode({ name: "(root)" });
++
++  WaterfallUtils.collapseMarkersIntoNode({
++    markerNode: rootMarkerNode,
++    markersList: gTestMarkers
++  });
++
++  function compare (marker, expected) {
++    for (let prop in expected) {
++      if (prop === "submarkers") {
++        for (let i = 0; i < expected.submarkers.length; i++) {
++          compare(marker.submarkers[i], expected.submarkers[i]);
++        }
++      } else if (prop !== "uid") {
++        is(marker[prop], expected[prop], `${expected.name} matches ${prop}`);
++      }
++    }
++  }
++
++  compare(rootMarkerNode, gExpectedOutput);
++  finish();
++}
++
++const gTestMarkers = [
++  { start: 2, end: 9, name: "Javascript" },
++    { start: 3, end: 4, name: "Paint" },
++  // Time range starting in nest, ending outside
++  { start: 5, end: 12, name: "ConsoleTime", causeName: "1" },
++
++  // Time range starting outside of nest, ending inside
++  { start: 15, end: 21, name: "ConsoleTime", causeName: "2" },
++  { start: 18, end: 22, name: "Javascript" },
++    { start: 19, end: 20, name: "Paint" },
++
++  // Time range completely eclipsing nest
++  { start: 30, end: 40, name: "ConsoleTime", causeName: "3" },
++  { start: 34, end: 39, name: "Javascript" },
++    { start: 35, end: 36, name: "Paint" },
++
++  // Time range completely eclipsed by nest
++  { start: 50, end: 60, name: "Javascript" },
++  { start: 54, end: 59, name: "ConsoleTime", causeName: "4" },
++    { start: 56, end: 57, name: "Paint" },
++];
++
++const gExpectedOutput = {
++  name: "(root)", submarkers: [
++    { start: 2, end: 9, name: "Javascript", submarkers: [
++      { start: 3, end: 4, name: "Paint" }
++    ]},
++    { start: 5, end: 12, name: "ConsoleTime", causeName: "1" },
++
++    { start: 15, end: 21, name: "ConsoleTime", causeName: "2" },
++    { start: 18, end: 22, name: "Javascript", submarkers: [
++      { start: 19, end: 20, name: "Paint" }
++    ]},
++    
++    { start: 30, end: 40, name: "ConsoleTime", causeName: "3" },
++    { start: 34, end: 39, name: "Javascript", submarkers: [
++      { start: 35, end: 36, name: "Paint" },
++    ]},
++
++    { start: 50, end: 60, name: "Javascript", submarkers: [
++      { start: 56, end: 57, name: "Paint" },
++    ]},
++    { start: 54, end: 59, name: "ConsoleTime", causeName: "4" },
++]};
+diff --git a/browser/devtools/performance/test/unit/xpcshell.ini b/browser/devtools/performance/test/unit/xpcshell.ini
+index deaaa1f..b84740d 100644
+--- a/browser/devtools/performance/test/unit/xpcshell.ini
++++ b/browser/devtools/performance/test/unit/xpcshell.ini
+@@ -12,8 +12,10 @@ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ [test_tree-model-02.js]
+ [test_tree-model-03.js]
+ [test_tree-model-04.js]
+ [test_tree-model-05.js]
+ [test_tree-model-06.js]
+ [test_tree-model-07.js]
+ [test_tree-model-08.js]
+ [test_tree-model-09.js]
++[test_waterfall-utils-collapse-01.js]
++[test_waterfall-utils-collapse-02.js]
+diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
+index 1415230..5a6feb4 100644
+--- a/browser/devtools/performance/views/details-waterfall.js
++++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -127,17 +127,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+    * populate the waterfall tree.
+    */
+   _prepareWaterfallTree: function(markers) {
+     let cached = this._cache.get(markers);
+     if (cached) {
+       return cached;
+     }
+ 
+-    let rootMarkerNode = WaterfallUtils.makeEmptyMarkerNode("(root)");
++    let rootMarkerNode = WaterfallUtils.makeParentMarkerNode({ name: "(root)" });
+ 
+     WaterfallUtils.collapseMarkersIntoNode({
+       markerNode: rootMarkerNode,
+       markersList: markers
+     });
+ 
+     this._cache.set(markers, rootMarkerNode);
+     return rootMarkerNode;
+-- 
+2.2.1
+

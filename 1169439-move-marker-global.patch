@@ -1,0 +1,920 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Sat, 30 May 2015 19:07:38 -0700
+Subject: Bug 1169439 - Pull out marker definitions into its own file, and move formatter and collapse functions into marker-utils. r=vp
+
+diff --git a/browser/devtools/performance/modules/global.js b/browser/devtools/performance/modules/global.js
+index 6a24278..70f6b29 100644
+--- a/browser/devtools/performance/modules/global.js
++++ b/browser/devtools/performance/modules/global.js
+@@ -1,19 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { ViewHelpers } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ 
+-// String used to fill in platform data when it should be hidden.
+-const GECKO_SYMBOL = "(Gecko)";
+-
+ /**
+  * Localization convenience methods.
+  + TODO: merge these into a single file: Bug 1082695.
+  */
+ const L10N = new ViewHelpers.MultiL10N([
+   "chrome://browser/locale/devtools/timeline.properties",
+   "chrome://browser/locale/devtools/profiler.properties"
+ ]);
+@@ -83,317 +79,16 @@ const CATEGORY_MAPPINGS = {
+   "256": CATEGORIES[3],   // js::ProfileEntry::Category::CC
+   "512": CATEGORIES[4],   // js::ProfileEntry::Category::NETWORK
+   "1024": CATEGORIES[5],  // js::ProfileEntry::Category::GRAPHICS
+   "2048": CATEGORIES[6],  // js::ProfileEntry::Category::STORAGE
+   "4096": CATEGORIES[7],  // js::ProfileEntry::Category::EVENTS
+ };
+ 
+ /**
+- * A simple schema for mapping markers to the timeline UI. The keys correspond
+- * to marker names, while the values are objects with the following format:
+- *
+- * - group: The row index in the timeline overview graph; multiple markers
+- *          can be added on the same row. @see <overview.js/buildGraphImage>
+- * - label: The label used in the waterfall to identify the marker. Can be a
+- *          string or just a function that accepts the marker and returns a
+- *          string, if you want to use a dynamic property for the main label.
+- *          If you use a function for a label, it *must* handle the case where
+- *          no marker is provided for a main label to describe all markers of
+- *          this type.
+- * - colorName: The label of the DevTools color used for this marker. If
+- *              adding a new color, be sure to check that there's an entry
+- *              for `.marker-details-bullet.{COLORNAME}` for the equivilent
+- *              entry in ./browser/themes/shared/devtools/performance.inc.css
+- *              https://developer.mozilla.org/en-US/docs/Tools/DevToolsColors
+- * - collapseFunc: A function determining how markers are collapsed together.
+- *                 Invoked with 3 arguments: the current parent marker, the
+- *                 current marker and a method for peeking i markers ahead. If
+- *                 nothing is returned, the marker is added as a standalone entry
+- *                 in the waterfall. Otherwise, an object needs to be returned
+- *                 with the following properties:
+- *                 - toParent: The parent marker name (needs to be an entry in
+- *                             the `TIMELINE_BLUEPRINT` itself).
+- *                 - withData: An object containing some properties to staple
+- *                             on the parent marker.
+- *                 - forceNew: True if a new parent marker needs to be created
+- *                             even though there is one currently available
+- *                             with the same name.
+- *                 - forceEnd: True if the current parent marker is full after
+- *                             this collapse operation and should be finalized.
+- * - fields: An optional array of marker properties you wish to display in the
+- *           marker details view. For example, a field in the array such as
+- *           { property: "aCauseName", label: "Cause" } would render a string
+- *           like `Cause: ${marker.aCauseName}` in the marker details view.
+- *           Each `field` item may take the following properties:
+- *           - property: The property that must exist on the marker to render,
+- *                       and the value of the property will be displayed.
+- *           - label: The name of the property that should be displayed.
+- *           - formatter: If a formatter is provided, instead of directly using
+- *                        the `property` property on the marker, the marker is
+- *                        passed into the formatter function to determine the
+- *                        displayed value.
+- *            Can also be a function that returns an object. Each key in the object
+- *            will be rendered as a field, with its value rendering as the value.
+- *
+- * Whenever this is changed, browser_timeline_waterfall-styles.js *must* be
+- * updated as well.
+- */
+-const TIMELINE_BLUEPRINT = {
+-  /* Group 0 - Reflow and Rendering pipeline */
+-  "Styles": {
+-    group: 0,
+-    colorName: "graphs-purple",
+-    collapseFunc: collapseConsecutiveIdentical,
+-    label: L10N.getStr("timeline.label.styles2"),
+-    fields: getStylesFields,
+-  },
+-  "Reflow": {
+-    group: 0,
+-    colorName: "graphs-purple",
+-    collapseFunc: collapseConsecutiveIdentical,
+-    label: L10N.getStr("timeline.label.reflow2"),
+-  },
+-  "Paint": {
+-    group: 0,
+-    colorName: "graphs-green",
+-    collapseFunc: collapseConsecutiveIdentical,
+-    label: L10N.getStr("timeline.label.paint"),
+-  },
+-
+-  /* Group 1 - JS */
+-  "DOMEvent": {
+-    group: 1,
+-    colorName: "graphs-yellow",
+-    collapseFunc: collapseDOMIntoDOMJS,
+-    label: L10N.getStr("timeline.label.domevent"),
+-    fields: getDOMEventFields,
+-  },
+-  "Javascript": {
+-    group: 1,
+-    colorName: "graphs-yellow",
+-    collapseFunc: either(collapseJSIntoDOMJS, collapseConsecutiveIdentical),
+-    label: getJSLabel,
+-    fields: getJSFields,
+-  },
+-  "meta::DOMEvent+JS": {
+-    colorName: "graphs-yellow",
+-    label: getDOMJSLabel,
+-    fields: getDOMEventFields,
+-  },
+-  "Parse HTML": {
+-    group: 1,
+-    colorName: "graphs-yellow",
+-    collapseFunc: collapseConsecutiveIdentical,
+-    label: L10N.getStr("timeline.label.parseHTML"),
+-  },
+-  "Parse XML": {
+-    group: 1,
+-    colorName: "graphs-yellow",
+-    collapseFunc: collapseConsecutiveIdentical,
+-    label: L10N.getStr("timeline.label.parseXML"),
+-  },
+-  "GarbageCollection": {
+-    group: 1,
+-    colorName: "graphs-red",
+-    collapseFunc: collapseAdjacentGC,
+-    label: getGCLabel,
+-    fields: [
+-      { property: "causeName", label: "Reason:" },
+-      { property: "nonincrementalReason", label: "Non-incremental Reason:" }
+-    ],
+-  },
+-
+-  /* Group 2 - User Controlled */
+-  "ConsoleTime": {
+-    group: 2,
+-    colorName: "graphs-grey",
+-    label: sublabelForProperty(L10N.getStr("timeline.label.consoleTime"), "causeName"),
+-    fields: [{
+-      property: "causeName",
+-      label: L10N.getStr("timeline.markerDetail.consoleTimerName")
+-    }],
+-  },
+-  "TimeStamp": {
+-    group: 2,
+-    colorName: "graphs-blue",
+-    label: sublabelForProperty(L10N.getStr("timeline.label.timestamp"), "causeName"),
+-    fields: [{
+-      property: "causeName",
+-      label: "Label:"
+-    }],
+-  },
+-};
+-
+-/**
+- * Helper for creating a function that returns the first defined result from
+- * a list of functions passed in as params, in order.
+- * @param ...function fun
+- * @return any
+- */
+-function either(...fun) {
+-  return function() {
+-    for (let f of fun) {
+-      let result = f.apply(null, arguments);
+-      if (result !== undefined) return result;
+-    }
+-  }
+-}
+-
+-/**
+- * A series of collapsers used by the blueprint. These functions are
+- * consecutively invoked on a moving window of two markers.
+- */
+-
+-function collapseConsecutiveIdentical(parent, curr, peek) {
+-  // If there is a parent marker currently being filled and the current marker
+-  // should go into the parent marker, make it so.
+-  if (parent && parent.name == curr.name) {
+-    return { toParent: parent.name };
+-  }
+-  // Otherwise if the current marker is the same type as the next marker type,
+-  // create a new parent marker containing the current marker.
+-  let next = peek(1);
+-  if (next && curr.name == next.name) {
+-    return { toParent: curr.name };
+-  }
+-}
+-
+-function collapseAdjacentGC(parent, curr, peek) {
+-  let next = peek(1);
+-  if (next && (next.start < curr.end || next.start - curr.end <= 10 /* ms */)) {
+-    return collapseConsecutiveIdentical(parent, curr, peek);
+-  }
+-}
+-
+-function collapseDOMIntoDOMJS(parent, curr, peek) {
+-  // If the next marker is a JavaScript marker, create a new meta parent marker
+-  // containing the current marker.
+-  let next = peek(1);
+-  if (next && next.name == "Javascript") {
+-    return {
+-      forceNew: true,
+-      toParent: "meta::DOMEvent+JS",
+-      withData: {
+-        type: curr.type,
+-        eventPhase: curr.eventPhase
+-      },
+-    };
+-  }
+-}
+-
+-function collapseJSIntoDOMJS(parent, curr, peek) {
+-  // If there is a parent marker currently being filled, and it's the one
+-  // created from a `DOMEvent` via `collapseDOMIntoDOMJS`, then the current
+-  // marker has to go into that one.
+-  if (parent && parent.name == "meta::DOMEvent+JS") {
+-    return {
+-      forceEnd: true,
+-      toParent: "meta::DOMEvent+JS",
+-      withData: {
+-        stack: curr.stack,
+-        endStack: curr.endStack
+-      },
+-    };
+-  }
+-}
+-
+-/**
+- * A series of formatters used by the blueprint.
+- */
+-
+-function getGCLabel (marker={}) {
+-  let label = L10N.getStr("timeline.label.garbageCollection");
+-  // Only if a `nonincrementalReason` exists, do we want to label
+-  // this as a non incremental GC event.
+-  if ("nonincrementalReason" in marker) {
+-    label = `${label} (Non-incremental)`;
+-  }
+-  return label;
+-}
+-
+-/**
+- * Mapping of JS marker causes to a friendlier form. Only
+- * markers that are considered "from content" should be labeled here.
+- */
+-const JS_MARKER_MAP = {
+-  "<script> element":          "Script Tag",
+-  "setInterval handler":       "setInterval",
+-  "setTimeout handler":        "setTimeout",
+-  "FrameRequestCallback":      "requestAnimationFrame",
+-  "promise callback":          "Promise Callback",
+-  "promise initializer":       "Promise Init",
+-  "Worker runnable":           "Worker",
+-  "javascript: URI":           "JavaScript URI",
+-  // The difference between these two event handler markers are differences
+-  // in their WebIDL implementation, so distinguishing them is not necessary.
+-  "EventHandlerNonNull":       "Event Handler",
+-  "EventListener.handleEvent": "Event Handler",
+-};
+-
+-function getJSLabel (marker={}) {
+-  let generic = L10N.getStr("timeline.label.javascript2");
+-  if ("causeName" in marker) {
+-    return JS_MARKER_MAP[marker.causeName] || generic;
+-  }
+-  return generic;
+-}
+-
+-function getDOMJSLabel (marker={}) {
+-  return `Event (${marker.type})`;
+-}
+-
+-/**
+- * Returns a hash for computing a fields object for a JS marker. If the cause
+- * is considered content (so an entry exists in the JS_MARKER_MAP), do not display it
+- * since it's redundant with the label. Otherwise for Gecko code, either display
+- * the cause, or "(Gecko)", depending on if "show-platform-data" is set.
+- */
+-function getJSFields (marker) {
+-  if ("causeName" in marker && !JS_MARKER_MAP[marker.causeName]) {
+-    return { Reason: PREFS["show-platform-data"] ? marker.causeName : GECKO_SYMBOL };
+-  }
+-}
+-
+-function getDOMEventFields (marker) {
+-  let fields = Object.create(null);
+-  if ("type" in marker) {
+-    fields[L10N.getStr("timeline.markerDetail.DOMEventType")] = marker.type;
+-  }
+-  if ("eventPhase" in marker) {
+-    let phase;
+-    if (marker.eventPhase === Ci.nsIDOMEvent.AT_TARGET) {
+-      phase = L10N.getStr("timeline.markerDetail.DOMEventTargetPhase");
+-    } else if (marker.eventPhase === Ci.nsIDOMEvent.CAPTURING_PHASE) {
+-      phase = L10N.getStr("timeline.markerDetail.DOMEventCapturingPhase");
+-    } else if (marker.eventPhase === Ci.nsIDOMEvent.BUBBLING_PHASE) {
+-      phase = L10N.getStr("timeline.markerDetail.DOMEventBubblingPhase");
+-    }
+-    fields[L10N.getStr("timeline.markerDetail.DOMEventPhase")] = phase;
+-  }
+-  return fields;
+-}
+-
+-function getStylesFields (marker) {
+-  if ("restyleHint" in marker) {
+-    return { "Restyle Hint": marker.restyleHint.replace(/eRestyle_/g, "") };
+-  }
+-}
+-
+-/**
+- * Takes a main label (like "Timestamp") and a property,
+- * and returns a marker that will print out the property
+- * value for a marker if it exists ("Timestamp (rendering)"),
+- * or just the main label if it does not.
+- */
+-function sublabelForProperty (mainLabel, prop) {
+-  return (marker={}) => marker[prop] ? `${mainLabel} (${marker[prop]})` : mainLabel;
+-}
+-
+-/**
+  * Get the numeric bitmask (or set of masks) for the given category
+  * abbreviation. See CATEGORIES and CATEGORY_MAPPINGS above.
+  *
+  * CATEGORY_MASK can be called with just a name if it is expected that the
+  * category is mapped to by exactly one bitmask.  If the category is mapped
+  * to by multiple masks, CATEGORY_MASK for that name must be called with
+  * an additional argument specifying the desired id (in ascending order).
+  */
+@@ -444,15 +139,14 @@ const CATEGORY_OTHER = CATEGORY_MASK('other');
+ 
+ // Human-readable JIT category bitmask. Certain pseudo-frames in a sample,
+ // like "EnterJIT", don't have any associated `cateogry` information.
+ const CATEGORY_JIT = CATEGORY_MASK('js');
+ 
+ // Exported symbols.
+ exports.L10N = L10N;
+ exports.PREFS = PREFS;
+-exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
+ exports.CATEGORIES = CATEGORIES;
+ exports.CATEGORY_MAPPINGS = CATEGORY_MAPPINGS;
+ exports.CATEGORY_MASK = CATEGORY_MASK;
+ exports.CATEGORY_MASK_LIST = CATEGORY_MASK_LIST;
+ exports.CATEGORY_OTHER = CATEGORY_OTHER;
+ exports.CATEGORY_JIT = CATEGORY_JIT;
+diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
+index 274b570..d93d5dd 100644
+--- a/browser/devtools/performance/modules/logic/marker-utils.js
++++ b/browser/devtools/performance/modules/logic/marker-utils.js
+@@ -3,23 +3,30 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * This file contains utilities for creating elements for markers to be displayed,
+  * and parsing out the blueprint to generate correct values for markers.
+  */
+ 
++const { Ci } = require("chrome");
++
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/performance/global", true);
+-loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
++loader.lazyRequireGetter(this, "PREFS",
+   "devtools/performance/global", true);
++loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
++  "devtools/performance/markers", true);
+ loader.lazyRequireGetter(this, "WebConsoleUtils",
+   "devtools/toolkit/webconsole/utils");
+ 
++// String used to fill in platform data when it should be hidden.
++const GECKO_SYMBOL = "(Gecko)";
++
+ /**
+  * Returns the correct label to display for passed in marker, based
+  * off of the blueprints.
+  *
+  * @param {ProfileTimelineMarker} marker
+  * @return {string}
+  */
+ function getMarkerLabel (marker) {
+@@ -265,12 +272,157 @@ const DOM = {
+         frameIndex = frame.parent;
+       }
+     }
+ 
+     return container;
+   }
+ };
+ 
++/**
++ * A series of collapsers used by the blueprint. These functions are
++ * invoked on a moving window of two markers.
++ */
++
++const CollapseFunctions = {
++  identical: function (parent, curr, peek) {
++    // If there is a parent marker currently being filled and the current marker
++    // should go into the parent marker, make it so.
++    if (parent && parent.name == curr.name) {
++      return { toParent: parent.name };
++    }
++    // Otherwise if the current marker is the same type as the next marker type,
++    // create a new parent marker containing the current marker.
++    let next = peek(1);
++    if (next && curr.name == next.name) {
++      return { toParent: curr.name };
++    }
++  },
++
++  adjacent: function (parent, curr, peek) {
++    let next = peek(1);
++    if (next && (next.start < curr.end || next.start - curr.end <= 10 /* ms */)) {
++      return CollapseFunctions.identical(parent, curr, peek);
++    }
++  },
++
++  DOMtoDOMJS: function (parent, curr, peek) {
++    // If the next marker is a JavaScript marker, create a new meta parent marker
++    // containing the current marker.
++    let next = peek(1);
++    if (next && next.name == "Javascript") {
++      return {
++        forceNew: true,
++        toParent: "meta::DOMEvent+JS",
++        withData: {
++          type: curr.type,
++          eventPhase: curr.eventPhase
++        },
++      };
++    }
++  },
++
++  JStoDOMJS: function (parent, curr, peek) {
++    // If there is a parent marker currently being filled, and it's the one
++    // created from a `DOMEvent` via `collapseDOMIntoDOMJS`, then the current
++    // marker has to go into that one.
++    if (parent && parent.name == "meta::DOMEvent+JS") {
++      return {
++        forceEnd: true,
++        toParent: "meta::DOMEvent+JS",
++        withData: {
++          stack: curr.stack,
++          endStack: curr.endStack
++        },
++      };
++    }
++  },
++};
++
++/**
++ * Mapping of JS marker causes to a friendlier form. Only
++ * markers that are considered "from content" should be labeled here.
++ */
++const JS_MARKER_MAP = {
++  "<script> element":          "Script Tag",
++  "setInterval handler":       "setInterval",
++  "setTimeout handler":        "setTimeout",
++  "FrameRequestCallback":      "requestAnimationFrame",
++  "promise callback":          "Promise Callback",
++  "promise initializer":       "Promise Init",
++  "Worker runnable":           "Worker",
++  "javascript: URI":           "JavaScript URI",
++  // The difference between these two event handler markers are differences
++  // in their WebIDL implementation, so distinguishing them is not necessary.
++  "EventHandlerNonNull":       "Event Handler",
++  "EventListener.handleEvent": "Event Handler",
++};
++
++/**
++ * A series of formatters used by the blueprint.
++ */
++const Formatters = {
++  GCLabel: function (marker={}) {
++    let label = L10N.getStr("timeline.label.garbageCollection");
++    // Only if a `nonincrementalReason` exists, do we want to label
++    // this as a non incremental GC event.
++    if ("nonincrementalReason" in marker) {
++      label = `${label} (Non-incremental)`;
++    }
++    return label;
++  },
++
++  JSLabel: function (marker={}) {
++    let generic = L10N.getStr("timeline.label.javascript2");
++    if ("causeName" in marker) {
++      return JS_MARKER_MAP[marker.causeName] || generic;
++    }
++    return generic;
++  },
++
++  DOMJSLabel: function (marker={}) {
++    return `Event (${marker.type})`;
++  },
++
++  /**
++   * Returns a hash for computing a fields object for a JS marker. If the cause
++   * is considered content (so an entry exists in the JS_MARKER_MAP), do not display it
++   * since it's redundant with the label. Otherwise for Gecko code, either display
++   * the cause, or "(Gecko)", depending on if "show-platform-data" is set.
++   */
++  JSFields: function (marker) {
++    if ("causeName" in marker && !JS_MARKER_MAP[marker.causeName]) {
++      return { Reason: PREFS["show-platform-data"] ? marker.causeName : GECKO_SYMBOL };
++    }
++  },
++
++  DOMEventFields: function (marker) {
++    let fields = Object.create(null);
++    if ("type" in marker) {
++      fields[L10N.getStr("timeline.markerDetail.DOMEventType")] = marker.type;
++    }
++    if ("eventPhase" in marker) {
++      let phase;
++      if (marker.eventPhase === Ci.nsIDOMEvent.AT_TARGET) {
++        phase = L10N.getStr("timeline.markerDetail.DOMEventTargetPhase");
++      } else if (marker.eventPhase === Ci.nsIDOMEvent.CAPTURING_PHASE) {
++        phase = L10N.getStr("timeline.markerDetail.DOMEventCapturingPhase");
++      } else if (marker.eventPhase === Ci.nsIDOMEvent.BUBBLING_PHASE) {
++        phase = L10N.getStr("timeline.markerDetail.DOMEventBubblingPhase");
++      }
++      fields[L10N.getStr("timeline.markerDetail.DOMEventPhase")] = phase;
++    }
++    return fields;
++  },
++
++  StylesFields: function (marker) {
++    if ("restyleHint" in marker) {
++      return { "Restyle Hint": marker.restyleHint.replace(/eRestyle_/g, "") };
++    }
++  },
++};
++
+ exports.getMarkerLabel = getMarkerLabel;
+ exports.getMarkerClassName = getMarkerClassName;
+ exports.getMarkerFields = getMarkerFields;
+ exports.DOM = DOM;
++exports.CollapseFunctions = CollapseFunctions;
++exports.Formatters = Formatters;
+diff --git a/browser/devtools/performance/modules/logic/waterfall-utils.js b/browser/devtools/performance/modules/logic/waterfall-utils.js
+index 66f945b..4308342 100644
+--- a/browser/devtools/performance/modules/logic/waterfall-utils.js
++++ b/browser/devtools/performance/modules/logic/waterfall-utils.js
+@@ -3,17 +3,17 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * Utility functions for collapsing markers into a waterfall.
+  */
+ 
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+-  "devtools/performance/global", true);
++  "devtools/performance/markers", true);
+ 
+ /**
+  * Collapses markers into a tree-like structure. Currently, this only goes
+  * one level deep.
+  * @param object markerNode
+  * @param array markersList
+  */
+ function collapseMarkersIntoNode({ markerNode, markersList }) {
+diff --git a/browser/devtools/performance/modules/markers.js b/browser/devtools/performance/modules/markers.js
+new file mode 100644
+index 0000000..92af448
+--- /dev/null
++++ b/browser/devtools/performance/modules/markers.js
+@@ -0,0 +1,171 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { L10N } = require("devtools/performance/global");
++const { Formatters, CollapseFunctions } = require("devtools/performance/marker-utils");
++
++/**
++ * A simple schema for mapping markers to the timeline UI. The keys correspond
++ * to marker names, while the values are objects with the following format:
++ *
++ * - group: The row index in the timeline overview graph; multiple markers
++ *          can be added on the same row. @see <overview.js/buildGraphImage>
++ * - label: The label used in the waterfall to identify the marker. Can be a
++ *          string or just a function that accepts the marker and returns a
++ *          string, if you want to use a dynamic property for the main label.
++ *          If you use a function for a label, it *must* handle the case where
++ *          no marker is provided for a main label to describe all markers of
++ *          this type.
++ * - colorName: The label of the DevTools color used for this marker. If
++ *              adding a new color, be sure to check that there's an entry
++ *              for `.marker-details-bullet.{COLORNAME}` for the equivilent
++ *              entry in ./browser/themes/shared/devtools/performance.inc.css
++ *              https://developer.mozilla.org/en-US/docs/Tools/DevToolsColors
++ * - collapseFunc: A function determining how markers are collapsed together.
++ *                 Invoked with 3 arguments: the current parent marker, the
++ *                 current marker and a method for peeking i markers ahead. If
++ *                 nothing is returned, the marker is added as a standalone entry
++ *                 in the waterfall. Otherwise, an object needs to be returned
++ *                 with the following properties:
++ *                 - toParent: The parent marker name (needs to be an entry in
++ *                             the `TIMELINE_BLUEPRINT` itself).
++ *                 - withData: An object containing some properties to staple
++ *                             on the parent marker.
++ *                 - forceNew: True if a new parent marker needs to be created
++ *                             even though there is one currently available
++ *                             with the same name.
++ *                 - forceEnd: True if the current parent marker is full after
++ *                             this collapse operation and should be finalized.
++ * - fields: An optional array of marker properties you wish to display in the
++ *           marker details view. For example, a field in the array such as
++ *           { property: "aCauseName", label: "Cause" } would render a string
++ *           like `Cause: ${marker.aCauseName}` in the marker details view.
++ *           Each `field` item may take the following properties:
++ *           - property: The property that must exist on the marker to render,
++ *                       and the value of the property will be displayed.
++ *           - label: The name of the property that should be displayed.
++ *           - formatter: If a formatter is provided, instead of directly using
++ *                        the `property` property on the marker, the marker is
++ *                        passed into the formatter function to determine the
++ *                        displayed value.
++ *            Can also be a function that returns an object. Each key in the object
++ *            will be rendered as a field, with its value rendering as the value.
++ *
++ * Whenever this is changed, browser_timeline_waterfall-styles.js *must* be
++ * updated as well.
++ */
++const TIMELINE_BLUEPRINT = {
++  /* Group 0 - Reflow and Rendering pipeline */
++  "Styles": {
++    group: 0,
++    colorName: "graphs-purple",
++    collapseFunc: CollapseFunctions.identical,
++    label: L10N.getStr("timeline.label.styles2"),
++    fields: Formatters.StylesFields,
++  },
++  "Reflow": {
++    group: 0,
++    colorName: "graphs-purple",
++    collapseFunc: CollapseFunctions.identical,
++    label: L10N.getStr("timeline.label.reflow2"),
++  },
++  "Paint": {
++    group: 0,
++    colorName: "graphs-green",
++    collapseFunc: CollapseFunctions.identical,
++    label: L10N.getStr("timeline.label.paint"),
++  },
++
++  /* Group 1 - JS */
++  "DOMEvent": {
++    group: 1,
++    colorName: "graphs-yellow",
++    collapseFunc: CollapseFunctions.DOMtoDOMJS,
++    label: L10N.getStr("timeline.label.domevent"),
++    fields: Formatters.DOMEventFields,
++  },
++  "Javascript": {
++    group: 1,
++    colorName: "graphs-yellow",
++    collapseFunc: either(CollapseFunctions.JStoDOMJS, CollapseFunctions.identical),
++    label: Formatters.JSLabel,
++    fields: Formatters.JSFields
++  },
++  "meta::DOMEvent+JS": {
++    colorName: "graphs-yellow",
++    label: Formatters.DOMJSLabel,
++    fields: Formatters.DOMJSFields,
++  },
++  "Parse HTML": {
++    group: 1,
++    colorName: "graphs-yellow",
++    collapseFunc: CollapseFunctions.identical,
++    label: L10N.getStr("timeline.label.parseHTML"),
++  },
++  "Parse XML": {
++    group: 1,
++    colorName: "graphs-yellow",
++    collapseFunc: CollapseFunctions.identical,
++    label: L10N.getStr("timeline.label.parseXML"),
++  },
++  "GarbageCollection": {
++    group: 1,
++    colorName: "graphs-red",
++    collapseFunc: CollapseFunctions.adjacent,
++    label: Formatters.GCLabel,
++    fields: [
++      { property: "causeName", label: "Reason:" },
++      { property: "nonincrementalReason", label: "Non-incremental Reason:" }
++    ],
++  },
++
++  /* Group 2 - User Controlled */
++  "ConsoleTime": {
++    group: 2,
++    colorName: "graphs-grey",
++    label: sublabelForProperty(L10N.getStr("timeline.label.consoleTime"), "causeName"),
++    fields: [{
++      property: "causeName",
++      label: L10N.getStr("timeline.markerDetail.consoleTimerName")
++    }],
++  },
++  "TimeStamp": {
++    group: 2,
++    colorName: "graphs-blue",
++    label: sublabelForProperty(L10N.getStr("timeline.label.timestamp"), "causeName"),
++    fields: [{
++      property: "causeName",
++      label: "Label:"
++    }],
++  },
++};
++
++/**
++ * Helper for creating a function that returns the first defined result from
++ * a list of functions passed in as params, in order.
++ * @param ...function fun
++ * @return any
++ */
++function either(...fun) {
++  return function() {
++    for (let f of fun) {
++      let result = f.apply(null, arguments);
++      if (result !== undefined) return result;
++    }
++  }
++}
++
++/**
++ * Takes a main label (like "Timestamp") and a property,
++ * and returns a marker that will print out the property
++ * value for a marker if it exists ("Timestamp (rendering)"),
++ * or just the main label if it does not.
++ */
++function sublabelForProperty (mainLabel, prop) {
++  return (marker={}) => marker[prop] ? `${mainLabel} (${marker[prop]})` : mainLabel;
++}
++
++// Exported symbols.
++exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
+diff --git a/browser/devtools/performance/modules/widgets/marker-details.js b/browser/devtools/performance/modules/widgets/marker-details.js
+index 64fbc1c..a21ca45 100644
+--- a/browser/devtools/performance/modules/widgets/marker-details.js
++++ b/browser/devtools/performance/modules/widgets/marker-details.js
+@@ -9,17 +9,17 @@
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ 
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+-  "devtools/performance/global", true);
++  "devtools/performance/markers", true);
+ loader.lazyRequireGetter(this, "MarkerUtils",
+   "devtools/performance/marker-utils");
+ 
+ /**
+  * A detailed view for one single marker.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the view.
+diff --git a/browser/devtools/performance/modules/widgets/marker-view.js b/browser/devtools/performance/modules/widgets/marker-view.js
+index 5e5a610..7a33eec 100644
+--- a/browser/devtools/performance/modules/widgets/marker-view.js
++++ b/browser/devtools/performance/modules/widgets/marker-view.js
+@@ -6,17 +6,17 @@
+ /**
+  * This file contains the "marker" view, essentially a detailed list
+  * of all the markers in the timeline data.
+  */
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Heritage } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeItem.jsm");
+-const { TIMELINE_BLUEPRINT: ORIGINAL_BP } = require("devtools/performance/global");
++const { TIMELINE_BLUEPRINT: ORIGINAL_BP } = require("devtools/performance/markers");
+ 
+ loader.lazyRequireGetter(this, "MarkerUtils",
+   "devtools/performance/marker-utils");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ 
+ const LEVEL_INDENT = 10; // px
+ const ARROW_NODE_OFFSET = -15; // px
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index dcafe4b..bffb374 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -11,16 +11,17 @@ EXTRA_JS_MODULES.devtools.performance += [
+     'modules/logic/front.js',
+     'modules/logic/io.js',
+     'modules/logic/jit.js',
+     'modules/logic/marker-utils.js',
+     'modules/logic/recording-model.js',
+     'modules/logic/recording-utils.js',
+     'modules/logic/tree-model.js',
+     'modules/logic/waterfall-utils.js',
++    'modules/markers.js',
+     'modules/widgets/graphs.js',
+     'modules/widgets/marker-details.js',
+     'modules/widgets/marker-view.js',
+     'modules/widgets/markers-overview.js',
+     'modules/widgets/tree-view.js',
+     'modules/widgets/waterfall-ticks.js',
+     'panel.js'
+ ]
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 405fa4c..70d8cee 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -13,17 +13,17 @@ loader.lazyRequireGetter(this, "EventEmitter",
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ 
+ // Logic modules
+ 
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+-  "devtools/performance/global", true);
++  "devtools/performance/markers", true);
+ loader.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/performance/recording-utils");
+ loader.lazyRequireGetter(this, "RecordingModel",
+   "devtools/performance/recording-model", true);
+ loader.lazyRequireGetter(this, "GraphsController",
+   "devtools/performance/graphs", true);
+ loader.lazyRequireGetter(this, "WaterfallHeader",
+   "devtools/performance/waterfall-ticks", true);
+diff --git a/browser/devtools/performance/test/browser_marker-utils.js b/browser/devtools/performance/test/browser_marker-utils.js
+index 9e0e07b..86f7e5d 100644
+--- a/browser/devtools/performance/test/browser_marker-utils.js
++++ b/browser/devtools/performance/test/browser_marker-utils.js
+@@ -1,17 +1,17 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests the marker utils methods.
+  */
+ 
+ function* spawnTest() {
+-  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/performance/global");
++  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/performance/markers");
+   let Utils = devtools.require("devtools/performance/marker-utils");
+ 
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
+ 
+   is(Utils.getMarkerLabel({ name: "DOMEvent" }), "DOM Event",
+     "getMarkerLabel() returns a simple label");
+   is(Utils.getMarkerLabel({ name: "Javascript", causeName: "setTimeout handler" }), "setTimeout",
+     "getMarkerLabel() returns a label defined via function");
+diff --git a/browser/devtools/performance/test/browser_timeline-blueprint.js b/browser/devtools/performance/test/browser_timeline-blueprint.js
+index 7eb6f17..5336e6b 100644
+--- a/browser/devtools/performance/test/browser_timeline-blueprint.js
++++ b/browser/devtools/performance/test/browser_timeline-blueprint.js
+@@ -1,17 +1,17 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the timeline blueprint has a correct structure.
+  */
+ 
+ function* spawnTest() {
+-  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/performance/global");
++  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/performance/markers");
+ 
+   ok(TIMELINE_BLUEPRINT,
+     "A timeline blueprint should be available.");
+ 
+   ok(Object.keys(TIMELINE_BLUEPRINT).length,
+     "The timeline blueprint has at least one entry.");
+ 
+   for (let [key, value] of Iterator(TIMELINE_BLUEPRINT)) {
+diff --git a/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js b/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
+index 1a40655..5d1ee3e 100644
+--- a/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
++++ b/browser/devtools/performance/test/browser_timeline-waterfall-sidebar.js
+@@ -3,17 +3,18 @@
+ 
+ /**
+  * Tests if the sidebar is properly updated when a marker is selected.
+  */
+ 
+ function* spawnTest() {
+   let { target, panel } = yield initPerformance(SIMPLE_URL);
+   let { $, $$, EVENTS, PerformanceController, OverviewView, WaterfallView } = panel.panelWin;
+-  let { L10N, TIMELINE_BLUEPRINT } = devtools.require("devtools/performance/global");
++  let { L10N } = devtools.require("devtools/performance/global");
++  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/performance/markers");
+   let { getMarkerLabel } = devtools.require("devtools/performance/marker-utils");
+ 
+   // Hijack the markers massaging part of creating the waterfall view,
+   // to prevent collapsing markers and allowing this test to verify
+   // everything individually. A better solution would be to just expand
+   // all markers first and then skip the meta nodes, but I'm lazy.
+   WaterfallView._prepareWaterfallTree = markers => {
+     return { submarkers: markers };
+-- 
+2.2.1
+

@@ -1,19 +1,12 @@
-From 727f8909c464f37b9ae51578de440c1e3a0c7227 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Sun, 24 May 2015 09:10:14 -0700
-Subject: [PATCH] Bug 1167976 - wip
-
----
- browser/devtools/performance/modules/global.js     | 40 +++++++++++++------
- .../performance/modules/logic/frame-utils.js       | 46 ++++++++++++++++++++--
- .../performance/modules/logic/tree-model.js        | 21 ++++------
- 3 files changed, 80 insertions(+), 27 deletions(-)
+Subject: Bug 1167976 - Mark platform JS code with category where appropriate. In this case, just "tools" category as devtools JS code. r=vp,shu
 
 diff --git a/browser/devtools/performance/modules/global.js b/browser/devtools/performance/modules/global.js
-index 839fe41..e3da891 100644
+index 70f6b29..2038a5f 100644
 --- a/browser/devtools/performance/modules/global.js
 +++ b/browser/devtools/performance/modules/global.js
-@@ -64,32 +64,44 @@ const CATEGORIES = [{
+@@ -60,32 +60,39 @@ const CATEGORIES = [{
  }, {
    color: "#8fa1b2",
    abbrev: "storage",
@@ -23,13 +16,9 @@ index 839fe41..e3da891 100644
    abbrev: "events",
    label: L10N.getStr("category.events")
 +}, {
-+  color: "#d99b28",
-+  abbrev: "idle",
-+  label: "Idle",
-+}, {
 +  color: "#8fa1b2",
 +  abbrev: "tools",
-+  label: "Tools",
++  label: L10N.getStr("category.tools")
  }];
  
  /**
@@ -49,37 +38,15 @@ index 839fe41..e3da891 100644
 +
 +  // non-bitmasks for specially-assigned categories
 +  "9000": CATEGORIES[8],
-+  "9001": CATEGORIES[9],
  };
  
  /**
-  * A simple schema for mapping markers to the timeline UI. The keys correspond
-  * to marker names, while the values are objects with the following format:
+  * Get the numeric bitmask (or set of masks) for the given category
+  * abbreviation. See CATEGORIES and CATEGORY_MAPPINGS above.
   *
-  * - group: The row index in the timeline overview graph; multiple markers
-  *          can be added on the same row. @see <overview.js/buildGraphImage>
-@@ -107,20 +119,16 @@ const CATEGORY_MAPPINGS = {
-  * - fields: An optional array of marker properties you wish to display in the
-  *           marker details view. For example, a field in the array such as
-  *           { property: "aCauseName", label: "Cause" } would render a string
-  *           like `Cause: ${marker.aCauseName}` in the marker details view.
-  *           Each `field` item may take the following properties:
-  *           - property: The property that must exist on the marker to render,
-  *                       and the value of the property will be displayed.
-  *           - label: The name of the property that should be displayed.
-- *           - formatter: If a formatter is provided, instead of directly using
-- *                        the `property` property on the marker, the marker is
-- *                        passed into the formatter function to determine the
-- *                        displayed value.
-  *            Can also be a function that returns an object. Each key in the object
-  *            will be rendered as a field, with its value rendering as the value.
-  *
-  * Whenever this is changed, browser_timeline_waterfall-styles.js *must* be
-  * updated as well.
-  */
- const TIMELINE_BLUEPRINT = {
-   /* Group 0 - Reflow and Rendering pipeline */
-@@ -301,53 +309,63 @@ const [CATEGORY_MASK, CATEGORY_MASK_LIST] = (function () {
+  * CATEGORY_MASK can be called with just a name if it is expected that the
+  * category is mapped to by exactly one bitmask.  If the category is mapped
+@@ -101,52 +108,57 @@ const [CATEGORY_MASK, CATEGORY_MASK_LIST] = (function () {
        .filter(mask => CATEGORY_MAPPINGS[mask] == category)
        .map(mask => +mask)
        .sort();
@@ -130,10 +97,6 @@ index 839fe41..e3da891 100644
 +// like "EnterJIT", don't have any associated `category` information.
 +const CATEGORY_JIT = CATEGORY_MASK("js");
 +
-+// Human-readable "idle" category bitmask. Not emitted from frames themselves,
-+// but used manually in the client.
-+const CATEGORY_IDLE = CATEGORY_MASK("idle");
-+
 +// Human-readable "devtools" category bitmask. Not emitted from frames themselves,
 +// but used manually in the client.
 +const CATEGORY_DEVTOOLS = CATEGORY_MASK("tools");
@@ -141,17 +104,15 @@ index 839fe41..e3da891 100644
  // Exported symbols.
  exports.L10N = L10N;
  exports.PREFS = PREFS;
- exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
  exports.CATEGORIES = CATEGORIES;
  exports.CATEGORY_MAPPINGS = CATEGORY_MAPPINGS;
  exports.CATEGORY_MASK = CATEGORY_MASK;
  exports.CATEGORY_MASK_LIST = CATEGORY_MASK_LIST;
  exports.CATEGORY_OTHER = CATEGORY_OTHER;
  exports.CATEGORY_JIT = CATEGORY_JIT;
-+exports.CATEGORY_IDLE = CATEGORY_IDLE;
 +exports.CATEGORY_DEVTOOLS = CATEGORY_DEVTOOLS;
 diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
-index bc212f1..d389f50 100644
+index faa2b26..1ddaa86 100644
 --- a/browser/devtools/performance/modules/logic/frame-utils.js
 +++ b/browser/devtools/performance/modules/logic/frame-utils.js
 @@ -1,18 +1,18 @@
@@ -175,7 +136,86 @@ index bc212f1..d389f50 100644
  const CHAR_CODE_F = "f".charCodeAt(0);
  const CHAR_CODE_H = "h".charCodeAt(0);
  const CHAR_CODE_I = "i".charCodeAt(0);
-@@ -244,17 +244,17 @@ function InflatedFrame(index, frameTable, stringTable, allocationsTable) {
+@@ -157,43 +157,65 @@ function parseLocation(location, fallbackLine, fallbackColumn) {
+     functionName = location;
+     url = null;
+   }
+ 
+   return { functionName, fileName, hostName, host, port, url, line, column };
+ };
+ 
+ /**
+- * Checks if the specified function represents a chrome or content frame.
++ * Sets the properties of `isContent` and `category` on a frame.
+  *
+- * @param string location
+- *        The location of the frame.
+- * @param number category [optional]
+- *        If a chrome frame, the category.
+- * @return boolean
+- *         True if a content frame, false if a chrome frame.
++ * @param {InflatedFrame} frame
+  */
+-function isContent({ location, category }) {
++function computeIsContentAndCategory(frame) {
+   // Only C++ stack frames have associated category information.
+-  if (category) {
+-    return false;
++  if (frame.category) {
++    return;
+   }
+ 
++  let location = frame.location;
++
+   // Locations in frames with function names look like:
+   //   "functionName (foo://bar)".
+   // Look for the starting left parenthesis, then try to match a
+   // scheme name.
+   for (let i = 0; i < location.length; i++) {
+     if (location.charCodeAt(i) === CHAR_CODE_LPAREN) {
+-      return isContentScheme(location, i + 1);
++      if (isContentScheme(location, i + 1)) {
++        frame.isContent = true;
++        return;
++      }
++
++      for (let j = i + 1; j < location.length; j++) {
++        if (location.charCodeAt(j) === CHAR_CODE_R &&
++            isChromeScheme(location, j) &&
++            (location.indexOf("resource://gre/modules/devtools") !== -1 ||
++             location.indexOf("resource:///modules/devtools") !== -1)) {
++          frame.category = global.CATEGORY_DEVTOOLS;
++          return;
++        }
++      }
++
++      break;
+     }
+   }
+ 
+   // If there was no left parenthesis, try matching from the start.
+-  return isContentScheme(location, 0);
++  if (isContentScheme(location, 0)) {
++    frame.isContent = true;
++    return;
++  }
++
++  if (location === "EnterJIT") {
++    frame.category = global.CATEGORY_JIT;
++    return;
++  }
++
++  frame.category = global.CATEGORY_OTHER;
+ }
+ 
+ /**
+  * Get caches to cache inflated frames and computed frame keys of a frame
+  * table.
+  *
+  * @param object framesTable
+  * @return object
+@@ -242,20 +264,27 @@ function InflatedFrame(index, frameTable, stringTable, allocationsTable) {
+   const CATEGORY_SLOT = frameTable.schema.category;
  
    let frame = frameTable.data[index];
    let category = frame[CATEGORY_SLOT];
@@ -183,19 +223,48 @@ index bc212f1..d389f50 100644
    this.optimizations = frame[OPTIMIZATIONS_SLOT];
    this.line = frame[LINE_SLOT];
    this.column = undefined;
-   this.category = category;
+-  this.category = category;
 -  this.metaCategory = category || CATEGORY_OTHER;
-+  this.metaCategory = category || global.CATEGORY_OTHER;
    this.allocations = allocationsTable ? allocationsTable[index] : 0;
-   this.isContent = isContent(this);
+-  this.isContent = isContent(this);
++  this.category = category;
++  this.isContent = false;
++
++  // Attempt to compute if this frame is a content frame, and if not,
++  // its category.
++  //
++  // Since only C++ stack frames have associated category information,
++  // attempt to generate a useful category, fallback to the one provided
++  // by the profiling data, or fallback to an unknown category.
++  computeIsContentAndCategory(this);
  };
  
  /**
   * Gets the frame key (i.e., equivalence group) according to options. Content
   * frames are always identified by location. Chrome frames are identified by
   * location if content-only filtering is off. If content-filtering is on, they
-@@ -415,8 +415,48 @@ function isChromeScheme(location, i) {
-   default:
+  * are identified by their category.
+  *
+@@ -279,17 +308,17 @@ InflatedFrame.prototype.getFrameKey = function getFrameKey(options) {
+     // and just show time spent in each bucket.
+     //
+     // 2. The calls leading to the leaf _aren't_ where we are spending time,
+     // but _do_ give the developer context for how they got to the leaf
+     // where they _are_ spending time. For non-platform hackers, the
+     // non-leaf platform frames don't give any meaningful context, and so we
+     // can safely filter them out.
+     options.isMetaCategoryOut = true;
+-    return this.metaCategory;
++    return this.category;
+   }
+ 
+   // Return an empty string denoting that this frame should be skipped.
+   return "";
+ };
+ 
+ /**
+  * Helper for getting an nsIURL instance out of a string.
+@@ -413,13 +442,13 @@ function isChromeScheme(location, i) {
      return false;
    }
  }
@@ -203,83 +272,61 @@ index bc212f1..d389f50 100644
  function isNumeric(c) {
    return c >= CHAR_CODE_0 && c <= CHAR_CODE_9;
  }
-+
-+
-+/**
-+ * Called during initialization, massages a category property
-+ * if not content and lacks a category bit on the frame by checking
-+ * location, special frame names, and falling back to a default.
-+ */
-+function getCategory (frame) {
-+  if (frame.isContent) {
-+    return;
-+  }
-+
-+  // Override these pseudo-frames marked as "Gecko" with
-+  // a more descriptive "idle" category
-+  if (frame.location == "Startup::XRE_InitChildProcess" ||
-+      frame.location == "Startup::XRE_Main") { // Remove "Startup::XRE_Main" once non-e10s is gone
-+    return global.CATEGORY_IDLE;
-+  }
-+
-+  // "EnterJIT" pseudoframes are special, not actually on the stack.
-+  if (frame.location == "EnterJIT") {
-+    return global.CATEGORY_JIT;
-+  }
-+
-+  // If no category defined yet, check to see if its a Chrome JS category
-+  if (!frame.category) {
-+    if (/resource:\/\/gre\/modules\/devtools/.test(frame.location) ||
-+        /resource:\/\/\/modules\/devtools/.test(frame.location)) {
-+      console.log("Found DT", frame.location);
-+      return global.CATEGORY_DEVTOOLS;
-+    }
-+  }
-+
-+  // Since only C++ stack frames have associated category information,
-+  // default to an "unknown" category otherwise
-+  if (frame.isMetaCategory && !frame.category) {
-+    return global.CATEGORY_OTHER;
-+  }
-+}
-+exports.getCategory = getCategory;
+ 
++exports.computeIsContentAndCategory = computeIsContentAndCategory;
+ exports.parseLocation = parseLocation;
+-exports.isContent = isContent;
+ exports.getInflatedFrameCache = getInflatedFrameCache;
+ exports.getOrAddInflatedFrame = getOrAddInflatedFrame;
+ exports.InflatedFrame = InflatedFrame;
 diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
-index fc1c5f8..b956e82 100644
+index 7275ee9..ebc0ce2 100644
 --- a/browser/devtools/performance/modules/logic/tree-model.js
 +++ b/browser/devtools/performance/modules/logic/tree-model.js
-@@ -8,16 +8,20 @@ const { Cc, Ci, Cu, Cr } = require("chrome");
+@@ -4,22 +4,16 @@
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ 
  loader.lazyRequireGetter(this, "L10N",
    "devtools/performance/global", true);
  loader.lazyRequireGetter(this, "CATEGORY_MAPPINGS",
    "devtools/performance/global", true);
- loader.lazyRequireGetter(this, "CATEGORIES",
-   "devtools/performance/global", true);
- loader.lazyRequireGetter(this, "CATEGORY_JIT",
-   "devtools/performance/global", true);
-+loader.lazyRequireGetter(this, "CATEGORY_IDLE",
-+  "devtools/performance/global", true);
-+loader.lazyRequireGetter(this, "CATEGORY_DEVTOOLS",
-+  "devtools/performance/global", true);
- loader.lazyRequireGetter(this, "CATEGORY_OTHER",
-   "devtools/performance/global", true);
+-loader.lazyRequireGetter(this, "CATEGORIES",
+-  "devtools/performance/global", true);
+-loader.lazyRequireGetter(this, "CATEGORY_JIT",
+-  "devtools/performance/global", true);
+-loader.lazyRequireGetter(this, "CATEGORY_OTHER",
+-  "devtools/performance/global", true);
  loader.lazyRequireGetter(this, "JITOptimizations",
    "devtools/performance/jit", true);
  loader.lazyRequireGetter(this, "FrameUtils",
    "devtools/performance/frame-utils");
  
- exports.ThreadNode = ThreadNode;
-@@ -377,16 +381,19 @@ function FrameNode(frameKey, { location, line, category, allocations, isContent
+ /**
+  * A call tree for a thread. This is essentially a linkage between all frames
+  * of all samples into a single tree structure, with additional information
+@@ -372,25 +366,25 @@ ThreadNode.prototype = {
+  * @param boolean isMetaCategory
+  *        Whether or not this is a platform node that should appear as a
+  *        generalized meta category or not.
+  */
+ function FrameNode(frameKey, { location, line, category, allocations, isContent }, isMetaCategory) {
+   this.key = frameKey;
+   this.location = location;
+   this.line = line;
+-  this.category = category;
    this.allocations = allocations;
    this.samples = 0;
    this.duration = 0;
    this.calls = [];
-   this.isContent = isContent;
+-  this.isContent = isContent;
++  this.isContent = !!isContent;
    this._optimizations = null;
    this._stringTable = null;
-   this.isMetaCategory = isMetaCategory;
-+
-+  // Check to see if any changes need to be made to the category
-+  this.category = FrameUtils.getCategory(this) || this.category;
+-  this.isMetaCategory = isMetaCategory;
++  this.isMetaCategory = !!isMetaCategory;
++  this.category = category;
  }
  
  FrameNode.prototype = {
@@ -288,7 +335,7 @@ index fc1c5f8..b956e82 100644
     *
     * @param number prevSampleTime
     *               The time when the immediate previous sample was sampled.
-@@ -453,29 +460,17 @@ FrameNode.prototype = {
+@@ -457,29 +451,17 @@ FrameNode.prototype = {
      return this._data || this._computeInfo();
    },
  
@@ -318,18 +365,742 @@ index fc1c5f8..b956e82 100644
  
      return this._data = parsedData;
    },
-@@ -495,10 +490,10 @@ FrameNode.prototype = {
-    *
-    * @return {JITOptimizations|null}
-    */
-   getOptimizations: function () {
-     if (!this._optimizations) {
-       return null;
-     }
-     return new JITOptimizations(this._optimizations, this._stringTable);
--  }
-+  },
- };
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index fd9399f..ac8cd12 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -112,18 +112,16 @@ skip-if = e10s # GC events seem unreliable in multiprocess
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
+ [browser_perf-range-changed-render.js]
+ [browser_perf-recording-selected-01.js]
+ [browser_perf-recording-selected-02.js]
+ [browser_perf-recording-selected-03.js]
+ [browser_perf-recording-selected-04.js]
+ [browser_perf-theme-toggle-01.js]
+-[browser_profiler_categories.js]
+-[browser_profiler_content-check.js]
+ [browser_profiler_tree-abstract-01.js]
+ [browser_profiler_tree-abstract-02.js]
+ [browser_profiler_tree-abstract-03.js]
+ [browser_profiler_tree-abstract-04.js]
+ [browser_profiler_tree-view-01.js]
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+diff --git a/browser/devtools/performance/test/browser_profiler_categories.js b/browser/devtools/performance/test/browser_profiler_categories.js
+deleted file mode 100644
+index e17e7cd..0000000
+--- a/browser/devtools/performance/test/browser_profiler_categories.js
++++ /dev/null
+@@ -1,34 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests if the profiler categories are mapped correctly.
+- */
+-
+-function test() {
+-  let global = devtools.require("devtools/performance/global");
+-  let l10n = global.L10N;
+-  let categories = global.CATEGORIES;
+-  let mappings = global.CATEGORY_MAPPINGS;
+-  let count = categories.length;
+-
+-  ok(count,
+-    "Should have a non-empty list of categories available.");
+-
+-  ok(!categories.some(e => !e.color),
+-    "All categories have an associated color.");
+-
+-  ok(!categories.some(e => !e.label),
+-    "All categories have an associated label.");
+-
+-  ok(!categories.some(e => e.label != l10n.getStr("category." + e.abbrev)),
+-    "All categories have a correctly localized label.");
+-
+-  ok(!Object.keys(mappings).some(e => !Number.isInteger(Math.log2(e))),
+-    "All bitmask mappings keys are powers of 2.");
+-
+-  ok(!Object.keys(mappings).some(e => categories.indexOf(mappings[e]) == -1),
+-    "All bitmask mappings point to a category.");
+-
+-  finish();
+-}
+diff --git a/browser/devtools/performance/test/browser_profiler_content-check.js b/browser/devtools/performance/test/browser_profiler_content-check.js
+deleted file mode 100644
+index 0f2b1b3..0000000
+--- a/browser/devtools/performance/test/browser_profiler_content-check.js
++++ /dev/null
+@@ -1,51 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests the function testing whether or not a frame is content or chrome
+- * works properly.
+- */
+-
+-function test() {
+-  let FrameUtils = devtools.require("devtools/performance/frame-utils");
+-
+-  ok(FrameUtils.isContent({ location: "http://foo" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(FrameUtils.isContent({ location: "https://foo" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(FrameUtils.isContent({ location: "file://foo" }),
+-    "Verifying content/chrome frames is working properly.");
+-
+-  ok(!FrameUtils.isContent({ location: "chrome://foo" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ location: "resource://foo" }),
+-    "Verifying content/chrome frames is working properly.");
+-
+-  ok(!FrameUtils.isContent({ location: "chrome://foo -> http://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ location: "chrome://foo -> https://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ location: "chrome://foo -> file://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-
+-  ok(!FrameUtils.isContent({ location: "resource://foo -> http://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ location: "resource://foo -> https://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ location: "resource://foo -> file://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-
+-  ok(!FrameUtils.isContent({ category: 1, location: "chrome://foo" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ category: 1, location: "resource://foo" }),
+-    "Verifying content/chrome frames is working properly.");
+-
+-  ok(!FrameUtils.isContent({ category: 1, location: "file://foo -> http://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ category: 1, location: "file://foo -> https://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-  ok(!FrameUtils.isContent({ category: 1, location: "file://foo -> file://bar" }),
+-    "Verifying content/chrome frames is working properly.");
+-
+-  finish();
+-}
+diff --git a/browser/devtools/performance/test/unit/test_frame-utils-01.js b/browser/devtools/performance/test/unit/test_frame-utils-01.js
+index ff07320..5ec1855 100644
+--- a/browser/devtools/performance/test/unit/test_frame-utils-01.js
++++ b/browser/devtools/performance/test/unit/test_frame-utils-01.js
+@@ -35,17 +35,22 @@ const CHROME_LOCATIONS = [
+   "EnterJIT",
+ ].map(argify);
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function () {
+-  const { isContent, parseLocation } = devtools.require("devtools/performance/frame-utils");
++  const { computeIsContentAndCategory, parseLocation } = devtools.require("devtools/performance/frame-utils");
++  let isContent = (frame) => {
++    computeIsContentAndCategory(frame);
++    return frame.isContent;
++  };
++
+ 
+   for (let frame of CONTENT_LOCATIONS) {
+     ok(isContent.apply(null, frameify(frame)), `${frame[0]} should be considered a content frame.`);
+   }
+ 
+   for (let frame of CHROME_LOCATIONS) {
+     ok(!isContent.apply(null, frameify(frame)), `${frame[0]} should not be considered a content frame.`);
+   }
+diff --git a/browser/devtools/performance/test/unit/test_frame-utils-02.js b/browser/devtools/performance/test/unit/test_frame-utils-02.js
+new file mode 100644
+index 0000000..10b6f0d
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_frame-utils-02.js
+@@ -0,0 +1,58 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the function testing whether or not a frame is content or chrome
++ * works properly.
++ */
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function () {
++  let FrameUtils = devtools.require("devtools/performance/frame-utils");
++
++  let isContent = (frame) => {
++    FrameUtils.computeIsContentAndCategory(frame);
++    return frame.isContent;
++  };
++
++  ok(isContent({ location: "http://foo" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(isContent({ location: "https://foo" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(isContent({ location: "file://foo" }),
++    "Verifying content/chrome frames is working properly.");
++
++  ok(!isContent({ location: "chrome://foo" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ location: "resource://foo" }),
++    "Verifying content/chrome frames is working properly.");
++
++  ok(!isContent({ location: "chrome://foo -> http://bar" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ location: "chrome://foo -> https://bar" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ location: "chrome://foo -> file://bar" }),
++    "Verifying content/chrome frames is working properly.");
++
++  ok(!isContent({ location: "resource://foo -> http://bar" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ location: "resource://foo -> https://bar" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ location: "resource://foo -> file://bar" }),
++    "Verifying content/chrome frames is working properly.");
++
++  ok(!isContent({ category: 1, location: "chrome://foo" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ category: 1, location: "resource://foo" }),
++    "Verifying content/chrome frames is working properly.");
++
++  ok(!isContent({ category: 1, location: "file://foo -> http://bar" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ category: 1, location: "file://foo -> https://bar" }),
++    "Verifying content/chrome frames is working properly.");
++  ok(!isContent({ category: 1, location: "file://foo -> file://bar" }),
++    "Verifying content/chrome frames is working properly.");
++});
+diff --git a/browser/devtools/performance/test/unit/test_profiler-categories.js b/browser/devtools/performance/test/unit/test_profiler-categories.js
+new file mode 100644
+index 0000000..b575798
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_profiler-categories.js
+@@ -0,0 +1,36 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the profiler categories are mapped correctly.
++ */
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function () {
++  let global = devtools.require("devtools/performance/global");
++  let l10n = global.L10N;
++  let categories = global.CATEGORIES;
++  let mappings = global.CATEGORY_MAPPINGS;
++  let count = categories.length;
++
++  ok(count,
++    "Should have a non-empty list of categories available.");
++
++  ok(categories.some(e => e.color),
++    "All categories have an associated color.");
++
++  ok(categories.every(e => e.label),
++    "All categories have an associated label.");
++
++  ok(categories.every(e => e.label === l10n.getStr("category." + e.abbrev)),
++    "All categories have a correctly localized label.");
++
++  ok(Object.keys(mappings).every(e => (Number(e) >= 9000 && Number(e) <= 9999) || Number.isInteger(Math.log2(e))),
++    "All bitmask mappings keys are powers of 2, or between 9000-9999 for special categories.");
++
++  ok(Object.keys(mappings).every(e => categories.indexOf(mappings[e]) !== -1),
++    "All bitmask mappings point to a category.");
++});
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-01.js b/browser/devtools/performance/test/unit/test_tree-model-01.js
+index 4f95c1a..63a4842 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-01.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-01.js
+@@ -21,17 +21,17 @@ add_task(function test() {
+ 
+   equal(threadNode.getInfo().nodeType, "Thread",
+     "The correct node type was retrieved for the root node.");
+ 
+   equal(root.duration, 20,
+     "The correct duration was calculated for the root node.");
+   equal(root.getInfo().functionName, "(root)",
+     "The correct function name was retrieved for the root node.");
+-  equal(root.getInfo().categoryData.toSource(), "({})",
++  equal(root.getInfo().categoryData.abbrev, "other",
+     "The correct empty category data was retrieved for the root node.");
+ 
+   equal(root.calls.length, 1,
+     "The correct number of child calls were calculated for the root node.");
+   ok(getFrameNodePath(root, "A"),
+     "The root node's only child call is correct.");
+ 
+   // Test all the descendant nodes.
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-08.js b/browser/devtools/performance/test/unit/test_tree-model-08.js
+index 8b326ea..f5d5c43 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-08.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-08.js
+@@ -8,243 +8,87 @@
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function test() {
+   let FrameUtils = devtools.require("devtools/performance/frame-utils");
+   let { FrameNode } = devtools.require("devtools/performance/tree-model");
+   let { CATEGORY_OTHER } = devtools.require("devtools/performance/global");
+-
+-  let frame1 = new FrameNode("hello/<.world (http://foo/bar.js:123:987)", {
+-    location: "hello/<.world (http://foo/bar.js:123:987)",
+-    line: 456,
+-    isContent: FrameUtils.isContent({
+-      location: "hello/<.world (http://foo/bar.js:123:987)"
+-    })
+-  }, false);
+-
+-  equal(frame1.getInfo().nodeType, "Frame",
+-    "The first frame node has the correct type.");
+-  equal(frame1.getInfo().functionName, "hello/<.world",
+-    "The first frame node has the correct function name.");
+-  equal(frame1.getInfo().fileName, "bar.js",
+-    "The first frame node has the correct file name.");
+-  equal(frame1.getInfo().hostName, "foo",
+-    "The first frame node has the correct host name.");
+-  equal(frame1.getInfo().url, "http://foo/bar.js",
+-    "The first frame node has the correct url.");
+-  equal(frame1.getInfo().line, 123,
+-    "The first frame node has the correct line.");
+-  equal(frame1.getInfo().column, 987,
+-    "The first frame node has the correct column.");
+-  equal(frame1.getInfo().categoryData.toSource(), "({})",
+-    "The first frame node has the correct category data.");
+-  equal(frame1.getInfo().isContent, true,
+-    "The first frame node has the correct content flag.");
+-
+-  let frame2 = new FrameNode("hello/<.world (http://foo/bar.js#baz:123:987)", {
+-    location: "hello/<.world (http://foo/bar.js#baz:123:987)",
+-    line: 456,
+-    isContent: FrameUtils.isContent({
+-      location: "hello/<.world (http://foo/bar.js#baz:123:987)"
+-    })
+-  }, false);
+-
+-  equal(frame2.getInfo().nodeType, "Frame",
+-    "The second frame node has the correct type.");
+-  equal(frame2.getInfo().functionName, "hello/<.world",
+-    "The second frame node has the correct function name.");
+-  equal(frame2.getInfo().fileName, "bar.js",
+-    "The second frame node has the correct file name.");
+-  equal(frame2.getInfo().hostName, "foo",
+-    "The second frame node has the correct host name.");
+-  equal(frame2.getInfo().url, "http://foo/bar.js#baz",
+-    "The second frame node has the correct url.");
+-  equal(frame2.getInfo().line, 123,
+-    "The second frame node has the correct line.");
+-  equal(frame2.getInfo().column, 987,
+-    "The second frame node has the correct column.");
+-  equal(frame2.getInfo().categoryData.toSource(), "({})",
+-    "The second frame node has the correct category data.");
+-  equal(frame2.getInfo().isContent, true,
+-    "The second frame node has the correct content flag.");
+-
+-  let frame3 = new FrameNode("hello/<.world (http://foo/#bar:123:987)", {
+-    location: "hello/<.world (http://foo/#bar:123:987)",
+-    line: 456,
+-    isContent: FrameUtils.isContent({
+-      location: "hello/<.world (http://foo/#bar:123:987)"
+-    })
+-  }, false);
+-
+-  equal(frame3.getInfo().nodeType, "Frame",
+-    "The third frame node has the correct type.");
+-  equal(frame3.getInfo().functionName, "hello/<.world",
+-    "The third frame node has the correct function name.");
+-  equal(frame3.getInfo().fileName, "/",
+-    "The third frame node has the correct file name.");
+-  equal(frame3.getInfo().hostName, "foo",
+-    "The third frame node has the correct host name.");
+-  equal(frame3.getInfo().url, "http://foo/#bar",
+-    "The third frame node has the correct url.");
+-  equal(frame3.getInfo().line, 123,
+-    "The third frame node has the correct line.");
+-  equal(frame3.getInfo().column, 987,
+-    "The third frame node has the correct column.");
+-  equal(frame3.getInfo().categoryData.toSource(), "({})",
+-    "The third frame node has the correct category data.");
+-  equal(frame3.getInfo().isContent, true,
+-    "The third frame node has the correct content flag.");
+-
+-  let frame4 = new FrameNode("hello/<.world (http://foo/:123:987)", {
+-    location: "hello/<.world (http://foo/:123:987)",
+-    line: 456,
+-    isContent: FrameUtils.isContent({
+-      location: "hello/<.world (http://foo/:123:987)"
+-    })
+-  }, false);
+-
+-  equal(frame4.getInfo().nodeType, "Frame",
+-    "The fourth frame node has the correct type.");
+-  equal(frame4.getInfo().functionName, "hello/<.world",
+-    "The fourth frame node has the correct function name.");
+-  equal(frame4.getInfo().fileName, "/",
+-    "The fourth frame node has the correct file name.");
+-  equal(frame4.getInfo().hostName, "foo",
+-    "The fourth frame node has the correct host name.");
+-  equal(frame4.getInfo().url, "http://foo/",
+-    "The fourth frame node has the correct url.");
+-  equal(frame4.getInfo().line, 123,
+-    "The fourth frame node has the correct line.");
+-  equal(frame4.getInfo().column, 987,
+-    "The fourth frame node has the correct column.");
+-  equal(frame4.getInfo().categoryData.toSource(), "({})",
+-    "The fourth frame node has the correct category data.");
+-  equal(frame4.getInfo().isContent, true,
+-    "The fourth frame node has the correct content flag.");
+-
+-  let frame5 = new FrameNode("hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)", {
+-    location: "hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)",
+-    line: 456,
+-    isContent: FrameUtils.isContent({
+-      location: "hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)"
+-    })
+-  }, false);
+-
+-  equal(frame5.getInfo().nodeType, "Frame",
+-    "The fifth frame node has the correct type.");
+-  equal(frame5.getInfo().functionName, "hello/<.world",
+-    "The fifth frame node has the correct function name.");
+-  equal(frame5.getInfo().fileName, "baz.js",
+-    "The fifth frame node has the correct file name.");
+-  equal(frame5.getInfo().hostName, "bar",
+-    "The fifth frame node has the correct host name.");
+-  equal(frame5.getInfo().url, "http://bar/baz.js",
+-    "The fifth frame node has the correct url.");
+-  equal(frame5.getInfo().line, 123,
+-    "The fifth frame node has the correct line.");
+-  equal(frame5.getInfo().column, 987,
+-    "The fifth frame node has the correct column.");
+-  equal(frame5.getInfo().categoryData.toSource(), "({})",
+-    "The fifth frame node has the correct category data.");
+-  equal(frame5.getInfo().isContent, false,
+-    "The fifth frame node has the correct content flag.");
+-
+-  let frame6 = new FrameNode("Foo::Bar::Baz", {
+-    location: "Foo::Bar::Baz",
+-    line: 456,
+-    category: CATEGORY_OTHER,
+-    isContent: FrameUtils.isContent({
++  let compute = frame => {
++    FrameUtils.computeIsContentAndCategory(frame);
++    return frame;
++  };
++
++  let frames = [
++    new FrameNode("hello/<.world (http://foo/bar.js:123:987)", compute({
++      location: "hello/<.world (http://foo/bar.js:123:987)",
++      line: 456,
++    }), false),
++    new FrameNode("hello/<.world (http://foo/bar.js#baz:123:987)", compute({
++      location: "hello/<.world (http://foo/bar.js#baz:123:987)",
++      line: 456,
++    }), false),
++    new FrameNode("hello/<.world (http://foo/#bar:123:987)", compute({
++      location: "hello/<.world (http://foo/#bar:123:987)",
++      line: 456,
++    }), false),
++    new FrameNode("hello/<.world (http://foo/:123:987)", compute({
++      location: "hello/<.world (http://foo/:123:987)",
++      line: 456,
++    }), false),
++    new FrameNode("hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)", compute({
++      location: "hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)",
++      line: 456,
++    }), false),
++    new FrameNode("Foo::Bar::Baz", compute({
+       location: "Foo::Bar::Baz",
+-      category: CATEGORY_OTHER
+-    })
+-  }, false);
+-
+-  equal(frame6.getInfo().nodeType, "Frame",
+-    "The sixth frame node has the correct type.");
+-  equal(frame6.getInfo().functionName, "Foo::Bar::Baz",
+-    "The sixth frame node has the correct function name.");
+-  equal(frame6.getInfo().fileName, null,
+-    "The sixth frame node has the correct file name.");
+-  equal(frame6.getInfo().hostName, null,
+-    "The sixth frame node has the correct host name.");
+-  equal(frame6.getInfo().url, null,
+-    "The sixth frame node has the correct url.");
+-  equal(frame6.getInfo().line, 456,
+-    "The sixth frame node has the correct line.");
+-  equal(frame6.getInfo().categoryData.abbrev, "other",
+-    "The sixth frame node has the correct category data.");
+-  equal(frame6.getInfo().isContent, false,
+-    "The sixth frame node has the correct content flag.");
+-
+-  let frame7 = new FrameNode("EnterJIT", {
+-    location: "EnterJIT",
+-    isContent: FrameUtils.isContent({
+-      location: "EnterJIT"
+-    })
+-  }, false);
+-
+-  equal(frame7.getInfo().nodeType, "Frame",
+-    "The seventh frame node has the correct type.");
+-  equal(frame7.getInfo().functionName, "EnterJIT",
+-    "The seventh frame node has the correct function name.");
+-  equal(frame7.getInfo().fileName, null,
+-    "The seventh frame node has the correct file name.");
+-  equal(frame7.getInfo().hostName, null,
+-    "The seventh frame node has the correct host name.");
+-  equal(frame7.getInfo().url, null,
+-    "The seventh frame node has the correct url.");
+-  equal(frame7.getInfo().line, null,
+-    "The seventh frame node has the correct line.");
+-  equal(frame7.getInfo().column, null,
+-    "The seventh frame node has the correct column.");
+-  equal(frame7.getInfo().categoryData.abbrev, "js",
+-    "The seventh frame node has the correct category data.");
+-  equal(frame7.getInfo().isContent, false,
+-    "The seventh frame node has the correct content flag.");
+-
+-  let frame8 = new FrameNode("chrome://browser/content/content.js", {
+-    location: "chrome://browser/content/content.js",
+-    line: 456,
+-    column: 123
+-  }, false);
+-
+-  equal(frame8.getInfo().hostName, null,
+-    "The eighth frame node has the correct host name.");
+-
+-  let frame9 = new FrameNode("hello/<.world (resource://gre/foo.js:123:434)", {
+-    location: "hello/<.world (resource://gre/foo.js:123:434)",
+-    line: 456
+-  }, false);
+-
+-  equal(frame9.getInfo().hostName, null,
+-    "The ninth frame node has the correct host name.");
+-
+-  let frame10 = new FrameNode("main (http://localhost:8888/file.js:123:987)", {
+-    location: "main (http://localhost:8888/file.js:123:987)",
+-    line: 123,
+-    isContent: FrameUtils.isContent({
+-      location: "main (http://localhost:8888/file.js:123:987)"
+-    })
+-  }, false);
+-
+-  equal(frame10.getInfo().nodeType, "Frame",
+-    "The tenth frame node has the correct type.");
+-  equal(frame10.getInfo().functionName, "main",
+-    "The tenth frame node has the correct function name.");
+-  equal(frame10.getInfo().fileName, "file.js",
+-    "The tenth frame node has the correct file name.");
+-  equal(frame10.getInfo().hostName, "localhost",
+-    "The tenth frame node has the correct host name.");
+-  equal(frame10.getInfo().url, "http://localhost:8888/file.js",
+-    "The tenth frame node has the correct url.");
+-  equal(frame10.getInfo().line, 123,
+-    "The tenth frame node has the correct line.");
+-  equal(frame10.getInfo().column, 987,
+-    "The tenth frame node has the correct column.");
+-  equal(frame10.getInfo().isContent, true,
+-    "The tenth frame node has the correct content flag.");
+-  equal(frame10.getInfo().host, "localhost:8888",
+-    "The tenth frame node has the correct host.");
+-  equal(frame10.getInfo().port, 8888,
+-    "The tenth frame node has the correct port.");
++      line: 456,
++      category: CATEGORY_OTHER,
++    }), false),
++    new FrameNode("EnterJIT", compute({
++      location: "EnterJIT",
++    }), false),
++    new FrameNode("chrome://browser/content/content.js", compute({
++      location: "chrome://browser/content/content.js",
++      line: 456,
++      column: 123
++    }), false),
++    new FrameNode("hello/<.world (resource://gre/foo.js:123:434)", compute({
++      location: "hello/<.world (resource://gre/foo.js:123:434)",
++      line: 456
++    }), false),
++    new FrameNode("main (http://localhost:8888/file.js:123:987)", compute({
++      location: "main (http://localhost:8888/file.js:123:987)",
++      line: 123,
++    }), false),
++    new FrameNode("main (resource://gre/modules/devtools/timeline.js:123)", compute({
++      location: "main (resource://gre/modules/devtools/timeline.js:123)",
++    }), false),
++  ];
++
++  let fields = ["nodeType", "functionName", "fileName", "hostName", "url", "line", "column", "categoryData.abbrev", "isContent", "port"]
++  let expected = [
++    // nodeType, functionName, fileName, hostName, url, line, column, categoryData.abbrev, isContent, port
++    ["Frame", "hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, 987, void 0, true],
++    ["Frame", "hello/<.world", "bar.js", "foo", "http://foo/bar.js#baz", 123, 987, void 0, true],
++    ["Frame", "hello/<.world", "/", "foo", "http://foo/#bar", 123, 987, void 0, true],
++    ["Frame", "hello/<.world", "/", "foo", "http://foo/", 123, 987, void 0, true],
++    ["Frame", "hello/<.world", "baz.js", "bar", "http://bar/baz.js", 123, 987, "other", false],
++    ["Frame", "Foo::Bar::Baz", null, null, null, 456, void 0, "other", false],
++    ["Frame", "EnterJIT", null, null, null, null, null, "js", false],
++    ["Frame", "chrome://browser/content/content.js", null, null, null, 456, null, "other", false],
++    ["Frame", "hello/<.world", "foo.js", null, "resource://gre/foo.js", 123, 434, "other", false],
++    ["Frame", "main", "file.js", "localhost", "http://localhost:8888/file.js", 123, 987, null, true, 8888],
++    ["Frame", "main", "timeline.js", null, "resource://gre/modules/devtools/timeline.js", 123, null, "tools", false]
++  ];
++
++  for (let i = 0; i < frames.length; i++) {
++    let info = frames[i].getInfo();
++    let expect = expected[i];
++
++    for (let j = 0; j < fields.length; j++) {
++      let field = fields[j];
++      let value = field === "categoryData.abbrev" ? info.categoryData.abbrev : info[field];
++      equal(value, expect[j], `${field} for frame #${i} is correct: ${expect[j]}`);
++    }
++  }
+ });
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-09.js b/browser/devtools/performance/test/unit/test_tree-model-09.js
+new file mode 100644
+index 0000000..70a411b
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_tree-model-09.js
+@@ -0,0 +1,82 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that when displaying only content nodes, platform nodes are generalized.
++ */
++
++let { CATEGORY_MASK } = devtools.require("devtools/performance/global");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function test() {
++  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
++  let url = (n) => `http://content/${n}`;
++
++  // Create a root node from a given samples array.
++
++  let root = getFrameNodePath(new ThreadNode(gThread, { contentOnly: true }), "(root)");
++
++  /*
++   * should have a tree like:
++   * root
++   *   - (Tools)
++   *   - A
++   *     - B
++   *       - C
++   *       - D
++   *     - E
++   *       - F
++   *         - (Tools)
++   */
++
++  // Test the root node.
++
++  equal(root.calls.length, 2, "root has 2 children");
++  ok(getFrameNodePath(root, url("A")), "root has content child");
++  ok(getFrameNodePath(root, "9000"), "root has platform generalized child from Chrome JS");
++  equal(getFrameNodePath(root, "9000").calls.length, 0, "platform generalized child is a leaf.");
++
++  ok(getFrameNodePath(root, `${url("A")} > ${url("E")} > ${url("F")} > 9000`),
++     "a second leaf of the generalized Chrome JS exists.");
++
++  equal(getFrameNodePath(root, "9000").category,
++     getFrameNodePath(root, `${url("A")} > ${url("E")} > ${url("F")} > 9000`).category,
++     "generalized frames of same type are duplicated in top-down view");
++});
++
++let gThread = synthesizeProfileForTest([{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "http://content/B" },
++    { location: "http://content/C" }
++  ]
++}, {
++  time: 5 + 6,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "http://content/B" },
++    { location: "fn (resource://loader.js -> resource:///modules/devtools/timeline.js)" },
++    { location: "http://content/D" }
++  ]
++}, {
++  time: 5 + 6 + 7,
++  frames: [
++    { location: "(root)" },
++    { location: "http://content/A" },
++    { location: "http://content/E" },
++    { location: "http://content/F" },
++    { location: "fn (resource://loader.js -> resource://gre/modules/devtools/promise.js)" }
++  ]
++}, {
++  time: 5 + 20,
++  frames: [
++    { location: "(root)" },
++    { location: "somefn (resource://loader.js -> resource:///modules/devtools/framerate.js)" }
++  ]
++}]);
+diff --git a/browser/devtools/performance/test/unit/xpcshell.ini b/browser/devtools/performance/test/unit/xpcshell.ini
+index 2a63637..deaaa1f 100644
+--- a/browser/devtools/performance/test/unit/xpcshell.ini
++++ b/browser/devtools/performance/test/unit/xpcshell.ini
+@@ -1,16 +1,19 @@
+ [DEFAULT]
+ tags = devtools
+ head = head.js
+ tail =
+ firefox-appdir = browser
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
++[test_profiler-categories.js]
+ [test_frame-utils-01.js]
++[test_frame-utils-02.js]
+ [test_tree-model-01.js]
+ [test_tree-model-02.js]
+ [test_tree-model-03.js]
+ [test_tree-model-04.js]
+ [test_tree-model-05.js]
+ [test_tree-model-06.js]
+ [test_tree-model-07.js]
+ [test_tree-model-08.js]
++[test_tree-model-09.js]
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.properties b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+index 5bb4a1c..dd0a16a 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+@@ -77,16 +77,17 @@ graphs.ms=ms
+ category.other=Gecko
+ category.css=Styles
+ category.js=JIT
+ category.gc=GC
+ category.network=Network
+ category.graphics=Graphics
+ category.storage=Storage
+ category.events=Input & Events
++category.tools=Tools
+ 
+ # LOCALIZATION NOTE (graphs.ms):
+ # This string is displayed in the call tree after units of time in milliseconds.
+ table.ms=ms
+ 
+ # LOCALIZATION NOTE (graphs.ms):
+ # This string is displayed in the call tree after units representing percentages.
+ table.percentage=%
 -- 
 2.2.1
 

@@ -1,0 +1,125 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 2 Jun 2015 16:16:32 -0700
+Subject: Bug 1170671 -  ProfileTimelineMarkers that use TRACING_TIMESTAMP should capture stack information. r=smaug
+
+diff --git a/browser/devtools/performance/test/browser_markers-timestamp.js b/browser/devtools/performance/test/browser_markers-timestamp.js
+index db46a35..86cc6d5 100644
+--- a/browser/devtools/performance/test/browser_markers-timestamp.js
++++ b/browser/devtools/performance/test/browser_markers-timestamp.js
+@@ -21,16 +21,17 @@ function* spawnTest () {
+ 
+   front.off("timeline-data", handler);
+   yield front.stopRecording(model);
+ 
+   info(`Got ${markers.length} markers.`);
+ 
+   let maxMarkerTime = model._timelineStartTime + model.getDuration() + TIME_CLOSE_TO;
+ 
++  ok(markers.every(({stack}) => typeof stack === "number"), "All markers have stack references.");
+   ok(markers.every(({name}) => name === "TimeStamp"), "All markers found are TimeStamp markers");
+   ok(markers.length === 2, "found 2 TimeStamp markers");
+   ok(markers.every(({start}) => typeof start === "number" && start > 0 && start < maxMarkerTime),
+     "All markers have a start time between the valid range.");
+   ok(markers.every(({end}) => typeof end === "number" && end > 0 && end < maxMarkerTime),
+     "All markers have an end time between the valid range.");
+   is(markers[0].causeName, void 0, "Unlabeled timestamps have an empty causeName");
+   is(markers[1].causeName, "myLabel", "Labeled timestamps have correct causeName");
+diff --git a/docshell/base/TimelineMarker.cpp b/docshell/base/TimelineMarker.cpp
+index 2bae8e8..90f70f4 100644
+--- a/docshell/base/TimelineMarker.cpp
++++ b/docshell/base/TimelineMarker.cpp
+@@ -10,33 +10,35 @@
+ TimelineMarker::TimelineMarker(nsDocShell* aDocShell, const char* aName,
+                                TracingMetadata aMetaData)
+   : mName(aName)
+   , mMetaData(aMetaData)
+ {
+   MOZ_COUNT_CTOR(TimelineMarker);
+   MOZ_ASSERT(aName);
+   aDocShell->Now(&mTime);
+-  if (aMetaData == TRACING_INTERVAL_START) {
++  if (aMetaData == TRACING_INTERVAL_START || aMetaData == TRACING_TIMESTAMP) {
+     CaptureStack();
+   }
+ }
+ 
+ TimelineMarker::TimelineMarker(nsDocShell* aDocShell, const char* aName,
+                                TracingMetadata aMetaData,
+                                const nsAString& aCause,
+                                TimelineStackRequest aStackRequest)
+   : mName(aName)
+   , mMetaData(aMetaData)
+   , mCause(aCause)
+ {
+   MOZ_COUNT_CTOR(TimelineMarker);
+   MOZ_ASSERT(aName);
+   aDocShell->Now(&mTime);
+-  if (aMetaData == TRACING_INTERVAL_START && aStackRequest != NO_STACK) {
++  if ((aMetaData == TRACING_INTERVAL_START ||
++      aMetaData == TRACING_TIMESTAMP) &&
++      aStackRequest != NO_STACK) {
+     CaptureStack();
+   }
+ }
+ 
+ TimelineMarker::~TimelineMarker()
+ {
+   MOZ_COUNT_DTOR(TimelineMarker);
+ }
+diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
+index 769bce8..a660110 100644
+--- a/docshell/base/nsDocShell.cpp
++++ b/docshell/base/nsDocShell.cpp
+@@ -2992,16 +2992,17 @@ nsDocShell::PopProfileTimelineMarkers(
+     // marker here.
+     if (startPayload->GetMetaData() == TRACING_TIMESTAMP) {
+       mozilla::dom::ProfileTimelineMarker* marker =
+         profileTimelineMarkers.AppendElement();
+ 
+       marker->mName = NS_ConvertUTF8toUTF16(startPayload->GetName());
+       marker->mStart = startPayload->GetTime();
+       marker->mEnd = startPayload->GetTime();
++      marker->mStack = startPayload->GetStack();
+       startPayload->AddDetails(aCx, *marker);
+       continue;
+     }
+ 
+     if (startPayload->GetMetaData() == TRACING_INTERVAL_START) {
+       bool hasSeenEnd = false;
+ 
+       // DOM events can be nested, so we must take care when searching
+diff --git a/dom/base/Console.cpp b/dom/base/Console.cpp
+index 0d8e7b5..da2af99 100644
+--- a/dom/base/Console.cpp
++++ b/dom/base/Console.cpp
+@@ -1039,27 +1039,25 @@ public:
+ class TimestampTimelineMarker : public TimelineMarker
+ {
+ public:
+   TimestampTimelineMarker(nsDocShell* aDocShell,
+                           TracingMetadata aMetaData,
+                           const nsAString& aCause)
+     : TimelineMarker(aDocShell, "TimeStamp", aMetaData, aCause)
+   {
+-    CaptureStack();
+     MOZ_ASSERT(aMetaData == TRACING_TIMESTAMP);
+   }
+ 
+   virtual void AddDetails(JSContext* aCx,
+                           mozilla::dom::ProfileTimelineMarker& aMarker) override
+   {
+     if (!GetCause().IsEmpty()) {
+       aMarker.mCauseName.Construct(GetCause());
+     }
+-    aMarker.mEndStack = GetStack();
+   }
+ };
+ 
+ // Queue a call to a console method. See the CALL_DELAY constant.
+ void
+ Console::Method(JSContext* aCx, MethodName aMethodName,
+                 const nsAString& aMethodString,
+                 const Sequence<JS::Value>& aData)
+-- 
+2.2.1
+
