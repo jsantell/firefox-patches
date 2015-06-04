@@ -1,0 +1,489 @@
+From: Jordan Santell <jsantell@gmail.com>
+Date: Thu, 4 Jun 2015 16:26:46 -0700
+Subject: Bug 1131661 - Add invalidation data to Styles ProfileTimelineMarkers.
+
+diff --git a/browser/devtools/performance/modules/widgets/marker-details.js b/browser/devtools/performance/modules/widgets/marker-details.js
+index a21ca45..75bf901 100644
+--- a/browser/devtools/performance/modules/widgets/marker-details.js
++++ b/browser/devtools/performance/modules/widgets/marker-details.js
+@@ -75,16 +75,28 @@ MarkerDetails.prototype = {
+   render: function({ marker, frames }) {
+     this.empty();
+ 
+     let elements = [];
+     elements.push(MarkerUtils.DOM.buildTitle(this._document, marker));
+     elements.push(MarkerUtils.DOM.buildDuration(this._document, marker));
+     MarkerUtils.DOM.buildFields(this._document, marker).forEach(f => elements.push(f));
+ 
++    // If we have invalidations on this marker, render those
++    // stack traces.
++    if (marker.invalidations && marker.invalidations.length) {
++      marker.invalidations.forEach(stack => {
++        // Handle other types of invalidations (Reflow) in the future
++        let type = marker.name === "Styles" ? "styleInvalidation" : "";
++        elements.push(MarkerUtils.DOM.buildStackTrace(this._document, {
++          frameIndex: stack, frames, type
++        }));
++      });
++    }
++
+     // Build a stack element -- and use the "startStack" label if
+     // we have both a startStack and endStack.
+     if (marker.stack) {
+       let type = marker.endStack ? "startStack" : "stack";
+       elements.push(MarkerUtils.DOM.buildStackTrace(this._document, {
+         frameIndex: marker.stack, frames, type
+       }));
+     }
+diff --git a/browser/locales/en-US/chrome/browser/devtools/timeline.properties b/browser/locales/en-US/chrome/browser/devtools/timeline.properties
+index 77b745b..d720f3e 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/timeline.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/timeline.properties
+@@ -68,11 +68,12 @@ timeline.markerDetail.consoleTimerName=Timer Name:
+ timeline.markerDetail.DOMEventType=Event Type:
+ timeline.markerDetail.DOMEventPhase=Phase:
+ timeline.markerDetail.DOMEventTargetPhase=Target
+ timeline.markerDetail.DOMEventCapturingPhase=Capture
+ timeline.markerDetail.DOMEventBubblingPhase=Bubbling
+ timeline.markerDetail.stack=Stack:
+ timeline.markerDetail.startStack=Stack at start:
+ timeline.markerDetail.endStack=Stack at end:
++timeline.markerDetail.styleInvalidation=Style invalidated at:
+ timeline.markerDetail.unknownFrame=<unknown location>
+ timeline.markerDetail.asyncStack=(Async: %S)
+ timeline.markerDetail.causeName=Cause:
+diff --git a/docshell/base/TimelineMarker.h b/docshell/base/TimelineMarker.h
+index a13baef..6f4fb0b 100644
+--- a/docshell/base/TimelineMarker.h
++++ b/docshell/base/TimelineMarker.h
+@@ -45,16 +45,18 @@ public:
+   // standard elements have already been set.  This method is
+   // called on both the starting and ending markers of a pair.
+   // Ordinarily the ending marker doesn't need to do anything
+   // here.
+   virtual void AddDetails(JSContext* aCx,
+                           mozilla::dom::ProfileTimelineMarker& aMarker)
+   {}
+ 
++  virtual const char* GetType() { return ""; }
++
+   virtual void AddLayerRectangles(
+       mozilla::dom::Sequence<mozilla::dom::ProfileTimelineLayerRect>&)
+   {
+     MOZ_ASSERT_UNREACHABLE("can only be called on layer markers");
+   }
+ 
+   const char* GetName() const { return mName; }
+   TracingMetadata GetMetaData() const { return mMetaData; }
+@@ -64,30 +66,41 @@ public:
+   JSObject* GetStack()
+   {
+     if (mStackTrace.initialized()) {
+       return mStackTrace;
+     }
+     return nullptr;
+   }
+ 
+-protected:
+-  void CaptureStack()
++  JSContext* GetJSContext()
++  {
++    return nsContentUtils::GetCurrentJSContext();
++  }
++
++  static void CaptureCurrentStack(
++      JS::PersistentRooted<JSObject*>& aStackTrace)
+   {
+     JSContext* ctx = nsContentUtils::GetCurrentJSContext();
+     if (ctx) {
+       JS::RootedObject stack(ctx);
+       if (JS::CaptureCurrentStack(ctx, &stack)) {
+-        mStackTrace.init(ctx, stack.get());
++        aStackTrace.init(ctx, stack.get());
+       } else {
+         JS_ClearPendingException(ctx);
+       }
+     }
+   }
+ 
++protected:
++  void CaptureStack()
++  {
++    TimelineMarker::CaptureCurrentStack(mStackTrace);
++  }
++
+ private:
+   const char* mName;
+   TracingMetadata mMetaData;
+   DOMHighResTimeStamp mTime;
+   nsString mCause;
+ 
+   // While normally it is not a good idea to make a persistent root,
+   // in this case changing nsDocShell to participate in cycle
+diff --git a/dom/webidl/ProfileTimelineMarker.webidl b/dom/webidl/ProfileTimelineMarker.webidl
+index e520b9f..dd06002 100644
+--- a/dom/webidl/ProfileTimelineMarker.webidl
++++ b/dom/webidl/ProfileTimelineMarker.webidl
+@@ -36,9 +36,10 @@ dictionary ProfileTimelineMarker {
+   object? endStack = null;
+   /* For DOMEvent markers.  */
+   DOMString type;
+   unsigned short eventPhase;
+   /* For Paint markers.  */
+   sequence<ProfileTimelineLayerRect> rectangles;
+   /* For Style markers. */
+   DOMString restyleHint;
++  sequence<object>? invalidations;
+ };
+diff --git a/layout/base/RestyleManager.cpp b/layout/base/RestyleManager.cpp
+index 525fdcf..74223c4 100644
+--- a/layout/base/RestyleManager.cpp
++++ b/layout/base/RestyleManager.cpp
+@@ -6,16 +6,17 @@
+ /**
+  * Code responsible for managing style changes: tracking what style
+  * changes need to happen, scheduling them, and doing them.
+  */
+ 
+ #include <algorithm> // For std::max
+ #include "RestyleManager.h"
+ #include "mozilla/EventStates.h"
++#include "mozilla/dom/ProfileTimelineMarkerBinding.h"
+ #include "nsLayoutUtils.h"
+ #include "AnimationCommon.h" // For GetLayerAnimationInfo
+ #include "FrameLayerBuilder.h"
+ #include "GeckoProfiler.h"
+ #include "nsStyleChangeList.h"
+ #include "nsRuleProcessorData.h"
+ #include "nsStyleUtil.h"
+ #include "nsCSSFrameConstructor.h"
+@@ -58,16 +59,38 @@ static nsCString
+ FrameTagToString(const nsIFrame* aFrame)
+ {
+   nsCString result;
+   aFrame->ListTag(result);
+   return result;
+ }
+ #endif
+ 
++class InvalidationTimelineMarker : public TimelineMarker
++{
++public:
++  InvalidationTimelineMarker(nsDocShell* aDocShell,
++                             const char* aType)
++    : TimelineMarker(aDocShell, "Invalidation", TRACING_TIMESTAMP)
++  {
++    mType = aType;
++  }
++
++  virtual const char* GetType() override { return mType; }
++
++  virtual void AddInvalidation(mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>>& aInvalidations) override
++  {
++    aInvalidations.AppendElement(
++      JS::PersistentRooted<JSObject*>(GetJSContext(), GetStack()));
++  }
++
++private:
++  const char* mType;
++};
++
+ RestyleManager::RestyleManager(nsPresContext* aPresContext)
+   : mPresContext(aPresContext)
+   , mDoRebuildAllStyleData(false)
+   , mInRebuildAllStyleData(false)
+   , mObservingRefreshDriver(false)
+   , mInStyleRefresh(false)
+   , mSkipAnimationRules(false)
+   , mHavePendingNonAnimationRestyles(false)
+@@ -577,17 +600,17 @@ RestyleManager::StyleChangeReflow(nsIFrame* aFrame, nsChangeHint aHint)
+ 
+   do {
+     mPresContext->PresShell()->FrameNeedsReflow(aFrame, dirtyType, dirtyBits);
+     aFrame = nsLayoutUtils::GetNextContinuationOrIBSplitSibling(aFrame);
+   } while (aFrame);
+ }
+ 
+ void
+-RestyleManager::AddSubtreeToOverflowTracker(nsIFrame* aFrame) 
++RestyleManager::AddSubtreeToOverflowTracker(nsIFrame* aFrame)
+ {
+   mOverflowChangedTracker.AddFrame(
+       aFrame,
+       OverflowChangedTracker::CHILDREN_CHANGED);
+   nsIFrame::ChildListIterator lists(aFrame);
+   for (; !lists.IsDone(); lists.Next()) {
+     nsFrameList::Enumerator childFrames(lists.CurrentList());
+     for (; !childFrames.AtEnd(); childFrames.Next()) {
+@@ -1824,16 +1847,28 @@ RestyleManager::PostRestyleEventInternal(bool aForLazyConstruction)
+     mObservingRefreshDriver = mPresContext->RefreshDriver()->
+       AddStyleFlushObserver(presShell);
+   }
+ 
+   // Unconditionally flag our document as needing a flush.  The other
+   // option here would be a dedicated boolean to track whether we need
+   // to do so (set here and unset in ProcessPendingRestyles).
+   presShell->GetDocument()->SetNeedStyleFlush();
++
++    // Gather stack information on style invalidation reasons
++    // for ProfileTimelineMarkers and pass them to
++    // mPendingRestyles to attach to the next "Styles" marker.
++    nsDocShell* docShell = static_cast<nsDocShell*>(mPresContext->GetDocShell());
++    if (docShell && docShell->GetRecordProfileTimelineMarkers()) {
++      JS::PersistentRooted<JSObject*> stack;
++      TimelineMarker::CaptureCurrentStack(stack);
++      if (stack.initialized()) {
++        mPendingRestyles.AddStyleInvalidation(stack);
++      }
++    }
+ }
+ 
+ void
+ RestyleManager::PostRebuildAllStyleDataEvent(nsChangeHint aExtraHint,
+                                              nsRestyleHint aRestyleHint)
+ {
+   NS_ASSERTION(!(aExtraHint & nsChangeHint_ReconstructFrame),
+                "Should not reconstruct the root of the frame tree.  "
+@@ -4317,9 +4352,10 @@ ElementRestyler::RestyleResultToString(RestyleResult aRestyleResult)
+       break;
+     default:
+       result.AppendPrintf("RestyleResult(%d)", aRestyleResult);
+   }
+   return result;
+ }
+ #endif
+ 
++
+ } // namespace mozilla
+diff --git a/layout/base/RestyleTracker.cpp b/layout/base/RestyleTracker.cpp
+index 4dcec39..89ea441 100644
+--- a/layout/base/RestyleTracker.cpp
++++ b/layout/base/RestyleTracker.cpp
+@@ -94,36 +94,57 @@ struct RestyleCollector {
+ #ifdef RESTYLE_LOGGING
+   uint32_t count;
+ #endif
+ };
+ 
+ class RestyleTimelineMarker : public TimelineMarker
+ {
+ public:
++  // Start tracing Styles
+   RestyleTimelineMarker(nsDocShell* aDocShell,
+-                        TracingMetadata aMetaData,
+-                        nsRestyleHint aRestyleHint)
+-    : TimelineMarker(aDocShell, "Styles", aMetaData)
++                        nsRestyleHint aRestyleHint,
++                        mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>>& stacks)
++    : TimelineMarker(aDocShell, "Styles", TRACING_INTERVAL_START)
+   {
+     if (aRestyleHint) {
+       mRestyleHint.AssignWithConversion(RestyleManager::RestyleHintToString(aRestyleHint));
+     }
++    // Transfer all current style invalidations from RestyleTracker
++    // to this marker, but still hold via PersistentRooted
++    mStacks.SwapElements(stacks);
+   }
+ 
++  // End tracing Styles
++  RestyleTimelineMarker(nsDocShell* aDocShell)
++    : TimelineMarker(aDocShell, "Styles", TRACING_INTERVAL_END)
++  {}
++
+   virtual void AddDetails(JSContext* aCx,
+                           mozilla::dom::ProfileTimelineMarker& aMarker) override
+   {
+     if (GetMetaData() == TRACING_INTERVAL_START) {
+       aMarker.mRestyleHint.Construct(mRestyleHint);
++
++      // Move over the rooted stack objects to an unrooted
++      // stacks sequence, and append them to aMarker.
++      mozilla::dom::Sequence<JSObject*> unrootedStacks;
++      for (uint32_t i = 0; i < mStacks.Length(); i++) {
++        unrootedStacks.AppendElement(mStacks[i].get());
++        mStacks.RemoveElementAt(i);
++        --i;
++      }
++      printf("Constructing invalidations %lu", unrootedStacks.Length());
++      aMarker.mInvalidations.Construct(unrootedStacks);
+     }
+   }
+ 
+ private:
+   nsAutoString mRestyleHint;
++  mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>> mStacks;
+ };
+ 
+ static PLDHashOperator
+ CollectRestyles(nsISupports* aElement,
+                 nsAutoPtr<RestyleTracker::RestyleData>& aData,
+                 void* aRestyleCollector)
+ {
+   dom::Element* element =
+@@ -350,35 +371,33 @@ RestyleTracker::DoProcessRestyles()
+         if (!GetRestyleData(element, data)) {
+           LOG_RESTYLE("skipping, already restyled");
+           continue;
+         }
+ 
+         if (isTimelineRecording) {
+           mozilla::UniquePtr<TimelineMarker> marker =
+             MakeUnique<RestyleTimelineMarker>(docShell,
+-                                              TRACING_INTERVAL_START,
+-                                              data->mRestyleHint);
++                                              data->mRestyleHint,
++                                              mInvalidations);
+           docShell->AddProfileTimelineMarker(Move(marker));
+         }
+ 
+ #if defined(MOZ_ENABLE_PROFILER_SPS) && !defined(MOZILLA_XPCOMRT_API)
+         Maybe<GeckoProfilerTracingRAII> profilerRAII;
+         if (profiler_feature_active("restyle")) {
+           profilerRAII.emplace("Paint", "Styles", Move(data->mBacktrace));
+         }
+ #endif
+         ProcessOneRestyle(element, data->mRestyleHint, data->mChangeHint);
+         AddRestyleRootsIfAwaitingRestyle(data->mDescendants);
+ 
+         if (isTimelineRecording) {
+           mozilla::UniquePtr<TimelineMarker> marker =
+-            MakeUnique<RestyleTimelineMarker>(docShell,
+-                                              TRACING_INTERVAL_END,
+-                                              data->mRestyleHint);
++            MakeUnique<RestyleTimelineMarker>(docShell);
+           docShell->AddProfileTimelineMarker(Move(marker));
+         }
+       }
+ 
+       if (mHaveLaterSiblingRestyles) {
+         // Keep processing restyles for now
+         continue;
+       }
+@@ -414,30 +433,28 @@ RestyleTracker::DoProcessRestyles()
+           Maybe<GeckoProfilerTracingRAII> profilerRAII;
+           if (profiler_feature_active("restyle")) {
+             profilerRAII.emplace("Paint", "Styles", Move(currentRestyle->mBacktrace));
+           }
+ #endif
+           if (isTimelineRecording) {
+             mozilla::UniquePtr<TimelineMarker> marker =
+               MakeUnique<RestyleTimelineMarker>(docShell,
+-                                                TRACING_INTERVAL_START,
+-                                                currentRestyle->mRestyleHint);
++                                                currentRestyle->mRestyleHint,
++                                                mInvalidations);
+             docShell->AddProfileTimelineMarker(Move(marker));
+           }
+ 
+           ProcessOneRestyle(currentRestyle->mElement,
+                             currentRestyle->mRestyleHint,
+                             currentRestyle->mChangeHint);
+ 
+           if (isTimelineRecording) {
+             mozilla::UniquePtr<TimelineMarker> marker =
+-              MakeUnique<RestyleTimelineMarker>(docShell,
+-                                                TRACING_INTERVAL_END,
+-                                                currentRestyle->mRestyleHint);
++              MakeUnique<RestyleTimelineMarker>(docShell);
+             docShell->AddProfileTimelineMarker(Move(marker));
+           }
+         }
+       }
+     }
+   }
+ 
+   mRestyleManager->EndProcessingRestyles();
+@@ -500,9 +517,16 @@ RestyleTracker::AddRestyleRootsIfAwaitingRestyle(
+   for (size_t i = 0; i < aElements.Length(); i++) {
+     Element* element = aElements[i];
+     if (element->HasFlag(RestyleBit())) {
+       mRestyleRoots.AppendElement(element);
+     }
+   }
+ }
+ 
++void
++RestyleTracker::AddStyleInvalidation(JS::PersistentRooted<JSObject*>& stack)
++{
++  mInvalidations.AppendElement(stack);
++}
++
++
+ } // namespace mozilla
+diff --git a/layout/base/RestyleTracker.h b/layout/base/RestyleTracker.h
+index 3512181..a11ff29 100644
+--- a/layout/base/RestyleTracker.h
++++ b/layout/base/RestyleTracker.h
+@@ -256,16 +256,22 @@ public:
+   /**
+    * Add a restyle for the given element to the tracker.  Returns true
+    * if the element already had eRestyle_LaterSiblings set on it.
+    */
+   bool AddPendingRestyle(Element* aElement, nsRestyleHint aRestyleHint,
+                          nsChangeHint aMinChangeHint);
+ 
+   /**
++   * Add a TimelineMarker stack for tracking where style invalidation
++   * occurred.
++   */
++  void AddStyleInvalidation(JS::PersistentRooted<JSObject*>& stack);
++
++  /**
+    * Process the restyles we've been tracking.
+    */
+   void DoProcessRestyles();
+ 
+   // Return our ELEMENT_HAS_PENDING_(ANIMATION_)RESTYLE bit
+   uint32_t RestyleBit() const {
+     return mRestyleBits & ELEMENT_PENDING_RESTYLE_FLAGS;
+   }
+@@ -371,16 +377,20 @@ private:
+   // We maintain this invariant by checking whether an element has an
+   // ancestor with the restyle root bit set before appending it to the
+   // array.
+   RestyleRootArray mRestyleRoots;
+   // True if we have some entries with the eRestyle_LaterSiblings
+   // flag.  We need this to avoid enumerating the hashtable looking
+   // for such entries when we can't possibly have any.
+   bool mHaveLaterSiblingRestyles;
++
++  // Sequence of style invalidations observed since last style
++  // recalculation, for TimelineMarkers.
++  mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>> mInvalidations;
+ };
+ 
+ inline bool
+ RestyleTracker::AddPendingRestyleToTable(Element* aElement,
+                                          nsRestyleHint aRestyleHint,
+                                          nsChangeHint aMinChangeHint)
+ {
+   RestyleData* existingData;
+diff --git a/toolkit/devtools/server/actors/timeline.js b/toolkit/devtools/server/actors/timeline.js
+index 514588c..cad8970 100644
+--- a/toolkit/devtools/server/actors/timeline.js
++++ b/toolkit/devtools/server/actors/timeline.js
+@@ -190,16 +190,21 @@ let TimelineActor = exports.TimelineActor = protocol.ActorClass({
+ 
+     // The docshell may return markers with stack traces attached.
+     // Here we transform the stack traces via the stack frame cache,
+     // which lets us preserve tail sharing when transferring the
+     // frames to the client.  We must waive xrays here because Firefox
+     // doesn't understand that the Debugger.Frame object is safe to
+     // use from chrome.  See Tutorial-Alloc-Log-Tree.md.
+     for (let marker of markers) {
++      if (marker.invalidations && marker.invalidations.length) {
++        for (let i = 0; i < marker.invalidations.length; i++) {
++          marker.invalidations[i] = this._stackFrames.addFrame(Cu.waiveXrays(marker.invalidations[i]));
++        }
++      }
+       if (marker.stack) {
+         marker.stack = this._stackFrames.addFrame(Cu.waiveXrays(marker.stack));
+       }
+       if (marker.endStack) {
+         marker.endStack = this._stackFrames.addFrame(Cu.waiveXrays(marker.endStack));
+       }
+     }
+ 
+-- 
+2.3.2 (Apple Git-55)
+
