@@ -1,0 +1,79 @@
+From b52fb95bb2c0f619fe36be022a03a96db29a7831 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 4 Jun 2015 16:39:24 -0700
+Subject: [PATCH] Bug 1168275 - Wait for specifically Parse HTML markers, not
+ any marker, to fix intermittent. r=fitzgen
+
+---
+ .../performance/test/browser_markers-parse-html.js | 43 ++++++++++++----------
+ 1 file changed, 24 insertions(+), 19 deletions(-)
+
+diff --git a/browser/devtools/performance/test/browser_markers-parse-html.js b/browser/devtools/performance/test/browser_markers-parse-html.js
+index 35e0ae7..10aba17 100644
+--- a/browser/devtools/performance/test/browser_markers-parse-html.js
++++ b/browser/devtools/performance/test/browser_markers-parse-html.js
+@@ -2,37 +2,42 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Test that we get a "Parse HTML" marker when a page sets innerHTML.
+  */
+ 
+ const TEST_URL = EXAMPLE_URL + "doc_innerHTML.html"
+ 
+-function* getMarkers(front) {
+-  const { promise, resolve } = Promise.defer();
+-  const handler = (_, name, markers) => {
+-    if (name === "markers") {
+-      resolve(markers);
+-    }
+-  };
++function* spawnTest () {
++  let { target, front } = yield initBackend(TEST_URL);
++  let markers = [];
++
+   front.on("timeline-data", handler);
++  let model = yield front.startRecording({ withTicks: true });
+ 
+-  yield front.startRecording({ withMarkers: true, withTicks: true });
++  yield waitUntil(() => {
++    return markers.length;
++  }, 100);
+ 
+-  const markers = yield promise;
+   front.off("timeline-data", handler);
+-  yield front.stopRecording();
++  yield front.stopRecording(model);
+ 
+-  return markers;
+-}
++  info(`Got ${markers.length} markers.`);
+ 
+-function* spawnTest () {
+-  let { target, front } = yield initBackend(TEST_URL);
+-
+-  const markers = yield getMarkers(front);
+-  info("markers = " + JSON.stringify(markers, null, 2));
+-  ok(markers.some(m => m.name === "Parse HTML" && m.stack != undefined),
+-     "Should get some Parse HTML markers");
++  ok(markers.every(({name}) => name === "Parse HTML"), "All markers found are Parse HTML markers");
+ 
+   yield removeTab(target.tab);
+   finish();
++
++  function handler (_, name, _markers) {
++    if (name !== "markers") {
++      return;
++    }
++
++    _markers.forEach(marker => {
++      info(marker.name);
++      if (marker.name === "Parse HTML") {
++        markers.push(marker);
++      }
++    });
++  }
+ }
+-- 
+2.2.1
+

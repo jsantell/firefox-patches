@@ -1,5 +1,5 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Sun, 31 May 2015 17:55:26 -0700
+Date: Thu, 4 Jun 2015 07:51:22 -0700
 Subject: Bug 1169439 - Markers fully eclipsed by another marker should be collapsed within the parent marker. r=vp
 
 diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
@@ -120,11 +120,10 @@ index d93d5dd..c412411 100644
   * markers that are considered "from content" should be labeled here.
   */
 diff --git a/browser/devtools/performance/modules/logic/waterfall-utils.js b/browser/devtools/performance/modules/logic/waterfall-utils.js
-index 4308342..b372ea0 100644
+index 4308342..d2228fb 100644
 --- a/browser/devtools/performance/modules/logic/waterfall-utils.js
 +++ b/browser/devtools/performance/modules/logic/waterfall-utils.js
-@@ -5,137 +5,137 @@
- 
+@@ -6,136 +6,126 @@
  /**
   * Utility functions for collapsing markers into a waterfall.
   */
@@ -132,9 +131,6 @@ index 4308342..b372ea0 100644
  loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
    "devtools/performance/markers", true);
  
-+// Unique ID for all markers
-+let uid = 0;
-+
  /**
 - * Collapses markers into a tree-like structure. Currently, this only goes
 - * one level deep.
@@ -153,10 +149,10 @@ index 4308342..b372ea0 100644
    for (let i = 0, len = markersList.length; i < len; i++) {
      let curr = markersList[i];
  
-     // Make sure all the markers have an assigned number id. This makes it
-     // easier to find them in a waterfall, for example.
-     curr.uid = ++uid;
- 
+-    // Make sure all the markers have an assigned number id. This makes it
+-    // easier to find them in a waterfall, for example.
+-    curr.uid = ++uid;
+-
      let parentNode = getCurrentParentNode();
 -    let blueprint = TIMELINE_BLUEPRINT[curr.name];
 -    let collapse = blueprint.collapseFunc || (() => null);
@@ -244,9 +240,6 @@ index 4308342..b372ea0 100644
 +  let node = Object.create(null);
 +  for (let prop in marker) {
 +    node[prop] = marker[prop];
-+  }
-+  if (!node.uid) {
-+    node.uid = ++uid;
 +  }
 +  node.submarkers = [];
 +  return node;
@@ -492,10 +485,10 @@ index 92af448..6f9a4a3 100644
  };
  
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index ac8cd12..6588561 100644
+index 6437729..02e5977 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -133,9 +133,8 @@ skip-if = e10s # GC events seem unreliable in multiprocess
+@@ -133,9 +133,8 @@ support-files =
  [browser_profiler_tree-view-10.js]
  [browser_timeline-blueprint.js]
  [browser_timeline-filters.js]
@@ -1076,9 +1069,28 @@ index deaaa1f..b84740d 100644
 +[test_waterfall-utils-collapse-01.js]
 +[test_waterfall-utils-collapse-02.js]
 diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
-index 1415230..5a6feb4 100644
+index 1415230..aeb322a 100644
 --- a/browser/devtools/performance/views/details-waterfall.js
 +++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -85,17 +85,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+    */
+   _onMarkerSelected: function (event, marker) {
+     let recording = PerformanceController.getCurrentRecording();
+     let frames = recording.getFrames();
+ 
+     if (event === "selected") {
+       this.details.render({ toolbox: gToolbox, marker, frames });
+       this.details.hidden = false;
+-      this._lastSelected = marker.uid;
++      this._lastSelected = marker;
+     }
+     if (event === "unselected") {
+       this.details.empty();
+     }
+   },
+ 
+   /**
+    * Called when the marker details view is resized.
 @@ -127,17 +127,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
     * populate the waterfall tree.
     */
@@ -1098,6 +1110,87 @@ index 1415230..5a6feb4 100644
  
      this._cache.set(markers, rootMarkerNode);
      return rootMarkerNode;
+@@ -170,17 +170,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+     root.attachTo(this.breakdownContainer);
+ 
+     this.headerContainer.innerHTML = "";
+     header.attachTo(this.headerContainer);
+ 
+     // If an item was previously selected in this view, attempt to
+     // re-select it by traversing the newly created tree.
+     if (this._lastSelected) {
+-      let item = root.find(i => i.marker.uid == this._lastSelected);
++      let item = root.find(i => i.marker === this._lastSelected);
+       if (item) {
+         item.focus();
+       }
+     }
+   },
+ 
+   toString: () => "[object WaterfallView]"
+ });
+diff --git a/browser/devtools/projecteditor/test/browser_projecteditor_contextmenu_02.js b/browser/devtools/projecteditor/test/browser_projecteditor_contextmenu_02.js
+index ee413767..9bbfaed 100644
+--- a/browser/devtools/projecteditor/test/browser_projecteditor_contextmenu_02.js
++++ b/browser/devtools/projecteditor/test/browser_projecteditor_contextmenu_02.js
+@@ -9,16 +9,20 @@ loadHelperScript("helper_edits.js");
+ // Test context menu enabled / disabled state in editor
+ 
+ add_task(function*() {
+   let projecteditor = yield addProjectEditorTabForTempDirectory();
+   ok (projecteditor, "ProjectEditor has loaded");
+ 
+   let {textEditorContextMenuPopup} = projecteditor;
+ 
++  // Update menu items for a clean slate, so previous tests cannot
++  // affect paste, and possibly other side effects
++  projecteditor._updateMenuItems();
++
+   let cmdDelete = textEditorContextMenuPopup.querySelector("[command=cmd_delete]");
+   let cmdSelectAll = textEditorContextMenuPopup.querySelector("[command=cmd_selectAll]");
+   let cmdCut = textEditorContextMenuPopup.querySelector("[command=cmd_cut]");
+   let cmdCopy = textEditorContextMenuPopup.querySelector("[command=cmd_copy]");
+   let cmdPaste = textEditorContextMenuPopup.querySelector("[command=cmd_paste]");
+ 
+   info ("Opening resource");
+   let resource = projecteditor.project.allResources()[2];
+@@ -54,9 +58,9 @@ function* openContextMenuForEditor(editor, contextMenu) {
+     {type: "contextmenu", button: 2}, editorDoc.defaultView);
+   yield shown;
+ }
+ function* closeContextMenuForEditor(editor, contextMenu) {
+   let editorDoc = editor.editor.container.contentDocument;
+   let hidden = onPopupHidden(contextMenu);
+   contextMenu.hidePopup();
+   yield hidden;
+-}
+\ No newline at end of file
++}
+diff --git a/browser/devtools/projecteditor/test/browser_projecteditor_menubar_02.js b/browser/devtools/projecteditor/test/browser_projecteditor_menubar_02.js
+index a8e0079..8d1a091 100644
+--- a/browser/devtools/projecteditor/test/browser_projecteditor_menubar_02.js
++++ b/browser/devtools/projecteditor/test/browser_projecteditor_menubar_02.js
+@@ -7,16 +7,20 @@
+ loadHelperScript("helper_edits.js");
+ 
+ // Test menu bar enabled / disabled state.
+ 
+ add_task(function*() {
+   let projecteditor = yield addProjectEditorTabForTempDirectory();
+   let menubar = projecteditor.menubar;
+ 
++  // Update menu items for a clean slate, so previous tests cannot
++  // affect paste, and possibly other side effects
++  projecteditor._updateMenuItems();
++
+   // let projecteditor = yield addProjectEditorTabForTempDirectory();
+   ok(projecteditor, "ProjectEditor has loaded");
+ 
+   let fileMenu = menubar.querySelector("#file-menu");
+   let editMenu = menubar.querySelector("#edit-menu");
+   ok (fileMenu, "The menu has loaded in the projecteditor document");
+   ok (editMenu, "The menu has loaded in the projecteditor document");
+ 
 -- 
 2.2.1
 

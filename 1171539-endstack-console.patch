@@ -1,0 +1,295 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 4 Jun 2015 12:38:32 -0700
+Subject: Bug 1171539 - ConsoleTime markers should render endStacks. r=vp
+
+diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
+index d93d5dd..a0197ed 100644
+--- a/browser/devtools/performance/modules/logic/marker-utils.js
++++ b/browser/devtools/performance/modules/logic/marker-utils.js
+@@ -170,16 +170,17 @@ const DOM = {
+    * @param string field
+    *        String identifier for label's name.
+    * @param string value
+    *        Label's value.
+    * @return {Element}
+    */
+   buildNameValueLabel: function (doc, field, value) {
+     let hbox = doc.createElement("hbox");
++    hbox.className = "marker-details-labelcontainer";
+     let labelName = doc.createElement("label");
+     let labelValue = doc.createElement("label");
+     labelName.className = "plain marker-details-labelname";
+     labelValue.className = "plain marker-details-labelvalue";
+     labelName.setAttribute("value", field);
+     labelValue.setAttribute("value", value);
+     hbox.appendChild(labelName);
+     hbox.appendChild(labelValue);
+@@ -196,16 +197,18 @@ const DOM = {
+    *        number frameIndex - The index of the topmost stack frame.
+    *        array frames - Array of stack frames.
+    */
+   buildStackTrace: function(doc, { type, frameIndex, frames }) {
+     let container = doc.createElement("vbox");
+     let labelName = doc.createElement("label");
+     labelName.className = "plain marker-details-labelname";
+     labelName.setAttribute("value", L10N.getStr(`timeline.markerDetail.${type}`));
++    container.setAttribute("type", type);
++    container.className = "marker-details-stack";
+     container.appendChild(labelName);
+ 
+     let wasAsyncParent = false;
+     while (frameIndex > 0) {
+       let frame = frames[frameIndex];
+       let url = frame.source;
+       let displayName = frame.functionDisplayName;
+       let line = frame.line;
+diff --git a/browser/devtools/performance/modules/widgets/marker-details.js b/browser/devtools/performance/modules/widgets/marker-details.js
+index a21ca45..5772ace 100644
+--- a/browser/devtools/performance/modules/widgets/marker-details.js
++++ b/browser/devtools/performance/modules/widgets/marker-details.js
+@@ -83,16 +83,22 @@ MarkerDetails.prototype = {
+     // Build a stack element -- and use the "startStack" label if
+     // we have both a startStack and endStack.
+     if (marker.stack) {
+       let type = marker.endStack ? "startStack" : "stack";
+       elements.push(MarkerUtils.DOM.buildStackTrace(this._document, {
+         frameIndex: marker.stack, frames, type
+       }));
+     }
++    if (marker.endStack) {
++      let type = "endStack";
++      elements.push(MarkerUtils.DOM.buildStackTrace(this._document, {
++        frameIndex: marker.endStack, frames, type
++      }));
++    }
+ 
+     elements.forEach(el => this._parent.appendChild(el));
+   },
+ 
+   /**
+    * Handles click in the marker details view. Based on the target,
+    * can handle different actions -- only supporting view source links
+    * for the moment.
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 6437729..944ed5b 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -1,14 +1,15 @@
+ [DEFAULT]
+ tags = devtools
+ subsuite = devtools
+ support-files =
+   doc_force_gc.html
+   doc_innerHTML.html
++  doc_markers.html
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
+ # that need to be moved over to performance tool
+ 
+ [browser_aaa-run-first-leaktest.js]
+ [browser_marker-utils.js]
+@@ -64,16 +65,17 @@ support-files =
+ [browser_perf-front-02.js]
+ [browser_perf-highlighted.js]
+ [browser_perf-jit-view-01.js]
+ [browser_perf-jit-view-02.js]
+ [browser_perf-jit-model-01.js]
+ [browser_perf-jit-model-02.js]
+ [browser_perf-loading-01.js]
+ [browser_perf-loading-02.js]
++[browser_perf-marker-details-01.js]
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-03.js]
+ [browser_perf-options-invert-call-tree-01.js]
+ [browser_perf-options-invert-call-tree-02.js]
+ [browser_perf-options-invert-flame-graph-01.js]
+ [browser_perf-options-invert-flame-graph-02.js]
+ [browser_perf-options-flatten-tree-recursion-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-marker-details-01.js b/browser/devtools/performance/test/browser_perf-marker-details-01.js
+new file mode 100644
+index 0000000..990933f
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-marker-details-01.js
+@@ -0,0 +1,113 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the Marker Details view renders all properties expected
++ * for each marker.
++ */
++
++function* spawnTest() {
++  let { target, panel } = yield initPerformance(MARKERS_URL);
++  let { $, $$, EVENTS, PerformanceController, OverviewView, WaterfallView } = panel.panelWin;
++  let { L10N } = devtools.require("devtools/performance/global");
++
++  // Hijack the markers massaging part of creating the waterfall view,
++  // to prevent collapsing markers and allowing this test to verify
++  // everything individually. A better solution would be to just expand
++  // all markers first and then skip the meta nodes, but I'm lazy.
++  WaterfallView._prepareWaterfallTree = markers => {
++    return { submarkers: markers };
++  };
++
++  const MARKER_TYPES = [
++    "Styles", "Reflow", "Paint", "ConsoleTime", "TimeStamp"
++  ];
++
++  yield startRecording(panel);
++  yield waitUntil(() => {
++    // Wait until we get 3 different markers.
++    let markers = PerformanceController.getCurrentRecording().getMarkers();
++    return MARKER_TYPES.every(type => markers.some(m => m.name === type));
++  });
++  yield stopRecording(panel);
++
++  // Select everything
++  let timeline = OverviewView.graphs.get("timeline");
++  let rerendered = WaterfallView.once(EVENTS.WATERFALL_RENDERED);
++  timeline.setSelection({ start: 0, end: timeline.width });
++  yield rerendered;
++
++  let bars = $$(".waterfall-marker-bar");
++  let markers = PerformanceController.getCurrentRecording().getMarkers();
++
++  ok(bars.length >= MARKER_TYPES.length, `Got at least ${MARKER_TYPES.length} markers (1)`);
++  ok(markers.length >= MARKER_TYPES.length, `Got at least ${MARKER_TYPES.length} markers (2)`);
++
++  const tests = {
++    ConsoleTime: function (marker) {
++      shouldHaveLabel($, L10N.getStr("timeline.markerDetail.consoleTimerName"), "!!!", marker);
++      shouldHaveStack($, "startStack", marker);
++      shouldHaveStack($, "endStack", marker);
++      return true;
++    },
++    TimeStamp: function (marker) {
++      shouldHaveLabel($, "Label:", "go", marker);
++      shouldHaveStack($, "stack", marker);
++      return true;
++    },
++    Styles: function (marker) {
++      if (marker.restyleHint) {
++        shouldHaveLabel($, "Restyle Hint:", marker.restyleHint.replace(/eRestyle_/g, ""), marker);
++      }
++      if (marker.stack) {
++        shouldHaveStack($, "stack", marker);
++        return true;
++      }
++    },
++    Reflow: function (marker) {
++      if (marker.stack) {
++        shouldHaveStack($, "stack", marker);
++        return true;
++      }
++    }
++  };
++
++  // Keep track of all marker tests that are finished so we only
++  // run through each marker test once, so we don't spam 500 redundant
++  // tests.
++  let testsDone = [];
++  let TOTAL_TESTS = 4;
++
++  for (let i = 0; i < bars.length; i++) {
++    let bar = bars[i];
++    let m = markers[i];
++    EventUtils.sendMouseEvent({ type: "mousedown" }, bar);
++
++    if (testsDone.indexOf(m.name) === -1 && tests[m.name]) {
++      let fullTestComplete = tests[m.name](m);
++      if (fullTestComplete) {
++        testsDone.push(m.name);
++      }
++    } else {
++      info(`TODO: Need to add marker details tests for ${m.name}`);
++    }
++
++    if (testsDone.length === TOTAL_TESTS) {
++      break;
++    }
++  }
++
++  yield teardown(panel);
++  finish();
++}
++
++function shouldHaveStack ($, type, marker) {
++  ok($(`#waterfall-details .marker-details-stack[type=${type}]`), `${marker.name} has a stack: ${type}`);
++}
++
++function shouldHaveLabel ($, name, value, marker) {
++  info(name);
++  let $name = $(`#waterfall-details .marker-details-labelcontainer .marker-details-labelname[value="${name}"]`);
++  let $value = $name.parentNode.querySelector(".marker-details-labelvalue");
++  is($value.getAttribute("value"), value, `${marker.name} has correct label for ${name}:${value}`);
++}
+diff --git a/browser/devtools/performance/test/doc_markers.html b/browser/devtools/performance/test/doc_markers.html
+new file mode 100644
+index 0000000..24a905e
+--- /dev/null
++++ b/browser/devtools/performance/test/doc_markers.html
+@@ -0,0 +1,35 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Performance tool marker generation</title>
++  </head>
++
++  <body>
++    <script type="text/javascript">
++      var x = 1;
++      function test() {
++        var i = 10;
++        // generate sync styles and reflows
++        while (--i) {
++            var h = document.body.clientHeight;
++            document.body.style.height = (200 + i) + "px";
++            document.body.style.borderTop = i + "px solid red"; // paint
++        }
++        console.time("!!!");
++        test2();
++      }
++      function test2() {
++        console.timeStamp("go");
++        console.timeEnd("!!!");
++      }
++
++      // Prevent this script from being garbage collected.
++      window.setInterval(test, 1);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index aa9bc15..28d025a 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -17,16 +17,17 @@ let { generateUUID } = Cc["@mozilla.org/uuid-generator;1"].getService(Ci.nsIUUID
+ let { getPerformanceActorsConnection, PerformanceFront } = devtools.require("devtools/performance/front");
+ let TargetFactory = devtools.TargetFactory;
+ 
+ let mm = null;
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
+ const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
++const MARKERS_URL = EXAMPLE_URL + "doc_markers.html";
+ 
+ const MEMORY_SAMPLE_PROB_PREF = "devtools.performance.memory.sample-probability";
+ const MEMORY_MAX_LOG_LEN_PREF = "devtools.performance.memory.max-log-length";
+ const PROFILER_BUFFER_SIZE_PREF = "devtools.performance.profiler.buffer-size";
+ const PROFILER_SAMPLE_RATE_PREF = "devtools.performance.profiler.sample-frequency-khz";
+ 
+ const FRAMERATE_PREF = "devtools.performance.ui.enable-framerate";
+ const MEMORY_PREF = "devtools.performance.ui.enable-memory";
+-- 
+2.2.1
+
