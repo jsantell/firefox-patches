@@ -3,7 +3,7 @@ Date: Thu, 4 Jun 2015 16:26:46 -0700
 Subject: Bug 1131661 - Add invalidation data to Styles ProfileTimelineMarkers.
 
 diff --git a/browser/devtools/performance/modules/widgets/marker-details.js b/browser/devtools/performance/modules/widgets/marker-details.js
-index a21ca45..75bf901 100644
+index 5772ace..e582683 100644
 --- a/browser/devtools/performance/modules/widgets/marker-details.js
 +++ b/browser/devtools/performance/modules/widgets/marker-details.js
 @@ -75,16 +75,28 @@ MarkerDetails.prototype = {
@@ -53,29 +53,10 @@ index 77b745b..d720f3e 100644
  timeline.markerDetail.asyncStack=(Async: %S)
  timeline.markerDetail.causeName=Cause:
 diff --git a/docshell/base/TimelineMarker.h b/docshell/base/TimelineMarker.h
-index a13baef..6f4fb0b 100644
+index a13baef..a2c79f6 100644
 --- a/docshell/base/TimelineMarker.h
 +++ b/docshell/base/TimelineMarker.h
-@@ -45,16 +45,18 @@ public:
-   // standard elements have already been set.  This method is
-   // called on both the starting and ending markers of a pair.
-   // Ordinarily the ending marker doesn't need to do anything
-   // here.
-   virtual void AddDetails(JSContext* aCx,
-                           mozilla::dom::ProfileTimelineMarker& aMarker)
-   {}
- 
-+  virtual const char* GetType() { return ""; }
-+
-   virtual void AddLayerRectangles(
-       mozilla::dom::Sequence<mozilla::dom::ProfileTimelineLayerRect>&)
-   {
-     MOZ_ASSERT_UNREACHABLE("can only be called on layer markers");
-   }
- 
-   const char* GetName() const { return mName; }
-   TracingMetadata GetMetaData() const { return mMetaData; }
-@@ -64,30 +66,41 @@ public:
+@@ -64,30 +64,36 @@ public:
    JSObject* GetStack()
    {
      if (mStackTrace.initialized()) {
@@ -86,11 +67,6 @@ index a13baef..6f4fb0b 100644
  
 -protected:
 -  void CaptureStack()
-+  JSContext* GetJSContext()
-+  {
-+    return nsContentUtils::GetCurrentJSContext();
-+  }
-+
 +  static void CaptureCurrentStack(
 +      JS::PersistentRooted<JSObject*>& aStackTrace)
    {
@@ -136,7 +112,7 @@ index e520b9f..dd06002 100644
 +  sequence<object>? invalidations;
  };
 diff --git a/layout/base/RestyleManager.cpp b/layout/base/RestyleManager.cpp
-index 525fdcf..74223c4 100644
+index 525fdcf..7e2a0f7 100644
 --- a/layout/base/RestyleManager.cpp
 +++ b/layout/base/RestyleManager.cpp
 @@ -6,16 +6,17 @@
@@ -157,46 +133,7 @@ index 525fdcf..74223c4 100644
  #include "nsRuleProcessorData.h"
  #include "nsStyleUtil.h"
  #include "nsCSSFrameConstructor.h"
-@@ -58,16 +59,38 @@ static nsCString
- FrameTagToString(const nsIFrame* aFrame)
- {
-   nsCString result;
-   aFrame->ListTag(result);
-   return result;
- }
- #endif
- 
-+class InvalidationTimelineMarker : public TimelineMarker
-+{
-+public:
-+  InvalidationTimelineMarker(nsDocShell* aDocShell,
-+                             const char* aType)
-+    : TimelineMarker(aDocShell, "Invalidation", TRACING_TIMESTAMP)
-+  {
-+    mType = aType;
-+  }
-+
-+  virtual const char* GetType() override { return mType; }
-+
-+  virtual void AddInvalidation(mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>>& aInvalidations) override
-+  {
-+    aInvalidations.AppendElement(
-+      JS::PersistentRooted<JSObject*>(GetJSContext(), GetStack()));
-+  }
-+
-+private:
-+  const char* mType;
-+};
-+
- RestyleManager::RestyleManager(nsPresContext* aPresContext)
-   : mPresContext(aPresContext)
-   , mDoRebuildAllStyleData(false)
-   , mInRebuildAllStyleData(false)
-   , mObservingRefreshDriver(false)
-   , mInStyleRefresh(false)
-   , mSkipAnimationRules(false)
-   , mHavePendingNonAnimationRestyles(false)
-@@ -577,17 +600,17 @@ RestyleManager::StyleChangeReflow(nsIFrame* aFrame, nsChangeHint aHint)
+@@ -577,17 +578,17 @@ RestyleManager::StyleChangeReflow(nsIFrame* aFrame, nsChangeHint aHint)
  
    do {
      mPresContext->PresShell()->FrameNeedsReflow(aFrame, dirtyType, dirtyBits);
@@ -215,7 +152,7 @@ index 525fdcf..74223c4 100644
    for (; !lists.IsDone(); lists.Next()) {
      nsFrameList::Enumerator childFrames(lists.CurrentList());
      for (; !childFrames.AtEnd(); childFrames.Next()) {
-@@ -1824,16 +1847,28 @@ RestyleManager::PostRestyleEventInternal(bool aForLazyConstruction)
+@@ -1824,16 +1825,28 @@ RestyleManager::PostRestyleEventInternal(bool aForLazyConstruction)
      mObservingRefreshDriver = mPresContext->RefreshDriver()->
        AddStyleFlushObserver(presShell);
    }
@@ -244,7 +181,7 @@ index 525fdcf..74223c4 100644
  {
    NS_ASSERTION(!(aExtraHint & nsChangeHint_ReconstructFrame),
                 "Should not reconstruct the root of the frame tree.  "
-@@ -4317,9 +4352,10 @@ ElementRestyler::RestyleResultToString(RestyleResult aRestyleResult)
+@@ -4317,9 +4330,10 @@ ElementRestyler::RestyleResultToString(RestyleResult aRestyleResult)
        break;
      default:
        result.AppendPrintf("RestyleResult(%d)", aRestyleResult);
@@ -256,10 +193,10 @@ index 525fdcf..74223c4 100644
 +
  } // namespace mozilla
 diff --git a/layout/base/RestyleTracker.cpp b/layout/base/RestyleTracker.cpp
-index 4dcec39..89ea441 100644
+index 4dcec39..ecc49b7 100644
 --- a/layout/base/RestyleTracker.cpp
 +++ b/layout/base/RestyleTracker.cpp
-@@ -94,36 +94,57 @@ struct RestyleCollector {
+@@ -94,36 +94,58 @@ struct RestyleCollector {
  #ifdef RESTYLE_LOGGING
    uint32_t count;
  #endif
@@ -274,7 +211,7 @@ index 4dcec39..89ea441 100644
 -                        nsRestyleHint aRestyleHint)
 -    : TimelineMarker(aDocShell, "Styles", aMetaData)
 +                        nsRestyleHint aRestyleHint,
-+                        mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>>& stacks)
++                        nsTArray<JS::PersistentRooted<JSObject*>>& stacks)
 +    : TimelineMarker(aDocShell, "Styles", TRACING_INTERVAL_START)
    {
      if (aRestyleHint) {
@@ -304,14 +241,15 @@ index 4dcec39..89ea441 100644
 +        mStacks.RemoveElementAt(i);
 +        --i;
 +      }
-+      printf("Constructing invalidations %lu", unrootedStacks.Length());
++      printf("***Constructing invalidations: %lu\n", unrootedStacks.Length());
 +      aMarker.mInvalidations.Construct(unrootedStacks);
      }
++    NS_ASSERTION(mStacks.Length() == 0, "Stacks should no longer be stored after adding details.");
    }
  
  private:
    nsAutoString mRestyleHint;
-+  mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>> mStacks;
++  nsTArray<JS::PersistentRooted<JSObject*>> mStacks;
  };
  
  static PLDHashOperator
@@ -320,7 +258,7 @@ index 4dcec39..89ea441 100644
                  void* aRestyleCollector)
  {
    dom::Element* element =
-@@ -350,35 +371,33 @@ RestyleTracker::DoProcessRestyles()
+@@ -350,35 +372,33 @@ RestyleTracker::DoProcessRestyles()
          if (!GetRestyleData(element, data)) {
            LOG_RESTYLE("skipping, already restyled");
            continue;
@@ -359,7 +297,7 @@ index 4dcec39..89ea441 100644
          // Keep processing restyles for now
          continue;
        }
-@@ -414,30 +433,28 @@ RestyleTracker::DoProcessRestyles()
+@@ -414,30 +434,28 @@ RestyleTracker::DoProcessRestyles()
            Maybe<GeckoProfilerTracingRAII> profilerRAII;
            if (profiler_feature_active("restyle")) {
              profilerRAII.emplace("Paint", "Styles", Move(currentRestyle->mBacktrace));
@@ -393,7 +331,7 @@ index 4dcec39..89ea441 100644
    }
  
    mRestyleManager->EndProcessingRestyles();
-@@ -500,9 +517,16 @@ RestyleTracker::AddRestyleRootsIfAwaitingRestyle(
+@@ -500,9 +518,16 @@ RestyleTracker::AddRestyleRootsIfAwaitingRestyle(
    for (size_t i = 0; i < aElements.Length(); i++) {
      Element* element = aElements[i];
      if (element->HasFlag(RestyleBit())) {
@@ -411,7 +349,7 @@ index 4dcec39..89ea441 100644
 +
  } // namespace mozilla
 diff --git a/layout/base/RestyleTracker.h b/layout/base/RestyleTracker.h
-index 3512181..a11ff29 100644
+index 3512181..0607e25 100644
 --- a/layout/base/RestyleTracker.h
 +++ b/layout/base/RestyleTracker.h
 @@ -256,16 +256,22 @@ public:
@@ -449,7 +387,7 @@ index 3512181..a11ff29 100644
 +
 +  // Sequence of style invalidations observed since last style
 +  // recalculation, for TimelineMarkers.
-+  mozilla::dom::Sequence<JS::PersistentRooted<JSObject*>> mInvalidations;
++  nsTArray<JS::PersistentRooted<JSObject*>> mInvalidations;
  };
  
  inline bool
