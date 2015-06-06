@@ -1,0 +1,206 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 5 Jun 2015 10:40:38 -0700
+Subject: Bug 1164731 - when modifying selection within a flame graph, other detail views should be queued for rendering. r=vp
+
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 14e3924..7c21b50 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -47,16 +47,17 @@ support-files =
+ [browser_perf-details-memory-flamegraph-render.js]
+ [browser_perf-details-waterfall-render.js]
+ [browser_perf-details-01.js]
+ [browser_perf-details-02.js]
+ [browser_perf-details-03.js]
+ [browser_perf-details-04.js]
+ [browser_perf-details-05.js]
+ [browser_perf-details-06.js]
++[browser_perf-details-07.js]
+ [browser_perf-events-calltree.js]
+ [browser_perf-front-basic-profiler-01.js]
+ [browser_perf-front-basic-timeline-01.js]
+ #[browser_perf-front-profiler-01.js] bug 1077464
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+diff --git a/browser/devtools/performance/test/browser_perf-details-07.js b/browser/devtools/performance/test/browser_perf-details-07.js
+new file mode 100644
+index 0000000..9d557d3
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-details-07.js
+@@ -0,0 +1,63 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that when flame chart views scroll to change selection,
++ * other detail views are rerendered
++ */
++let HORIZONTAL_AXIS = 1;
++let VERTICAL_AXIS = 2;
++
++function* spawnTest() {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController, OverviewView, DetailsView, WaterfallView, JsCallTreeView, JsFlameGraphView } = panel.panelWin;
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  let waterfallRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  let calltreeRendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  let flamegraphRendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
++
++  OverviewView.setTimeInterval({ startTime: 10, endTime: 20 });
++  DetailsView.selectView("waterfall");
++  yield waterfallRendered;
++  DetailsView.selectView("js-calltree");
++  yield calltreeRendered;
++  DetailsView.selectView("js-flamegraph");
++  yield flamegraphRendered;
++
++  waterfallRendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  calltreeRendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  let overviewRangeSelected = once(OverviewView, EVENTS.OVERVIEW_RANGE_SELECTED);
++
++  once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED).then(() =>
++    ok(false, "FlameGraphView should not rerender, but be handled via its graph widget"));
++
++  // Reset the range to full view, trigger a "selection" event as if
++  // our mouse has done this
++  scroll(JsFlameGraphView.graph, 200, HORIZONTAL_AXIS, 10);
++
++  DetailsView.selectView("waterfall");
++  yield waterfallRendered;
++  ok(true, "Waterfall rerendered by flame graph changing interval");
++
++  DetailsView.selectView("js-calltree");
++  yield calltreeRendered;
++  ok(true, "CallTree rerendered by flame graph changing interval");
++
++  yield teardown(panel);
++  finish();
++}
++
++// EventUtils just doesn't work!
++
++function scroll(graph, wheel, axis, x, y = 1) {
++  x /= window.devicePixelRatio;
++  y /= window.devicePixelRatio;
++  graph._onMouseMove({ testX: x, testY: y });
++  graph._onMouseWheel({ testX: x, testY: y, axis, detail: wheel, axis,
++    HORIZONTAL_AXIS,
++    VERTICAL_AXIS
++  });
++}
+diff --git a/browser/devtools/performance/views/details-abstract-subview.js b/browser/devtools/performance/views/details-abstract-subview.js
+index 6f92c6d..62e7c26 100644
+--- a/browser/devtools/performance/views/details-abstract-subview.js
++++ b/browser/devtools/performance/views/details-abstract-subview.js
+@@ -40,16 +40,25 @@ let DetailsSubview = {
+ 
+   /**
+    * Amount of time (in milliseconds) to wait until this view gets updated,
+    * when the range is changed in the overview.
+    */
+   rangeChangeDebounceTime: 0,
+ 
+   /**
++   * When the overview range changes, all details views will require a
++   * rerendering at a later point, determined by `shouldUpdateWhenShown` and
++   * `canUpdateWhileHidden` and whether or not its the current view.
++   * Set `requiresUpdateOnRangeChange` to false to not invalidate the view
++   * when the range changes.
++   */
++  requiresUpdateOnRangeChange: true,
++
++  /**
+    * Flag specifying if this view should be updated when selected. This will
+    * be set to true, for example, when the range changes in the overview and
+    * this view is not currently visible.
+    */
+   shouldUpdateWhenShown: false,
+ 
+   /**
+    * Flag specifying if this view may get updated even when it's not selected.
+@@ -88,16 +97,19 @@ let DetailsSubview = {
+       this.shouldUpdateWhenShown = true;
+     }
+   },
+ 
+   /**
+    * Fired when a range is selected or cleared in the OverviewView.
+    */
+   _onOverviewRangeChange: function (_, interval) {
++    if (!this.requiresUpdateOnRangeChange) {
++      return;
++    }
+     if (DetailsView.isViewSelected(this)) {
+       let debounced = () => {
+         if (!this.shouldUpdateWhileMouseIsActive && OverviewView.isMouseActive) {
+           // Don't render yet, while the selection is still being dragged.
+           setNamedTimeout("range-change-debounce", this.rangeChangeDebounceTime, debounced);
+         } else {
+           this.render(interval);
+         }
+diff --git a/browser/devtools/performance/views/details-js-flamegraph.js b/browser/devtools/performance/views/details-js-flamegraph.js
+index 621074a..ef0b549 100644
+--- a/browser/devtools/performance/views/details-js-flamegraph.js
++++ b/browser/devtools/performance/views/details-js-flamegraph.js
+@@ -81,17 +81,23 @@ let JsFlameGraphView = Heritage.extend(DetailsSubview, {
+     this.emit(EVENTS.JS_FLAMEGRAPH_RENDERED);
+   },
+ 
+   /**
+    * Fired when a range is selected or cleared in the FlameGraph.
+    */
+   _onRangeChangeInGraph: function () {
+     let interval = this.graph.getViewRange();
+-    OverviewView.setTimeInterval(interval, { stopPropagation: true });
++
++    // Squelch rerendering this view when we update the range here
++    // to avoid recursion, as our FlameGraph handles rerendering itself
++    // when originating from within the graph.
++    this.requiresUpdateOnRangeChange = false;
++    OverviewView.setTimeInterval(interval);
++    this.requiresUpdateOnRangeChange = true;
+   },
+ 
+   /**
+    * Called whenever a pref is changed and this view needs to be rerendered.
+    */
+   _onRerenderPrefChanged: function() {
+     let recording = PerformanceController.getCurrentRecording();
+     let profile = recording.getProfile();
+diff --git a/browser/devtools/performance/views/details-memory-flamegraph.js b/browser/devtools/performance/views/details-memory-flamegraph.js
+index 8bb2fdf..6968ddd 100644
+--- a/browser/devtools/performance/views/details-memory-flamegraph.js
++++ b/browser/devtools/performance/views/details-memory-flamegraph.js
+@@ -79,17 +79,23 @@ let MemoryFlameGraphView = Heritage.extend(DetailsSubview, {
+     this.emit(EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   },
+ 
+   /**
+    * Fired when a range is selected or cleared in the FlameGraph.
+    */
+   _onRangeChangeInGraph: function () {
+     let interval = this.graph.getViewRange();
+-    OverviewView.setTimeInterval(interval, { stopPropagation: true });
++
++    // Squelch rerendering this view when we update the range here
++    // to avoid recursion, as our FlameGraph handles rerendering itself
++    // when originating from within the graph.
++    this.requiresUpdateOnRangeChange = false;
++    OverviewView.setTimeInterval(interval);
++    this.requiresUpdateOnRangeChange = true;
+   },
+ 
+   /**
+    * Called whenever a pref is changed and this view needs to be rerendered.
+    */
+   _onRerenderPrefChanged: function() {
+     let recording = PerformanceController.getCurrentRecording();
+     let allocations = recording.getAllocations();
+-- 
+2.2.1
+

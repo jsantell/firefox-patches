@@ -1,0 +1,582 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 5 Jun 2015 18:29:45 -0700
+Subject: Bug 1168566 - Separate memory over time and allocation recording in perftools as two different preferences. r=fitzgen
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index 46c254b..88031d6 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1456,16 +1456,17 @@ pref("devtools.performance.timeline.hidden-markers", "[]");
+ pref("devtools.performance.profiler.buffer-size", 10000000);
+ pref("devtools.performance.profiler.sample-frequency-khz", 1);
+ pref("devtools.performance.ui.invert-call-tree", true);
+ pref("devtools.performance.ui.invert-flame-graph", false);
+ pref("devtools.performance.ui.flatten-tree-recursion", true);
+ pref("devtools.performance.ui.show-platform-data", false);
+ pref("devtools.performance.ui.show-idle-blocks", true);
+ pref("devtools.performance.ui.enable-memory", false);
++pref("devtools.performance.ui.enable-allocations", false);
+ pref("devtools.performance.ui.enable-framerate", true);
+ pref("devtools.performance.ui.show-jit-optimizations", false);
+ 
+ // Enable experimental options in the UI only in Nightly
+ #if defined(NIGHTLY_BUILD)
+ pref("devtools.performance.ui.experimental", true);
+ #else
+ pref("devtools.performance.ui.experimental", false);
+diff --git a/browser/devtools/performance/modules/logic/front.js b/browser/devtools/performance/modules/logic/front.js
+index 621e1d3..3ab40e7 100644
+--- a/browser/devtools/performance/modules/logic/front.js
++++ b/browser/devtools/performance/modules/logic/front.js
+@@ -523,16 +523,16 @@ PerformanceFront.prototype = {
+ /**
+  * Creates an object of configurations based off of preferences for a RecordingModel.
+  */
+ function getRecordingModelPrefs () {
+   return {
+     withMarkers: true,
+     withMemory: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
+     withTicks: Services.prefs.getBoolPref("devtools.performance.ui.enable-framerate"),
+-    withAllocations: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
++    withAllocations: Services.prefs.getBoolPref("devtools.performance.ui.enable-allocations"),
+     allocationsSampleProbability: +Services.prefs.getCharPref("devtools.performance.memory.sample-probability"),
+     allocationsMaxLogLength: Services.prefs.getIntPref("devtools.performance.memory.max-log-length")
+   };
+ }
+ 
+ exports.getPerformanceActorsConnection = t => SharedPerformanceActors.forTarget(t);
+ exports.PerformanceFront = PerformanceFront;
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 70d8cee..a45b027 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -292,17 +292,17 @@ let PerformanceController = {
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+     let options = {
+       withMarkers: true,
+       withMemory: this.getOption("enable-memory"),
+       withTicks: this.getOption("enable-framerate"),
+-      withAllocations: this.getOption("enable-memory"),
++      withAllocations: this.getOption("enable-allocations"),
+       allocationsSampleProbability: this.getPref("memory-sample-probability"),
+       allocationsMaxLogLength: this.getPref("memory-max-log-length"),
+       bufferSize: this.getPref("profiler-buffer-size"),
+       sampleFrequency: this.getPref("profiler-sample-frequency")
+     };
+ 
+     yield gFront.startRecording(options);
+   }),
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 0b5226c..5efaa81 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -38,16 +38,22 @@
+                 label="&profilerUI.showPlatformData;"
+                 tooltiptext="&profilerUI.showPlatformData.tooltiptext;"/>
+       <menuitem id="option-enable-memory"
+                 class="experimental-option"
+                 type="checkbox"
+                 data-pref="enable-memory"
+                 label="&profilerUI.enableMemory;"
+                 tooltiptext="&profilerUI.enableMemory.tooltiptext;"/>
++      <menuitem id="option-enable-allocations"
++                class="experimental-option"
++                type="checkbox"
++                data-pref="enable-allocations"
++                label="&profilerUI.enableAllocations;"
++                tooltiptext="&profilerUI.enableAllocations.tooltiptext;"/>
+       <menuitem id="option-enable-framerate"
+                 type="checkbox"
+                 data-pref="enable-framerate"
+                 label="&profilerUI.enableFramerate;"
+                 tooltiptext="&profilerUI.enableFramerate.tooltiptext;"/>
+       <menuitem id="option-invert-call-tree"
+                 type="checkbox"
+                 data-pref="invert-call-tree"
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-01.js b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+index 88549fa..dc45184 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-01.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+@@ -8,16 +8,17 @@
+ let WAIT_TIME = 100;
+ 
+ function* spawnTest() {
+   let { target, front } = yield initBackend(SIMPLE_URL, {
+     TEST_MOCK_MEMORY_ACTOR: true,
+     TEST_MOCK_TIMELINE_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   let { memory, timeline } = front.getActorSupport();
+   ok(!memory, "memory should be mocked.");
+   ok(!timeline, "timeline should be mocked.");
+ 
+   let recording = yield front.startRecording({
+     withTicks: true,
+     withMarkers: true,
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-03.js b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+index 6a14ace..e639232 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-03.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+@@ -7,16 +7,17 @@
+ 
+ let WAIT_TIME = 100;
+ 
+ function* spawnTest() {
+   let { target, front } = yield initBackend(SIMPLE_URL, {
+     TEST_MOCK_MEMORY_ACTOR: true
+   });
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   let { memory, timeline } = front.getActorSupport();
+   ok(!memory, "memory should be mocked.");
+   ok(timeline, "timeline should not be mocked.");
+ 
+   let recording = yield front.startRecording({
+     withTicks: true,
+     withMarkers: true,
+diff --git a/browser/devtools/performance/test/browser_perf-details-03.js b/browser/devtools/performance/test/browser_perf-details-03.js
+index dd1ff3c..7b77a43 100644
+--- a/browser/devtools/performance/test/browser_perf-details-03.js
++++ b/browser/devtools/performance/test/browser_perf-details-03.js
+@@ -3,27 +3,27 @@
+ 
+ /**
+  * Tests that the details view hides the memory buttons when a recording does not
+  * have memory data (withMemory: false), and that when a memory panel is selected,
+  * switching to a panel that does not have memory goes to a default panel instead.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, PerformanceController, OverviewView, DetailsView } = panel.panelWin;
++  let { EVENTS, PerformanceController, DetailsView } = panel.panelWin;
+   let { $, RecordingsView, WaterfallView, MemoryCallTreeView, MemoryFlameGraphView } = panel.panelWin;
+ 
+-  Services.prefs.setBoolPref(MEMORY_PREF, false);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, false);
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   ok(DetailsView.isViewSelected(WaterfallView),
+     "The waterfall view is selected by default in the details view.");
+ 
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   // The toolbar buttons will always be hidden when a recording isn't available,
+   // so make sure we have one that's finished.
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   let flameBtn = $("toolbarbutton[data-view='memory-flamegraph']");
+   let callBtn = $("toolbarbutton[data-view='memory-calltree']");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+index 78d7ea4..be67422 100644
+--- a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+@@ -4,17 +4,17 @@
+ /**
+  * Tests that the memory call tree view renders content after recording.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test.
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+   yield stopRecording(panel);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   yield DetailsView.selectView("memory-calltree");
+   ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+diff --git a/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js b/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js
+index fafac98..a299c62 100644
+--- a/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-memory-flamegraph-render.js
+@@ -4,17 +4,17 @@
+ /**
+  * Tests that the memory flamegraph view renders content after recording.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryFlameGraphView } = panel.panelWin;
+ 
+   // Enable memory to test.
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+   yield stopRecording(panel);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   yield DetailsView.selectView("memory-flamegraph");
+   ok(DetailsView.isViewSelected(MemoryFlameGraphView), "The flamegraph is now selected.");
+diff --git a/browser/devtools/performance/test/browser_perf-front-02.js b/browser/devtools/performance/test/browser_perf-front-02.js
+index def219e..96d23fc6 100644
+--- a/browser/devtools/performance/test/browser_perf-front-02.js
++++ b/browser/devtools/performance/test/browser_perf-front-02.js
+@@ -5,17 +5,17 @@
+  * Test that timeline and memory actors can be started multiple times to get
+  * different start times for different recording sessions.
+  */
+ 
+ let WAIT_TIME = 1000;
+ 
+ function* spawnTest() {
+   let { target, front } = yield initBackend(SIMPLE_URL);
+-  let config = { withMarkers: true, withMemory: true, withTicks: true };
++  let config = { withMarkers: true, withAllocations: true, withTicks: true };
+ 
+   yield front._request("memory", "attach");
+ 
+   let timelineStart1 = yield front._request("timeline", "start", config);
+   let memoryStart1 = yield front._request("memory", "startRecordingAllocations");
+   let timelineStart2 = yield front._request("timeline", "start", config);
+   let memoryStart2 = yield front._request("memory", "startRecordingAllocations");
+   let timelineStop = yield front._request("timeline", "stop");
+diff --git a/browser/devtools/performance/test/browser_perf-options-allocations.js b/browser/devtools/performance/test/browser_perf-options-allocations.js
+index 4cb12a8..6a0ef91 100644
+--- a/browser/devtools/performance/test/browser_perf-options-allocations.js
++++ b/browser/devtools/performance/test/browser_perf-options-allocations.js
+@@ -3,31 +3,31 @@
+ 
+ 
+ /**
+  * Tests that setting the `devtools.performance.memory.` prefs propagate to the memory actor.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, $, gFront } = panel.panelWin;
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   let originalProbability = Services.prefs.getCharPref(MEMORY_SAMPLE_PROB_PREF);
+   let originalLogLength = Services.prefs.getIntPref(MEMORY_MAX_LOG_LEN_PREF);
+ 
+   Services.prefs.setCharPref(MEMORY_SAMPLE_PROB_PREF, "0.213");
+   Services.prefs.setIntPref(MEMORY_MAX_LOG_LEN_PREF, 777777);
+ 
+   yield startRecording(panel);
+ 
+   let { probability, maxLogLength } = yield gFront._request("memory", "getAllocationsSettings");
+ 
+   yield stopRecording(panel);
+ 
+   is(probability, 0.213, "allocations probability option is set on memory actor");
+   is(maxLogLength, 777777, "allocations max log length option is set on memory actor");
+ 
+-  Services.prefs.setBoolPref(MEMORY_PREF, false);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, false);
+   Services.prefs.setCharPref(MEMORY_SAMPLE_PROB_PREF, originalProbability);
+   Services.prefs.setIntPref(MEMORY_MAX_LOG_LEN_PREF, originalLogLength);
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js b/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js
+index 17802a5..42373e7 100644
+--- a/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js
++++ b/browser/devtools/performance/test/browser_perf-options-enable-memory-01.js
+@@ -25,14 +25,14 @@ function* spawnTest() {
+     "memory graph is still hidden after enabling if recording did not start recording memory");
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   ok(!$("#memory-overview").hidden, "memory graph is not hidden when memory enabled before recording");
+   is(PerformanceController.getCurrentRecording().getConfiguration().withMemory, true,
+     "PerformanceFront started with memory recording.");
+-  is(PerformanceController.getCurrentRecording().getConfiguration().withAllocations, true,
+-    "PerformanceFront started with allocations recording.");
++  is(PerformanceController.getCurrentRecording().getConfiguration().withAllocations, false,
++    "PerformanceFront did not record with allocations.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-options-enable-memory-02.js b/browser/devtools/performance/test/browser_perf-options-enable-memory-02.js
+index dd287da..6c3a034 100644
+--- a/browser/devtools/performance/test/browser_perf-options-enable-memory-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-enable-memory-02.js
+@@ -23,14 +23,14 @@ function* spawnTest() {
+ 
+   // Test starting with memory, and stopping without it.
+   yield startRecording(panel);
+   Services.prefs.setBoolPref(MEMORY_PREF, false);
+   yield stopRecording(panel);
+ 
+   is(PerformanceController.getCurrentRecording().getConfiguration().withMemory, true,
+     "The recording finished with tracking memory.");
+-  is(PerformanceController.getCurrentRecording().getConfiguration().withAllocations, true,
+-    "The recording finished with tracking allocations.");
++  is(PerformanceController.getCurrentRecording().getConfiguration().withAllocations, false,
++    "The recording still is not recording allocations.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
+index 46a846e..d765c54 100644
+--- a/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-flatten-tree-recursion-02.js
+@@ -4,17 +4,17 @@
+ /**
+  * Tests that the memory flamegraphs get rerendered when toggling `flatten-tree-recursion`
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, DetailsView, MemoryFlameGraphView, RecordingUtils, FlameGraphUtils } = panel.panelWin;
+ 
+   // Enable memory to test
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   Services.prefs.setBoolPref(FLATTEN_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   yield stopRecording(panel);
+   yield DetailsView.selectView("memory-flamegraph");
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js b/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js
+index e7d8ac2..9247921 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-call-tree-02.js
+@@ -4,17 +4,17 @@
+ /**
+  * Tests that the memory call tree views get rerendered when toggling `invert-call-tree`
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   Services.prefs.setBoolPref(INVERT_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+   yield stopRecording(panel);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   yield DetailsView.selectView("memory-calltree");
+diff --git a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
+index 12a5a3b..60f386b 100644
+--- a/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-invert-flame-graph-02.js
+@@ -3,17 +3,17 @@
+ 
+ /**
+  * Tests that the memory Flamegraphs gets rerendered when toggling `invert-flame-graph`
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryFlameGraphView } = panel.panelWin;
+ 
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   Services.prefs.setBoolPref(INVERT_FLAME_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+   yield stopRecording(panel);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   yield DetailsView.selectView("memory-flamegraph");
+diff --git a/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js b/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js
+index 0196279..e505499 100644
+--- a/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js
++++ b/browser/devtools/performance/test/browser_perf-options-show-idle-blocks-02.js
+@@ -4,17 +4,17 @@
+ /**
+  * Tests that the memory flamegraphs get rerendered when toggling `show-idle-blocks`
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, DetailsView, MemoryFlameGraphView } = panel.panelWin;
+ 
+   // Enable memory to test
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   Services.prefs.setBoolPref(IDLE_PREF, true);
+ 
+   yield startRecording(panel);
+   yield busyWait(100);
+   yield stopRecording(panel);
+ 
+   let rendered = once(MemoryFlameGraphView, EVENTS.MEMORY_FLAMEGRAPH_RENDERED);
+   yield DetailsView.selectView("memory-flamegraph");
+diff --git a/browser/devtools/performance/test/browser_perf-recording-selected-04.js b/browser/devtools/performance/test/browser_perf-recording-selected-04.js
+index fb3dc71..d799b91 100644
+--- a/browser/devtools/performance/test/browser_perf-recording-selected-04.js
++++ b/browser/devtools/performance/test/browser_perf-recording-selected-04.js
+@@ -5,18 +5,19 @@
+ /**
+  * Tests that all components can get rerendered for a profile when switching.
+  */
+ 
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+   let { $, EVENTS, PerformanceController, DetailsView, DetailsSubview, RecordingsView } = panel.panelWin;
+ 
+-  // Enable memory to test the memory-calltree and memory-flamegraph.
++  // Enable allocations to test the memory-calltree and memory-flamegraph.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   // Need to allow widgets to be updated while hidden, otherwise we can't use
+   // `waitForWidgetsRendered`.
+   DetailsSubview.canUpdateWhileHidden = true;
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-states.js b/browser/devtools/performance/test/browser_perf-states.js
+index ec602df..9731381 100644
+--- a/browser/devtools/performance/test/browser_perf-states.js
++++ b/browser/devtools/performance/test/browser_perf-states.js
+@@ -25,16 +25,17 @@ function* spawnTest() {
+   ok(!DetailsView.components["js-flamegraph"].initialized,
+     "The js-flamegraph detail view should not have been created yet.");
+   ok(!DetailsView.components["memory-calltree"].initialized,
+     "The memory-calltree detail view should not have been created yet.");
+   ok(!DetailsView.components["memory-flamegraph"].initialized,
+     "The memory-flamegraph detail view should not have been created yet.");
+ 
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   ok(!(OverviewView.graphs.get("timeline")),
+     "The markers graph should still not have been created yet.");
+   ok(!(OverviewView.graphs.get("memory")),
+     "The memory graph should still not have been created yet.");
+   ok(!(OverviewView.graphs.get("framerate")),
+     "The framerate graph should still not have been created yet.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-01.js b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+index bee1bd8..0e69e0e 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-01.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+@@ -4,17 +4,18 @@
+ /**
+  * Tests if the performance tool is able to save and load recordings.
+  */
+ 
+ let test = Task.async(function*() {
+   var { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+   var { EVENTS, PerformanceController, DetailsView, DetailsSubview } = panel.panelWin;
+ 
+-  // Enable memory to test the memory-calltree and memory-flamegraph.
++  // Enable allocations to test the memory-calltree and memory-flamegraph.
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(FRAMERATE_PREF, true);
+ 
+   // Need to allow widgets to be updated while hidden, otherwise we can't use
+   // `waitForWidgetsRendered`.
+   DetailsSubview.canUpdateWhileHidden = true;
+ 
+   yield startRecording(panel);
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-04.js b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+index cf194c0..6417307 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-04.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+@@ -70,17 +70,17 @@ let PROFILER_DATA = (function () {
+   return data;
+ })();
+ 
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+   let { $, EVENTS, PerformanceController, DetailsView, OverviewView, JsCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test the memory-calltree and memory-flamegraph.
+-  Services.prefs.setBoolPref(MEMORY_PREF, true);
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   // Create a structure from the data that mimics the old profiler's data.
+   // Different name for `ticks`, different way of storing time,
+   // and no memory, markers data.
+   let oldProfilerData = {
+     profilerData: { profile: PROFILER_DATA },
+     ticksData: TICKS_DATA,
+     recordingDuration: 10000,
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 28d025a..7d56827 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -26,16 +26,17 @@ const MARKERS_URL = EXAMPLE_URL + "doc_markers.html";
+ 
+ const MEMORY_SAMPLE_PROB_PREF = "devtools.performance.memory.sample-probability";
+ const MEMORY_MAX_LOG_LEN_PREF = "devtools.performance.memory.max-log-length";
+ const PROFILER_BUFFER_SIZE_PREF = "devtools.performance.profiler.buffer-size";
+ const PROFILER_SAMPLE_RATE_PREF = "devtools.performance.profiler.sample-frequency-khz";
+ 
+ const FRAMERATE_PREF = "devtools.performance.ui.enable-framerate";
+ const MEMORY_PREF = "devtools.performance.ui.enable-memory";
++const ALLOCATIONS_PREF = "devtools.performance.ui.enable-allocations";
+ 
+ const PLATFORM_DATA_PREF = "devtools.performance.ui.show-platform-data";
+ const IDLE_PREF = "devtools.performance.ui.show-idle-blocks";
+ const INVERT_PREF = "devtools.performance.ui.invert-call-tree";
+ const INVERT_FLAME_PREF = "devtools.performance.ui.invert-flame-graph";
+ const FLATTEN_PREF = "devtools.performance.ui.flatten-tree-recursion";
+ const JIT_PREF = "devtools.performance.ui.show-jit-optimizations";
+ const EXPERIMENTAL_PREF = "devtools.performance.ui.experimental";
+@@ -47,16 +48,17 @@ gDevTools.testing = true;
+ 
+ let DEFAULT_PREFS = [
+   "devtools.debugger.log",
+   "devtools.performance.ui.invert-call-tree",
+   "devtools.performance.ui.flatten-tree-recursion",
+   "devtools.performance.ui.show-platform-data",
+   "devtools.performance.ui.show-idle-blocks",
+   "devtools.performance.ui.enable-memory",
++  "devtools.performance.ui.enable-allocations",
+   "devtools.performance.ui.enable-framerate",
+   "devtools.performance.ui.show-jit-optimizations",
+   "devtools.performance.memory.sample-probability",
+   "devtools.performance.memory.max-log-length",
+   "devtools.performance.profiler.buffer-size",
+   "devtools.performance.profiler.sample-frequency-khz",
+   "devtools.performance.ui.experimental",
+ ].reduce((prefs, pref) => {
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+index 960e191..fba9235 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+@@ -125,16 +125,22 @@
+ <!ENTITY profilerUI.flattenTreeRecursion.tooltiptext "Flatten recursion when inspecting functions.">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.enableMemory): This string
+   -  is displayed next to a checkbox determining whether or not memory
+   -  measurements are enabled. -->
+ <!ENTITY profilerUI.enableMemory             "Record Memory">
+ <!ENTITY profilerUI.enableMemory.tooltiptext "Record memory consumption while profiling.">
+ 
++<!-- LOCALIZATION NOTE (profilerUI.enableAllocations): This string
++  -  is displayed next to a checkbox determining whether or not allocation
++  -  measurements are enabled. -->
++<!ENTITY profilerUI.enableAllocations             "Record Allocations">
++<!ENTITY profilerUI.enableAllocations.tooltiptext "Record allocation locations and information while profiling.">
++
+ <!-- LOCALIZATION NOTE (profilerUI.enableFramerate): This string
+   -  is displayed next to a checkbox determining whether or not framerate
+   -  is recorded. -->
+ <!ENTITY profilerUI.enableFramerate             "Record Framerate">
+ <!ENTITY profilerUI.enableFramerate.tooltiptext "Record framerate while profiling.">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.showJITOptimizations): This string
+   -  is displayed next to a checkbox determining whether or not JIT optimization data
+-- 
+2.2.1
+
