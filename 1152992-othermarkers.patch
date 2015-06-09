@@ -3,7 +3,7 @@ Date: Wed, 3 Jun 2015 11:09:53 -0700
 Subject: Bug 1152992 - If markers do not have a definition, classify them as "Other" in the perftools. r=vp
 
 diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
-index c412411..06ecc70 100644
+index 3453592..4e2cb2b 100644
 --- a/browser/devtools/performance/modules/logic/marker-utils.js
 +++ b/browser/devtools/performance/modules/logic/marker-utils.js
 @@ -3,53 +3,53 @@
@@ -117,7 +117,7 @@ index c412411..06ecc70 100644
      bullet.className = `marker-details-bullet marker-color-${blueprint.colorName}`;
  
      let title = getMarkerLabel(marker);
-@@ -369,16 +369,24 @@ const JS_MARKER_MAP = {
+@@ -372,16 +372,24 @@ const JS_MARKER_MAP = {
    "EventHandlerNonNull":       "Event Handler",
    "EventListener.handleEvent": "Event Handler",
  };
@@ -142,7 +142,7 @@ index c412411..06ecc70 100644
        label = `${label} (Non-incremental)`;
      }
      return label;
-@@ -429,14 +437,64 @@ const Formatters = {
+@@ -432,14 +440,64 @@ const Formatters = {
  
    StylesFields: function (marker) {
      if ("restyleHint" in marker) {
@@ -337,7 +337,7 @@ index d2228fb..e177012 100644
  
        // If `toParent` is an object, use it as the next parent marker
 diff --git a/browser/devtools/performance/modules/markers.js b/browser/devtools/performance/modules/markers.js
-index 6f9a4a3..cde77b5 100644
+index 6f9a4a3..aa0f3fd 100644
 --- a/browser/devtools/performance/modules/markers.js
 +++ b/browser/devtools/performance/modules/markers.js
 @@ -50,16 +50,26 @@ const { Formatters, CollapseFunctions: collapse } = require("devtools/performanc
@@ -352,9 +352,9 @@ index 6f9a4a3..cde77b5 100644
 +  /* Default definition used for markers that occur but
 +   * are not defined here. Should ultimately be defined, but this gives
 +   * us room to work on the front end separately from the platform. */
-+  "OTHER": {
-+    group: 1,
-+    colorName: "graphs-blue",
++  "UNKNOWN": {
++    group: 2,
++    colorName: "graphs-grey",
 +    collapseFunc: collapse.child,
 +    label: Formatters.DefaultLabel
 +  },
@@ -367,7 +367,29 @@ index 6f9a4a3..cde77b5 100644
      label: L10N.getStr("timeline.label.styles2"),
      fields: Formatters.StylesFields,
    },
-@@ -132,16 +142,29 @@ const TIMELINE_BLUEPRINT = {
+@@ -112,36 +122,49 @@ const TIMELINE_BLUEPRINT = {
+       { property: "causeName", label: "Reason:" },
+       { property: "nonincrementalReason", label: "Non-incremental Reason:" }
+     ],
+   },
+ 
+   /* Group 2 - User Controlled */
+   "ConsoleTime": {
+     group: 2,
+-    colorName: "graphs-grey",
++    colorName: "graphs-blue",
+     label: sublabelForProperty(L10N.getStr("timeline.label.consoleTime"), "causeName"),
+     fields: [{
+       property: "causeName",
+       label: L10N.getStr("timeline.markerDetail.consoleTimerName")
+     }],
+   },
+   "TimeStamp": {
+     group: 2,
+-    colorName: "graphs-blue",
++    colorName: "graphs-yellow",
+     collapseFunc: collapse.child,
+     label: sublabelForProperty(L10N.getStr("timeline.label.timestamp"), "causeName"),
      fields: [{
        property: "causeName",
        label: "Label:"
@@ -377,7 +399,7 @@ index 6f9a4a3..cde77b5 100644
  
  /**
 + * Takes a marker and returns the definition for that marker type,
-+ * falling back to the OTHER definition if undefined. Takes an optional
++ * falling back to the UNKNOWN definition if undefined. Takes an optional
 + * second argument if using another blueprint, rather than TIMELINE_BLUEPRINT.
 + *
 + * @param {Marker} marker
@@ -385,7 +407,7 @@ index 6f9a4a3..cde77b5 100644
 + * @return {object}
 + */
 +function getBlueprintFor (marker, blueprint=TIMELINE_BLUEPRINT) {
-+  return blueprint[marker.name] || blueprint.OTHER;
++  return blueprint[marker.name] || blueprint.UNKNOWN;
 +}
 +
 +/**
@@ -408,7 +430,7 @@ index 6f9a4a3..cde77b5 100644
  exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
 +exports.getBlueprintFor = getBlueprintFor;
 diff --git a/browser/devtools/performance/modules/widgets/marker-details.js b/browser/devtools/performance/modules/widgets/marker-details.js
-index a21ca45..4e548a1 100644
+index 5772ace..12780ea 100644
 --- a/browser/devtools/performance/modules/widgets/marker-details.js
 +++ b/browser/devtools/performance/modules/widgets/marker-details.js
 @@ -8,18 +8,16 @@
@@ -431,7 +453,7 @@ index a21ca45..4e548a1 100644
   * @param nsIDOMNode parent
   *        The parent node holding the view.
 diff --git a/browser/devtools/performance/modules/widgets/marker-view.js b/browser/devtools/performance/modules/widgets/marker-view.js
-index 7a33eec..daa5758 100644
+index 7a33eec..f45c7ec 100644
 --- a/browser/devtools/performance/modules/widgets/marker-view.js
 +++ b/browser/devtools/performance/modules/widgets/marker-view.js
 @@ -6,17 +6,17 @@
@@ -503,8 +525,8 @@ index 7a33eec..daa5758 100644
 -    let sidebarCell = this._buildMarkerSidebar(
 -      doc, style, marker);
 +    // If this marker type has been marked hidden via marker filtering,
-+    // then don't display it. This is so we can also handle "Other" markers
-+    // that do not have a blueprint, but we want to show those anyway unless "Other"
++    // then don't display it. This is so we can also handle "Unknown" markers
++    // that do not have a blueprint, but we want to show those anyway unless "Unknown"
 +    // markers are filtered.
 +    if (blueprint.hidden) {
 +      return;
@@ -523,7 +545,7 @@ index 7a33eec..daa5758 100644
      let hasDescendants = submarkers && submarkers.length > 0;
      if (hasDescendants) {
 diff --git a/browser/devtools/performance/modules/widgets/markers-overview.js b/browser/devtools/performance/modules/widgets/markers-overview.js
-index 3d75a55..c237905 100644
+index 3d75a55..89dc23e 100644
 --- a/browser/devtools/performance/modules/widgets/markers-overview.js
 +++ b/browser/devtools/performance/modules/widgets/markers-overview.js
 @@ -70,17 +70,17 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
@@ -545,17 +567,20 @@ index 3d75a55..c237905 100644
    /**
     * Disables selection and empties this graph.
     */
-@@ -100,17 +100,17 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -98,19 +98,19 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     let { markers, duration } = this._data;
+ 
      let { canvas, ctx } = this._getNamedCanvas("markers-overview-data");
      let canvasWidth = this._width;
      let canvasHeight = this._height;
  
      // Group markers into separate paint batches. This is necessary to
      // draw all markers sharing the same style at once.
- 
+-
      for (let marker of markers) {
 -      let markerType = this._paintBatches.get(marker.name);
-+      let markerType = this._paintBatches.get(marker.name) || this._paintBatches.get("OTHER");
++      let markerType = this._paintBatches.get(marker.name) || this._paintBatches.get("UNKNOWN");
++      // We don't have batches for filtered markers
        if (markerType) {
          markerType.batch.push(marker);
        }
@@ -588,11 +613,11 @@ index 70d8cee..40b50f9 100644
    _onRecordingSelectFromView: function (_, recording) {
      this.setCurrentRecording(recording);
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 02e5977..3a52b20 100644
+index 7c21b50..8b2fa8e 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -6,17 +6,16 @@ support-files =
-   doc_innerHTML.html
+@@ -7,17 +7,16 @@ support-files =
+   doc_markers.html
    doc_simple-test.html
    head.js
  
@@ -609,7 +634,7 @@ index 02e5977..3a52b20 100644
  [browser_perf-categories-js-calltree.js]
  [browser_perf-compatibility-01.js]
  [browser_perf-compatibility-02.js]
-@@ -126,15 +125,14 @@ support-files =
+@@ -129,15 +128,14 @@ support-files =
  [browser_profiler_tree-view-03.js]
  [browser_profiler_tree-view-04.js]
  [browser_profiler_tree-view-05.js]
@@ -742,7 +767,7 @@ index 5336e6b..0000000
 -  }
 -}
 diff --git a/browser/devtools/performance/test/browser_timeline-filters.js b/browser/devtools/performance/test/browser_timeline-filters.js
-index 7f61a96..f9489a5 100644
+index 7f61a96..e09efb1 100644
 --- a/browser/devtools/performance/test/browser_timeline-filters.js
 +++ b/browser/devtools/performance/test/browser_timeline-filters.js
 @@ -1,15 +1,17 @@
@@ -790,7 +815,7 @@ index 7f61a96..f9489a5 100644
    let menuItem1 = $("menuitem[marker-type=Styles]");
    let menuItem2 = $("menuitem[marker-type=Reflow]");
    let menuItem3 = $("menuitem[marker-type=Paint]");
-+  let menuItem4 = $("menuitem[marker-type=OTHER]");
++  let menuItem4 = $("menuitem[marker-type=UNKNOWN]");
  
    let overview = OverviewView.graphs.get("timeline");
    let originalHeight = overview.fixedHeight;
@@ -800,7 +825,7 @@ index 7f61a96..f9489a5 100644
    ok($(".waterfall-marker-bar[type=Styles]"), "Found at least one 'Styles' marker (1)");
    ok($(".waterfall-marker-bar[type=Reflow]"), "Found at least one 'Reflow' marker (1)");
    ok($(".waterfall-marker-bar[type=Paint]"), "Found at least one 'Paint' marker (1)");
-+  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Other' marker (1)");
++  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Unknown' marker (1)");
  
    let heightBefore = overview.fixedHeight;
    EventUtils.synthesizeMouseAtCenter(menuItem1, {type: "mouseup"}, panel.panelWin);
@@ -810,7 +835,7 @@ index 7f61a96..f9489a5 100644
    ok(!$(".waterfall-marker-bar[type=Styles]"), "No 'Styles' marker (2)");
    ok($(".waterfall-marker-bar[type=Reflow]"), "Found at least one 'Reflow' marker (2)");
    ok($(".waterfall-marker-bar[type=Paint]"), "Found at least one 'Paint' marker (2)");
-+  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Other' marker (2)");
++  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Unknown' marker (2)");
  
    heightBefore = overview.fixedHeight;
    EventUtils.synthesizeMouseAtCenter(menuItem2, {type: "mouseup"}, panel.panelWin);
@@ -820,7 +845,7 @@ index 7f61a96..f9489a5 100644
    ok(!$(".waterfall-marker-bar[type=Styles]"), "No 'Styles' marker (3)");
    ok(!$(".waterfall-marker-bar[type=Reflow]"), "No 'Reflow' marker (3)");
    ok($(".waterfall-marker-bar[type=Paint]"), "Found at least one 'Paint' marker (3)");
-+  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Other' marker (3)");
++  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Unknown' marker (3)");
  
    heightBefore = overview.fixedHeight;
    EventUtils.synthesizeMouseAtCenter(menuItem3, {type: "mouseup"}, panel.panelWin);
@@ -830,7 +855,7 @@ index 7f61a96..f9489a5 100644
    ok(!$(".waterfall-marker-bar[type=Styles]"), "No 'Styles' marker (4)");
    ok(!$(".waterfall-marker-bar[type=Reflow]"), "No 'Reflow' marker (4)");
    ok(!$(".waterfall-marker-bar[type=Paint]"), "No 'Paint' marker (4)");
-+  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Other' marker (4)");
++  ok($(".waterfall-marker-bar[type=CustomMarker]"), "Found at least one 'Unknown' marker (4)");
 +
 +  EventUtils.synthesizeMouseAtCenter(menuItem4, {type: "mouseup"}, panel.panelWin);
 +  yield waitForOverviewAndCommand(overview, menuItem4);
@@ -838,7 +863,7 @@ index 7f61a96..f9489a5 100644
 +  ok(!$(".waterfall-marker-bar[type=Styles]"), "No 'Styles' marker (5)");
 +  ok(!$(".waterfall-marker-bar[type=Reflow]"), "No 'Reflow' marker (5)");
 +  ok(!$(".waterfall-marker-bar[type=Paint]"), "No 'Paint' marker (5)");
-+  ok(!$(".waterfall-marker-bar[type=CustomMarker]"), "No 'Other' marker (5)");
++  ok(!$(".waterfall-marker-bar[type=CustomMarker]"), "No 'Unknown' marker (5)");
  
    for (let item of [menuItem1, menuItem2, menuItem3]) {
      EventUtils.synthesizeMouseAtCenter(item, {type: "mouseup"}, panel.panelWin);
@@ -851,7 +876,7 @@ index 7f61a96..f9489a5 100644
 +  ok($(".waterfall-marker-bar[type=Styles]"), "Found at least one 'Styles' marker (6)");
 +  ok($(".waterfall-marker-bar[type=Reflow]"), "Found at least one 'Reflow' marker (6)");
 +  ok($(".waterfall-marker-bar[type=Paint]"), "Found at least one 'Paint' marker (6)");
-+  ok(!$(".waterfall-marker-bar[type=CustomMarker]"), "No 'Other' marker (6)");
++  ok(!$(".waterfall-marker-bar[type=CustomMarker]"), "No 'Unknown' marker (6)");
  
    is(overview.fixedHeight, originalHeight, "Overview restored");
  
@@ -922,7 +947,7 @@ index 0000000..bd93e30
 +});
 diff --git a/browser/devtools/performance/test/unit/test_marker-utils.js b/browser/devtools/performance/test/unit/test_marker-utils.js
 new file mode 100644
-index 0000000..d0cd161
+index 0000000..c48a42b
 --- /dev/null
 +++ b/browser/devtools/performance/test/unit/test_marker-utils.js
 @@ -0,0 +1,92 @@
@@ -999,7 +1024,7 @@ index 0000000..d0cd161
 +  delete TIMELINE_BLUEPRINT["fakemarker"];
 +
 +  let customBlueprint = {
-+    DEFAULT: {
++    UNKNOWN: {
 +      group: 1,
 +      label: "MyDefault"
 +    },
