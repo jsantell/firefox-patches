@@ -1,0 +1,527 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 8 Jun 2015 19:44:27 -0700
+Subject: Bug 1172183 - Pull out the implementation of FramerateActor so that it can be consumed by other actors. r=vp
+
+diff --git a/toolkit/devtools/server/actors/actor-registry.js b/toolkit/devtools/server/actors/actor-registry.js
+index 4af0c35..94b3ecf 100644
+--- a/toolkit/devtools/server/actors/actor-registry.js
++++ b/toolkit/devtools/server/actors/actor-registry.js
+@@ -6,18 +6,17 @@
+ 
+ const protocol = require("devtools/server/protocol");
+ const { method, custom, Arg, Option, RetVal } = protocol;
+ 
+ const { Cu, CC, components } = require("chrome");
+ const { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const Services = require("Services");
+ const { DebuggerServer } = require("devtools/server/main");
+-const ActorRegistryUtils = require("devtools/server/actors/utils/actor-registry-utils");
+-const { registerActor, unregisterActor } = ActorRegistryUtils;
++const { registerActor, unregisterActor } = require("devtools/server/actors/utils/actor-registry-utils");
+ 
+ loader.lazyImporter(this, "NetUtil", "resource://gre/modules/NetUtil.jsm");
+ 
+ /**
+  * The ActorActor gives you a handle to an actor you've dynamically
+  * registered and allows you to unregister it.
+  */
+ const ActorActor = protocol.ActorClass({
+diff --git a/toolkit/devtools/server/actors/framerate.js b/toolkit/devtools/server/actors/framerate.js
+index 6d5b08e..e5c828b 100644
+--- a/toolkit/devtools/server/actors/framerate.js
++++ b/toolkit/devtools/server/actors/framerate.js
+@@ -1,128 +1,59 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const {Cc, Ci, Cu, Cr} = require("chrome");
+-const Services = require("Services");
+-const events = require("sdk/event/core");
+ const protocol = require("devtools/server/protocol");
+-const DevToolsUtils = require("devtools/toolkit/DevToolsUtils.js");
+-
+-const {on, once, off, emit} = events;
+-const {method, custom, Arg, Option, RetVal} = protocol;
++const { actorBridge } = require("devtools/server/actors/utils/actor-utils");
++const { method, custom, Arg, Option, RetVal } = protocol;
++const { on, once, off, emit } = require("sdk/event/core");
++const { Framerate } = require("devtools/toolkit/shared/framerate");
+ 
+ /**
+- * A very simple utility for monitoring framerate.
++ * An actor wrapper around Framerate. Uses exposed
++ * methods via bridge and provides RDP definitions.
++ *
++ * @see toolkit/devtools/shared/framerate.js for documentation.
+  */
+ let FramerateActor = exports.FramerateActor = protocol.ActorClass({
+   typeName: "framerate",
+-  initialize: function(conn, tabActor) {
++  initialize: function (conn, tabActor) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+-    this.tabActor = tabActor;
+-    this._contentWin = tabActor.window;
+-    this._onRefreshDriverTick = this._onRefreshDriverTick.bind(this);
+-    this._onGlobalCreated = this._onGlobalCreated.bind(this);
+-    on(this.tabActor, "window-ready", this._onGlobalCreated);
++    this.bridge = new Framerate(tabActor);
+   },
+   destroy: function(conn) {
+-    off(this.tabActor, "window-ready", this._onGlobalCreated);
+     protocol.Actor.prototype.destroy.call(this, conn);
+-    this.stopRecording();
++    this.bridge.destroy();
+   },
+ 
+-  /**
+-   * Starts monitoring framerate, storing the frames per second.
+-   */
+-  startRecording: method(function() {
+-    if (this._recording) {
+-      return;
+-    }
+-    this._recording = true;
+-    this._ticks = [];
+-    this._startTime = this.tabActor.docShell.now();
+-    this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
+-  }, {
+-  }),
++  startRecording: actorBridge("startRecording", {}),
+ 
+-  /**
+-   * Stops monitoring framerate, returning the recorded values.
+-   */
+-  stopRecording: method(function(beginAt = 0, endAt = Number.MAX_SAFE_INTEGER) {
+-    if (!this._recording) {
+-      return [];
+-    }
+-    let ticks = this.getPendingTicks(beginAt, endAt);
+-    this.cancelRecording();
+-    return ticks;
+-  }, {
++  stopRecording: actorBridge("stopRecording", {
+     request: {
+       beginAt: Arg(0, "nullable:number"),
+       endAt: Arg(1, "nullable:number")
+     },
+     response: { ticks: RetVal("array:number") }
+   }),
+ 
+-  /**
+-   * Stops monitoring framerate, without returning the recorded values.
+-   */
+-  cancelRecording: method(function() {
+-    this._contentWin.cancelAnimationFrame(this._rafID);
+-    this._recording = false;
+-    this._ticks = null;
+-    this._rafID = -1;
+-  }, {
+-  }),
++  cancelRecording: actorBridge("cancelRecording"),
+ 
+-  /**
+-   * Returns whether this actor is currently active.
+-   */
+-  isRecording: method(function() {
+-    return !!this._recording;
+-  }, {
++  isRecording: actorBridge("isRecording", {
+     response: { recording: RetVal("boolean") }
+   }),
+ 
+-  /**
+-   * Gets the refresh driver ticks recorded so far.
+-   */
+-  getPendingTicks: method(function(beginAt = 0, endAt = Number.MAX_SAFE_INTEGER) {
+-    if (!this._ticks) {
+-      return [];
+-    }
+-    return this._ticks.filter(e => e >= beginAt && e <= endAt);
+-  }, {
++  getPendingTicks: actorBridge("getPendingTicks", {
+     request: {
+       beginAt: Arg(0, "nullable:number"),
+       endAt: Arg(1, "nullable:number")
+     },
+     response: { ticks: RetVal("array:number") }
+   }),
+-
+-  /**
+-   * Function invoked along with the refresh driver.
+-   */
+-  _onRefreshDriverTick: function() {
+-    if (!this._recording) {
+-      return;
+-    }
+-    this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
+-    this._ticks.push(this.tabActor.docShell.now() - this._startTime);
+-  },
+-
+-  /**
+-   * When the content window for the tab actor is created.
+-   */
+-  _onGlobalCreated: function (win) {
+-    if (this._recording) {
+-      this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
+-    }
+-  }
+ });
+ 
+ /**
+  * The corresponding Front object for the FramerateActor.
+  */
+ let FramerateFront = exports.FramerateFront = protocol.FrontClass(FramerateActor, {
+   initialize: function(client, { framerateActor }) {
+     protocol.Front.prototype.initialize.call(this, client, { actor: framerateActor });
+diff --git a/toolkit/devtools/server/actors/memory.js b/toolkit/devtools/server/actors/memory.js
+index d60bf17..95a7b21 100644
+--- a/toolkit/devtools/server/actors/memory.js
++++ b/toolkit/devtools/server/actors/memory.js
+@@ -2,31 +2,21 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ "use strict";
+ 
+ const protocol = require("devtools/server/protocol");
+ const { method, RetVal, Arg, types } = protocol;
+ const { MemoryBridge } = require("./utils/memory-bridge");
++const { actorBridge } = require("./utils/actor-utils");
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
+ loader.lazyRequireGetter(this, "StackFrameCache",
+                          "devtools/server/actors/utils/stack", true);
+ 
+-/**
+- * Proxies a call to the MemoryActor to the underlying MemoryBridge,
+- * allowing access to MemoryBridge features by defining the RDP
+- * request/response signature.
+- */
+-function linkBridge (methodName, definition) {
+-  return method(function () {
+-    return this.bridge[methodName].apply(this.bridge, arguments);
+-  }, definition);
+-}
+-
+ types.addDictType("AllocationsRecordingOptions", {
+   // The probability we sample any given allocation when recording
+   // allocations. Must be between 0.0 and 1.0. Defaults to 1.0, or sampling
+   // every allocation.
+   probability: "number",
+ 
+   // The maximum number of of allocation events to keep in the allocations
+   // log. If new allocations arrive, when we are already at capacity, the oldest
+@@ -74,124 +64,124 @@ let MemoryActor = protocol.ActorClass({
+ 
+   /**
+    * Attach to this MemoryActor.
+    *
+    * This attaches the MemoryActor's Debugger instance so that you can start
+    * recording allocations or take a census of the heap. In addition, the
+    * MemoryActor will start emitting GC events.
+    */
+-  attach: linkBridge("attach", {
++  attach: actorBridge("attach", {
+     request: {},
+     response: {
+       type: "attached"
+     }
+   }),
+ 
+   /**
+    * Detach from this MemoryActor.
+    */
+-  detach: linkBridge("detach", {
++  detach: actorBridge("detach", {
+     request: {},
+     response: {
+       type: "detached"
+     }
+   }),
+ 
+   /**
+    * Gets the current MemoryActor attach/detach state.
+    */
+-  getState: linkBridge("getState", {
++  getState: actorBridge("getState", {
+     response: {
+       state: RetVal(0, "string")
+     }
+   }),
+ 
+   /**
+    * Take a census of the heap. See js/src/doc/Debugger/Debugger.Memory.md for
+    * more information.
+    */
+-  takeCensus: linkBridge("takeCensus", {
++  takeCensus: actorBridge("takeCensus", {
+     request: {},
+     response: RetVal("json")
+   }),
+ 
+   /**
+    * Start recording allocation sites.
+    *
+    * @param AllocationsRecordingOptions options
+    *        See the protocol.js definition of AllocationsRecordingOptions above.
+    */
+-  startRecordingAllocations: linkBridge("startRecordingAllocations", {
++  startRecordingAllocations: actorBridge("startRecordingAllocations", {
+     request: {
+       options: Arg(0, "nullable:AllocationsRecordingOptions")
+     },
+     response: {
+       // Accept `nullable` in the case of server Gecko <= 37, handled on the front
+       value: RetVal(0, "nullable:number")
+     }
+   }),
+ 
+   /**
+    * Stop recording allocation sites.
+    */
+-  stopRecordingAllocations: linkBridge("stopRecordingAllocations", {
++  stopRecordingAllocations: actorBridge("stopRecordingAllocations", {
+     request: {},
+     response: {
+       // Accept `nullable` in the case of server Gecko <= 37, handled on the front
+       value: RetVal(0, "nullable:number")
+     }
+   }),
+ 
+   /**
+    * Return settings used in `startRecordingAllocations` for `probability`
+    * and `maxLogLength`. Currently only uses in tests.
+    */
+-  getAllocationsSettings: linkBridge("getAllocationsSettings", {
++  getAllocationsSettings: actorBridge("getAllocationsSettings", {
+     request: {},
+     response: {
+       options: RetVal(0, "json")
+     }
+   }),
+ 
+-  getAllocations: linkBridge("getAllocations", {
++  getAllocations: actorBridge("getAllocations", {
+     request: {},
+     response: RetVal("json")
+   }),
+ 
+   /*
+    * Force a browser-wide GC.
+    */
+-  forceGarbageCollection: linkBridge("forceGarbageCollection", {
++  forceGarbageCollection: actorBridge("forceGarbageCollection", {
+     request: {},
+     response: {}
+   }),
+ 
+   /**
+    * Force an XPCOM cycle collection. For more information on XPCOM cycle
+    * collection, see
+    * https://developer.mozilla.org/en-US/docs/Interfacing_with_the_XPCOM_cycle_collector#What_the_cycle_collector_does
+    */
+-  forceCycleCollection: linkBridge("forceCycleCollection", {
++  forceCycleCollection: actorBridge("forceCycleCollection", {
+     request: {},
+     response: {}
+   }),
+ 
+   /**
+    * A method that returns a detailed breakdown of the memory consumption of the
+    * associated window.
+    *
+    * @returns object
+    */
+-  measure: linkBridge("measure", {
++  measure: actorBridge("measure", {
+     request: {},
+     response: RetVal("json"),
+   }),
+ 
+-  residentUnique: linkBridge("residentUnique", {
++  residentUnique: actorBridge("residentUnique", {
+     request: {},
+     response: { value: RetVal("number") }
+   }),
+ 
+   /**
+    * Called when the underlying MemoryBridge fires a "garbage-collection" events.
+    * Propagates over RDP.
+    */
+diff --git a/toolkit/devtools/server/actors/utils/actor-utils.js b/toolkit/devtools/server/actors/utils/actor-utils.js
+new file mode 100644
+index 0000000..e231757
+--- /dev/null
++++ b/toolkit/devtools/server/actors/utils/actor-utils.js
+@@ -0,0 +1,24 @@
++/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
++/* vim: set ft=javascript ts=2 et sw=2 tw=80: */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++const { method } = require("devtools/server/protocol");
++
++/**
++ * Proxies a call from an actor to an underlying module, stored
++ * as `bridge` on the actor. This allows a module to be defined in one
++ * place, usable by other modules/actors on the server, but a separate
++ * module defining the actor/RDP definition.
++ *
++ * @see Framerate implementation: toolkit/devtools/shared/framerate.js
++ * @see Framerate actor definition: toolkit/devtools/server/actors/framerate.js
++ */
++exports.actorBridge = function actorBridge (methodName, definition={}) {
++  return method(function () {
++    return this.bridge[methodName].apply(this.bridge, arguments);
++  }, definition);
++}
+diff --git a/toolkit/devtools/server/moz.build b/toolkit/devtools/server/moz.build
+index be7bb2f..cbf3d4b 100644
+--- a/toolkit/devtools/server/moz.build
++++ b/toolkit/devtools/server/moz.build
+@@ -93,16 +93,17 @@ EXTRA_JS_MODULES.devtools.server.actors += [
+     'actors/webbrowser.js',
+     'actors/webconsole.js',
+     'actors/webgl.js',
+     'actors/worker.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.server.actors.utils += [
+     'actors/utils/actor-registry-utils.js',
++    'actors/utils/actor-utils.js',
+     'actors/utils/audionodes.json',
+     'actors/utils/automation-timeline.js',
+     'actors/utils/make-debugger.js',
+     'actors/utils/map-uri-to-addon-id.js',
+     'actors/utils/memory-bridge.js',
+     'actors/utils/ScriptStore.js',
+     'actors/utils/stack.js',
+     'actors/utils/TabSources.js'
+diff --git a/toolkit/devtools/shared/framerate.js b/toolkit/devtools/shared/framerate.js
+new file mode 100644
+index 0000000..3d4fa1e
+--- /dev/null
++++ b/toolkit/devtools/shared/framerate.js
+@@ -0,0 +1,98 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { on, once, off, emit } = require("sdk/event/core");
++const { Class } = require("sdk/core/heritage");
++
++/**
++ * A very simple utility for monitoring framerate. Takes a `tabActor`
++ * and monitors framerate over time. The actor wrapper around this
++ * can be found at toolkit/devtools/server/actors/framerate.js
++ */
++let Framerate = exports.Framerate = Class({
++  initialize: function (tabActor) {
++    this.tabActor = tabActor;
++    this._contentWin = tabActor.window;
++    this._onRefreshDriverTick = this._onRefreshDriverTick.bind(this);
++    this._onGlobalCreated = this._onGlobalCreated.bind(this);
++    on(this.tabActor, "window-ready", this._onGlobalCreated);
++  },
++  destroy: function(conn) {
++    off(this.tabActor, "window-ready", this._onGlobalCreated);
++    this.stopRecording();
++  },
++
++  /**
++   * Starts monitoring framerate, storing the frames per second.
++   */
++  startRecording: function () {
++    if (this._recording) {
++      return;
++    }
++    this._recording = true;
++    this._ticks = [];
++    this._startTime = this.tabActor.docShell.now();
++    this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
++  },
++
++  /**
++   * Stops monitoring framerate, returning the recorded values.
++   */
++  stopRecording: function (beginAt = 0, endAt = Number.MAX_SAFE_INTEGER) {
++    if (!this._recording) {
++      return [];
++    }
++    let ticks = this.getPendingTicks(beginAt, endAt);
++    this.cancelRecording();
++    return ticks;
++  },
++
++  /**
++   * Stops monitoring framerate, without returning the recorded values.
++   */
++  cancelRecording: function () {
++    this._contentWin.cancelAnimationFrame(this._rafID);
++    this._recording = false;
++    this._ticks = null;
++    this._rafID = -1;
++  },
++
++  /**
++   * Returns whether this instance is currently recording.
++   */
++  isRecording: function () {
++    return !!this._recording;
++  },
++
++  /**
++   * Gets the refresh driver ticks recorded so far.
++   */
++  getPendingTicks: function (beginAt = 0, endAt = Number.MAX_SAFE_INTEGER) {
++    if (!this._ticks) {
++      return [];
++    }
++    return this._ticks.filter(e => e >= beginAt && e <= endAt);
++  },
++
++  /**
++   * Function invoked along with the refresh driver.
++   */
++  _onRefreshDriverTick: function () {
++    if (!this._recording) {
++      return;
++    }
++    this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
++    this._ticks.push(this.tabActor.docShell.now() - this._startTime);
++  },
++
++  /**
++   * When the content window for the tab actor is created.
++   */
++  _onGlobalCreated: function (win) {
++    if (this._recording) {
++      this._rafID = this._contentWin.requestAnimationFrame(this._onRefreshDriverTick);
++    }
++  }
++});
+diff --git a/toolkit/devtools/shared/moz.build b/toolkit/devtools/shared/moz.build
+index 0a612d7..6eb5aef 100644
+--- a/toolkit/devtools/shared/moz.build
++++ b/toolkit/devtools/shared/moz.build
+@@ -3,11 +3,12 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ BROWSER_CHROME_MANIFESTS += ['tests/browser/browser.ini']
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+   'async-storage.js',
++  'framerate.js',
+   'worker-helper.js',
+   'worker.js'
+ ]
+-- 
+2.2.1
+

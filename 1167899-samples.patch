@@ -1,0 +1,1401 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 8 Jun 2015 18:16:18 -0700
+Subject: Bug 1167899 - Profiler data should compute timing information from sample count, not timestamps in the samples. r=shu
+
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index ebc0ce2..b380915 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -18,31 +18,31 @@ loader.lazyRequireGetter(this, "FrameUtils",
+  * A call tree for a thread. This is essentially a linkage between all frames
+  * of all samples into a single tree structure, with additional information
+  * on each node, like the time spent (in milliseconds) and samples count.
+  *
+  * @param object thread
+  *        The raw thread object received from the backend. Contains samples,
+  *        stackTable, frameTable, and stringTable.
+  * @param object options
+- *        Additional supported options, @see ThreadNode.prototype.insert
+- *          - number startTime [optional]
+- *          - number endTime [optional]
++ *        Additional supported options
++ *          - number startTime
++ *          - number endTime
+  *          - boolean contentOnly [optional]
+  *          - boolean invertTree [optional]
+  *          - boolean flattenRecursion [optional]
+  */
+ function ThreadNode(thread, options = {}) {
++  if (options.endTime == void 0 || options.startTime == void 0) {
++    throw new Error("ThreadNode requires both `startTime` and `endTime`.");
++  }
+   this.samples = 0;
+-  this.duration = 0;
++  this.leafSamples = 0;
+   this.calls = [];
+-
+-  // Maps of frame to their self counts and duration.
+-  this.selfCount = Object.create(null);
+-  this.selfDuration = Object.create(null);
++  this.duration = options.endTime - options.startTime;
+ 
+   let { samples, stackTable, frameTable, stringTable, allocationsTable } = thread;
+ 
+   // Nothing to do if there are no samples.
+   if (samples.data.length === 0) {
+     return;
+   }
+ 
+@@ -69,18 +69,18 @@ ThreadNode.prototype = {
+    *        The table of deduplicated frames from the backend.
+    * @param object stringTable
+    *        The table of deduplicated strings from the backend.
+    * @param object allocationsTable
+    *        The table of allocation counts from the backend. Indexed by frame
+    *        index.
+    * @param object options
+    *        Additional supported options
+-   *          - number startTime [optional]
+-   *          - number endTime [optional]
++   *          - number startTime
++   *          - number endTime
+    *          - boolean contentOnly [optional]
+    *          - boolean invertTree [optional]
+    */
+   _buildInverted: function buildInverted(samples, stackTable, frameTable, stringTable, allocationsTable, options) {
+     function getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame, isMetaCategory, leafTable) {
+       // Insert the inflated frame into the call tree at the current level.
+       let frameNode;
+ 
+@@ -115,28 +115,25 @@ ThreadNode.prototype = {
+     const SAMPLE_TIME_SLOT = samples.schema.time;
+ 
+     const STACK_PREFIX_SLOT = stackTable.schema.prefix;
+     const STACK_FRAME_SLOT = stackTable.schema.frame;
+ 
+     const InflatedFrame = FrameUtils.InflatedFrame;
+     const getOrAddInflatedFrame = FrameUtils.getOrAddInflatedFrame;
+ 
+-    let selfCount = this.selfCount;
+-    let selfDuration = this.selfDuration;
+-
+     let samplesData = samples.data;
+     let stacksData = stackTable.data;
+ 
+     // Caches.
+     let inflatedFrameCache = FrameUtils.getInflatedFrameCache(frameTable);
+     let leafTable = Object.create(null);
+ 
+-    let startTime = options.startTime || 0
+-    let endTime = options.endTime || Infinity;
++    let startTime = options.startTime;
++    let endTime = options.endTime;
+     let flattenRecursion = options.flattenRecursion;
+ 
+     // Take the timestamp of the first sample as prevSampleTime. 0 is
+     // incorrect due to circular buffer wraparound. If wraparound happens,
+     // then the first sample will have an incorrect, large duration.
+     let prevSampleTime = samplesData[0][SAMPLE_TIME_SLOT];
+ 
+     // Reused options object passed to InflatedFrame.prototype.getFrameKey.
+@@ -158,23 +155,23 @@ ThreadNode.prototype = {
+       //
+       // Thus, we compare sampleTime <= start instead of < to filter out
+       // samples that end exactly at the start time.
+       if (!sampleTime || sampleTime <= startTime || sampleTime > endTime) {
+         prevSampleTime = sampleTime;
+         continue;
+       }
+ 
+-      let sampleDuration = sampleTime - prevSampleTime;
+       let stackIndex = sample[SAMPLE_STACK_SLOT];
+       let calls = this.calls;
+       let prevCalls = this.calls;
+       let prevFrameKey;
+       let isLeaf = mutableFrameKeyOptions.isLeaf = true;
+       let skipRoot = options.invertTree;
++      let framesInStack = Object.create(null);
+ 
+       // Inflate the stack and build the FrameNode call tree directly.
+       //
+       // In the profiler data, each frame's stack is referenced by an index
+       // into stackTable.
+       //
+       // Each entry in stackTable is a pair [ prefixIndex, frameIndex ]. The
+       // prefixIndex is itself an index into stackTable, referencing the
+@@ -218,55 +215,39 @@ ThreadNode.prototype = {
+         // Inflate the frame.
+         let inflatedFrame = getOrAddInflatedFrame(inflatedFrameCache, frameIndex, frameTable,
+                                                   stringTable, allocationsTable);
+ 
+         // Compute the frame key.
+         mutableFrameKeyOptions.isRoot = stackIndex === null;
+         let frameKey = inflatedFrame.getFrameKey(mutableFrameKeyOptions);
+ 
+-        // Leaf frames are never skipped and require self count and duration
+-        // bookkeeping.
+-        if (isLeaf) {
+-          // Tabulate self count and duration for the leaf frame. The frameKey
+-          // is never empty for a leaf frame.
+-          if (selfCount[frameKey] === undefined) {
+-            selfCount[frameKey] = 0;
+-            selfDuration[frameKey] = 0;
+-          }
+-          selfCount[frameKey]++;
+-          selfDuration[frameKey] += sampleDuration;
+-        } else {
+-          // An empty frame key means this frame should be skipped.
+-          if (frameKey === "") {
+-            continue;
+-          }
++        // An empty frame key means this frame should be skipped.
++        if (frameKey === "") {
++          continue;
+         }
+ 
+         // If we shouldn't flatten the current frame into the previous one, advance a
+         // level in the call tree.
+         if (!flattenRecursion || frameKey !== prevFrameKey) {
+           calls = prevCalls;
+         }
+ 
+         let frameNode = getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame,
+                                           mutableFrameKeyOptions.isMetaCategoryOut,
+                                           leafTable);
+-
+-        frameNode._countSample(prevSampleTime, sampleTime, inflatedFrame.optimizations,
+-                               stringTable);
++        frameNode._countSample(prevSampleTime, sampleTime, isLeaf);
++        frameNode._addOptimizations(inflatedFrame.optimizations, stringTable);
+ 
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
+       }
+ 
+-      this.duration += sampleDuration;
+       this.samples++;
+-      prevSampleTime = sampleTime;
+     }
+   },
+ 
+   /**
+    * Uninverts the call tree after its having been built.
+    */
+   _uninvert: function uninvert() {
+     function mergeOrAddFrameNode(calls, node) {
+@@ -342,17 +323,27 @@ ThreadNode.prototype = {
+    */
+ 
+   hasOptimizations: function () {
+     return null;
+   }
+ };
+ 
+ /**
+- * A function call node in a tree.
++ * A function call node in a tree. Represents a function call with a unique context,
++ * resulting in each FrameNode having its own row in the corresponding tree view.
++ * Take samples:
++ *  A()->B()->C()
++ *  A()->B()
++ *  Q()->B()
++ *
++ * In inverted tree, a->b->c would have one frame node, and a->b and q->b would share a frame node.
++ * In an uninverted tree, a->b->c and a->b would share a frame node, with q->b having its own.
++ *
++ * In all cases, all the frame nodes originated from the same InflatedFrame.
+  *
+  * @param string frameKey
+  *        The key associated with this frame. The key determines identity of
+  *        the node.
+  * @param string location
+  *        The location of this function call. Note that this isn't sanitized,
+  *        so it may very well (not?) include the function name, url, etc.
+  * @param number line
+@@ -367,44 +358,54 @@ ThreadNode.prototype = {
+  *        Whether or not this is a platform node that should appear as a
+  *        generalized meta category or not.
+  */
+ function FrameNode(frameKey, { location, line, category, allocations, isContent }, isMetaCategory) {
+   this.key = frameKey;
+   this.location = location;
+   this.line = line;
+   this.allocations = allocations;
++  this.leafSamples = 0;
+   this.samples = 0;
+-  this.duration = 0;
+   this.calls = [];
+   this.isContent = !!isContent;
+   this._optimizations = null;
+   this._stringTable = null;
+   this.isMetaCategory = !!isMetaCategory;
+   this.category = category;
+ }
+ 
+ FrameNode.prototype = {
+   /**
+    * Count a sample as associated with this node.
+    *
+    * @param number prevSampleTime
+    *               The time when the immediate previous sample was sampled.
+    * @param number sampleTime
+    *               The time when the current sample was sampled.
++   * @param boolean isLeaf
++   *                Whether or not this frame was observed as a leaf or not.
++   */
++  _countSample: function (prevSampleTime, sampleTime, isLeaf) {
++    if (isLeaf) {
++      this.leafSamples++;
++    }
++    this.samples++;
++  },
++
++  /**
++   * Take optimization data observed for this frame.
++   *
+    * @param object optimizationSite
+    *               Any JIT optimization information attached to the current
+    *               sample. Lazily inflated via stringTable.
+    * @param object stringTable
+    *               The string table used to inflate the optimizationSite.
+    */
+-  _countSample: function (prevSampleTime, sampleTime, optimizationSite, stringTable) {
+-    this.samples++;
+-    this.duration += sampleTime - prevSampleTime;
+-
++  _addOptimizations: function (optimizationSite, stringTable) {
+     // Simply accumulate optimization sites for now. Processing is done lazily
+     // by JITOptimizations, if optimization information is actually displayed.
+     if (optimizationSite) {
+       let opts = this._optimizations;
+       if (opts === null) {
+         opts = this._optimizations = [];
+         this._stringTable = stringTable;
+       }
+@@ -419,17 +420,17 @@ FrameNode.prototype = {
+   },
+ 
+   _merge: function (otherNode) {
+     if (this === otherNode) {
+       return;
+     }
+ 
+     this.samples += otherNode.samples;
+-    this.duration += otherNode.duration;
++    this.leafSamples += otherNode.leafSamples;
+ 
+     if (otherNode._optimizations) {
+       let opts = this._optimizations;
+       if (opts === null) {
+         opts = this._optimizations = [];
+         this._stringTable = otherNode._stringTable;
+       }
+       let otherOpts = otherNode._optimizations;
+diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
+index 27aace3..a9c6f1c 100644
+--- a/browser/devtools/performance/modules/widgets/tree-view.js
++++ b/browser/devtools/performance/modules/widgets/tree-view.js
+@@ -23,17 +23,17 @@ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
+   let dataB = frameB.getDisplayedData();
+   if (this.inverted) {
+     // Invert trees, sort by selfPercentage, and then totalPercentage
+     if (dataA.selfPercentage === dataB.selfPercentage) {
+       return dataA.totalPercentage < dataB.totalPercentage ? 1 : -1;
+     }
+     return dataA.selfPercentage < dataB.selfPercentage ? 1 : - 1;
+   }
+-  return dataA.samples < dataB.samples ? 1 : -1;
++  return dataA.totalPercentage < dataB.totalPercentage ? 1 : -1;
+ };
+ 
+ const DEFAULT_AUTO_EXPAND_DEPTH = 3; // depth
+ const DEFAULT_VISIBLE_CELLS = {
+   duration: true,
+   percentage: true,
+   allocations: false,
+   selfDuration: true,
+@@ -353,64 +353,38 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+      *   50%   |   0%  |    50 |   ▼ B
+      *
+      * Every instance of a `CallView` represents a row in the call tree. The same
+      * container node is used for all rows.
+      */
+ 
+     // Leaf nodes in an inverted tree don't have to do anything special.
+     let isLeaf = this._level === 0;
++    let totalSamples = this.root.frame.samples;
++    let totalDuration = this.root.frame.duration;
+ 
+-    if (this.inverted && !isLeaf && this.parent != null) {
+-      let calleeData = this.parent.getDisplayedData();
+-      // Percentage of time that this frame called the callee
+-      // in this branch
+-      let callerPercentage = this.frame.samples / calleeData.samples;
+-
+-      // Self/total duration.
+-      if (this.visibleCells.duration) {
+-        data.totalDuration = calleeData.totalDuration * callerPercentage;
+-      }
+-      if (this.visibleCells.selfDuration) {
+-        data.selfDuration = 0;
+-      }
+-
+-      // Self/total samples percentage.
+-      if (this.visibleCells.percentage) {
+-        data.totalPercentage = calleeData.totalPercentage * callerPercentage;
+-      }
+-      if (this.visibleCells.selfPercentage) {
+-        data.selfPercentage = 0;
+-      }
+-
+-      // Raw samples.
+-      if (this.visibleCells.samples) {
+-        data.samples = this.frame.samples;
+-      }
+-    } else {
+-      // Self/total duration.
+-      if (this.visibleCells.duration) {
+-        data.totalDuration = this.frame.duration;
+-      }
+-      if (this.visibleCells.selfDuration) {
+-        data.selfDuration = this.root.frame.selfDuration[this.frame.key];
+-      }
+-
+-      // Self/total samples percentage.
+-      if (this.visibleCells.percentage) {
+-        data.totalPercentage = this.frame.samples / this.root.frame.samples * 100;
+-      }
+-      if (this.visibleCells.selfPercentage) {
+-        data.selfPercentage = this.root.frame.selfCount[this.frame.key] / this.root.frame.samples * 100;
+-      }
+-
+-      // Raw samples.
+-      if (this.visibleCells.samples) {
+-        data.samples = this.frame.samples;
+-      }
++    // Self duration, cost
++    if (this.visibleCells.selfDuration) {
++      data.selfDuration = this.frame.leafSamples / totalSamples * totalDuration;
++    }
++    if (this.visibleCells.selfPercentage) {
++      data.selfPercentage = this.frame.leafSamples / totalSamples * 100;
++    }
++
++    // Total duration, cost
++    if (this.visibleCells.duration) {
++      data.totalDuration = this.frame.samples / totalSamples * totalDuration;
++    }
++    if (this.visibleCells.percentage) {
++      data.totalPercentage = this.frame.samples / totalSamples * 100;
++    }
++
++    // Raw samples.
++    if (this.visibleCells.samples) {
++      data.samples = this.frame.leafSamples;
+     }
+ 
+     // Self/total allocations count.
+     if (this.visibleCells.allocations) {
+       let childrenAllocations = this.frame.calls.reduce((acc, node) => acc + node.allocations, 0);
+       data.totalAllocations = this.frame.allocations + childrenAllocations;
+     }
+     if (this.visibleCells.selfAllocations) {
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 70d8cee..9a64673 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -122,18 +122,16 @@ const EVENTS = {
+   // Emitted by the OverviewView when more data has been rendered
+   OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
+   FRAMERATE_GRAPH_RENDERED: "Performance:UI:OverviewFramerateRendered",
+   MARKERS_GRAPH_RENDERED: "Performance:UI:OverviewMarkersRendered",
+   MEMORY_GRAPH_RENDERED: "Performance:UI:OverviewMemoryRendered",
+ 
+   // Emitted by the OverviewView when a range has been selected in the graphs
+   OVERVIEW_RANGE_SELECTED: "Performance:UI:OverviewRangeSelected",
+-  // Emitted by the OverviewView when a selection range has been removed
+-  OVERVIEW_RANGE_CLEARED: "Performance:UI:OverviewRangeCleared",
+ 
+   // Emitted by the DetailsView when a subview is selected
+   DETAILS_VIEW_SELECTED: "Performance:UI:DetailsViewSelected",
+ 
+   // Emitted by the WaterfallView when it has been rendered
+   WATERFALL_RENDERED: "Performance:UI:WaterfallRendered",
+ 
+   // Emitted by the JsCallTreeView when a call tree has been rendered
+diff --git a/browser/devtools/performance/test/browser_perf-events-calltree.js b/browser/devtools/performance/test/browser_perf-events-calltree.js
+index ee5f4c7..0968fcd 100644
+--- a/browser/devtools/performance/test/browser_perf-events-calltree.js
++++ b/browser/devtools/performance/test/browser_perf-events-calltree.js
+@@ -9,29 +9,29 @@ const RecordingUtils = devtools.require("devtools/performance/recording-utils")
+ 
+ function* spawnTest() {
+   let focus = 0;
+   let focusEvent = () => focus++;
+ 
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, $, DetailsView, JsCallTreeView, MemoryCallTreeView } = panel.panelWin;
++  let { EVENTS, $, DetailsView, OverviewView, JsCallTreeView, MemoryCallTreeView } = panel.panelWin;
+ 
+   yield DetailsView.selectView("js-calltree");
+   ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
+ 
+   // Make a recording just so the performance tool is in the correct state
+   yield startRecording(panel);
+   let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+   yield stopRecording(panel);
+   yield rendered;
+ 
+   // Mock the profile used so we can get a deterministic tree created
+-  let threadNode = new ThreadNode(gProfile.threads[0]);
++  let threadNode = new ThreadNode(gProfile.threads[0], OverviewView.getTimeInterval());
+   JsCallTreeView._populateCallTree(threadNode);
+   JsCallTreeView.emit(EVENTS.JS_CALL_TREE_RENDERED);
+ 
+   JsCallTreeView.on("focus", focusEvent);
+ 
+   click(panel.panelWin, $("#js-calltree-view .call-tree-item"));
+   fireKey("VK_DOWN");
+   fireKey("VK_DOWN");
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-01.js b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+index 02f69de..f2ecb1b 100644
+--- a/browser/devtools/performance/test/browser_perf-jit-view-01.js
++++ b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+@@ -53,17 +53,17 @@ function* spawnTest() {
+     info("Injecting mock profile data");
+     let recording = PerformanceController.getCurrentRecording();
+     recording._profile = profilerData;
+ 
+     is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel is hidden when pref off.");
+ 
+     // Force a rerender
+     let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-    JsCallTreeView.render();
++    JsCallTreeView.render(OverviewView.getTimeInterval());
+     yield rendered;
+ 
+     is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel still hidden when rerendered");
+     Services.prefs.setBoolPref(JIT_PREF, true);
+     is($("#jit-optimizations-view").hidden, false, "JIT Optimizations should be visible when pref is on");
+     ok($("#jit-optimizations-view").classList.contains("empty"),
+       "JIT Optimizations view has empty message when no frames selected.");
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-02.js b/browser/devtools/performance/test/browser_perf-jit-view-02.js
+index 7b0edd9..924a75a 100644
+--- a/browser/devtools/performance/test/browser_perf-jit-view-02.js
++++ b/browser/devtools/performance/test/browser_perf-jit-view-02.js
+@@ -56,17 +56,17 @@ function* spawnTest() {
+   function *injectAndRenderProfilerData() {
+     // Get current recording and inject our mock data
+     info("Injecting mock profile data");
+     let recording = PerformanceController.getCurrentRecording();
+     recording._profile = profilerData;
+ 
+     // Force a rerender
+     let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-    JsCallTreeView.render();
++    JsCallTreeView.render(OverviewView.getTimeInterval());
+     yield rendered;
+ 
+     Services.prefs.setBoolPref(JIT_PREF, true);
+     ok($("#jit-optimizations-view").classList.contains("empty"),
+       "JIT Optimizations view has empty message when no frames selected.");
+ 
+      Services.prefs.setBoolPref(JIT_PREF, false);
+   }
+diff --git a/browser/devtools/performance/test/browser_perf-overview-selection-01.js b/browser/devtools/performance/test/browser_perf-overview-selection-01.js
+index 16ba93e..7c1e5b4 100644
+--- a/browser/devtools/performance/test/browser_perf-overview-selection-01.js
++++ b/browser/devtools/performance/test/browser_perf-overview-selection-01.js
+@@ -2,52 +2,69 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that events are fired from OverviewView from selection manipulation.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, OverviewView } = panel.panelWin;
+-  let startTime, endTime, params, _;
++  let params, _;
+ 
+   yield startRecording(panel);
+ 
+   yield Promise.all([
+     once(OverviewView, EVENTS.FRAMERATE_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.MARKERS_GRAPH_RENDERED),
+     once(OverviewView, EVENTS.OVERVIEW_RENDERED)
+   ]);
+ 
+   yield stopRecording(panel);
+ 
+   let graph = OverviewView.graphs.get("timeline");
+   let MAX = graph.width;
++  let duration = PerformanceController.getCurrentRecording().getDuration();
++  let selection = null;
++
++  // Throw out events that select everything, as this will occur on the
++  // first click
++  OverviewView.on(EVENTS.OVERVIEW_RANGE_SELECTED, function handler (_, interval) {
++    if (interval.endTime !== duration) {
++      selection = interval;
++      OverviewView.off(handler);
++    }
++  });
+ 
+-  // Select the first half of the graph
+   let results = onceSpread(OverviewView, EVENTS.OVERVIEW_RANGE_SELECTED);
++  // Select the first half of the graph
+   dragStart(graph, 0);
+   dragStop(graph, MAX / 2);
+-  [_, { startTime, endTime }] = yield results;
++  yield waitUntil(() => selection);
++  let { startTime, endTime } = selection;
+ 
+   let mapStart = () => 0;
+-  let mapEnd = () => PerformanceController.getCurrentRecording().getDuration();
++  let mapEnd = () => duration;
+   let actual = graph.getMappedSelection({ mapStart, mapEnd });
++  is(actual.min, 0, "graph selection starts at 0");
++  is(actual.max, duration/2, `graph selection ends at ${duration/2}`);
++
+   is(graph.hasSelection(), true,
+     "A selection exists on the graph.");
+-  is(startTime, actual.min,
++  is(startTime, 0,
+     "OVERVIEW_RANGE_SELECTED fired with startTime value on click.");
+-  is(endTime, actual.max,
++  is(endTime, duration / 2,
+     "OVERVIEW_RANGE_SELECTED fired with endTime value on click.");
+ 
+   // Listen to deselection
+-  results = onceSpread(OverviewView, EVENTS.OVERVIEW_RANGE_CLEARED);
++  results = onceSpread(OverviewView, EVENTS.OVERVIEW_RANGE_SELECTED);
+   dropSelection(graph);
+   [_, params] = yield results;
+ 
+   is(graph.hasSelection(), false,
+     "A selection no longer on the graph.");
+-  is(params, undefined,
+-    "OVERVIEW_RANGE_CLEARED fired with no additional arguments.");
++  is(params.startTime, 0,
++    "OVERVIEW_RANGE_SELECTED fired with 0 as a startTime.");
++  is(params.endTime, duration,
++    "OVERVIEW_RANGE_SELECTED fired with max duration as endTime");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-range-changed-render.js b/browser/devtools/performance/test/browser_perf-range-changed-render.js
+index 19fa107..3707c86 100644
+--- a/browser/devtools/performance/test/browser_perf-range-changed-render.js
++++ b/browser/devtools/performance/test/browser_perf-range-changed-render.js
+@@ -35,17 +35,17 @@ function* spawnTest() {
+   ok(true, "Call tree rerenders after its corresponding pane is shown.");
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+   yield DetailsView.selectView("js-flamegraph");
+   yield rendered;
+   ok(true, "Flamegraph rerenders after its corresponding pane is shown.");
+ 
+   rendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
+-  OverviewView.emit(EVENTS.OVERVIEW_RANGE_CLEARED);
++  OverviewView.emit(EVENTS.OVERVIEW_RANGE_SELECTED);
+   yield rendered;
+   ok(true, "Flamegraph rerenders when a range in the overview graph is removed.");
+ 
+   rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+   yield DetailsView.selectView("js-calltree");
+   yield rendered;
+   ok(true, "Call tree rerenders after its corresponding pane is shown.");
+ 
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-01.js b/browser/devtools/performance/test/browser_profiler_tree-view-01.js
+index dbcbe64..6ef4569 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-01.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-01.js
+@@ -5,17 +5,17 @@
+  * Tests if the profiler's tree view implementation works properly and
+  * creates the correct column structure.
+  */
+ 
+ function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.autoExpandDepth = 0;
+   treeRoot.attachTo(container);
+ 
+@@ -26,17 +26,17 @@ function test() {
+ 
+   is(container.childNodes[0].childNodes.length, 6,
+     "The root node in the tree has the correct number of children.");
+   is(container.childNodes[0].querySelectorAll(".call-tree-cell").length, 6,
+     "The root node in the tree has only 6 'call-tree-cell' children.");
+ 
+   is(container.childNodes[0].childNodes[0].getAttribute("type"), "duration",
+     "The root node in the tree has a duration cell.");
+-  is(container.childNodes[0].childNodes[0].getAttribute("value"), "15 ms",
++  is(container.childNodes[0].childNodes[0].getAttribute("value"), "20 ms",
+     "The root node in the tree has the correct duration cell value.");
+ 
+   is(container.childNodes[0].childNodes[1].getAttribute("type"), "percentage",
+     "The root node in the tree has a percentage cell.");
+   is(container.childNodes[0].childNodes[1].getAttribute("value"), "100%",
+     "The root node in the tree has the correct percentage cell value.");
+ 
+   is(container.childNodes[0].childNodes[2].getAttribute("type"), "self-duration",
+@@ -46,17 +46,17 @@ function test() {
+ 
+   is(container.childNodes[0].childNodes[3].getAttribute("type"), "self-percentage",
+     "The root node in the tree has a self-percentage cell.");
+   is(container.childNodes[0].childNodes[3].getAttribute("value"), "0%",
+     "The root node in the tree has the correct self-percentage cell value.");
+ 
+   is(container.childNodes[0].childNodes[4].getAttribute("type"), "samples",
+     "The root node in the tree has an samples cell.");
+-  is(container.childNodes[0].childNodes[4].getAttribute("value"), "4",
++  is(container.childNodes[0].childNodes[4].getAttribute("value"), "0",
+     "The root node in the tree has the correct samples cell value.");
+ 
+   is(container.childNodes[0].childNodes[5].getAttribute("type"), "function",
+     "The root node in the tree has a function cell.");
+   is(container.childNodes[0].childNodes[5].style.MozMarginStart, "0px",
+     "The root node in the tree has the correct indentation.");
+ 
+   finish();
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-02.js b/browser/devtools/performance/test/browser_profiler_tree-view-02.js
+index d95815e..a0d04dc 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-02.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-02.js
+@@ -7,17 +7,17 @@
+  */
+ 
+ let { CATEGORY_MASK } = devtools.require("devtools/performance/global");
+ 
+ function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.autoExpandDepth = 0;
+   treeRoot.attachTo(container);
+ 
+@@ -28,21 +28,21 @@ function test() {
+   let $$perc = i => container.querySelectorAll(".call-tree-cell[type=percentage]")[i];
+   let $$sampl = i => container.querySelectorAll(".call-tree-cell[type=samples]")[i];
+ 
+   is(container.childNodes.length, 1,
+     "The container node should have one child available.");
+   is(container.childNodes[0].className, "call-tree-item",
+     "The root node in the tree has the correct class name.");
+ 
+-  is($$dur(0).getAttribute("value"), "15 ms",
++  is($$dur(0).getAttribute("value"), "20 ms",
+     "The root's duration cell displays the correct value.");
+   is($$perc(0).getAttribute("value"), "100%",
+     "The root's percentage cell displays the correct value.");
+-  is($$sampl(0).getAttribute("value"), "4",
++  is($$sampl(0).getAttribute("value"), "0",
+     "The root's samples cell displays the correct value.");
+   is($$fun(".call-tree-name")[0].getAttribute("value"), "(root)",
+     "The root's function cell displays the correct name.");
+   is($$fun(".call-tree-url")[0], null,
+     "The root's function cell displays no url.");
+   is($$fun(".call-tree-line")[0], null,
+     "The root's function cell displays no line.");
+   is($$fun(".call-tree-host")[0], null,
+@@ -54,21 +54,21 @@ function test() {
+ 
+   is(container.childNodes.length, 2,
+     "The container node should have two children available.");
+   is(container.childNodes[0].className, "call-tree-item",
+     "The root node in the tree has the correct class name.");
+   is(container.childNodes[1].className, "call-tree-item",
+     "The .A node in the tree has the correct class name.");
+ 
+-  is($$dur(1).getAttribute("value"), "15 ms",
++  is($$dur(1).getAttribute("value"), "20 ms",
+     "The .A node's duration cell displays the correct value.");
+   is($$perc(1).getAttribute("value"), "100%",
+     "The .A node's percentage cell displays the correct value.");
+-  is($$sampl(1).getAttribute("value"), "4",
++  is($$sampl(1).getAttribute("value"), "0",
+     "The .A node's samples cell displays the correct value.");
+   is($fun(".call-tree-name", $$(".call-tree-item")[1]).getAttribute("value"), "A",
+     "The .A node's function cell displays the correct name.");
+   is($fun(".call-tree-url", $$(".call-tree-item")[1]).getAttribute("value"), "baz",
+     "The .A node's function cell displays the correct url.");
+   ok($fun(".call-tree-url", $$(".call-tree-item")[1]).getAttribute("tooltiptext").includes("http://foo/bar/baz"),
+     "The .A node's function cell displays the correct url tooltiptext.");
+   is($fun(".call-tree-line", $$(".call-tree-item")[1]).getAttribute("value"), ":12",
+@@ -83,40 +83,40 @@ function test() {
+ 
+   is(container.childNodes.length, 4,
+     "The container node should have four children available.");
+   is(container.childNodes[2].className, "call-tree-item",
+     "The .B node in the tree has the correct class name.");
+   is(container.childNodes[3].className, "call-tree-item",
+     "The .E node in the tree has the correct class name.");
+ 
+-  is($$dur(2).getAttribute("value"), "8 ms",
++  is($$dur(2).getAttribute("value"), "15 ms",
+     "The .A.B node's duration cell displays the correct value.");
+   is($$perc(2).getAttribute("value"), "75%",
+     "The .A.B node's percentage cell displays the correct value.");
+-  is($$sampl(2).getAttribute("value"), "3",
++  is($$sampl(2).getAttribute("value"), "0",
+     "The .A.B node's samples cell displays the correct value.");
+   is($fun(".call-tree-name", $$(".call-tree-item")[2]).getAttribute("value"), "B",
+     "The .A.B node's function cell displays the correct name.");
+   is($fun(".call-tree-url", $$(".call-tree-item")[2]).getAttribute("value"), "baz",
+     "The .A.B node's function cell displays the correct url.");
+   ok($fun(".call-tree-url", $$(".call-tree-item")[2]).getAttribute("tooltiptext").includes("http://foo/bar/baz"),
+     "The .A.B node's function cell displays the correct url tooltiptext.");
+   is($fun(".call-tree-line", $$(".call-tree-item")[2]).getAttribute("value"), ":34",
+     "The .A.B node's function cell displays the correct line.");
+   is($fun(".call-tree-host", $$(".call-tree-item")[2]).getAttribute("value"), "foo",
+     "The .A.B node's function cell displays the correct host.");
+   is($fun(".call-tree-category", $$(".call-tree-item")[2]).getAttribute("value"), "Styles",
+     "The .A.B node's function cell displays the correct category.");
+ 
+-  is($$dur(3).getAttribute("value"), "7 ms",
++  is($$dur(3).getAttribute("value"), "5 ms",
+     "The .A.E node's duration cell displays the correct value.");
+   is($$perc(3).getAttribute("value"), "25%",
+     "The .A.E node's percentage cell displays the correct value.");
+-  is($$sampl(3).getAttribute("value"), "1",
++  is($$sampl(3).getAttribute("value"), "0",
+     "The .A.E node's samples cell displays the correct value.");
+   is($fun(".call-tree-name", $$(".call-tree-item")[3]).getAttribute("value"), "E",
+     "The .A.E node's function cell displays the correct name.");
+   is($fun(".call-tree-url", $$(".call-tree-item")[3]).getAttribute("value"), "baz",
+     "The .A.E node's function cell displays the correct url.");
+   ok($fun(".call-tree-url", $$(".call-tree-item")[3]).getAttribute("tooltiptext").includes("http://foo/bar/baz"),
+     "The .A.E node's function cell displays the correct url tooltiptext.");
+   is($fun(".call-tree-line", $$(".call-tree-item")[3]).getAttribute("value"), ":90",
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-03.js b/browser/devtools/performance/test/browser_profiler_tree-view-03.js
+index ce842f8..1c5e9a7 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-03.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-03.js
+@@ -5,17 +5,17 @@
+  * Tests if the profiler's tree view implementation works properly and
+  * creates the correct column structure and can auto-expand all nodes.
+  */
+ 
+ function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.attachTo(container);
+ 
+   let $$fun = i => container.querySelectorAll(".call-tree-cell[type=function]")[i];
+@@ -52,29 +52,29 @@ function test() {
+     "The .A.B.D node's function cell displays the correct name.");
+   is($$name(4).getAttribute("value"), "C",
+     "The .A.B.C node's function cell displays the correct name.");
+   is($$name(5).getAttribute("value"), "E",
+     "The .A.E node's function cell displays the correct name.");
+   is($$name(6).getAttribute("value"), "F",
+     "The .A.E.F node's function cell displays the correct name.");
+ 
+-  is($$duration(0).getAttribute("value"), "15 ms",
++  is($$duration(0).getAttribute("value"), "20 ms",
+     "The root node's function cell displays the correct duration.");
+-  is($$duration(1).getAttribute("value"), "15 ms",
++  is($$duration(1).getAttribute("value"), "20 ms",
+     "The .A node's function cell displays the correct duration.");
+-  is($$duration(2).getAttribute("value"), "8 ms",
++  is($$duration(2).getAttribute("value"), "15 ms",
+     "The .A.B node's function cell displays the correct duration.");
+-  is($$duration(3).getAttribute("value"), "3 ms",
++  is($$duration(3).getAttribute("value"), "10 ms",
+     "The .A.B.D node's function cell displays the correct duration.");
+   is($$duration(4).getAttribute("value"), "5 ms",
+     "The .A.B.C node's function cell displays the correct duration.");
+-  is($$duration(5).getAttribute("value"), "7 ms",
++  is($$duration(5).getAttribute("value"), "5 ms",
+     "The .A.E node's function cell displays the correct duration.");
+-  is($$duration(6).getAttribute("value"), "7 ms",
++  is($$duration(6).getAttribute("value"), "5 ms",
+     "The .A.E.F node's function cell displays the correct duration.");
+ 
+   finish();
+ }
+ 
+ let gThread = synthesizeProfileForTest([{
+   time: 5,
+   frames: [
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-04.js b/browser/devtools/performance/test/browser_profiler_tree-view-04.js
+index c50fa8d..fd39fcc 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-04.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-04.js
+@@ -7,17 +7,17 @@
+  */
+ 
+ let { CATEGORY_MASK } = devtools.require("devtools/performance/global");
+ 
+ function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.attachTo(container);
+ 
+   is(treeRoot.target.getAttribute("origin"), "chrome",
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-05.js b/browser/devtools/performance/test/browser_profiler_tree-view-05.js
+index 328c705..4d39968 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-05.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-05.js
+@@ -5,17 +5,17 @@
+  * Tests if the profiler's tree view implementation works properly and
+  * can toggle categories hidden or visible.
+  */
+ 
+ function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.attachTo(container);
+ 
+   let categories = container.querySelectorAll(".call-tree-category");
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-06.js b/browser/devtools/performance/test/browser_profiler_tree-view-06.js
+index e064593..c1ea929 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-06.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-06.js
+@@ -5,17 +5,17 @@
+  * Tests if the profiler's tree view implementation works properly and
+  * correctly emits events when certain DOM nodes are clicked.
+  */
+ 
+ function* spawnTest() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.attachTo(container);
+ 
+   let A = treeRoot.getChild();
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-07.js b/browser/devtools/performance/test/browser_profiler_tree-view-07.js
+index 4b99736..6e9c5ef 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-07.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-07.js
+@@ -5,17 +5,17 @@
+  * Tests if the profiler's tree view implementation works properly and
+  * has the correct 'root', 'parent', 'level' etc. accessors on child nodes.
+  */
+ 
+ function* spawnTest() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode });
+ 
+   let container = document.createElement("vbox");
+   container.id = "call-tree-container";
+   treeRoot.attachTo(container);
+ 
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-08.js b/browser/devtools/performance/test/browser_profiler_tree-view-08.js
+index a0f29ce..327e01a 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-08.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-08.js
+@@ -21,17 +21,17 @@ function test() {
+    *       - D
+    *     - E
+    *       - F
+    *         - (JS)
+    *     - (GC)
+    *   - (JS)
+    */
+ 
+-  let threadNode = new ThreadNode(gThread, { contentOnly: true });
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 30, contentOnly: true });
+   // Don't display the synthesized (root) and the real (root) node twice.
+   threadNode.calls = threadNode.calls[0].calls;
+   let treeRoot = new CallView({ frame: threadNode, autoExpandDepth: 10 });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.attachTo(container);
+ 
+   let A = treeRoot.getChild(0);
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-09.js b/browser/devtools/performance/test/browser_profiler_tree-view-09.js
+index ecddd2e..06a8ed5 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-09.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-09.js
+@@ -7,17 +7,17 @@
+  */
+ 
+ let { CATEGORY_MASK } = devtools.require("devtools/performance/global");
+ 
+ let test = Task.async(function*() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gSamples, { invertTree: true });
++  let threadNode = new ThreadNode(gSamples, { invertTree: true, startTime: 0, endTime: 10 });
+   let treeRoot = new CallView({ frame: threadNode, inverted: true, autoExpandDepth: 1 });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.attachTo(container);
+ 
+   is(treeRoot.getChild(0).frame.location, "B",
+     "The tree root's first child is the `B` function.");
+   is(treeRoot.getChild(1).frame.location, "A",
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-10.js b/browser/devtools/performance/test/browser_profiler_tree-view-10.js
+index 40f1d3d..74efd31 100644
+--- a/browser/devtools/performance/test/browser_profiler_tree-view-10.js
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-10.js
+@@ -5,17 +5,17 @@
+  * Tests if the profiler's tree view, when inverted, displays the self and
+  * total costs correctly.
+  */
+ 
+ function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let { CallView } = devtools.require("devtools/performance/tree-view");
+ 
+-  let threadNode = new ThreadNode(gThread, { invertTree: true });
++  let threadNode = new ThreadNode(gThread, { invertTree: true, startTime: 0, endTime: 50 });
+   let treeRoot = new CallView({ frame: threadNode, inverted: true, hidden: true });
+ 
+   let container = document.createElement("vbox");
+   treeRoot.attachTo(container);
+ 
+   // Add 1 to each index to skip the hidden root node
+   let $$fun = i => container.querySelectorAll(".call-tree-cell[type=function]")[i+1];
+   let $$name = i => container.querySelectorAll(".call-tree-cell[type=function] > .call-tree-name")[i+1];
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-01.js b/browser/devtools/performance/test/unit/test_tree-model-01.js
+index 63a4842..85b27b3 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-01.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-01.js
+@@ -9,26 +9,26 @@ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function test() {
+   const { ThreadNode } = devtools.require("devtools/performance/tree-model");
+ 
+   // Create a root node from a given samples array.
+ 
+-  let threadNode = new ThreadNode(gThread);
++  let threadNode = new ThreadNode(gThread, { startTime: 0, endTime: 20 });
+   let root = getFrameNodePath(threadNode, "(root)");
+ 
+   // Test the root node.
+ 
+   equal(threadNode.getInfo().nodeType, "Thread",
+     "The correct node type was retrieved for the root node.");
+ 
+-  equal(root.duration, 20,
+-    "The correct duration was calculated for the root node.");
++  equal(threadNode.duration, 20,
++    "The correct duration was calculated for the ThreadNode.");
+   equal(root.getInfo().functionName, "(root)",
+     "The correct function name was retrieved for the root node.");
+   equal(root.getInfo().categoryData.abbrev, "other",
+     "The correct empty category data was retrieved for the root node.");
+ 
+   equal(root.calls.length, 1,
+     "The correct number of child calls were calculated for the root node.");
+   ok(getFrameNodePath(root, "A"),
+@@ -77,42 +77,48 @@ add_task(function test() {
+ 
+   equal(getFrameNodePath(root, "A > B > C > D > E > F > G").calls.length, 0,
+     "The correct number of child calls were calculated for the 'A > B > C > D > E > F > G' node.");
+   equal(getFrameNodePath(root, "A > B > D").calls.length, 0,
+     "The correct number of child calls were calculated for the 'A > B > D' node.");
+   equal(getFrameNodePath(root, "A > E > F").calls.length, 0,
+     "The correct number of child calls were calculated for the 'A > E > F' node.");
+ 
+-  // Check the location, sample times, duration and samples of the root.
++  // Check the location, sample times, and samples of the root.
+ 
+   equal(getFrameNodePath(root, "A").location, "A",
+     "The 'A' node has the correct location.");
+-  equal(getFrameNodePath(root, "A").duration, 20,
+-    "The 'A' node has the correct duration in milliseconds.");
++  equal(getFrameNodePath(root, "A").leafSamples, 0,
++    "The 'A' has correct `leafSamples`");
+   equal(getFrameNodePath(root, "A").samples, 4,
+-    "The 'A' node has the correct number of samples.");
++    "The 'A' has correct `samples`");
++
++  // A frame that is both a leaf and caught in another stack
++  equal(getFrameNodePath(root, "A > B > C").leafSamples, 1,
++    "The 'A > B > C' has correct `leafSamples`");
++  equal(getFrameNodePath(root, "A > B > C").samples, 2,
++    "The 'A > B > C' has correct `samples`");
+ 
+   // ...and the rightmost leaf.
+ 
+   equal(getFrameNodePath(root, "A > E > F").location, "F",
+     "The 'A > E > F' node has the correct location.");
+-  equal(getFrameNodePath(root, "A > E > F").duration, 7,
+-    "The 'A > E > F' node has the correct duration in milliseconds.");
+   equal(getFrameNodePath(root, "A > E > F").samples, 1,
+     "The 'A > E > F' node has the correct number of samples.");
++  equal(getFrameNodePath(root, "A > E > F").leafSamples, 1,
++    "The 'A > E > F' node has the correct number of leafSamples.");
+ 
+   // ...and the leftmost leaf.
+ 
+   equal(getFrameNodePath(root, "A > B > C > D > E > F > G").location, "G",
+     "The 'A > B > C > D > E > F > G' node has the correct location.");
+-  equal(getFrameNodePath(root, "A > B > C > D > E > F > G").duration, 2,
+-    "The 'A > B > C > D > E > F > G' node has the correct duration in milliseconds.");
+   equal(getFrameNodePath(root, "A > B > C > D > E > F > G").samples, 1,
+     "The 'A > B > C > D > E > F > G' node has the correct number of samples.");
++  equal(getFrameNodePath(root, "A > B > C > D > E > F > G").leafSamples, 1,
++    "The 'A > B > C > D > E > F > G' node has the correct number of leafSamples.");
+ });
+ 
+ let gThread = synthesizeProfileForTest([{
+   time: 5,
+   frames: [
+     { location: "(root)" },
+     { location: "A" },
+     { location: "B" },
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-02.js b/browser/devtools/performance/test/unit/test_tree-model-02.js
+index 32abea1..396ef4a 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-02.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-02.js
+@@ -9,22 +9,22 @@ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+ 
+   // Create a root node from a given samples array.
+ 
+-  let root = getFrameNodePath(new ThreadNode(gThread), "(root)");
++  let thread = new ThreadNode(gThread, { startTime: 0, endTime: 10 });
++  let root = getFrameNodePath(thread, "(root)");
+ 
+-  // Test the root node.
+-
+-  equal(root.duration, 5,
+-    "The correct duration was calculated for the root node.");
++  // Test the ThreadNode, only node with a duration.
++  equal(thread.duration, 10,
++    "The correct duration was calculated for the ThreadNode.");
+ 
+   equal(root.calls.length, 1,
+     "The correct number of child calls were calculated for the root node.");
+   ok(getFrameNodePath(root, "A"),
+     "The root node's only child call is correct.");
+ 
+   // Test all the descendant nodes.
+ 
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-03.js b/browser/devtools/performance/test/unit/test_tree-model-03.js
+index 93243af..93157cd 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-03.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-03.js
+@@ -15,22 +15,23 @@ add_task(function test() {
+ 
+   // Create a root node from a given samples array, filtering by time.
+   //
+   // Filtering from 5 to 18 includes the 2nd and 3rd samples. The 2nd sample
+   // starts exactly on 5 and ends at 11. The 3rd sample starts at 11 and ends
+   // exactly at 18.
+   let startTime = 5;
+   let endTime = 18;
+-  let root = getFrameNodePath(new ThreadNode(gThread, { startTime, endTime }), "(root)");
++  let thread = new ThreadNode(gThread, { startTime, endTime });
++  let root = getFrameNodePath(thread, "(root)");
+ 
+   // Test the root node.
+ 
+-  equal(root.duration, endTime - startTime,
+-    "The correct duration was calculated for the root node.");
++  equal(thread.duration, endTime - startTime,
++    "The correct duration was calculated for the ThreadNode.");
+ 
+   equal(root.calls.length, 1,
+     "The correct number of child calls were calculated for the root node.");
+   ok(getFrameNodePath(root, "A"),
+     "The root node's only child call is correct.");
+ 
+   // Test all the descendant nodes.
+ 
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-04.js b/browser/devtools/performance/test/unit/test_tree-model-04.js
+index 2fd06af..9ba3f10 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-04.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-04.js
+@@ -12,22 +12,22 @@ function run_test() {
+ 
+ add_task(function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+ 
+   // Create a root node from a given samples array, filtering by time.
+ 
+   let startTime = 5;
+   let endTime = 18;
+-  let root = getFrameNodePath(new ThreadNode(gThread, { startTime: startTime, endTime: endTime, contentOnly: true }), "(root)");
++  let thread = new ThreadNode(gThread, { startTime, endTime, contentOnly: true });
++  let root = getFrameNodePath(thread, "(root)");
+ 
+-  // Test the root node.
+-
+-  equal(root.duration, endTime - startTime,
+-    "The correct duration was calculated for the root node.");
++  // Test the ThreadNode, only node which should have duration
++  equal(thread.duration, endTime - startTime,
++    "The correct duration was calculated for the root ThreadNode.");
+ 
+   equal(root.calls.length, 2,
+     "The correct number of child calls were calculated for the root node.");
+   ok(getFrameNodePath(root, "http://D"),
+     "The root has a 'http://D' child call.");
+   ok(getFrameNodePath(root, "http://A"),
+     "The root has a 'http://A' child call.");
+ 
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-05.js b/browser/devtools/performance/test/unit/test_tree-model-05.js
+index 3dbe828..67e6350 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-05.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-05.js
+@@ -44,17 +44,17 @@ let gThread = synthesizeProfileForTest([{
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+ 
+-  let root = new ThreadNode(gThread, { invertTree: true });
++  let root = new ThreadNode(gThread, { invertTree: true, startTime: 0, endTime: 4 });
+ 
+   equal(root.calls.length, 2,
+      "Should get the 2 youngest frames, not the 1 oldest frame");
+ 
+   let C = getFrameNodePath(root, "C");
+   ok(C, "Should have C as a child of the root.");
+ 
+   equal(C.calls.length, 3,
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-06.js b/browser/devtools/performance/test/unit/test_tree-model-06.js
+index 35addf4..74c9ebd 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-06.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-06.js
+@@ -154,17 +154,17 @@ gThread.frameTable.data.forEach((frame) => {
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+ 
+-  let root = new ThreadNode(gThread);
++  let root = new ThreadNode(gThread, { startTime: 0, endTime: 4 });
+ 
+   let A = getFrameNodePath(root, "(root) > A");
+ 
+   let opts = A.getOptimizations();
+   let sites = opts.optimizationSites;
+   equal(sites.length, 2, "Frame A has two optimization sites.");
+   equal(sites[0].samples, 2, "first opt site has 2 samples.");
+   equal(sites[1].samples, 1, "second opt site has 1 sample.");
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-07.js b/browser/devtools/performance/test/unit/test_tree-model-07.js
+index ea2b3c9..ab747ed 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-07.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-07.js
+@@ -12,17 +12,17 @@ function run_test() {
+ }
+ 
+ add_task(function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let url = (n) => `http://content/${n}`;
+ 
+   // Create a root node from a given samples array.
+ 
+-  let root = getFrameNodePath(new ThreadNode(gThread, { contentOnly: true }), "(root)");
++  let root = getFrameNodePath(new ThreadNode(gThread, { startTime: 5, endTime: 30, contentOnly: true }), "(root)");
+ 
+   /*
+    * should have a tree like:
+    * root
+    *   - (JS)
+    *   - A
+    *     - (GC)
+    *     - B
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-09.js b/browser/devtools/performance/test/unit/test_tree-model-09.js
+index 70a411b..bdf47db 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-09.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-09.js
+@@ -12,17 +12,17 @@ function run_test() {
+ }
+ 
+ add_task(function test() {
+   let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+   let url = (n) => `http://content/${n}`;
+ 
+   // Create a root node from a given samples array.
+ 
+-  let root = getFrameNodePath(new ThreadNode(gThread, { contentOnly: true }), "(root)");
++  let root = getFrameNodePath(new ThreadNode(gThread, { startTime: 5, endTime: 25, contentOnly: true }), "(root)");
+ 
+   /*
+    * should have a tree like:
+    * root
+    *   - (Tools)
+    *   - A
+    *     - B
+    *       - C
+diff --git a/browser/devtools/performance/views/details-abstract-subview.js b/browser/devtools/performance/views/details-abstract-subview.js
+index 6f92c6d..f24cbb6 100644
+--- a/browser/devtools/performance/views/details-abstract-subview.js
++++ b/browser/devtools/performance/views/details-abstract-subview.js
+@@ -15,31 +15,29 @@ let DetailsSubview = {
+     this._onOverviewRangeChange = this._onOverviewRangeChange.bind(this);
+     this._onDetailsViewSelected = this._onDetailsViewSelected.bind(this);
+     this._onPrefChanged = this._onPrefChanged.bind(this);
+ 
+     PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.on(EVENTS.OVERVIEW_RANGE_SELECTED, this._onOverviewRangeChange);
+-    OverviewView.on(EVENTS.OVERVIEW_RANGE_CLEARED, this._onOverviewRangeChange);
+     DetailsView.on(EVENTS.DETAILS_VIEW_SELECTED, this._onDetailsViewSelected);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     clearNamedTimeout("range-change-debounce");
+ 
+     PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingStoppedOrSelected);
+     PerformanceController.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     OverviewView.off(EVENTS.OVERVIEW_RANGE_SELECTED, this._onOverviewRangeChange);
+-    OverviewView.off(EVENTS.OVERVIEW_RANGE_CLEARED, this._onOverviewRangeChange);
+     DetailsView.off(EVENTS.DETAILS_VIEW_SELECTED, this._onDetailsViewSelected);
+   },
+ 
+   /**
+    * Amount of time (in milliseconds) to wait until this view gets updated,
+    * when the range is changed in the overview.
+    */
+   rangeChangeDebounceTime: 0,
+@@ -78,17 +76,17 @@ let DetailsSubview = {
+   /**
+    * Called when recording stops or is selected.
+    */
+   _onRecordingStoppedOrSelected: function(_, recording) {
+     if (!recording || !recording.isCompleted()) {
+       return;
+     }
+     if (DetailsView.isViewSelected(this) || this.canUpdateWhileHidden) {
+-      this.render();
++      this.render(OverviewView.getTimeInterval());
+     } else {
+       this.shouldUpdateWhenShown = true;
+     }
+   },
+ 
+   /**
+    * Fired when a range is selected or cleared in the OverviewView.
+    */
+diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
+index e5a7bdb..1f05eaf 100644
+--- a/browser/devtools/performance/views/overview.js
++++ b/browser/devtools/performance/views/overview.js
+@@ -160,18 +160,20 @@ let OverviewView = {
+     }
+     if (this.isDisabled()) {
+       return { startTime: 0, endTime: recording.getDuration() };
+     }
+     let mapStart = () => 0;
+     let mapEnd = () => recording.getDuration();
+     let selection = this.graphs.getMappedSelection({ mapStart, mapEnd });
+     // If no selection returned, this means the overview graphs have not been rendered
+-    // yet, so act as if we have no selection (the full recording).
+-    if (!selection) {
++    // yet, so act as if we have no selection (the full recording). Also
++    // if the selection range distance is tiny, assume the range was cleared or just
++    // clicked, and we do not have a range.
++    if (!selection || (selection.max - selection.min) < 1) {
+       return { startTime: 0, endTime: recording.getDuration() };
+     }
+     return { startTime: selection.min, endTime: selection.max };
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering the overview graphs.
+    *
+@@ -295,24 +297,18 @@ let OverviewView = {
+   /**
+    * Fired when the graph selection has changed. Called by
+    * mouseup and scroll events.
+    */
+   _onGraphSelecting: function () {
+     if (this._stopSelectionChangeEventPropagation) {
+       return;
+     }
+-    // If the range is smaller than a pixel (which can happen when performing
+-    // a click on the graphs), treat this as a cleared selection.
+-    let interval = this.getTimeInterval();
+-    if (interval.endTime - interval.startTime < 1) {
+-      this.emit(EVENTS.OVERVIEW_RANGE_CLEARED);
+-    } else {
+-      this.emit(EVENTS.OVERVIEW_RANGE_SELECTED, interval);
+-    }
++
++    this.emit(EVENTS.OVERVIEW_RANGE_SELECTED, this.getTimeInterval());
+   },
+ 
+   _onGraphRendered: function (_, graphName) {
+     switch (graphName) {
+       case "timeline":
+         this.emit(EVENTS.MARKERS_GRAPH_RENDERED);
+         break;
+       case "memory":
+-- 
+2.2.1
+
