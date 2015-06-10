@@ -3,7 +3,7 @@ Date: Mon, 8 Jun 2015 18:16:18 -0700
 Subject: Bug 1167899 - Profiler data should compute timing information from sample count, not timestamps in the samples. r=shu
 
 diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
-index ebc0ce2..b380915 100644
+index ebc0ce2..57a7fc2 100644
 --- a/browser/devtools/performance/modules/logic/tree-model.js
 +++ b/browser/devtools/performance/modules/logic/tree-model.js
 @@ -18,31 +18,31 @@ loader.lazyRequireGetter(this, "FrameUtils",
@@ -31,7 +31,7 @@ index ebc0ce2..b380915 100644
 +  }
    this.samples = 0;
 -  this.duration = 0;
-+  this.leafSamples = 0;
++  this.youngestFrameSamples = 0;
    this.calls = [];
 -
 -  // Maps of frame to their self counts and duration.
@@ -98,7 +98,7 @@ index ebc0ce2..b380915 100644
      let prevSampleTime = samplesData[0][SAMPLE_TIME_SLOT];
  
      // Reused options object passed to InflatedFrame.prototype.getFrameKey.
-@@ -158,23 +155,23 @@ ThreadNode.prototype = {
+@@ -158,17 +155,16 @@ ThreadNode.prototype = {
        //
        // Thus, we compare sampleTime <= start instead of < to filter out
        // samples that end exactly at the start time.
@@ -114,16 +114,9 @@ index ebc0ce2..b380915 100644
        let prevFrameKey;
        let isLeaf = mutableFrameKeyOptions.isLeaf = true;
        let skipRoot = options.invertTree;
-+      let framesInStack = Object.create(null);
  
        // Inflate the stack and build the FrameNode call tree directly.
-       //
-       // In the profiler data, each frame's stack is referenced by an index
-       // into stackTable.
-       //
-       // Each entry in stackTable is a pair [ prefixIndex, frameIndex ]. The
-       // prefixIndex is itself an index into stackTable, referencing the
-@@ -218,55 +215,39 @@ ThreadNode.prototype = {
+@@ -218,55 +214,42 @@ ThreadNode.prototype = {
          // Inflate the frame.
          let inflatedFrame = getOrAddInflatedFrame(inflatedFrameCache, frameIndex, frameTable,
                                                    stringTable, allocationsTable);
@@ -165,7 +158,10 @@ index ebc0ce2..b380915 100644
 -
 -        frameNode._countSample(prevSampleTime, sampleTime, inflatedFrame.optimizations,
 -                               stringTable);
-+        frameNode._countSample(prevSampleTime, sampleTime, isLeaf);
++        if (isLeaf) {
++          frameNode.youngestFrameSamples++;
++        }
++        frameNode.samples++;
 +        frameNode._addOptimizations(inflatedFrame.optimizations, stringTable);
  
          prevFrameKey = frameKey;
@@ -184,7 +180,7 @@ index ebc0ce2..b380915 100644
     */
    _uninvert: function uninvert() {
      function mergeOrAddFrameNode(calls, node) {
-@@ -342,17 +323,27 @@ ThreadNode.prototype = {
+@@ -342,17 +325,29 @@ ThreadNode.prototype = {
     */
  
    hasOptimizations: function () {
@@ -201,8 +197,10 @@ index ebc0ce2..b380915 100644
 + *  A()->B()
 + *  Q()->B()
 + *
-+ * In inverted tree, a->b->c would have one frame node, and a->b and q->b would share a frame node.
-+ * In an uninverted tree, a->b->c and a->b would share a frame node, with q->b having its own.
++ * In inverted tree, A()->B()->C() would have one frame node, and A()->B() and
++ * Q()->B() would share a frame node.
++ * In an uninverted tree, A()->B()->C() and A()->B() would share a frame node,
++ * with Q()->B() having its own.
 + *
 + * In all cases, all the frame nodes originated from the same InflatedFrame.
   *
@@ -213,7 +211,7 @@ index ebc0ce2..b380915 100644
   *        The location of this function call. Note that this isn't sanitized,
   *        so it may very well (not?) include the function name, url, etc.
   * @param number line
-@@ -367,44 +358,54 @@ ThreadNode.prototype = {
+@@ -367,44 +362,37 @@ ThreadNode.prototype = {
   *        Whether or not this is a platform node that should appear as a
   *        generalized meta category or not.
   */
@@ -222,7 +220,7 @@ index ebc0ce2..b380915 100644
    this.location = location;
    this.line = line;
    this.allocations = allocations;
-+  this.leafSamples = 0;
++  this.youngestFrameSamples = 0;
    this.samples = 0;
 -  this.duration = 0;
    this.calls = [];
@@ -235,25 +233,13 @@ index ebc0ce2..b380915 100644
  
  FrameNode.prototype = {
    /**
-    * Count a sample as associated with this node.
-    *
-    * @param number prevSampleTime
-    *               The time when the immediate previous sample was sampled.
-    * @param number sampleTime
-    *               The time when the current sample was sampled.
-+   * @param boolean isLeaf
-+   *                Whether or not this frame was observed as a leaf or not.
-+   */
-+  _countSample: function (prevSampleTime, sampleTime, isLeaf) {
-+    if (isLeaf) {
-+      this.leafSamples++;
-+    }
-+    this.samples++;
-+  },
-+
-+  /**
+-   * Count a sample as associated with this node.
 +   * Take optimization data observed for this frame.
-+   *
+    *
+-   * @param number prevSampleTime
+-   *               The time when the immediate previous sample was sampled.
+-   * @param number sampleTime
+-   *               The time when the current sample was sampled.
     * @param object optimizationSite
     *               Any JIT optimization information attached to the current
     *               sample. Lazily inflated via stringTable.
@@ -273,7 +259,7 @@ index ebc0ce2..b380915 100644
          opts = this._optimizations = [];
          this._stringTable = stringTable;
        }
-@@ -419,17 +420,17 @@ FrameNode.prototype = {
+@@ -419,17 +407,17 @@ FrameNode.prototype = {
    },
  
    _merge: function (otherNode) {
@@ -283,7 +269,7 @@ index ebc0ce2..b380915 100644
  
      this.samples += otherNode.samples;
 -    this.duration += otherNode.duration;
-+    this.leafSamples += otherNode.leafSamples;
++    this.youngestFrameSamples += otherNode.youngestFrameSamples;
  
      if (otherNode._optimizations) {
        let opts = this._optimizations;
@@ -293,7 +279,7 @@ index ebc0ce2..b380915 100644
        }
        let otherOpts = otherNode._optimizations;
 diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
-index 27aace3..a9c6f1c 100644
+index 27aace3..9c53ccc 100644
 --- a/browser/devtools/performance/modules/widgets/tree-view.js
 +++ b/browser/devtools/performance/modules/widgets/tree-view.js
 @@ -23,17 +23,17 @@ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
@@ -376,10 +362,10 @@ index 27aace3..a9c6f1c 100644
 -      }
 +    // Self duration, cost
 +    if (this.visibleCells.selfDuration) {
-+      data.selfDuration = this.frame.leafSamples / totalSamples * totalDuration;
++      data.selfDuration = this.frame.youngestFrameSamples / totalSamples * totalDuration;
 +    }
 +    if (this.visibleCells.selfPercentage) {
-+      data.selfPercentage = this.frame.leafSamples / totalSamples * 100;
++      data.selfPercentage = this.frame.youngestFrameSamples / totalSamples * 100;
 +    }
 +
 +    // Total duration, cost
@@ -392,7 +378,7 @@ index 27aace3..a9c6f1c 100644
 +
 +    // Raw samples.
 +    if (this.visibleCells.samples) {
-+      data.samples = this.frame.leafSamples;
++      data.samples = this.frame.youngestFrameSamples;
      }
  
      // Self/total allocations count.
@@ -402,7 +388,7 @@ index 27aace3..a9c6f1c 100644
      }
      if (this.visibleCells.selfAllocations) {
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index 70d8cee..9a64673 100644
+index feea881..f43f9df 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
 @@ -122,18 +122,16 @@ const EVENTS = {
@@ -1010,7 +996,7 @@ index 40f1d3d..74efd31 100644
    let $$fun = i => container.querySelectorAll(".call-tree-cell[type=function]")[i+1];
    let $$name = i => container.querySelectorAll(".call-tree-cell[type=function] > .call-tree-name")[i+1];
 diff --git a/browser/devtools/performance/test/unit/test_tree-model-01.js b/browser/devtools/performance/test/unit/test_tree-model-01.js
-index 63a4842..85b27b3 100644
+index 63a4842..b3476e9 100644
 --- a/browser/devtools/performance/test/unit/test_tree-model-01.js
 +++ b/browser/devtools/performance/test/unit/test_tree-model-01.js
 @@ -9,26 +9,26 @@ function run_test() {
@@ -1059,15 +1045,15 @@ index 63a4842..85b27b3 100644
      "The 'A' node has the correct location.");
 -  equal(getFrameNodePath(root, "A").duration, 20,
 -    "The 'A' node has the correct duration in milliseconds.");
-+  equal(getFrameNodePath(root, "A").leafSamples, 0,
-+    "The 'A' has correct `leafSamples`");
++  equal(getFrameNodePath(root, "A").youngestFrameSamples, 0,
++    "The 'A' has correct `youngestFrameSamples`");
    equal(getFrameNodePath(root, "A").samples, 4,
 -    "The 'A' node has the correct number of samples.");
 +    "The 'A' has correct `samples`");
 +
 +  // A frame that is both a leaf and caught in another stack
-+  equal(getFrameNodePath(root, "A > B > C").leafSamples, 1,
-+    "The 'A > B > C' has correct `leafSamples`");
++  equal(getFrameNodePath(root, "A > B > C").youngestFrameSamples, 1,
++    "The 'A > B > C' has correct `youngestFrameSamples`");
 +  equal(getFrameNodePath(root, "A > B > C").samples, 2,
 +    "The 'A > B > C' has correct `samples`");
  
@@ -1079,8 +1065,8 @@ index 63a4842..85b27b3 100644
 -    "The 'A > E > F' node has the correct duration in milliseconds.");
    equal(getFrameNodePath(root, "A > E > F").samples, 1,
      "The 'A > E > F' node has the correct number of samples.");
-+  equal(getFrameNodePath(root, "A > E > F").leafSamples, 1,
-+    "The 'A > E > F' node has the correct number of leafSamples.");
++  equal(getFrameNodePath(root, "A > E > F").youngestFrameSamples, 1,
++    "The 'A > E > F' node has the correct number of youngestFrameSamples.");
  
    // ...and the leftmost leaf.
  
@@ -1090,8 +1076,8 @@ index 63a4842..85b27b3 100644
 -    "The 'A > B > C > D > E > F > G' node has the correct duration in milliseconds.");
    equal(getFrameNodePath(root, "A > B > C > D > E > F > G").samples, 1,
      "The 'A > B > C > D > E > F > G' node has the correct number of samples.");
-+  equal(getFrameNodePath(root, "A > B > C > D > E > F > G").leafSamples, 1,
-+    "The 'A > B > C > D > E > F > G' node has the correct number of leafSamples.");
++  equal(getFrameNodePath(root, "A > B > C > D > E > F > G").youngestFrameSamples, 1,
++    "The 'A > B > C > D > E > F > G' node has the correct number of youngestFrameSamples.");
  });
  
  let gThread = synthesizeProfileForTest([{
@@ -1288,7 +1274,7 @@ index 70a411b..bdf47db 100644
     *     - B
     *       - C
 diff --git a/browser/devtools/performance/views/details-abstract-subview.js b/browser/devtools/performance/views/details-abstract-subview.js
-index 6f92c6d..f24cbb6 100644
+index e929f54..36d3454 100644
 --- a/browser/devtools/performance/views/details-abstract-subview.js
 +++ b/browser/devtools/performance/views/details-abstract-subview.js
 @@ -15,31 +15,29 @@ let DetailsSubview = {
@@ -1323,7 +1309,7 @@ index 6f92c6d..f24cbb6 100644
     * when the range is changed in the overview.
     */
    rangeChangeDebounceTime: 0,
-@@ -78,17 +76,17 @@ let DetailsSubview = {
+@@ -87,17 +85,17 @@ let DetailsSubview = {
    /**
     * Called when recording stops or is selected.
     */
