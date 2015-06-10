@@ -1,0 +1,403 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 9 Jun 2015 17:01:30 -0700
+Subject: Bug 1172182 - Pull out memory utility logic out of the MemoryActor so other actors can consume it. r=vp
+
+diff --git a/toolkit/devtools/server/actors/common.js b/toolkit/devtools/server/actors/common.js
+index 1dde19c..2ee6bed 100644
+--- a/toolkit/devtools/server/actors/common.js
++++ b/toolkit/devtools/server/actors/common.js
+@@ -2,16 +2,17 @@
+ /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ "use strict";
+ 
+ const promise = require("promise");
++const { method } = require("devtools/server/protocol");
+ 
+ /**
+  * Creates "registered" actors factory meant for creating another kind of
+  * factories, ObservedActorFactory, during the call to listTabs.
+  * These factories live in DebuggerServer.{tab|global}ActorFactories.
+  *
+  * These actors only exposes:
+  * - `name` string attribute used to match actors by constructor name
+@@ -514,8 +515,24 @@ function expectState(expectedState, method, activity) {
+       return promise.reject(new Error(msg));
+     }
+ 
+     return method.apply(this, args);
+   };
+ }
+ 
+ exports.expectState = expectState;
++
++/**
++ * Proxies a call from an actor to an underlying module, stored
++ * as `bridge` on the actor. This allows a module to be defined in one
++ * place, usable by other modules/actors on the server, but a separate
++ * module defining the actor/RDP definition.
++ *
++ * @see Framerate implementation: toolkit/devtools/shared/framerate.js
++ * @see Framerate actor definition: toolkit/devtools/server/actors/framerate.js
++ */
++function actorBridge (methodName, definition={}) {
++  return method(function () {
++    return this.bridge[methodName].apply(this.bridge, arguments);
++  }, definition);
++}
++exports.actorBridge = actorBridge;
+diff --git a/toolkit/devtools/server/actors/framerate.js b/toolkit/devtools/server/actors/framerate.js
+index e5c828b..f029916 100644
+--- a/toolkit/devtools/server/actors/framerate.js
++++ b/toolkit/devtools/server/actors/framerate.js
+@@ -1,15 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const protocol = require("devtools/server/protocol");
+-const { actorBridge } = require("devtools/server/actors/utils/actor-utils");
++const { actorBridge } = require("devtools/server/actors/common");
+ const { method, custom, Arg, Option, RetVal } = protocol;
+ const { on, once, off, emit } = require("sdk/event/core");
+ const { Framerate } = require("devtools/toolkit/shared/framerate");
+ 
+ /**
+  * An actor wrapper around Framerate. Uses exposed
+  * methods via bridge and provides RDP definitions.
+  *
+diff --git a/toolkit/devtools/server/actors/memory.js b/toolkit/devtools/server/actors/memory.js
+index 95a7b21..78d6b41 100644
+--- a/toolkit/devtools/server/actors/memory.js
++++ b/toolkit/devtools/server/actors/memory.js
+@@ -1,18 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ "use strict";
+ 
+ const protocol = require("devtools/server/protocol");
+ const { method, RetVal, Arg, types } = protocol;
+-const { MemoryBridge } = require("./utils/memory-bridge");
+-const { actorBridge } = require("./utils/actor-utils");
++const { Memory } = require("devtools/toolkit/shared/memory");
++const { actorBridge } = require("devtools/server/actors/common");
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
+ loader.lazyRequireGetter(this, "StackFrameCache",
+                          "devtools/server/actors/utils/stack", true);
+ 
+ types.addDictType("AllocationsRecordingOptions", {
+   // The probability we sample any given allocation when recording
+   // allocations. Must be between 0.0 and 1.0. Defaults to 1.0, or sampling
+   // every allocation.
+@@ -24,18 +24,23 @@ types.addDictType("AllocationsRecordingOptions", {
+   maxLogLength: "number"
+ });
+ 
+ /**
+  * An actor that returns memory usage data for its parent actor's window.
+  * A tab-scoped instance of this actor will measure the memory footprint of its
+  * parent tab. A global-scoped instance however, will measure the memory
+  * footprint of the chrome window referenced by the root actor.
++ * 
++ * This actor wraps the Memory module at toolkit/devtools/shared/memory.js
++ * and provides RDP definitions.
++ *
++ * @see toolkit/devtools/shared/memory.js for documentation.
+  */
+-let MemoryActor = protocol.ActorClass({
++let MemoryActor = exports.MemoryActor = protocol.ActorClass({
+   typeName: "memory",
+ 
+   /**
+    * The set of unsolicited events the MemoryActor emits that will be sent over
+    * the RDP (by protocol.js).
+    */
+ 
+   events: {
+@@ -47,155 +52,105 @@ let MemoryActor = protocol.ActorClass({
+       data: Arg(0, "json"),
+     },
+   },
+ 
+   initialize: function(conn, parent, frameCache = new StackFrameCache()) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+ 
+     this._onGarbageCollection = this._onGarbageCollection.bind(this);
+-    this.bridge = new MemoryBridge(parent, frameCache);
++    this.bridge = new Memory(parent, frameCache);
+     this.bridge.on("garbage-collection", this._onGarbageCollection);
+   },
+ 
+   destroy: function() {
+     this.bridge.off("garbage-collection", this._onGarbageCollection);
+     this.bridge.destroy();
+     protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+-  /**
+-   * Attach to this MemoryActor.
+-   *
+-   * This attaches the MemoryActor's Debugger instance so that you can start
+-   * recording allocations or take a census of the heap. In addition, the
+-   * MemoryActor will start emitting GC events.
+-   */
+   attach: actorBridge("attach", {
+     request: {},
+     response: {
+       type: "attached"
+     }
+   }),
+ 
+-  /**
+-   * Detach from this MemoryActor.
+-   */
+   detach: actorBridge("detach", {
+     request: {},
+     response: {
+       type: "detached"
+     }
+   }),
+ 
+-  /**
+-   * Gets the current MemoryActor attach/detach state.
+-   */
+   getState: actorBridge("getState", {
+     response: {
+       state: RetVal(0, "string")
+     }
+   }),
+ 
+-  /**
+-   * Take a census of the heap. See js/src/doc/Debugger/Debugger.Memory.md for
+-   * more information.
+-   */
+   takeCensus: actorBridge("takeCensus", {
+     request: {},
+     response: RetVal("json")
+   }),
+ 
+-  /**
+-   * Start recording allocation sites.
+-   *
+-   * @param AllocationsRecordingOptions options
+-   *        See the protocol.js definition of AllocationsRecordingOptions above.
+-   */
+   startRecordingAllocations: actorBridge("startRecordingAllocations", {
+     request: {
+       options: Arg(0, "nullable:AllocationsRecordingOptions")
+     },
+     response: {
+       // Accept `nullable` in the case of server Gecko <= 37, handled on the front
+       value: RetVal(0, "nullable:number")
+     }
+   }),
+ 
+-  /**
+-   * Stop recording allocation sites.
+-   */
+   stopRecordingAllocations: actorBridge("stopRecordingAllocations", {
+     request: {},
+     response: {
+       // Accept `nullable` in the case of server Gecko <= 37, handled on the front
+       value: RetVal(0, "nullable:number")
+     }
+   }),
+ 
+-  /**
+-   * Return settings used in `startRecordingAllocations` for `probability`
+-   * and `maxLogLength`. Currently only uses in tests.
+-   */
+   getAllocationsSettings: actorBridge("getAllocationsSettings", {
+     request: {},
+     response: {
+       options: RetVal(0, "json")
+     }
+   }),
+ 
+   getAllocations: actorBridge("getAllocations", {
+     request: {},
+     response: RetVal("json")
+   }),
+ 
+-  /*
+-   * Force a browser-wide GC.
+-   */
+   forceGarbageCollection: actorBridge("forceGarbageCollection", {
+     request: {},
+     response: {}
+   }),
+ 
+-  /**
+-   * Force an XPCOM cycle collection. For more information on XPCOM cycle
+-   * collection, see
+-   * https://developer.mozilla.org/en-US/docs/Interfacing_with_the_XPCOM_cycle_collector#What_the_cycle_collector_does
+-   */
+   forceCycleCollection: actorBridge("forceCycleCollection", {
+     request: {},
+     response: {}
+   }),
+ 
+-  /**
+-   * A method that returns a detailed breakdown of the memory consumption of the
+-   * associated window.
+-   *
+-   * @returns object
+-   */
+   measure: actorBridge("measure", {
+     request: {},
+     response: RetVal("json"),
+   }),
+ 
+   residentUnique: actorBridge("residentUnique", {
+     request: {},
+     response: { value: RetVal("number") }
+   }),
+ 
+-  /**
+-   * Called when the underlying MemoryBridge fires a "garbage-collection" events.
+-   * Propagates over RDP.
+-   */
+   _onGarbageCollection: function (data) {
+     events.emit(this, "garbage-collection", data);
+   },
+ });
+ 
+-exports.MemoryActor = MemoryActor;
+-
+ exports.MemoryFront = protocol.FrontClass(MemoryActor, {
+   initialize: function(client, form) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+     this.actorID = form.memoryActor;
+     this.manage(this);
+   }
+ });
+diff --git a/toolkit/devtools/server/actors/utils/actor-utils.js b/toolkit/devtools/server/actors/utils/actor-utils.js
+deleted file mode 100644
+index e231757..0000000
+--- a/toolkit/devtools/server/actors/utils/actor-utils.js
++++ /dev/null
+@@ -1,24 +0,0 @@
+-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
+-/* vim: set ft=javascript ts=2 et sw=2 tw=80: */
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
+-"use strict";
+-
+-const { method } = require("devtools/server/protocol");
+-
+-/**
+- * Proxies a call from an actor to an underlying module, stored
+- * as `bridge` on the actor. This allows a module to be defined in one
+- * place, usable by other modules/actors on the server, but a separate
+- * module defining the actor/RDP definition.
+- *
+- * @see Framerate implementation: toolkit/devtools/shared/framerate.js
+- * @see Framerate actor definition: toolkit/devtools/server/actors/framerate.js
+- */
+-exports.actorBridge = function actorBridge (methodName, definition={}) {
+-  return method(function () {
+-    return this.bridge[methodName].apply(this.bridge, arguments);
+-  }, definition);
+-}
+diff --git a/toolkit/devtools/server/moz.build b/toolkit/devtools/server/moz.build
+index cbf3d4b..5762aa5 100644
+--- a/toolkit/devtools/server/moz.build
++++ b/toolkit/devtools/server/moz.build
+@@ -93,20 +93,18 @@ EXTRA_JS_MODULES.devtools.server.actors += [
+     'actors/webbrowser.js',
+     'actors/webconsole.js',
+     'actors/webgl.js',
+     'actors/worker.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.server.actors.utils += [
+     'actors/utils/actor-registry-utils.js',
+-    'actors/utils/actor-utils.js',
+     'actors/utils/audionodes.json',
+     'actors/utils/automation-timeline.js',
+     'actors/utils/make-debugger.js',
+     'actors/utils/map-uri-to-addon-id.js',
+-    'actors/utils/memory-bridge.js',
+     'actors/utils/ScriptStore.js',
+     'actors/utils/stack.js',
+     'actors/utils/TabSources.js'
+ ]
+ 
+ FAIL_ON_WARNINGS = True
+diff --git a/toolkit/devtools/server/actors/utils/memory-bridge.js b/toolkit/devtools/shared/memory.js
+similarity index 98%
+rename from toolkit/devtools/server/actors/utils/memory-bridge.js
+rename to toolkit/devtools/shared/memory.js
+index d4b5af5..4409617 100644
+--- a/toolkit/devtools/server/actors/utils/memory-bridge.js
++++ b/toolkit/devtools/shared/memory.js
+@@ -7,28 +7,27 @@
+ const { Cc, Ci, Cu } = require("chrome");
+ const { reportException } = require("devtools/toolkit/DevToolsUtils");
+ const { Class } = require("sdk/core/heritage");
+ const { expectState } = require("devtools/server/actors/common");
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
+ loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
+ loader.lazyRequireGetter(this, "StackFrameCache",
+                          "devtools/server/actors/utils/stack", true);
+-
+ /**
+  * A class that returns memory data for a parent actor's window.
+  * Using a tab-scoped actor with this instance will measure the memory footprint of its
+  * parent tab. Using a global-scoped actor instance however, will measure the memory
+  * footprint of the chrome window referenced by its root actor.
+  *
+- * To be consumed by actor's, like MemoryActor using MemoryBridge to
++ * To be consumed by actor's, like MemoryActor using this module to
+  * send information over RDP, and TimelineActor for using more light-weight
+  * utilities like GC events and measuring memory consumption.
+  */
+-let MemoryBridge = Class({
++let Memory = exports.Memory = Class({
+   extends: EventTarget,
+ 
+   /**
+    * Requires a root actor and a StackFrameCache.
+    */
+   initialize: function (parent, frameCache = new StackFrameCache()) {
+     this.parent = parent;
+     this._mgr = Cc["@mozilla.org/memory-reporter-manager;1"]
+@@ -330,10 +329,8 @@ let MemoryBridge = Class({
+ 
+     return result;
+   },
+ 
+   residentUnique: function () {
+     return this._mgr.residentUnique;
+   }
+ });
+-
+-exports.MemoryBridge = MemoryBridge;
+diff --git a/toolkit/devtools/shared/moz.build b/toolkit/devtools/shared/moz.build
+index 6eb5aef..74df470 100644
+--- a/toolkit/devtools/shared/moz.build
++++ b/toolkit/devtools/shared/moz.build
+@@ -4,11 +4,12 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ BROWSER_CHROME_MANIFESTS += ['tests/browser/browser.ini']
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+   'async-storage.js',
+   'framerate.js',
++  'memory.js',
+   'worker-helper.js',
+   'worker.js'
+ ]
+-- 
+2.2.1
+

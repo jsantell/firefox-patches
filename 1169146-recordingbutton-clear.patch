@@ -1,0 +1,338 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 9 Jun 2015 18:24:46 -0700
+Subject: Bug 1169146 - Clearing recordings while a recording is in progress now correctly sets the state of the recording buttons. r=vp
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 5d7eddb..f962153 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -453,16 +453,17 @@ let PerformanceController = {
+    * @param {RecordingModel} model
+    */
+   _onRecordingStateChange: function (state, model) {
+     // If we get a state change for a recording that isn't being tracked in the front,
+     // just ignore it. This can occur when stopping a profile via console that was cleared.
+     if (state !== "recording-starting" && this.getRecordings().indexOf(model) === -1) {
+       return;
+     }
++
+     switch (state) {
+       // Fired when a RecordingModel was just created from the front
+       case "recording-starting":
+         // When a recording is just starting, store it internally
+         this._recordings.push(model);
+         this.emit(EVENTS.RECORDING_WILL_START, model);
+         break;
+       // Fired when a RecordingModel has started recording
+diff --git a/browser/devtools/performance/performance-view.js b/browser/devtools/performance/performance-view.js
+index 884e05e..ad58f44 100644
+--- a/browser/devtools/performance/performance-view.js
++++ b/browser/devtools/performance/performance-view.js
+@@ -44,36 +44,36 @@ let PerformanceView = {
+   initialize: Task.async(function* () {
+     this._recordButton = $("#main-record-button");
+     this._importButton = $("#import-button");
+     this._clearButton = $("#clear-button");
+ 
+     this._onRecordButtonClick = this._onRecordButtonClick.bind(this);
+     this._onImportButtonClick = this._onImportButtonClick.bind(this);
+     this._onClearButtonClick = this._onClearButtonClick.bind(this);
+-    this._lockRecordButtons = this._lockRecordButtons.bind(this);
+-    this._unlockRecordButtons = this._unlockRecordButtons.bind(this);
+     this._onRecordingSelected = this._onRecordingSelected.bind(this);
+-    this._onRecordingStopped = this._onRecordingStopped.bind(this);
+-    this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onProfilerStatusUpdated = this._onProfilerStatusUpdated.bind(this);
++    this._onRecordingWillStart = this._onRecordingWillStart.bind(this);
++    this._onRecordingStarted = this._onRecordingStarted.bind(this);
+     this._onRecordingWillStop = this._onRecordingWillStop.bind(this);
++    this._onRecordingStopped = this._onRecordingStopped.bind(this);
+ 
+     for (let button of $$(".record-button")) {
+       button.addEventListener("click", this._onRecordButtonClick);
+     }
+     this._importButton.addEventListener("click", this._onImportButtonClick);
+     this._clearButton.addEventListener("click", this._onClearButtonClick);
+ 
+     // Bind to controller events to unlock the record button
+-    PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+-    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+     PerformanceController.on(EVENTS.PROFILER_STATUS_UPDATED, this._onProfilerStatusUpdated);
++    PerformanceController.on(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
++    PerformanceController.on(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.on(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
++    PerformanceController.on(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+ 
+     this.setState("empty");
+ 
+     // Initialize the ToolbarView first, because other views may need access
+     // to the OptionsView via the controller, to read prefs.
+     yield ToolbarView.initialize();
+     yield RecordingsView.initialize();
+     yield OverviewView.initialize();
+@@ -85,21 +85,22 @@ let PerformanceView = {
+    */
+   destroy: Task.async(function* () {
+     for (let button of $$(".record-button")) {
+       button.removeEventListener("click", this._onRecordButtonClick);
+     }
+     this._importButton.removeEventListener("click", this._onImportButtonClick);
+     this._clearButton.removeEventListener("click", this._onClearButtonClick);
+ 
+-    PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+-    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelected);
+     PerformanceController.off(EVENTS.PROFILER_STATUS_UPDATED, this._onProfilerStatusUpdated);
++    PerformanceController.off(EVENTS.RECORDING_WILL_START, this._onRecordingWillStart);
++    PerformanceController.off(EVENTS.RECORDING_STARTED, this._onRecordingStarted);
+     PerformanceController.off(EVENTS.RECORDING_WILL_STOP, this._onRecordingWillStop);
++    PerformanceController.off(EVENTS.RECORDING_STOPPED, this._onRecordingStopped);
+ 
+     yield ToolbarView.destroy();
+     yield RecordingsView.destroy();
+     yield OverviewView.destroy();
+     yield DetailsView.destroy();
+   }),
+ 
+   /**
+@@ -172,98 +173,118 @@ let PerformanceView = {
+       $container.setAttribute("buffer-status", "in-progress");
+     }
+ 
+     $bufferLabel.value = `Buffer ${percent}% full`;
+     this.emit(EVENTS.UI_BUFFER_UPDATED, percent);
+   },
+ 
+   /**
+-   * Adds the `locked` attribute on the record button. This prevents it
+-   * from being clicked while recording is started or stopped.
++   * Toggles the `locked` attribute on the record buttons based
++   * on `lock`.
++   *
++   * @param {boolean} lock
++   */
++  _lockRecordButtons: function (lock) {
++    for (let button of $$(".record-button")) {
++      if (lock) {
++        button.setAttribute("locked", "true");
++      } else {
++        button.removeAttribute("locked");
++      }
++    }
++  },
++
++  /*
++   * Toggles the `checked` attribute on the record buttons based
++   * on `activate`.
++   *
++   * @param {boolean} activate
+    */
+-  _lockRecordButtons: function () {
++  _activateRecordButtons: function (activate) {
+     for (let button of $$(".record-button")) {
+-      button.setAttribute("locked", "true");
++      if (activate) {
++        button.setAttribute("checked", "true");
++      } else {
++        button.removeAttribute("checked");
++      }
+     }
+   },
+ 
+   /**
+-   * Removes the `locked` attribute on the record button.
++   * Fired when a recording is just starting, but actors may not have
++   * yet started actually recording.
+    */
+-  _unlockRecordButtons: function () {
+-    for (let button of $$(".record-button")) {
+-      button.removeAttribute("locked");
++  _onRecordingWillStart: function (_, recording) {
++    if (!recording.isConsole()) {
++      this._lockRecordButtons(true);
++      this._activateRecordButtons(true);
+     }
+   },
+ 
+   /**
+    * When a recording has started.
+    */
+   _onRecordingStarted: function (_, recording) {
+     // A stopped recording can be from `console.profileEnd` -- only unlock
+     // the button if it's the main recording that was started via UI.
+     if (!recording.isConsole()) {
+-      this._unlockRecordButtons();
++      this._lockRecordButtons(false);
+     }
+     if (recording.isRecording()) {
+       this.updateBufferStatus();
+     }
+   },
+ 
+   /**
++   * Fired when a recording is stopping, but not yet completed
++   */
++  _onRecordingWillStop: function (_, recording) {
++    if (!recording.isConsole()) {
++      this._lockRecordButtons(true);
++      this._activateRecordButtons(false);
++    }
++    // Lock the details view while the recording is being loaded in the UI.
++    // Only do this if this is the current recording.
++    if (recording === PerformanceController.getCurrentRecording()) {
++      this.setState("loading");
++    }
++  },
++
++  /**
+    * When a recording is complete.
+    */
+   _onRecordingStopped: function (_, recording) {
+     // A stopped recording can be from `console.profileEnd` -- only unlock
+     // the button if it's the main recording that was started via UI.
+     if (!recording.isConsole()) {
+-      this._unlockRecordButtons();
++      this._lockRecordButtons(false);
+     }
+ 
+     // If the currently selected recording is the one that just stopped,
+     // switch state to "recorded".
+     if (recording === PerformanceController.getCurrentRecording()) {
+       this.setState("recorded");
+     }
+   },
+ 
+   /**
+-   * Fired when a recording is stopping, but not yet completed
+-   */
+-  _onRecordingWillStop: function (_, recording) {
+-    // Lock the details view while the recording is being loaded in the UI.
+-    // Only do this if this is the current recording.
+-    if (recording === PerformanceController.getCurrentRecording()) {
+-      this.setState("loading");
+-    }
+-  },
+-
+-  /**
+    * Handler for clicking the clear button.
+    */
+   _onClearButtonClick: function (e) {
+     this.emit(EVENTS.UI_CLEAR_RECORDINGS);
+   },
+ 
+   /**
+    * Handler for clicking the record button.
+    */
+   _onRecordButtonClick: function (e) {
+     if (this._recordButton.hasAttribute("checked")) {
+       this.emit(EVENTS.UI_STOP_RECORDING);
+-      this._lockRecordButtons();
+-      for (let button of $$(".record-button")) {
+-        button.removeAttribute("checked");
+-      }
+     } else {
+-      this._lockRecordButtons();
+-      for (let button of $$(".record-button")) {
+-        button.setAttribute("checked", "true");
+-      }
+       this.emit(EVENTS.UI_START_RECORDING);
+     }
+   },
+ 
+   /**
+    * Handler for clicking the import button.
+    */
+   _onImportButtonClick: function(e) {
+diff --git a/browser/devtools/performance/test/browser_perf-clear-02.js b/browser/devtools/performance/test/browser_perf-clear-02.js
+index f633af0..2eab3ef 100644
+--- a/browser/devtools/performance/test/browser_perf-clear-02.js
++++ b/browser/devtools/performance/test/browser_perf-clear-02.js
+@@ -1,14 +1,14 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that clearing recordings empties out the recordings list and stops
+- * a current recording if recording.
++ * a current recording if recording and can continue recording after.
+  */
+ 
+ let test = Task.async(function*() {
+   let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, PerformanceView, RecordingsView } = panel.panelWin;
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+@@ -24,11 +24,15 @@ let test = Task.async(function*() {
+ 
+   is(RecordingsView.itemCount, 0,
+     "RecordingsView should be empty.");
+   is(PerformanceView.getState(), "empty",
+     "PerformanceView should be in an empty state.");
+   is(PerformanceController.getCurrentRecording(), null,
+     "There should be no current recording.");
+ 
++  // bug 1169146: Try another recording after clearing mid-recording
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
+   yield teardown(panel);
+   finish();
+ });
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 1b2993f..9e39e58 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -341,22 +341,23 @@ function* startRecording(panel, options = {
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked yet.");
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked yet.");
+ 
+   click(win, button);
+   yield clicked;
+ 
++  yield willStart;
++
+   ok(button.hasAttribute("checked"),
+     "The record button should now be checked.");
+   ok(button.hasAttribute("locked"),
+     "The record button should be locked.");
+ 
+-  yield willStart;
+   let stateChanged = options.waitForStateChanged
+     ? once(win.PerformanceView, win.EVENTS.UI_STATE_CHANGED)
+     : Promise.resolve();
+ 
+   yield hasStarted;
+ 
+   let overviewRendered = options.waitForOverview
+     ? once(win.OverviewView, win.EVENTS.OVERVIEW_RENDERED)
+@@ -388,22 +389,22 @@ function* stopRecording(panel, options = {
+   ok(button.hasAttribute("checked"),
+     "The record button should already be checked.");
+   ok(!button.hasAttribute("locked"),
+     "The record button should not be locked yet.");
+ 
+   click(win, button);
+   yield clicked;
+ 
++  yield willStop;
+   ok(!button.hasAttribute("checked"),
+     "The record button should not be checked.");
+   ok(button.hasAttribute("locked"),
+     "The record button should be locked.");
+ 
+-  yield willStop;
+   let stateChanged = options.waitForStateChanged
+     ? once(win.PerformanceView, win.EVENTS.UI_STATE_CHANGED)
+     : Promise.resolve();
+ 
+   yield hasStopped;
+ 
+   // Wait for the final rendering of the overview, not a low res
+   // incremental rendering and less likely to be from another rendering that was selected
+-- 
+2.2.1
+
