@@ -1,0 +1,230 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 11 Jun 2015 18:45:21 -0700
+Subject: Bug 1173695 - When extra threads are in a profile of a nested profile, stringified, handle that gracefully for older recordings. r=vp
+
+diff --git a/browser/devtools/performance/modules/logic/recording-utils.js b/browser/devtools/performance/modules/logic/recording-utils.js
+index af7f7fc..aeff6e7 100644
+--- a/browser/devtools/performance/modules/logic/recording-utils.js
++++ b/browser/devtools/performance/modules/logic/recording-utils.js
+@@ -255,16 +255,17 @@ function getFilteredBlueprint({ blueprint, hiddenMarkers }) {
+  * by the C++ UniqueStacks class in tools/profiler/ProfileEntry.cpp.
+  *
+  * @param object profile
+  *               A profile with version 2.
+  */
+ function deflateProfile(profile) {
+   profile.threads = profile.threads.map((thread) => {
+     let uniqueStacks = new UniqueStacks();
++
+     return deflateThread(thread, uniqueStacks);
+   });
+ 
+   profile.meta.version = 3;
+   return profile;
+ };
+ 
+ /**
+@@ -362,16 +363,30 @@ function deflateMarkers(markers, uniqueStacks) {
+  * Deflate a thread.
+  *
+  * @param object thread
+  *               The profile thread.
+  * @param UniqueStacks uniqueStacks
+  * @return object
+  */
+ function deflateThread(thread, uniqueStacks) {
++  // Some extra threads in a profile come stringified as a full profile (so
++  // it has nested threads itself) so the top level "thread" does not have markers
++  // or samples. We don't use this anyway so just make this safe to deflate.
++  // can be a string rather than an object on import. Bug 1173695
++  if (typeof thread === "string") {
++    thread = JSON.parse(thread);
++  }
++  if (!thread.samples) {
++    thread.samples = [];
++  }
++  if (!thread.markers) {
++    thread.markers = [];
++  }
++
+   return {
+     name: thread.name,
+     tid: thread.tid,
+     samples: deflateSamples(thread.samples, uniqueStacks),
+     markers: deflateMarkers(thread.markers, uniqueStacks),
+     stackTable: uniqueStacks.getStackTableWithSchema(),
+     frameTable: uniqueStacks.getFrameTableWithSchema(),
+     stringTable: uniqueStacks.getStringTable()
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 7c21b50..6aedd0b 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -109,16 +109,17 @@ support-files =
+ [browser_perf-recording-notices-02.js]
+ [browser_perf-recording-notices-03.js]
+ [browser_perf-recording-notices-04.js]
+ [browser_perf-recording-notices-05.js]
+ [browser_perf_recordings-io-01.js]
+ [browser_perf_recordings-io-02.js]
+ [browser_perf_recordings-io-03.js]
+ [browser_perf_recordings-io-04.js]
++[browser_perf_recordings-io-05.js]
+ [browser_perf-range-changed-render.js]
+ [browser_perf-recording-selected-01.js]
+ [browser_perf-recording-selected-02.js]
+ [browser_perf-recording-selected-03.js]
+ [browser_perf-recording-selected-04.js]
+ [browser_perf-theme-toggle-01.js]
+ [browser_profiler_tree-abstract-01.js]
+ [browser_profiler_tree-abstract-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-05.js b/browser/devtools/performance/test/browser_perf_recordings-io-05.js
+new file mode 100644
+index 0000000..8288985
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-05.js
+@@ -0,0 +1,142 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if the performance tool can import profiler data when Profiler is v2
++ * and requires deflating, and has an extra thread that's a string. Not sure
++ * what causes this.
++ */
++let RecordingUtils = devtools.require("devtools/performance/recording-utils");
++
++let STRINGED_THREAD = (function () {
++  let thread = {};
++
++  thread.libs = [{
++    start: 123,
++    end: 456,
++    offset: 0,
++    name: "",
++    breakpadId: ""
++  }];
++  thread.meta = { version: 2, interval: 1, stackwalk: 0, processType: 1, startTime: 0 };
++  thread.threads = [{
++    name: "Plugin",
++    tid: 4197,
++    samples: [],
++    markers: [],
++  }];
++
++  return JSON.stringify(thread);
++})();
++
++let PROFILER_DATA = (function () {
++  let data = {};
++  let threads = data.threads = [];
++  let thread = {};
++  threads.push(thread);
++  threads.push(STRINGED_THREAD);
++  thread.name = "Content";
++  thread.samples = [{
++    time: 5,
++    frames: [
++      { location: "(root)" },
++      { location: "A" },
++      { location: "B" },
++      { location: "C" }
++    ]
++  }, {
++    time: 5 + 6,
++    frames: [
++      { location: "(root)" },
++      { location: "A" },
++      { location: "B" },
++      { location: "D" }
++    ]
++  }, {
++    time: 5 + 6 + 7,
++    frames: [
++      { location: "(root)" },
++      { location: "A" },
++      { location: "E" },
++      { location: "F" }
++    ]
++  }, {
++    time: 20,
++    frames: [
++      { location: "(root)" },
++      { location: "A" },
++      { location: "B" },
++      { location: "C" },
++      { location: "D" },
++      { location: "E" },
++      { location: "F" },
++      { location: "G" }
++    ]
++  }];
++
++  // Handled in other deflating tests
++  thread.markers = [];
++
++  let meta = data.meta = {};
++  meta.version = 2;
++  meta.interval = 1;
++  meta.stackwalk = 0;
++  meta.product = "Firefox";
++  return data;
++})();
++
++let test = Task.async(function*() {
++  let { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
++  let { $, EVENTS, PerformanceController, DetailsView, JsCallTreeView } = panel.panelWin;
++
++  let profilerData = {
++    profile: PROFILER_DATA,
++    duration: 10000,
++    configuration: {},
++    fileType: "Recorded Performance Data",
++    version: 2
++  };
++
++  let file = FileUtils.getFile("TmpD", ["tmpprofile.json"]);
++  file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("666", 8));
++  yield asyncCopy(profilerData, file);
++
++  // Import recording.
++
++  let calltreeRendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  let imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
++  yield PerformanceController.importRecording("", file);
++
++  yield imported;
++  ok(true, "The profiler data appears to have been successfully imported.");
++
++  yield calltreeRendered;
++  ok(true, "The imported data was re-rendered.");
++
++  yield teardown(panel);
++  finish();
++});
++
++function getUnicodeConverter() {
++  let className = "@mozilla.org/intl/scriptableunicodeconverter";
++  let converter = Cc[className].createInstance(Ci.nsIScriptableUnicodeConverter);
++  converter.charset = "UTF-8";
++  return converter;
++}
++
++function asyncCopy(data, file) {
++  let deferred = Promise.defer();
++
++  let string = JSON.stringify(data);
++  let inputStream = getUnicodeConverter().convertToInputStream(string);
++  let outputStream = FileUtils.openSafeFileOutputStream(file);
++
++  NetUtil.asyncCopy(inputStream, outputStream, status => {
++    if (!Components.isSuccessCode(status)) {
++      deferred.reject(new Error("Could not save data to file."));
++    }
++    deferred.resolve();
++  });
++
++  return deferred.promise;
++}
+-- 
+2.2.1
+

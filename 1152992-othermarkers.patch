@@ -3,7 +3,7 @@ Date: Tue, 9 Jun 2015 20:34:51 -0700
 Subject: Bug 1152992 - If markers do not have a definition, classify them as "Unknown" in the perftools. r=vp
 
 diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
-index 3453592..a0a4a60 100644
+index 43608ea..55a4edb 100644
 --- a/browser/devtools/performance/modules/logic/marker-utils.js
 +++ b/browser/devtools/performance/modules/logic/marker-utils.js
 @@ -3,53 +3,65 @@
@@ -22,8 +22,7 @@ index 3453592..a0a4a60 100644
    "devtools/performance/global", true);
  loader.lazyRequireGetter(this, "PREFS",
    "devtools/performance/global", true);
--loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
-+loader.lazyRequireGetter(this, "getBlueprintFor",
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
    "devtools/performance/markers", true);
  loader.lazyRequireGetter(this, "WebConsoleUtils",
    "devtools/toolkit/webconsole/utils");
@@ -35,8 +34,8 @@ index 3453592..a0a4a60 100644
 + * Takes a marker, blueprint, and filter list and
 + * determines if this marker should be filtered or not.
 + */
-+function isMarkerValid (marker, blueprint, filter) {
-+  let isUnknown = !blueprint[marker.name];
++function isMarkerValid (marker, filter) {
++  let isUnknown = !(marker.name in TIMELINE_BLUEPRINT);
 +  if (isUnknown) {
 +    return filter.indexOf("UNKNOWN") === -1;
 +  }
@@ -154,15 +153,26 @@ index 3453592..a0a4a60 100644
        label = `${label} (Non-incremental)`;
      }
      return label;
-@@ -432,14 +452,15 @@ const Formatters = {
- 
-   StylesFields: function (marker) {
-     if ("restyleHint" in marker) {
-       return { "Restyle Hint": marker.restyleHint.replace(/eRestyle_/g, "") };
-     }
+@@ -439,14 +459,27 @@ const Formatters = {
+   CycleCollectionFields: function (marker) {
+     let Type = PREFS["show-platform-data"]
+         ? marker.name
+         : marker.name.replace(/nsCycleCollector::/g, "");
+     return { Type };
    },
  };
  
++/**
++ * Takes a marker and returns the definition for that marker type,
++ * falling back to the UNKNOWN definition if undefined.
++ *
++ * @param {Marker} marker
++ * @return {object}
++ */
++function getBlueprintFor (marker) {
++  return TIMELINE_BLUEPRINT[marker.name] || TIMELINE_BLUEPRINT.UNKNOWN;
++}
++
 +exports.isMarkerValid = isMarkerValid;
  exports.getMarkerLabel = getMarkerLabel;
  exports.getMarkerClassName = getMarkerClassName;
@@ -170,6 +180,7 @@ index 3453592..a0a4a60 100644
  exports.DOM = DOM;
  exports.CollapseFunctions = CollapseFunctions;
  exports.Formatters = Formatters;
++exports.getBlueprintFor = getBlueprintFor;
 diff --git a/browser/devtools/performance/modules/logic/recording-utils.js b/browser/devtools/performance/modules/logic/recording-utils.js
 index af7f7fc..5569d99 100644
 --- a/browser/devtools/performance/modules/logic/recording-utils.js
@@ -255,10 +266,10 @@ index af7f7fc..5569d99 100644
  exports.UniqueStrings = UniqueStrings;
  exports.UniqueStacks = UniqueStacks;
 diff --git a/browser/devtools/performance/modules/logic/waterfall-utils.js b/browser/devtools/performance/modules/logic/waterfall-utils.js
-index d2228fb..e03dc06 100644
+index d2228fb..b1bf06f 100644
 --- a/browser/devtools/performance/modules/logic/waterfall-utils.js
 +++ b/browser/devtools/performance/modules/logic/waterfall-utils.js
-@@ -2,37 +2,36 @@
+@@ -2,37 +2,35 @@
   * License, v. 2.0. If a copy of the MPL was not distributed with this file,
   * You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
@@ -268,17 +279,18 @@ index d2228fb..e03dc06 100644
   */
  
 -loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+-  "devtools/performance/markers", true);
 +loader.lazyRequireGetter(this, "getBlueprintFor",
-   "devtools/performance/markers", true);
++  "devtools/performance/marker-utils", true);
  
  /**
   * Collapses markers into a tree-like structure.
   * @param object markerNode
   * @param array markersList
 - * @param ?object blueprint
-+ * @param object blueprint
   */
- function collapseMarkersIntoNode({ markerNode, markersList, blueprint }) {
+-function collapseMarkersIntoNode({ markerNode, markersList, blueprint }) {
++function collapseMarkersIntoNode({ markerNode, markersList }) {
    let { getCurrentParentNode, collapseMarker, addParentNode, popParentNode } = createParentNodeFactory(markerNode);
 -  blueprint = blueprint || TIMELINE_BLUEPRINT;
  
@@ -288,9 +300,9 @@ index d2228fb..e03dc06 100644
      let parentNode = getCurrentParentNode();
 -    let def = blueprint[curr.name];
 -    let collapse = def.collapseFunc || (() => null);
-+    let definition = getBlueprintFor(curr, blueprint);
++    let blueprint = getBlueprintFor(curr);
 +
-+    let collapse = definition.collapseFunc || (() => null);
++    let collapse = blueprint.collapseFunc || (() => null);
      let peek = distance => markersList[i + distance];
 -    let foundParent = false;
  
@@ -302,7 +314,7 @@ index d2228fb..e03dc06 100644
        if (typeof toParent === "object") {
          addParentNode(toParent);
 diff --git a/browser/devtools/performance/modules/markers.js b/browser/devtools/performance/modules/markers.js
-index 6f9a4a3..14c6569 100644
+index 984eb4a..177a4d4 100644
 --- a/browser/devtools/performance/modules/markers.js
 +++ b/browser/devtools/performance/modules/markers.js
 @@ -50,16 +50,26 @@ const { Formatters, CollapseFunctions: collapse } = require("devtools/performanc
@@ -332,10 +344,10 @@ index 6f9a4a3..14c6569 100644
      label: L10N.getStr("timeline.label.styles2"),
      fields: Formatters.StylesFields,
    },
-@@ -112,36 +122,49 @@ const TIMELINE_BLUEPRINT = {
-       { property: "causeName", label: "Reason:" },
-       { property: "nonincrementalReason", label: "Non-incremental Reason:" }
-     ],
+@@ -126,17 +136,17 @@ const TIMELINE_BLUEPRINT = {
+     collapseFunc: either(collapse.parent, collapse.child),
+     label: "Cycle Collection",
+     fields: Formatters.CycleCollectionFields,
    },
  
    /* Group 2 - User Controlled */
@@ -351,54 +363,44 @@ index 6f9a4a3..14c6569 100644
    },
    "TimeStamp": {
      group: 2,
--    colorName: "graphs-blue",
-+    colorName: "graphs-yellow",
-     collapseFunc: collapse.child,
-     label: sublabelForProperty(L10N.getStr("timeline.label.timestamp"), "causeName"),
-     fields: [{
-       property: "causeName",
-       label: "Label:"
-     }],
-   },
- };
- 
- /**
-+ * Takes a marker and returns the definition for that marker type,
-+ * falling back to the UNKNOWN definition if undefined. Takes an optional
-+ * second argument if using another blueprint, rather than TIMELINE_BLUEPRINT.
-+ *
-+ * @param {Marker} marker
-+ * @param {?object} blueprint
-+ * @return {object}
-+ */
-+function getBlueprintFor (marker, blueprint=TIMELINE_BLUEPRINT) {
-+  return blueprint[marker.name] || blueprint.UNKNOWN;
-+}
-+
-+/**
-  * Helper for creating a function that returns the first defined result from
-  * a list of functions passed in as params, in order.
-  * @param ...function fun
-  * @return any
-  */
- function either(...fun) {
-   return function() {
-     for (let f of fun) {
-@@ -158,8 +181,9 @@ function either(...fun) {
-  * or just the main label if it does not.
-  */
- function sublabelForProperty (mainLabel, prop) {
-   return (marker={}) => marker[prop] ? `${mainLabel} (${marker[prop]})` : mainLabel;
- }
- 
- // Exported symbols.
- exports.TIMELINE_BLUEPRINT = TIMELINE_BLUEPRINT;
-+exports.getBlueprintFor = getBlueprintFor;
 diff --git a/browser/devtools/performance/modules/widgets/graphs.js b/browser/devtools/performance/modules/widgets/graphs.js
-index 468ab8d..d26986e 100644
+index 468ab8d..bb5b50b 100644
 --- a/browser/devtools/performance/modules/widgets/graphs.js
 +++ b/browser/devtools/performance/modules/widgets/graphs.js
-@@ -170,24 +170,26 @@ const GRAPH_DEFINITIONS = {
+@@ -130,18 +130,18 @@ function MemoryGraph(parent) {
+ MemoryGraph.prototype = Heritage.extend(PerformanceGraph.prototype, {
+   mainColor: MEMORY_GRAPH_COLOR_NAME,
+   setPerformanceData: function ({ duration, memory }) {
+     this.dataDuration = duration;
+     return this.setData(memory);
+   }
+ });
+ 
+-function TimelineGraph(parent, blueprint) {
+-  MarkersOverview.call(this, parent, blueprint);
++function TimelineGraph(parent, filter) {
++  MarkersOverview.call(this, parent, filter);
+ }
+ 
+ TimelineGraph.prototype = Heritage.extend(MarkersOverview.prototype, {
+   headerHeight: MARKERS_GRAPH_HEADER_HEIGHT,
+   rowHeight: MARKERS_GRAPH_ROW_HEIGHT,
+   groupPadding: MARKERS_GROUP_VERTICAL_PADDING,
+   setPerformanceData: MarkersOverview.prototype.setData
+ });
+@@ -158,36 +158,35 @@ const GRAPH_DEFINITIONS = {
+   },
+   framerate: {
+     constructor: FramerateGraph,
+     selector: "#time-framerate",
+   },
+   timeline: {
+     constructor: TimelineGraph,
+     selector: "#markers-overview",
+-    needsBlueprints: true,
+     primaryLink: true
+   }
+ };
  
  /**
   * A controller for orchestrating the performance's tool overview graphs. Constructs,
@@ -406,17 +408,17 @@ index 468ab8d..d26986e 100644
   *
   * @param {object} definition
   * @param {DOMElement} root
-  * @param {function} getBlueprint
+- * @param {function} getBlueprint
 + * @param {function} getFilter
   * @param {function} getTheme
   */
 -function GraphsController ({ definition, root, getBlueprint, getTheme }) {
-+function GraphsController ({ definition, root, getFilter, getBlueprint, getTheme }) {
++function GraphsController ({ definition, root, getFilter, getTheme }) {
    this._graphs = {};
    this._enabled = new Set();
    this._definition = definition || GRAPH_DEFINITIONS;
    this._root = root;
-   this._getBlueprint = getBlueprint;
+-  this._getBlueprint = getBlueprint;
 +  this._getFilter = getFilter;
    this._getTheme = getTheme;
    this._primaryLink = Object.keys(this._definition).filter(name => this._definition[name].primaryLink)[0];
@@ -426,7 +428,8 @@ index 468ab8d..d26986e 100644
    this._onSelecting = this._onSelecting.bind(this);
  }
  
-@@ -365,17 +367,18 @@ GraphsController.prototype = {
+@@ -364,18 +363,18 @@ GraphsController.prototype = {
+   }),
  
    /**
     * Creates the graph `graphName` and initializes it.
@@ -434,10 +437,10 @@ index 468ab8d..d26986e 100644
    _construct: Task.async(function *(graphName) {
      let def = this._definition[graphName];
      let el = this.$(def.selector);
-     let blueprint = def.needsBlueprints ? this._getBlueprint() : void 0;
+-    let blueprint = def.needsBlueprints ? this._getBlueprint() : void 0;
 -    let graph = this._graphs[graphName] = new def.constructor(el, blueprint);
-+    let filter = def.needsBlueprints ? this._getFilter() : void 0;
-+    let graph = this._graphs[graphName] = new def.constructor(el, blueprint, filter);
++    let filter = this._getFilter();
++    let graph = this._graphs[graphName] = new def.constructor(el, filter);
      graph.graphName = graphName;
  
      yield graph.ready();
@@ -470,10 +473,10 @@ index 5772ace..12780ea 100644
   * @param nsIDOMNode parent
   *        The parent node holding the view.
 diff --git a/browser/devtools/performance/modules/widgets/marker-view.js b/browser/devtools/performance/modules/widgets/marker-view.js
-index 7a33eec..c5b526a 100644
+index 7a33eec..4f8d105 100644
 --- a/browser/devtools/performance/modules/widgets/marker-view.js
 +++ b/browser/devtools/performance/modules/widgets/marker-view.js
-@@ -6,17 +6,17 @@
+@@ -6,21 +6,20 @@
  /**
   * This file contains the "marker" view, essentially a detailed list
   * of all the markers in the timeline data.
@@ -483,44 +486,52 @@ index 7a33eec..c5b526a 100644
  const { Heritage } = require("resource:///modules/devtools/ViewHelpers.jsm");
  const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeItem.jsm");
 -const { TIMELINE_BLUEPRINT: ORIGINAL_BP } = require("devtools/performance/markers");
-+const { getBlueprintFor } = require("devtools/performance/markers");
- 
+-
  loader.lazyRequireGetter(this, "MarkerUtils",
    "devtools/performance/marker-utils");
  
++
  const HTML_NS = "http://www.w3.org/1999/xhtml";
  
  const LEVEL_INDENT = 10; // px
  const ARROW_NODE_OFFSET = -15; // px
-@@ -67,16 +67,27 @@ MarkerView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
-   set blueprint(blueprint) {
-     this.root._blueprint = blueprint;
-   },
-   get blueprint() {
-     return this.root._blueprint;
+ const WATERFALL_MARKER_SIDEBAR_WIDTH = 175; // px
+ const WATERFALL_MARKER_TIMEBAR_WIDTH_MIN = 5; // px
+ 
+ /**
+@@ -55,25 +54,24 @@ MarkerView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+    * Calculates and stores the available width for the waterfall.
+    * This should be invoked every time the container node is resized.
+    */
+   recalculateBounds: function() {
+     this.root._waterfallWidth = this.bounds.width - WATERFALL_MARKER_SIDEBAR_WIDTH;
    },
  
    /**
+-   * Sets a list of names and colors used to paint markers.
+-   * @see TIMELINE_BLUEPRINT in timeline/widgets/global.js
+-   * @param object blueprint
 +   * Sets a list of marker types to be filtered out of this view.
 +   * @param Array<String> filter
-+   */
+    */
+-  set blueprint(blueprint) {
+-    this.root._blueprint = blueprint;
 +  set filter(filter) {
 +    this.root._filter = filter;
-+  },
+   },
+-  get blueprint() {
+-    return this.root._blueprint;
 +  get filter() {
 +    return this.root._filter;
-+  },
-+
-+  /**
+   },
+ 
+   /**
     * Sets the { startTime, endTime }, in milliseconds.
     * @param object interval
     */
    set interval(interval) {
      this.root._interval = interval;
-   },
-   get interval() {
-     return this.root._interval;
-@@ -134,35 +145,32 @@ MarkerView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+@@ -134,35 +132,32 @@ MarkerView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
     * Populates this node in the waterfall tree with the corresponding "markers".
     * @param array:AbstractTreeItem children
     */
@@ -544,7 +555,7 @@ index 7a33eec..c5b526a 100644
 -          console.warn(`Marker not found in timeline blueprint: ${marker.name}.`);
 -        }
 +      // Skip filtered markers
-+      if (!MarkerUtils.isMarkerValid(marker, this.blueprint, this.filter)) {
++      if (!MarkerUtils.isMarkerValid(marker, this.filter)) {
          continue;
        }
 +
@@ -560,7 +571,7 @@ index 7a33eec..c5b526a 100644
        }));
      }
    },
-@@ -170,25 +178,22 @@ MarkerView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+@@ -170,25 +165,22 @@ MarkerView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
    /**
     * Builds all the nodes representing a marker in the waterfall.
     * @param nsIDOMNode document
@@ -570,7 +581,7 @@ index 7a33eec..c5b526a 100644
    _buildMarkerCells: function(doc, targetNode, arrowNode) {
      let marker = this.marker;
 -    let style = this.root._blueprint[marker.name];
-+    let blueprint = getBlueprintFor(marker, this.blueprint);
++    let blueprint = MarkerUtils.getBlueprintFor(marker);
      let startTime = this.root._interval.startTime;
      let endTime = this.root._interval.endTime;
  
@@ -590,10 +601,10 @@ index 7a33eec..c5b526a 100644
      let hasDescendants = submarkers && submarkers.length > 0;
      if (hasDescendants) {
 diff --git a/browser/devtools/performance/modules/widgets/markers-overview.js b/browser/devtools/performance/modules/widgets/markers-overview.js
-index 3d75a55..36d1f28 100644
+index 3d75a55..53bfbf2 100644
 --- a/browser/devtools/performance/modules/widgets/markers-overview.js
 +++ b/browser/devtools/performance/modules/widgets/markers-overview.js
-@@ -16,74 +16,92 @@ const { Heritage } = require("resource:///modules/devtools/ViewHelpers.jsm");
+@@ -16,74 +16,91 @@ const { Heritage } = require("resource:///modules/devtools/ViewHelpers.jsm");
  loader.lazyRequireGetter(this, "colorUtils",
    "devtools/css-color", true);
  loader.lazyRequireGetter(this, "getColor",
@@ -604,6 +615,8 @@ index 3d75a55..36d1f28 100644
    "devtools/performance/waterfall-ticks", true);
 +loader.lazyRequireGetter(this, "MarkerUtils",
 +  "devtools/performance/marker-utils");
++loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
++  "devtools/performance/markers", true);
  
  const OVERVIEW_HEADER_HEIGHT = 14; // px
  const OVERVIEW_ROW_HEIGHT = 11; // px
@@ -627,17 +640,16 @@ index 3d75a55..36d1f28 100644
   *
   * @param nsIDOMNode parent
   *        The parent node holding the overview.
-  * @param Object blueprint
-  *        List of names and colors defining markers.
+- * @param Object blueprint
+- *        List of names and colors defining markers.
 + * @param Array<String> filter
 + *        List of names of marker types that should not be shown.
   */
 -function MarkersOverview(parent, blueprint, ...args) {
-+function MarkersOverview(parent, blueprint, filter=[], ...args) {
++function MarkersOverview(parent, filter=[], ...args) {
    AbstractCanvasGraph.apply(this, [parent, "markers-overview", ...args]);
    this.setTheme();
 -  this.setBlueprint(blueprint);
-+  this._blueprint = blueprint;
 +  this.setFilter(filter);
  }
  
@@ -673,12 +685,12 @@ index 3d75a55..36d1f28 100644
 -      this._lastGroup = Math.max(this._lastGroup, blueprint[type].group || 0);
 +    let observedGroups = new Set();
 +
-+    for (let type of Object.keys(this._blueprint)) {
++    for (let type in TIMELINE_BLUEPRINT) {
 +      if (filter.indexOf(type) !== -1) {
 +        continue;
 +      }
-+      this._paintBatches.set(type, { definition: this._blueprint[type], batch: [] });
-+      observedGroups.add(this._blueprint[type].group);
++      this._paintBatches.set(type, { definition: TIMELINE_BLUEPRINT[type], batch: [] });
++      observedGroups.add(TIMELINE_BLUEPRINT[type].group);
 +    }
 +
 +    // Take our set of observed groups and order them and map
@@ -698,7 +710,7 @@ index 3d75a55..36d1f28 100644
    clearView: function() {
      this.selectionEnabled = false;
      this.dropSelection();
-@@ -98,27 +116,30 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -98,27 +115,29 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
      let { markers, duration } = this._data;
  
      let { canvas, ctx } = this._getNamedCanvas("markers-overview-data");
@@ -712,10 +724,9 @@ index 3d75a55..36d1f28 100644
 -      let markerType = this._paintBatches.get(marker.name);
 -      if (markerType) {
 -        markerType.batch.push(marker);
-+
 +      // Again skip over markers that we're filtering -- we don't want them
 +      // to be labeled as "Unknown"
-+      if (!MarkerUtils.isMarkerValid(marker, this._blueprint, this._filter)) {
++      if (!MarkerUtils.isMarkerValid(marker, this._filter)) {
 +        continue;
        }
 +
@@ -734,7 +745,7 @@ index 3d75a55..36d1f28 100644
      // Draw the header and overview background.
  
      ctx.fillStyle = this.headerBackgroundColor;
-@@ -127,17 +148,17 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -127,17 +146,17 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
      ctx.fillStyle = this.backgroundColor;
      ctx.fillRect(0, headerHeight, canvasWidth, canvasHeight);
  
@@ -753,7 +764,7 @@ index 3d75a55..36d1f28 100644
  
      // Draw the timeline header ticks.
  
-@@ -167,21 +188,22 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+@@ -167,21 +186,22 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
        ctx.moveTo(lineLeft, 0);
        ctx.lineTo(lineLeft, canvasHeight);
      }
@@ -780,42 +791,41 @@ index 3d75a55..36d1f28 100644
          ctx.rect(left, top, width, height);
        }
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index 37521ee..9fe7a0b 100644
+index f43f9df..4fbc1e7 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
-@@ -400,19 +400,24 @@ let PerformanceController = {
+@@ -394,26 +394,16 @@ let PerformanceController = {
+       if (!model.isConsole() && !model.isImported()) {
+         return this._recordings[i];
+       }
+     }
      return null;
    },
  
    /**
-    * Gets the current timeline blueprint without the hidden markers.
-    * @return object
-    */
-   getTimelineBlueprint: function() {
+-   * Gets the current timeline blueprint without the hidden markers.
+-   * @return object
+-   */
+-  getTimelineBlueprint: function() {
 -    let blueprint = TIMELINE_BLUEPRINT;
 -    let hiddenMarkers = this.getPref("hidden-markers");
 -    return RecordingUtils.getFilteredBlueprint({ blueprint, hiddenMarkers });
-+    return TIMELINE_BLUEPRINT;
-+  },
-+
-+  /**
-+   * Returns the currently hidden marker types as an array.
-+   */
-+  getHiddenMarkerTypes: function () {
-+    return this.getPref("hidden-markers");
-   },
- 
-   /**
+-  },
+-
+-  /**
     * Fired from RecordingsView, we listen on the PerformanceController so we can
     * set it here and re-emit on the controller, where all views can listen.
     */
    _onRecordingSelectFromView: function (_, recording) {
      this.setCurrentRecording(recording);
+   },
+ 
+   /**
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 7c21b50..8b2fa8e 100644
+index b296a57..825586d 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -7,17 +7,16 @@ support-files =
+@@ -8,17 +8,16 @@ support-files =
    doc_markers.html
    doc_simple-test.html
    head.js
@@ -825,6 +835,7 @@ index 7c21b50..8b2fa8e 100644
  
  [browser_aaa-run-first-leaktest.js]
 -[browser_marker-utils.js]
+ [browser_markers-cycle-collection.js]
  [browser_markers-gc.js]
  [browser_markers-parse-html.js]
  [browser_markers-styles.js]
@@ -832,8 +843,7 @@ index 7c21b50..8b2fa8e 100644
  [browser_perf-allocations-to-samples.js]
  [browser_perf-categories-js-calltree.js]
  [browser_perf-compatibility-01.js]
- [browser_perf-compatibility-02.js]
-@@ -129,15 +128,14 @@ support-files =
+@@ -132,15 +131,14 @@ support-files =
  [browser_profiler_tree-view-03.js]
  [browser_profiler_tree-view-04.js]
  [browser_profiler_tree-view-05.js]
@@ -1085,7 +1095,7 @@ index 7f61a96..e09efb1 100644
  
  function waitForOverviewAndCommand(overview, item) {
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 1b2993f..533679b 100644
+index 9e39e58..7f2eb05 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
 @@ -56,16 +56,17 @@ let DEFAULT_PREFS = [
@@ -1168,10 +1178,10 @@ index 0000000..bd93e30
 +});
 diff --git a/browser/devtools/performance/test/unit/test_marker-utils.js b/browser/devtools/performance/test/unit/test_marker-utils.js
 new file mode 100644
-index 0000000..74e193b
+index 0000000..f9e3d1e
 --- /dev/null
 +++ b/browser/devtools/performance/test/unit/test_marker-utils.js
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,88 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -1184,7 +1194,7 @@ index 0000000..74e193b
 +}
 +
 +add_task(function () {
-+  let { TIMELINE_BLUEPRINT, getBlueprintFor } = devtools.require("devtools/performance/markers");
++  let { TIMELINE_BLUEPRINT } = devtools.require("devtools/performance/markers");
 +  let Utils = devtools.require("devtools/performance/marker-utils");
 +
 +  Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
@@ -1255,14 +1265,10 @@ index 0000000..74e193b
 +    }
 +  };
 +
-+  equal(getBlueprintFor({ name: "Reflow" }).label, "Layout",
-+    "getBlueprintFor() should return marker def for passed in marker.");
-+  equal(getBlueprintFor({ name: "Not sure!" }).label(), "Unknown",
-+    "getBlueprintFor() should return a default marker def if the marker is undefined.");
-+  equal(getBlueprintFor({ name: "custom" }, customBlueprint).label, "MyCustom",
-+    "getBlueprintFor() should return a marker def if also passed in a non-default blueprint");
-+  equal(getBlueprintFor({ name: "CHAOS!" }, customBlueprint).label, "MyDefault",
-+    "getBlueprintFor() should return a default marker def if also passed in a non-default blueprint");
++  equal(Utils.getBlueprintFor({ name: "Reflow" }).label, "Layout",
++    "Utils.getBlueprintFor() should return marker def for passed in marker.");
++  equal(Utils.getBlueprintFor({ name: "Not sure!" }).label(), "Unknown",
++    "Utils.getBlueprintFor() should return a default marker def if the marker is undefined.");
 +});
 diff --git a/browser/devtools/performance/test/unit/xpcshell.ini b/browser/devtools/performance/test/unit/xpcshell.ini
 index b84740d..acefb99 100644
@@ -1291,10 +1297,10 @@ index b84740d..acefb99 100644
  [test_tree-model-07.js]
  [test_tree-model-08.js]
 diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
-index aeb322a..f274d43 100644
+index eb26fc4..0896b7b 100644
 --- a/browser/devtools/performance/views/details-waterfall.js
 +++ b/browser/devtools/performance/views/details-waterfall.js
-@@ -27,16 +27,18 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+@@ -27,16 +27,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
    initialize: function () {
      DetailsSubview.initialize.call(this);
  
@@ -1303,8 +1309,7 @@ index aeb322a..f274d43 100644
      this._onMarkerSelected = this._onMarkerSelected.bind(this);
      this._onResize = this._onResize.bind(this);
      this._onViewSource = this._onViewSource.bind(this);
-+    this._blueprint = PerformanceController.getTimelineBlueprint();
-+    this._hiddenMarkers = PerformanceController.getHiddenMarkerTypes();
++    this._hiddenMarkers = PerformanceController.getPref("hidden-markers");
  
      this.headerContainer = $("#waterfall-header");
      this.breakdownContainer = $("#waterfall-breakdown");
@@ -1313,7 +1318,7 @@ index aeb322a..f274d43 100644
  
      this.details = new MarkerDetails($("#waterfall-details"), $("#waterfall-view > splitter"));
      this.details.hidden = true;
-@@ -106,18 +108,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+@@ -106,18 +107,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
        this.render(OverviewView.getTimeInterval());
      });
    },
@@ -1324,7 +1329,7 @@ index aeb322a..f274d43 100644
    _onObservedPrefChange: function(_, prefName) {
 -    let blueprint = PerformanceController.getTimelineBlueprint();
 -    this._markersRoot.blueprint = blueprint;
-+    this._hiddenMarkers = PerformanceController.getHiddenMarkerTypes();
++    this._hiddenMarkers = PerformanceController.getPref("hidden-markers");
    },
  
    /**
@@ -1333,7 +1338,7 @@ index aeb322a..f274d43 100644
    _onViewSource: function (_, file, line) {
      gToolbox.viewSourceInDebugger(file, line);
    },
-@@ -131,17 +132,18 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+@@ -131,17 +131,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
      if (cached) {
        return cached;
      }
@@ -1344,7 +1349,6 @@ index aeb322a..f274d43 100644
        markerNode: rootMarkerNode,
 -      markersList: markers
 +      markersList: markers,
-+      blueprint: this._blueprint
      });
  
      this._cache.set(markers, rootMarkerNode);
@@ -1353,7 +1357,7 @@ index aeb322a..f274d43 100644
  
    /**
     * Renders the waterfall tree.
-@@ -155,18 +157,18 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+@@ -155,18 +155,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
        autoExpandDepth: 0
      });
  
@@ -1365,7 +1369,6 @@ index aeb322a..f274d43 100644
 -    let blueprint = PerformanceController.getTimelineBlueprint();
 -    root.blueprint = blueprint;
 +    root.filter = this._hiddenMarkers;
-+    root.blueprint = this._blueprint;
      root.interval = interval;
      root.on("selected", this._onMarkerSelected);
      root.on("unselected", this._onMarkerSelected);
@@ -1375,10 +1378,11 @@ index aeb322a..f274d43 100644
  
      this.headerContainer.innerHTML = "";
 diff --git a/browser/devtools/performance/views/overview.js b/browser/devtools/performance/views/overview.js
-index e5a7bdb..323c8a2 100644
+index 1f05eaf..5f017f7 100644
 --- a/browser/devtools/performance/views/overview.js
 +++ b/browser/devtools/performance/views/overview.js
-@@ -38,16 +38,17 @@ let OverviewView = {
+@@ -37,17 +37,17 @@ let OverviewView = {
+   OVERVIEW_UPDATE_INTERVAL: OVERVIEW_UPDATE_INTERVAL,
  
    /**
     * Sets up the view with event binding.
@@ -1386,8 +1390,8 @@ index e5a7bdb..323c8a2 100644
    initialize: function () {
      this.graphs = new GraphsController({
        root: $("#overview-pane"),
-       getBlueprint: () => PerformanceController.getTimelineBlueprint(),
-+      getFilter: () => PerformanceController.getHiddenMarkerTypes(),
+-      getBlueprint: () => PerformanceController.getTimelineBlueprint(),
++      getFilter: () => PerformanceController.getPref("hidden-markers"),
        getTheme: () => PerformanceController.getTheme(),
      });
  
@@ -1396,7 +1400,7 @@ index e5a7bdb..323c8a2 100644
        this.disable();
        return;
      }
-@@ -330,18 +331,18 @@ let OverviewView = {
+@@ -326,18 +326,18 @@ let OverviewView = {
     * because those will set values on a recording model, and
     * the graphs will render based on the existence.
     */
@@ -1407,7 +1411,7 @@ index e5a7bdb..323c8a2 100644
          if (graph = yield this.graphs.isAvailable("timeline")) {
 -          let blueprint = PerformanceController.getTimelineBlueprint();
 -          graph.setBlueprint(blueprint);
-+          let filter = PerformanceController.getHiddenMarkerTypes();
++          let filter = PerformanceController.getPref("hidden-markers");
 +          graph.setFilter(filter);
            graph.refresh({ force: true });
          }

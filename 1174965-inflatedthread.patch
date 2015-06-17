@@ -1,0 +1,417 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 16 Jun 2015 09:27:32 -0700
+Subject: [PATCH] Bug 1174965 - inflated thread model
+
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index 1ddaa86..19825d2 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -235,48 +235,51 @@ function getInflatedFrameCache(frameTable) {
+ /**
+  * Get or add an inflated frame to a cache.
+  *
+  * @param object cache
+  * @param number index
+  * @param object frameTable
+  * @param object stringTable
+  * @param object allocationsTable
++ * @param boolean isRoot
+  */
+-function getOrAddInflatedFrame(cache, index, frameTable, stringTable, allocationsTable) {
++function getOrAddInflatedFrame(cache, index, frameTable, stringTable, allocationsTable, isRoot) {
+   let inflatedFrame = cache[index];
+   if (inflatedFrame === null) {
+-    inflatedFrame = cache[index] = new InflatedFrame(index, frameTable, stringTable, allocationsTable);
++    inflatedFrame = cache[index] = new InflatedFrame(index, frameTable, stringTable, allocationsTable, isRoot);
+   }
+   return inflatedFrame;
+ };
+ 
+ /**
+  * An intermediate data structured used to hold inflated frames.
+  *
+  * @param number index
+  * @param object frameTable
+  * @param object stringTable
+  * @param object allocationsTable
++ * @param boolean isRoot
+  */
+-function InflatedFrame(index, frameTable, stringTable, allocationsTable) {
++function InflatedFrame(index, frameTable, stringTable, allocationsTable, isRoot) {
+   const LOCATION_SLOT = frameTable.schema.location;
+   const OPTIMIZATIONS_SLOT = frameTable.schema.optimizations;
+   const LINE_SLOT = frameTable.schema.line;
+   const CATEGORY_SLOT = frameTable.schema.category;
+ 
+   let frame = frameTable.data[index];
+   let category = frame[CATEGORY_SLOT];
+   this.location = stringTable[frame[LOCATION_SLOT]];
+   this.optimizations = frame[OPTIMIZATIONS_SLOT];
+   this.line = frame[LINE_SLOT];
+   this.column = undefined;
+   this.allocations = allocationsTable ? allocationsTable[index] : 0;
+   this.category = category;
+   this.isContent = false;
++  this.isRoot = isRoot;
+ 
+   // Attempt to compute if this frame is a content frame, and if not,
+   // its category.
+   //
+   // Since only C++ stack frames have associated category information,
+   // attempt to generate a useful category, fallback to the one provided
+   // by the profiling data, or fallback to an unknown category.
+   computeIsContentAndCategory(this);
+@@ -287,17 +290,17 @@ function InflatedFrame(index, frameTable, stringTable, allocationsTable) {
+  * frames are always identified by location. Chrome frames are identified by
+  * location if content-only filtering is off. If content-filtering is on, they
+  * are identified by their category.
+  *
+  * @param object options
+  * @return string
+  */
+ InflatedFrame.prototype.getFrameKey = function getFrameKey(options) {
+-  if (this.isContent || !options.contentOnly || options.isRoot) {
++  if (this.isContent || this.isRoot || !options.contentOnly || options.isRoot) {
+     options.isMetaCategoryOut = false;
+     return this.location;
+   }
+ 
+   if (options.isLeaf) {
+     // We only care about leaf platform frames if we are displaying content
+     // only. If no category is present, give the default category of
+     // CATEGORY_OTHER.
+diff --git a/browser/devtools/performance/modules/logic/thread.js b/browser/devtools/performance/modules/logic/thread.js
+new file mode 100644
+index 0000000..a8cbfa8
+--- /dev/null
++++ b/browser/devtools/performance/modules/logic/thread.js
+@@ -0,0 +1,80 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++loader.lazyRequireGetter(this, "FrameUtils",
++  "devtools/performance/frame-utils");
++
++let threadCache = new WeakMap();
++
++function inflateThread (thread) {
++  let cached = threadCache.get(thread);
++  if (cached) {
++    return cached;
++  }
++
++  let inflatedThread = new InflatedThread(thread);
++  threadCache.set(thread, inflatedThread);
++  return inflatedThread;
++}
++
++function InflatedThread (thread) {
++  let { samples, stackTable, frameTable, stringTable, allocationsTable } = thread;
++  let data = this.data = Object.create(null);
++  data.samples = [];
++
++  const SAMPLE_STACK_SLOT = samples.schema.stack;
++  const SAMPLE_TIME_SLOT = samples.schema.time;
++
++  const STACK_PREFIX_SLOT = stackTable.schema.prefix;
++  const STACK_FRAME_SLOT = stackTable.schema.frame;
++
++  const InflatedFrame = FrameUtils.InflatedFrame;
++  const getOrAddInflatedFrame = FrameUtils.getOrAddInflatedFrame;
++
++  let samplesData = samples.data;
++  let stacksData = stackTable.data;
++
++  // Caches
++  let inflatedFrameCache = FrameUtils.getInflatedFrameCache(frameTable);
++
++  // In the profiler data, each frame's stack is referenced by an index
++  // into stackTable.
++  //
++  // Each entry in stackTable is a pair [ prefixIndex, frameIndex ]. The
++  // prefixIndex is itself an index into stackTable, referencing the
++  // prefix of the current stack (that is, the younger frames). In other
++  // words, the stackTable is encoded as a trie of the inverted
++  // callstack. The frameIndex is an index into frameTable, describing the
++  // frame at the current depth.
++  //
++  // This algorithm inflates each frame in the frame table while walking
++  // the stack trie as described above.
++  for (let i = 1; i < samplesData.length; i++) {
++    let sample = samplesData[i];
++    let time = sample[SAMPLE_TIME_SLOT];
++    let stackIndex = sample[SAMPLE_STACK_SLOT];
++    let prevFrameKey;
++    let inflatedSample = data.samples[i] = { time, frames: [] };
++
++    while (stackIndex !== null) {
++      let stackEntry = stacksData[stackIndex];
++      let frameIndex = stackEntry[STACK_FRAME_SLOT];
++
++      // Fetch the stack prefix (i.e. older frames) index
++      stackIndex = stackEntry[STACK_PREFIX_SLOT];
++
++      let inflatedFrame = getOrAddInflatedFrame(inflatedFrameCache, frameIndex, frameTable, stringTable, allocationsTable, stackIndex === null);
++
++      inflatedSample.frames.push(inflatedFrame);
++    }
++  }
++}
++
++InflatedThread.prototype.getData = function () {
++  return this.data;
++};
++
++exports.InflatedThread = InflatedThread;
++exports.inflateThread = inflateThread;
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index 57a7fc2..f2c0e9f 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -8,16 +8,18 @@ const { Cc, Ci, Cu, Cr } = require("chrome");
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "CATEGORY_MAPPINGS",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/performance/jit", true);
+ loader.lazyRequireGetter(this, "FrameUtils",
+   "devtools/performance/frame-utils");
++loader.lazyRequireGetter(this, "inflateThread",
++  "devtools/performance/thread", true);
+ 
+ /**
+  * A call tree for a thread. This is essentially a linkage between all frames
+  * of all samples into a single tree structure, with additional information
+  * on each node, like the time spent (in milliseconds) and samples count.
+  *
+  * @param object thread
+  *        The raw thread object received from the backend. Contains samples,
+@@ -34,24 +36,22 @@ function ThreadNode(thread, options = {}) {
+   if (options.endTime == void 0 || options.startTime == void 0) {
+     throw new Error("ThreadNode requires both `startTime` and `endTime`.");
+   }
+   this.samples = 0;
+   this.youngestFrameSamples = 0;
+   this.calls = [];
+   this.duration = options.endTime - options.startTime;
+ 
+-  let { samples, stackTable, frameTable, stringTable, allocationsTable } = thread;
+-
+   // Nothing to do if there are no samples.
+-  if (samples.data.length === 0) {
++  if (thread.samples.data.length === 0) {
+     return;
+   }
+ 
+-  this._buildInverted(samples, stackTable, frameTable, stringTable, allocationsTable, options);
++  this._buildInverted(thread, options);
+   if (!options.invertTree) {
+     this._uninvert();
+   }
+ }
+ 
+ ThreadNode.prototype = {
+   /**
+    * Build an inverted call tree from profile samples. The format of the
+@@ -74,17 +74,17 @@ ThreadNode.prototype = {
+    *        index.
+    * @param object options
+    *        Additional supported options
+    *          - number startTime
+    *          - number endTime
+    *          - boolean contentOnly [optional]
+    *          - boolean invertTree [optional]
+    */
+-  _buildInverted: function buildInverted(samples, stackTable, frameTable, stringTable, allocationsTable, options) {
++  _buildInverted: function buildInverted(thread, options) {
+     function getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame, isMetaCategory, leafTable) {
+       // Insert the inflated frame into the call tree at the current level.
+       let frameNode;
+ 
+       // Leaf nodes have fan out much greater than non-leaf nodes, thus the
+       // use of a hash table. Otherwise, do linear search.
+       //
+       // Note that this method is very hot, thus the manual looping over
+@@ -106,122 +106,74 @@ ThreadNode.prototype = {
+           leafTable[frameKey] = frameNode;
+         }
+         calls.push(frameNode);
+       }
+ 
+       return frameNode;
+     }
+ 
+-    const SAMPLE_STACK_SLOT = samples.schema.stack;
+-    const SAMPLE_TIME_SLOT = samples.schema.time;
+-
+-    const STACK_PREFIX_SLOT = stackTable.schema.prefix;
+-    const STACK_FRAME_SLOT = stackTable.schema.frame;
+-
+-    const InflatedFrame = FrameUtils.InflatedFrame;
+-    const getOrAddInflatedFrame = FrameUtils.getOrAddInflatedFrame;
+-
+-    let samplesData = samples.data;
+-    let stacksData = stackTable.data;
+-
+-    // Caches.
+-    let inflatedFrameCache = FrameUtils.getInflatedFrameCache(frameTable);
++    let inflatedThread = inflateThread(thread);
++    let { stringTable } = thread;
++    let { samples } = inflatedThread.getData();
+     let leafTable = Object.create(null);
+-
+     let startTime = options.startTime;
+     let endTime = options.endTime;
+     let flattenRecursion = options.flattenRecursion;
+-
+-    // Take the timestamp of the first sample as prevSampleTime. 0 is
+-    // incorrect due to circular buffer wraparound. If wraparound happens,
+-    // then the first sample will have an incorrect, large duration.
+-    let prevSampleTime = samplesData[0][SAMPLE_TIME_SLOT];
++    let skipRoot = options.invertTree;
+ 
+     // Reused options object passed to InflatedFrame.prototype.getFrameKey.
+     let mutableFrameKeyOptions = {
+       contentOnly: options.contentOnly,
+-      isRoot: false,
+       isLeaf: false,
+       isMetaCategoryOut: false
+     };
+ 
+     // Start iteration at the second sample, as we use the first sample to
+     // compute prevSampleTime.
+-    for (let i = 1; i < samplesData.length; i++) {
+-      let sample = samplesData[i];
+-      let sampleTime = sample[SAMPLE_TIME_SLOT];
++    for (let i = 1; i < samples.length; i++) {
++      let sample = samples[i];
++      let { time } = sample;
+ 
+       // A sample's end time is considered to be its time of sampling. Its
+       // start time is the sampling time of the previous sample.
+-      //
+-      // Thus, we compare sampleTime <= start instead of < to filter out
++      // Thus, we compare time <= start instead of < to filter out
+       // samples that end exactly at the start time.
+-      if (!sampleTime || sampleTime <= startTime || sampleTime > endTime) {
+-        prevSampleTime = sampleTime;
++      if (!time || time <= startTime || time > endTime) {
+         continue;
+       }
+ 
+-      let stackIndex = sample[SAMPLE_STACK_SLOT];
+       let calls = this.calls;
+       let prevCalls = this.calls;
+       let prevFrameKey;
+       let isLeaf = mutableFrameKeyOptions.isLeaf = true;
+-      let skipRoot = options.invertTree;
+ 
+-      // Inflate the stack and build the FrameNode call tree directly.
+-      //
+-      // In the profiler data, each frame's stack is referenced by an index
+-      // into stackTable.
+-      //
+-      // Each entry in stackTable is a pair [ prefixIndex, frameIndex ]. The
+-      // prefixIndex is itself an index into stackTable, referencing the
+-      // prefix of the current stack (that is, the younger frames). In other
+-      // words, the stackTable is encoded as a trie of the inverted
+-      // callstack. The frameIndex is an index into frameTable, describing the
+-      // frame at the current depth.
+-      //
+-      // This algorithm inflates each frame in the frame table while walking
+-      // the stack trie as described above.
+-      //
++      // Iterate over the inflated samples and frames and create
++      // FrameNodes out of them.
+       // The frame key is then computed from the inflated frame /and/ the
+       // current depth in the FrameNode call tree.  That is, the frame key is
+       // not wholly determinable from just the inflated frame.
+       //
+       // For content frames, the frame key is just its location. For chrome
+       // frames, the key may be a metacategory or its location, depending on
+       // rendering options and its position in the FrameNode call tree.
+       //
+       // The frame key is then used to build up the inverted FrameNode call
+       // tree.
+-      //
+-      // Note that various filtering functions, such as filtering for content
+-      // frames or flattening recursion, are inlined into the stack inflation
+-      // loop. This is important for performance as it avoids intermediate
+       // structures and multiple passes.
+-      while (stackIndex !== null) {
+-        let stackEntry = stacksData[stackIndex];
+-        let frameIndex = stackEntry[STACK_FRAME_SLOT];
+-
+-        // Fetch the stack prefix (i.e. older frames) index.
+-        stackIndex = stackEntry[STACK_PREFIX_SLOT];
++      for (let j = 0; j < sample.frames.length; j++) {
++        let inflatedFrame = sample.frames[j];
+ 
+         // Do not include the (root) node in this sample, as the costs of each frame
+         // will make it clear to differentiate (root)->B vs (root)->A->B
+         // when a tree is inverted, a revert of bug 1147604
+-        if (stackIndex === null && skipRoot) {
++        if (skipRoot && inflatedFrame.isRoot) {
+           break;
+         }
+ 
+-        // Inflate the frame.
+-        let inflatedFrame = getOrAddInflatedFrame(inflatedFrameCache, frameIndex, frameTable,
+-                                                  stringTable, allocationsTable);
+-
+-        // Compute the frame key.
+-        mutableFrameKeyOptions.isRoot = stackIndex === null;
+         let frameKey = inflatedFrame.getFrameKey(mutableFrameKeyOptions);
+ 
+         // An empty frame key means this frame should be skipped.
+         if (frameKey === "") {
+           continue;
+         }
+ 
+         // If we shouldn't flatten the current frame into the previous one, advance a
+@@ -231,16 +183,17 @@ ThreadNode.prototype = {
+         }
+ 
+         let frameNode = getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame,
+                                           mutableFrameKeyOptions.isMetaCategoryOut,
+                                           leafTable);
+         if (isLeaf) {
+           frameNode.youngestFrameSamples++;
+         }
++
+         frameNode.samples++;
+         frameNode._addOptimizations(inflatedFrame.optimizations, stringTable);
+ 
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
+       }
+ 
+diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
+index bffb374..3318b72 100644
+--- a/browser/devtools/performance/moz.build
++++ b/browser/devtools/performance/moz.build
+@@ -9,16 +9,17 @@ EXTRA_JS_MODULES.devtools.performance += [
+     'modules/logic/compatibility.js',
+     'modules/logic/frame-utils.js',
+     'modules/logic/front.js',
+     'modules/logic/io.js',
+     'modules/logic/jit.js',
+     'modules/logic/marker-utils.js',
+     'modules/logic/recording-model.js',
+     'modules/logic/recording-utils.js',
++    'modules/logic/thread.js',
+     'modules/logic/tree-model.js',
+     'modules/logic/waterfall-utils.js',
+     'modules/markers.js',
+     'modules/widgets/graphs.js',
+     'modules/widgets/marker-details.js',
+     'modules/widgets/marker-view.js',
+     'modules/widgets/markers-overview.js',
+     'modules/widgets/tree-view.js',
+-- 
+2.2.1
+

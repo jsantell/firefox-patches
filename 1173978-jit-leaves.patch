@@ -1,0 +1,545 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 11 Jun 2015 16:04:26 -0700
+Subject: Bug 1173978 - JIT optimizations should only be stored for youngest frames. r=shu
+
+diff --git a/browser/devtools/performance/modules/logic/jit.js b/browser/devtools/performance/modules/logic/jit.js
+index 6ddc28a..8a5578a 100644
+--- a/browser/devtools/performance/modules/logic/jit.js
++++ b/browser/devtools/performance/modules/logic/jit.js
+@@ -206,16 +206,29 @@ const JITOptimizations = function (rawSites, stringTable) {
+       column: data.column
+     };
+   }
+ 
+   this.optimizationSites = sites.sort((a, b) => b.samples - a.samples);;
+ };
+ 
+ /**
++ * Make JITOptimizations iterable.
++ */
++JITOptimizations.prototype = {
++  [Symbol.iterator]: function *() {
++    yield* this.optimizationSites;
++  },
++
++  get length() {
++    return this.optimizationSites.length;
++  }
++};
++
++/**
+  * Takes an "outcome" string from an OptimizationAttempt and returns
+  * a boolean indicating whether or not its a successful outcome.
+  *
+  * @return {boolean}
+  */
+ 
+ OptimizationSite.isSuccessfulOutcome = JITOptimizations.isSuccessfulOutcome = function (outcome) {
+   return !!~SUCCESSFUL_OUTCOMES.indexOf(outcome);
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index 57a7fc2..10f15ea 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -230,19 +230,19 @@ ThreadNode.prototype = {
+           calls = prevCalls;
+         }
+ 
+         let frameNode = getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame,
+                                           mutableFrameKeyOptions.isMetaCategoryOut,
+                                           leafTable);
+         if (isLeaf) {
+           frameNode.youngestFrameSamples++;
++          frameNode._addOptimizations(inflatedFrame.optimizations, stringTable);
+         }
+         frameNode.samples++;
+-        frameNode._addOptimizations(inflatedFrame.optimizations, stringTable);
+ 
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
+       }
+ 
+       this.samples++;
+     }
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-01.js b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+index f2ecb1b..c6ede9d 100644
+--- a/browser/devtools/performance/test/browser_perf-jit-view-01.js
++++ b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+@@ -26,22 +26,24 @@ function* spawnTest() {
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   yield DetailsView.selectView("js-calltree");
+ 
+   yield injectAndRenderProfilerData();
+ 
+-  // gRawSite1 and gRawSite2 are both optimizations on A, so they'll have
++  // A is never a leaf, so it's optimizations should not be shown.
++  yield checkFrame(1);
++
++  // gRawSite2 and gRawSite3 are both optimizations on B, so they'll have
+   // indices in descending order of # of samples.
+-  yield checkFrame(1, [{ i: 0, opt: gRawSite1 }, { i: 1, opt: gRawSite2 }]);
++  yield checkFrame(2, [{ i: 0, opt: gRawSite2 }, { i: 1, opt: gRawSite3 }]);
+ 
+-  // gRawSite3 is the only optimization on B, so it'll have index 0.
+-  yield checkFrame(2, [{ i: 0, opt: gRawSite3 }]);
++  // Leaf node (C) with no optimizations should not display any opts.
+   yield checkFrame(3);
+ 
+   let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
+   let reset = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RESET);
+   RecordingsView.selectedIndex = 0;
+   yield Promise.all([select, reset]);
+   ok(true, "JITOptimizations view correctly reset when switching recordings.");
+ 
+@@ -109,61 +111,61 @@ function* spawnTest() {
+ 
+       for (let j = 0; j < ionTypes.length; j++) {
+         ok($(`.tree-widget-container li[data-id='["${i}","${i}-types","${i}-types-${j}"]']`),
+           "found an ion type row");
+       }
+ 
+       // The second and third optimization should display optimization failures.
+       let warningIcon = $(`.tree-widget-container li[data-id='["${i}"]'] .opt-icon[severity=warning]`);
+-      if (opt === gRawSite2 || opt === gRawSite3) {
++      if (opt === gRawSite3 || opt === gRawSite1) {
+         ok(warningIcon, "did find a warning icon for all strategies failing.");
+       } else {
+         ok(!warningIcon, "did not find a warning icon for no successful strategies");
+       }
+     }
+   }
+ }
+ 
+ let gUniqueStacks = new RecordingUtils.UniqueStacks();
+ 
+ function uniqStr(s) {
+   return gUniqueStacks.getOrAddStringIndex(s);
+ }
+ 
+ // Since deflateThread doesn't handle deflating optimization info, use
+-// placeholder names A_O1, B_O3, and A_O2, which will be used to manually
++// placeholder names A_O1, B_O2, and B_O3, which will be used to manually
+ // splice deduped opts into the profile.
+ let gThread = RecordingUtils.deflateThread({
+   samples: [{
+     time: 0,
+     frames: [
+       { location: "(root)" }
+     ]
+   }, {
+     time: 5,
+     frames: [
+       { location: "(root)" },
+       { location: "A_O1" },
+-      { location: "B_O3" },
++      { location: "B_O2" },
+       { location: "C (http://foo/bar/baz:56)" }
+     ]
+   }, {
+     time: 5 + 1,
+     frames: [
+       { location: "(root)" },
+       { location: "A (http://foo/bar/baz:12)" },
+-      { location: "B (http://foo/bar/boo:34)" },
++      { location: "B_O2" },
+     ]
+   }, {
+     time: 5 + 1 + 2,
+     frames: [
+       { location: "(root)" },
+-      { location: "A_O2" },
+-      { location: "B (http://foo/bar/boo:34)" },
++      { location: "A_O1" },
++      { location: "B_O3" },
+     ]
+   }, {
+     time: 5 + 1 + 2 + 7,
+     frames: [
+       { location: "(root)" },
+       { location: "A_O1" },
+       { location: "E (http://foo/bar/baz:90)" },
+       { location: "F (http://foo/bar/baz:99)" }
+@@ -192,43 +194,43 @@ let gRawSite1 = {
+   attempts: {
+     schema: {
+       outcome: 0,
+       strategy: 1
+     },
+     data: [
+       [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+       [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("Inlined"), uniqStr("SomeGetter3")]
++      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
+     ]
+   }
+ };
+ 
+ let gRawSite2 = {
+-  _testFrameInfo: { name: "A", line: "12", file: "@baz" },
+-  line: 12,
++  _testFrameInfo: { name: "B", line: "10", file: "@boo" },
++  line: 40,
+   types: [{
+     mirType: uniqStr("Int32"),
+     site: uniqStr("Receiver")
+   }],
+   attempts: {
+     schema: {
+       outcome: 0,
+       strategy: 1
+     },
+     data: [
+       [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+       [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
++      [uniqStr("Inlined"), uniqStr("SomeGetter3")]
+     ]
+   }
+ };
+ 
+ let gRawSite3 = {
+-  _testFrameInfo: { name: "B", line: "34", file: "@boo" },
++  _testFrameInfo: { name: "B", line: "10", file: "@boo" },
+   line: 34,
+   types: [{
+     mirType: uniqStr("Int32"),
+     site: uniqStr("Receiver")
+   }],
+   attempts: {
+     schema: {
+       outcome: 0,
+@@ -247,18 +249,18 @@ gThread.frameTable.data.forEach((frame) => {
+   const OPTIMIZATIONS_SLOT = gThread.frameTable.schema.optimizations;
+ 
+   let l = gThread.stringTable[frame[LOCATION_SLOT]];
+   switch (l) {
+   case "A_O1":
+     frame[LOCATION_SLOT] = uniqStr("A (http://foo/bar/baz:12)");
+     frame[OPTIMIZATIONS_SLOT] = gRawSite1;
+     break;
+-  case "A_O2":
+-    frame[LOCATION_SLOT] = uniqStr("A (http://foo/bar/baz:12)");
++  case "B_O2":
++    frame[LOCATION_SLOT] = uniqStr("B (http://foo/bar/boo:10)");
+     frame[OPTIMIZATIONS_SLOT] = gRawSite2;
+     break;
+   case "B_O3":
+-    frame[LOCATION_SLOT] = uniqStr("B (http://foo/bar/boo:34)");
++    frame[LOCATION_SLOT] = uniqStr("B (http://foo/bar/boo:10)");
+     frame[OPTIMIZATIONS_SLOT] = gRawSite3;
+     break;
+   }
+ });
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 7f2eb05..7d2e11e 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -7,16 +7,17 @@ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ let { Preferences } = Cu.import("resource://gre/modules/Preferences.jsm", {});
+ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ let { Promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ let { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
+ let { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
++let { console } = devtools.require("resource://gre/modules/devtools/Console.jsm");
+ let { merge } = devtools.require("sdk/util/object");
+ let { generateUUID } = Cc["@mozilla.org/uuid-generator;1"].getService(Ci.nsIUUIDGenerator);
+ let { getPerformanceFront, PerformanceFront } = devtools.require("devtools/performance/front");
+ let TargetFactory = devtools.TargetFactory;
+ 
+ let mm = null;
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
+diff --git a/browser/devtools/performance/test/unit/head.js b/browser/devtools/performance/test/unit/head.js
+index 14d39ee..600feda 100644
+--- a/browser/devtools/performance/test/unit/head.js
++++ b/browser/devtools/performance/test/unit/head.js
+@@ -1,16 +1,17 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ 
+ let { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ let { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
++let { console } = devtools.require("resource://gre/modules/devtools/Console.jsm");
+ const RecordingUtils = devtools.require("devtools/performance/recording-utils");
+ 
+ const PLATFORM_DATA_PREF = "devtools.performance.ui.show-platform-data";
+ 
+ /**
+  * Get a path in a FrameNode call tree.
+  */
+ function getFrameNodePath(root, path) {
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-06.js b/browser/devtools/performance/test/unit/test_tree-model-06.js
+index 74c9ebd..035d09c 100644
+--- a/browser/devtools/performance/test/unit/test_tree-model-06.js
++++ b/browser/devtools/performance/test/unit/test_tree-model-06.js
+@@ -1,77 +1,113 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that when constructing FrameNodes, if optimization data is available,
+- * the FrameNodes have the correct optimization data after iterating over samples.
++ * the FrameNodes have the correct optimization data after iterating over samples,
++ * and only youngest frames capture optimization data.
+  */
+ 
++function run_test() {
++  run_next_test();
++}
++
++add_task(function test() {
++  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
++  let root = getFrameNodePath(new ThreadNode(gThread, { startTime: 0, endTime: 30 }), "(root)");
++
++  let A = getFrameNodePath(root, "A");
++  let B = getFrameNodePath(A, "B");
++  let C = getFrameNodePath(B, "C");
++  let Aopts = A.getOptimizations();
++  let Bopts = B.getOptimizations();
++  let Copts = C.getOptimizations();
++
++  ok(!Aopts, "A() was never youngest frame, so should not have optimization data");
++
++  equal(Bopts.length, 2, "B() only has optimization data when it was a youngest frame");
++
++  // Check a few properties on the OptimizationSites.
++  let optSitesObserved = new Set();
++  for (let opt of Bopts) {
++    if (opt.data.line === 12) {
++      equal(opt.samples, 2, "Correct amount of samples for B()'s first opt site");
++      equal(opt.data.attempts.length, 3, "First opt site has 3 attempts");
++      equal(opt.data.attempts[0].strategy, "SomeGetter1", "inflated strategy name");
++      equal(opt.data.attempts[0].outcome, "Failure1", "inflated outcome name");
++      equal(opt.data.types[0].typeset[0].keyedBy, "constructor", "inflates type info");
++      optSitesObserved.add("first");
++    } else {
++      equal(opt.samples, 1, "Correct amount of samples for B()'s second opt site");
++      optSitesObserved.add("second");
++    }
++  }
++
++  ok(optSitesObserved.has("first"), "first opt site for B() was checked");
++  ok(optSitesObserved.has("second"), "second opt site for B() was checked");
++
++  equal(Copts.length, 1, "C() always youngest frame, so has optimization data");
++});
++
+ let gUniqueStacks = new RecordingUtils.UniqueStacks();
+ 
+ function uniqStr(s) {
+   return gUniqueStacks.getOrAddStringIndex(s);
+ }
+ 
+-let time = 1;
+-
+ let gThread = RecordingUtils.deflateThread({
+   samples: [{
+     time: 0,
+     frames: [
+       { location: "(root)" }
+     ]
+   }, {
+-    time: time++,
++    time: 10,
+     frames: [
+       { location: "(root)" },
+-      { location: "A_O1" },
+-      { location: "B" },
+-      { location: "C" }
++      { location: "A" },
++      { location: "B_LEAF_1" }
+     ]
+   }, {
+-    time: time++,
++    time: 15,
+     frames: [
+       { location: "(root)" },
+-      { location: "A_O1" },
+-      { location: "D" },
+-      { location: "C" }
++      { location: "A" },
++      { location: "B_NOTLEAF" },
++      { location: "C" },
+     ]
+   }, {
+-    time: time++,
++    time: 20,
+     frames: [
+       { location: "(root)" },
+-      { location: "A_O2" },
+-      { location: "E_O3" },
+-      { location: "C" }
+-    ],
++      { location: "A" },
++      { location: "B_LEAF_2" }
++    ]
+   }, {
+-    time: time++,
++    time: 25,
+     frames: [
+       { location: "(root)" },
+       { location: "A" },
+-      { location: "B" },
+-      { location: "F" }
++      { location: "B_LEAF_2" }
+     ]
+   }],
+   markers: []
+ }, gUniqueStacks);
+ 
+-// 3 OptimizationSites
+ let gRawSite1 = {
+   line: 12,
+   column: 2,
+   types: [{
+     mirType: uniqStr("Object"),
+-    site: uniqStr("A (http://foo/bar/bar:12)"),
++    site: uniqStr("B (http://foo/bar:10)"),
+     typeset: [{
+         keyedBy: uniqStr("constructor"),
+         name: uniqStr("Foo"),
+-        location: uniqStr("A (http://foo/bar/baz:12)")
++        location: uniqStr("B (http://foo/bar:10)")
+     }, {
+         keyedBy: uniqStr("primitive"),
+         location: uniqStr("self-hosted")
+     }]
+   }],
+   attempts: {
+     schema: {
+       outcome: 0,
+@@ -81,17 +117,17 @@ let gRawSite1 = {
+       [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+       [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+       [uniqStr("Inlined"), uniqStr("SomeGetter3")]
+     ]
+   }
+ };
+ 
+ let gRawSite2 = {
+-  line: 34,
++  line: 22,
+   types: [{
+     mirType: uniqStr("Int32"),
+     site: uniqStr("Receiver")
+   }],
+   attempts: {
+     schema: {
+       outcome: 0,
+       strategy: 1
+@@ -99,83 +135,40 @@ let gRawSite2 = {
+     data: [
+       [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+       [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+       [uniqStr("Failure3"), uniqStr("SomeGetter3")]
+     ]
+   }
+ };
+ 
+-let gRawSite3 = {
+-  line: 78,
+-  types: [{
+-    mirType: uniqStr("Object"),
+-    site: uniqStr("A (http://foo/bar/bar:12)"),
+-    typeset: [{
+-      keyedBy: uniqStr("constructor"),
+-      name: uniqStr("Foo"),
+-      location: uniqStr("A (http://foo/bar/baz:12)")
+-    }, {
+-      keyedBy: uniqStr("primitive"),
+-      location: uniqStr("self-hosted")
+-    }]
+-  }],
+-  attempts: {
+-    schema: {
+-      outcome: 0,
+-      strategy: 1
+-    },
+-    data: [
+-      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+-      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("GenericSuccess"), uniqStr("SomeGetter3")]
+-    ]
+-  }
+-};
++function serialize (x) {
++  return JSON.parse(JSON.stringify(x));
++}
+ 
+ gThread.frameTable.data.forEach((frame) => {
+   const LOCATION_SLOT = gThread.frameTable.schema.location;
+   const OPTIMIZATIONS_SLOT = gThread.frameTable.schema.optimizations;
+ 
+   let l = gThread.stringTable[frame[LOCATION_SLOT]];
+   switch (l) {
+-  case "A_O1":
+-    frame[LOCATION_SLOT] = uniqStr("A");
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite1;
++  case "A":
++    frame[OPTIMIZATIONS_SLOT] = serialize(gRawSite1);
+     break;
+-  case "A_O2":
+-    frame[LOCATION_SLOT] = uniqStr("A");
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite2;
++  // Rename some of the location sites so we can register different
++  // frames with different opt sites
++  case "B_LEAF_1":
++    frame[OPTIMIZATIONS_SLOT] = serialize(gRawSite2);
++    frame[LOCATION_SLOT] = uniqStr("B");
+     break;
+-  case "E_O3":
+-    frame[LOCATION_SLOT] = uniqStr("E");
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite3;
++  case "B_LEAF_2":
++    frame[OPTIMIZATIONS_SLOT] = serialize(gRawSite1);
++    frame[LOCATION_SLOT] = uniqStr("B");
++    break;
++  case "B_NOTLEAF":
++    frame[OPTIMIZATIONS_SLOT] = serialize(gRawSite1);
++    frame[LOCATION_SLOT] = uniqStr("B");
++    break;
++  case "C":
++    frame[OPTIMIZATIONS_SLOT] = serialize(gRawSite1);
+     break;
+   }
+ });
+-
+-function run_test() {
+-  run_next_test();
+-}
+-
+-add_task(function test() {
+-  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
+-
+-  let root = new ThreadNode(gThread, { startTime: 0, endTime: 4 });
+-
+-  let A = getFrameNodePath(root, "(root) > A");
+-
+-  let opts = A.getOptimizations();
+-  let sites = opts.optimizationSites;
+-  equal(sites.length, 2, "Frame A has two optimization sites.");
+-  equal(sites[0].samples, 2, "first opt site has 2 samples.");
+-  equal(sites[1].samples, 1, "second opt site has 1 sample.");
+-
+-  let E = getFrameNodePath(A, "E");
+-  opts = E.getOptimizations();
+-  sites = opts.optimizationSites;
+-  equal(sites.length, 1, "Frame E has one optimization site.");
+-  equal(sites[0].samples, 1, "first opt site has 1 samples.");
+-
+-  let D = getFrameNodePath(A, "D");
+-  ok(!D.getOptimizations(),
+-    "frames that do not have any opts data do not have JITOptimizations instances.");
+-});
+-- 
+2.2.1
+

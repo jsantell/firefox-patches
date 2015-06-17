@@ -3,36 +3,58 @@ Date: Tue, 9 Jun 2015 15:36:52 -0700
 Subject: Bug 1171821 - Children markers should not be hidden when filtering out their parent markers. r=vp
 
 diff --git a/browser/devtools/performance/modules/logic/waterfall-utils.js b/browser/devtools/performance/modules/logic/waterfall-utils.js
-index e177012..9dab4fe 100644
+index b1bf06f..0e13233 100644
 --- a/browser/devtools/performance/modules/logic/waterfall-utils.js
 +++ b/browser/devtools/performance/modules/logic/waterfall-utils.js
-@@ -20,16 +20,21 @@ function collapseMarkersIntoNode({ markerNode, markersList, blueprint }) {
+@@ -2,33 +2,38 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * Utility functions for collapsing markers into a waterfall.
+  */
+ 
+-loader.lazyRequireGetter(this, "getBlueprintFor",
+-  "devtools/performance/marker-utils", true);
++loader.lazyRequireGetter(this, "MarkerUtils",
++  "devtools/performance/marker-utils");
+ 
+ /**
+  * Collapses markers into a tree-like structure.
+  * @param object markerNode
+  * @param array markersList
++ * @param array filter
+  */
+-function collapseMarkersIntoNode({ markerNode, markersList }) {
++function collapseMarkersIntoNode({ markerNode, markersList, filter }) {
    let { getCurrentParentNode, collapseMarker, addParentNode, popParentNode } = createParentNodeFactory(markerNode);
  
    for (let i = 0, len = markersList.length; i < len; i++) {
      let curr = markersList[i];
  
-     let parentNode = getCurrentParentNode();
-     let definition = getBlueprintFor(curr, blueprint);
- 
+-    let parentNode = getCurrentParentNode();
+-    let blueprint = getBlueprintFor(curr);
 +    // If this marker type should not be displayed, just skip
-+    if (definition.hidden) {
++    if (!MarkerUtils.isMarkerValid(curr, filter)) {
 +      continue;
 +    }
-+
-     let collapse = definition.collapseFunc || (() => null);
+ 
++    let parentNode = getCurrentParentNode();
++    let blueprint = MarkerUtils.getBlueprintFor(curr);
+     let collapse = blueprint.collapseFunc || (() => null);
      let peek = distance => markersList[i + distance];
-     let foundParent = false;
  
      let collapseInfo = collapse(parentNode, curr, peek);
      if (collapseInfo) {
        let { collapse, toParent, finalize } = collapseInfo;
  
+       // If `toParent` is an object, use it as the next parent marker
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 8b2fa8e..20e763f 100644
+index 825586d..b9ffb62 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -128,14 +128,15 @@ support-files =
+@@ -131,14 +131,15 @@ support-files =
  [browser_profiler_tree-view-03.js]
  [browser_profiler_tree-view-04.js]
  [browser_profiler_tree-view-05.js]
@@ -105,41 +127,19 @@ index 0000000..93d67fe
 +  yield teardown(panel);
 +  finish();
 +}
-diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 1b2993f..533679b 100644
---- a/browser/devtools/performance/test/head.js
-+++ b/browser/devtools/performance/test/head.js
-@@ -56,16 +56,17 @@ let DEFAULT_PREFS = [
-   "devtools.performance.ui.enable-allocations",
-   "devtools.performance.ui.enable-framerate",
-   "devtools.performance.ui.show-jit-optimizations",
-   "devtools.performance.memory.sample-probability",
-   "devtools.performance.memory.max-log-length",
-   "devtools.performance.profiler.buffer-size",
-   "devtools.performance.profiler.sample-frequency-khz",
-   "devtools.performance.ui.experimental",
-+  "devtools.performance.timeline.hidden-markers",
- ].reduce((prefs, pref) => {
-   prefs[pref] = Preferences.get(pref);
-   return prefs;
- }, {});
- 
- // Enable the new performance panel for all tests.
- Services.prefs.setBoolPref("devtools.performance.enabled", true);
- // Enable logging for all the tests. Both the debugger server and frontend will
 diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
-index d88ba0a..abf0a8a 100644
+index 0896b7b..a9a6cf2 100644
 --- a/browser/devtools/performance/views/details-waterfall.js
 +++ b/browser/devtools/performance/views/details-waterfall.js
-@@ -109,16 +109,20 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+@@ -108,16 +108,20 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+     });
    },
  
    /**
     * Called whenever an observed pref is changed.
     */
    _onObservedPrefChange: function(_, prefName) {
-     this._blueprint = PerformanceController.getTimelineBlueprint();
-     this._markersRoot.blueprint = this._blueprint;
+     this._hiddenMarkers = PerformanceController.getPref("hidden-markers");
 +
 +    // Clear the cache as we'll need to recompute the collapsed
 +    // marker model
@@ -152,6 +152,24 @@ index d88ba0a..abf0a8a 100644
    _onViewSource: function (_, file, line) {
      gToolbox.viewSourceInDebugger(file, line);
    },
+@@ -132,16 +136,17 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+       return cached;
+     }
+ 
+     let rootMarkerNode = WaterfallUtils.makeParentMarkerNode({ name: "(root)" });
+ 
+     WaterfallUtils.collapseMarkersIntoNode({
+       markerNode: rootMarkerNode,
+       markersList: markers,
++      filter: this._hiddenMarkers
+     });
+ 
+     this._cache.set(markers, rootMarkerNode);
+     return rootMarkerNode;
+   },
+ 
+   /**
+    * Renders the waterfall tree.
 -- 
 2.2.1
 

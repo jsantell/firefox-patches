@@ -1,0 +1,181 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 15 Jun 2015 11:38:39 -0700
+Subject: Bug 1174829 - Remove vestigial PerformanceActorsConnection references in comments. r=vp
+
+diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
+index cd51057..38a97a8 100644
+--- a/browser/devtools/framework/toolbox.js
++++ b/browser/devtools/framework/toolbox.js
+@@ -2036,17 +2036,17 @@ Toolbox.prototype = {
+     yield this.performance.open();
+     // Emit an event when connected, but don't wait on startup for this.
+     this.emit("profiler-connected");
+ 
+     return this.performance;
+   }),
+ 
+   /**
+-   * Disconnects the underlying Performance Actor Connection. If the connection
++   * Disconnects the underlying Performance actor. If the connection
+    * has not finished initializing, as opening a toolbox does not wait,
+    * the performance connection destroy method will wait for it on its own.
+    */
+   destroyPerformance: Task.async(function*() {
+     if (!this.performance) {
+       return;
+     }
+     yield this.performance.destroy();
+diff --git a/browser/devtools/performance/modules/logic/actors.js b/browser/devtools/performance/modules/logic/actors.js
+index 0cf3cdc..9aa4753 100644
+--- a/browser/devtools/performance/modules/logic/actors.js
++++ b/browser/devtools/performance/modules/logic/actors.js
+@@ -240,17 +240,17 @@ TimelineFrontFacade.prototype = {
+    */
+   destroy: Task.async(function *() {
+     this.EVENTS.forEach(type => this._actor.off(type, this[`_on${type}`]));
+     yield this._actor.destroy();
+   }),
+ 
+   /**
+    * An aggregate of all events (markers, frames, memory, ticks) and exposes
+-   * to PerformanceActorsConnection as a single event.
++   * to PerformanceFront as a single event.
+    */
+   _onTimelineData: function (type, ...data) {
+     this.emit("timeline-data", type, ...data);
+   },
+ 
+   toString: () => "[object TimelineFrontFacade]"
+ };
+ 
+diff --git a/browser/devtools/performance/modules/logic/front.js b/browser/devtools/performance/modules/logic/front.js
+index b7e0377..e4b5741 100644
+--- a/browser/devtools/performance/modules/logic/front.js
++++ b/browser/devtools/performance/modules/logic/front.js
+@@ -30,18 +30,18 @@ loader.lazyImporter(this, "gDevTools",
+ let PerformanceFronts = new WeakMap();
+ 
+ /**
+  * Instantiates a shared PerformanceFront for the specified target.
+  * Consumers must yield on `open` to make sure the connection is established.
+  *
+  * @param Target target
+  *        The target owning this connection.
+- * @return PerformanceActorsConnection
+- *         The shared connection for the specified target.
++ * @return PerformanceFront
++ *         The pseudofront for all the underlying actors.
+  */
+ PerformanceFronts.forTarget = function(target) {
+   if (this.has(target)) {
+     return this.get(target);
+   }
+ 
+   let instance = new PerformanceFront(target);
+   this.set(target, instance);
+@@ -345,17 +345,17 @@ PerformanceFront.prototype = {
+    * Manually ends the recording session for the corresponding RecordingModel.
+    *
+    * @param RecordingModel model
+    *        The corresponding RecordingModel that belongs to the recording session wished to stop.
+    * @return RecordingModel
+    *         Returns the same model, populated with the profiling data.
+    */
+   stopRecording: Task.async(function*(model) {
+-    // If model isn't in the PerformanceActorsConnections internal store,
++    // If model isn't in the PerformanceFront internal store,
+     // then do nothing.
+     if (this._recordings.indexOf(model) === -1) {
+       return;
+     }
+ 
+     // Flag the recording as no longer recording, so that `model.isRecording()`
+     // is false. Do this before we fetch all the data, and then subsequently
+     // the recording can be considered "completed".
+diff --git a/browser/devtools/performance/modules/logic/recording-model.js b/browser/devtools/performance/modules/logic/recording-model.js
+index 4c15dbb..caf6a7f 100644
+--- a/browser/devtools/performance/modules/logic/recording-model.js
++++ b/browser/devtools/performance/modules/logic/recording-model.js
+@@ -83,18 +83,18 @@ RecordingModel.prototype = {
+    *        The file to stream the data into.
+    */
+   exportRecording: Task.async(function *(file) {
+     let recordingData = this.getAllData();
+     yield PerformanceIO.saveRecordingToFile(recordingData, file);
+   }),
+ 
+   /**
+-   * Sets up the instance with data from the SharedPerformanceConnection when
+-   * starting a recording. Should only be called by SharedPerformanceConnection.
++   * Sets up the instance with data from the PerformanceFront when
++   * starting a recording. Should only be called by PerformanceFront.
+    */
+   _populate: function (info) {
+     // Times must come from the actor in order to be self-consistent.
+     // However, we also want to update the view with the elapsed time
+     // even when the actor is not generating data. To do this we get
+     // the local time and use it to compute a reasonable elapsed time.
+     this._localStartTime = Date.now();
+ 
+@@ -125,18 +125,18 @@ RecordingModel.prototype = {
+    * all the data is fetched.
+    */
+   _onStoppingRecording: function (endTime) {
+     this._duration = endTime - this._localStartTime;
+     this._recording = false;
+   },
+ 
+   /**
+-   * Sets results available from stopping a recording from SharedPerformanceConnection.
+-   * Should only be called by SharedPerformanceConnection.
++   * Sets results available from stopping a recording from PerformanceFront.
++   * Should only be called by PerformanceFront.
+    */
+   _onStopRecording: Task.async(function *({ profilerEndTime, profile }) {
+     // Update the duration with the accurate profilerEndTime, so we don't have
+     // samples outside of the approximate duration set in `_onStoppingRecording`.
+     this._duration = profilerEndTime - this._profilerStartTime;
+     this._profile = profile;
+     this._completed = true;
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-shared-connection-02.js b/browser/devtools/performance/test/browser_perf-shared-connection-02.js
+index 6e1b46f..e0e8575 100644
+--- a/browser/devtools/performance/test/browser_perf-shared-connection-02.js
++++ b/browser/devtools/performance/test/browser_perf-shared-connection-02.js
+@@ -1,13 +1,13 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Tests if the shared PerformanceActorsConnection is only opened once.
++ * Tests if the shared PerformanceFront is only opened once.
+  */
+ 
+ let gProfilerConnectionsOpened = 0;
+ Services.obs.addObserver(profilerConnectionObserver, "performance-tools-connection-opened", false);
+ 
+ function* spawnTest() {
+   let { target, panel } = yield initPerformance(SIMPLE_URL);
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-shared-connection-03.js b/browser/devtools/performance/test/browser_perf-shared-connection-03.js
+index f975b15..a46df84 100644
+--- a/browser/devtools/performance/test/browser_perf-shared-connection-03.js
++++ b/browser/devtools/performance/test/browser_perf-shared-connection-03.js
+@@ -1,13 +1,13 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Tests if the shared PerformanceActorsConnection can properly send requests.
++ * Tests if the shared PerformanceFront can properly send requests.
+  */
+ 
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let front = panel.panelWin.gFront;
+ 
+   loadFrameScripts();
+ 
+-- 
+2.2.1
+
