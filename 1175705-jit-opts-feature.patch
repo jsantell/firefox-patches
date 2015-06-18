@@ -1,0 +1,622 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 17 Jun 2015 14:57:45 -0700
+Subject: Bug 1175705 - Make enable-jit-optimizations a recording-feature rather than a toggleable display feature. r=vp
+
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+index bc876e9..56476ef 100644
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -1457,17 +1457,17 @@ pref("devtools.performance.profiler.sample-frequency-khz", 1);
+ pref("devtools.performance.ui.invert-call-tree", true);
+ pref("devtools.performance.ui.invert-flame-graph", false);
+ pref("devtools.performance.ui.flatten-tree-recursion", true);
+ pref("devtools.performance.ui.show-platform-data", false);
+ pref("devtools.performance.ui.show-idle-blocks", true);
+ pref("devtools.performance.ui.enable-memory", false);
+ pref("devtools.performance.ui.enable-allocations", false);
+ pref("devtools.performance.ui.enable-framerate", true);
+-pref("devtools.performance.ui.show-jit-optimizations", false);
++pref("devtools.performance.ui.enable-jit-optimizations", false);
+ 
+ // Enable experimental options in the UI only in Nightly
+ #if defined(NIGHTLY_BUILD)
+ pref("devtools.performance.ui.experimental", true);
+ #else
+ pref("devtools.performance.ui.experimental", false);
+ #endif
+ 
+diff --git a/browser/devtools/performance/modules/logic/front.js b/browser/devtools/performance/modules/logic/front.js
+index b7e0377..e37c34b 100644
+--- a/browser/devtools/performance/modules/logic/front.js
++++ b/browser/devtools/performance/modules/logic/front.js
+@@ -455,15 +455,16 @@ PerformanceFront.prototype = {
+  * Creates an object of configurations based off of preferences for a RecordingModel.
+  */
+ function getRecordingModelPrefs () {
+   return {
+     withMarkers: true,
+     withMemory: Services.prefs.getBoolPref("devtools.performance.ui.enable-memory"),
+     withTicks: Services.prefs.getBoolPref("devtools.performance.ui.enable-framerate"),
+     withAllocations: Services.prefs.getBoolPref("devtools.performance.ui.enable-allocations"),
++    withJITOptimizations: Services.prefs.getBoolPref("devtools.performance.ui.enable-jit-optimizations"),
+     allocationsSampleProbability: +Services.prefs.getCharPref("devtools.performance.memory.sample-probability"),
+     allocationsMaxLogLength: Services.prefs.getIntPref("devtools.performance.memory.max-log-length")
+   };
+ }
+ 
+ exports.getPerformanceFront = t => PerformanceFronts.forTarget(t);
+ exports.PerformanceFront = PerformanceFront;
+diff --git a/browser/devtools/performance/modules/logic/recording-model.js b/browser/devtools/performance/modules/logic/recording-model.js
+index 1eb2cea..311a0e8 100644
+--- a/browser/devtools/performance/modules/logic/recording-model.js
++++ b/browser/devtools/performance/modules/logic/recording-model.js
+@@ -20,16 +20,17 @@ const RecordingModel = function (options={}) {
+   this._label = options.label || "";
+   this._console = options.console || false;
+ 
+   this._configuration = {
+     withMarkers: options.withMarkers || false,
+     withTicks: options.withTicks || false,
+     withMemory: options.withMemory || false,
+     withAllocations: options.withAllocations || false,
++    withJITOptimizations: options.withJITOptimizations || false,
+     allocationsSampleProbability: options.allocationsSampleProbability || 0,
+     allocationsMaxLogLength: options.allocationsMaxLogLength || 0,
+     bufferSize: options.bufferSize || 0,
+     sampleFrequency: options.sampleFrequency || 1
+   };
+ };
+ 
+ RecordingModel.prototype = {
+@@ -179,17 +180,18 @@ RecordingModel.prototype = {
+       return Date.now() - this._localStartTime;
+     } else {
+       return this._duration;
+     }
+   },
+ 
+   /**
+    * Returns configuration object of specifying whether the recording
+-   * was started withTicks, withMemory and withAllocations.
++   * was started withTicks, withMemory and withAllocations and other
++   * recording options.
+    * @return object
+    */
+   getConfiguration: function () {
+     return this._configuration;
+   },
+ 
+   /**
+    * Gets the accumulated markers in the current recording.
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 4fbc1e7..494b5df 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -290,16 +290,17 @@ let PerformanceController = {
+    * Starts recording with the PerformanceFront. Emits `EVENTS.RECORDING_STARTED`
+    * when the front has started to record.
+    */
+   startRecording: Task.async(function *() {
+     let options = {
+       withMarkers: true,
+       withMemory: this.getOption("enable-memory"),
+       withTicks: this.getOption("enable-framerate"),
++      withJITOptimizations: this.getOption("enable-jit-optimizations"),
+       withAllocations: this.getOption("enable-allocations"),
+       allocationsSampleProbability: this.getPref("memory-sample-probability"),
+       allocationsMaxLogLength: this.getPref("memory-max-log-length"),
+       bufferSize: this.getPref("profiler-buffer-size"),
+       sampleFrequency: this.getPref("profiler-sample-frequency")
+     };
+ 
+     yield gFront.startRecording(options);
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 5efaa81..5f5f62b 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -64,22 +64,22 @@
+                 data-pref="invert-flame-graph"
+                 label="&profilerUI.invertFlameGraph;"
+                 tooltiptext="&profilerUI.invertFlameGraph.tooltiptext;"/>
+       <menuitem id="option-flatten-tree-recursion"
+                 type="checkbox"
+                 data-pref="flatten-tree-recursion"
+                 label="&profilerUI.flattenTreeRecursion;"
+                 tooltiptext="&profilerUI.flattenTreeRecursion.tooltiptext;"/>
+-      <menuitem id="option-show-jit-optimizations"
++      <menuitem id="option-enable-jit-optimizations"
+                 class="experimental-option"
+                 type="checkbox"
+-                data-pref="show-jit-optimizations"
+-                label="&profilerUI.showJITOptimizations;"
+-                tooltiptext="&profilerUI.showJITOptimizations.tooltiptext;"/>
++                data-pref="enable-jit-optimizations"
++                label="&profilerUI.enableJITOptimizations;"
++                tooltiptext="&profilerUI.enableJITOptimizations.tooltiptext;"/>
+     </menupopup>
+   </popupset>
+ 
+   <hbox class="theme-body" flex="1">
+ 
+     <!-- Sidebar: controls and recording list -->
+     <vbox id="recordings-pane">
+       <toolbar id="recordings-toolbar"
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index dfed976..7f1958a 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -81,16 +81,17 @@ support-files =
+ [browser_perf-options-flatten-tree-recursion-01.js]
+ [browser_perf-options-flatten-tree-recursion-02.js]
+ [browser_perf-options-show-platform-data-01.js]
+ [browser_perf-options-show-platform-data-02.js]
+ [browser_perf-options-show-idle-blocks-01.js]
+ [browser_perf-options-show-idle-blocks-02.js]
+ [browser_perf-options-enable-memory-01.js]
+ [browser_perf-options-enable-memory-02.js]
++[browser_perf-options-enable-optimizations.js]
+ [browser_perf-options-enable-framerate.js]
+ [browser_perf-options-allocations.js]
+ [browser_perf-options-profiler.js]
+ [browser_perf-overview-render-01.js]
+ [browser_perf-overview-render-02.js]
+ [browser_perf-overview-render-03.js]
+ [browser_perf-overview-render-04.js]
+ [browser_perf-overview-selection-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-01.js b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+index c6ede9d..dd4d360 100644
+--- a/browser/devtools/performance/test/browser_perf-jit-view-01.js
++++ b/browser/devtools/performance/test/browser_perf-jit-view-01.js
+@@ -12,17 +12,19 @@ Services.prefs.setBoolPref(INVERT_PREF, false);
+ 
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, $, $$, window, PerformanceController } = panel.panelWin;
+   let { OverviewView, DetailsView, JITOptimizationsView, JsCallTreeView, RecordingsView } = panel.panelWin;
+ 
+   let profilerData = { threads: [gThread] }
+ 
+-  is(Services.prefs.getBoolPref(JIT_PREF), false, "show JIT Optimizations pref off by default");
++  is(Services.prefs.getBoolPref(JIT_PREF), false, "record JIT Optimizations pref off by default");
++  Services.prefs.setBoolPref(JIT_PREF, true);
++  is(Services.prefs.getBoolPref(JIT_PREF), true, "toggle on record JIT Optimizations");
+ 
+   // Make two recordings, so we have one to switch to later, as the
+   // second one will have fake sample data
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+@@ -51,37 +53,30 @@ function* spawnTest() {
+   finish();
+ 
+   function *injectAndRenderProfilerData() {
+     // Get current recording and inject our mock data
+     info("Injecting mock profile data");
+     let recording = PerformanceController.getCurrentRecording();
+     recording._profile = profilerData;
+ 
+-    is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel is hidden when pref off.");
+-
+     // Force a rerender
+     let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+     JsCallTreeView.render(OverviewView.getTimeInterval());
+     yield rendered;
+ 
+-    is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel still hidden when rerendered");
+-    Services.prefs.setBoolPref(JIT_PREF, true);
+     is($("#jit-optimizations-view").hidden, false, "JIT Optimizations should be visible when pref is on");
+     ok($("#jit-optimizations-view").classList.contains("empty"),
+       "JIT Optimizations view has empty message when no frames selected.");
+-
+-     Services.prefs.setBoolPref(JIT_PREF, false);
+   }
+ 
+   function *checkFrame (frameIndex, expectedOpts=[]) {
+     // Click the frame
+     let rendered = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RENDERED);
+     mousedown(window, $$(".call-tree-item")[frameIndex]);
+-    Services.prefs.setBoolPref(JIT_PREF, true);
+     yield rendered;
+     ok(true, "JITOptimizationsView rendered when enabling with the current frame node selected");
+ 
+     let isEmpty = $("#jit-optimizations-view").classList.contains("empty");
+     if (expectedOpts.length === 0) {
+       ok(isEmpty, "JIT Optimizations view has an empty message when selecting a frame without opt data.");
+       return;
+     } else {
+diff --git a/browser/devtools/performance/test/browser_perf-jit-view-02.js b/browser/devtools/performance/test/browser_perf-jit-view-02.js
+index 924a75a..e289f24 100644
+--- a/browser/devtools/performance/test/browser_perf-jit-view-02.js
++++ b/browser/devtools/performance/test/browser_perf-jit-view-02.js
+@@ -14,31 +14,30 @@ Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
+ 
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, $, $$, window, PerformanceController } = panel.panelWin;
+   let { OverviewView, DetailsView, JITOptimizationsView, JsCallTreeView, RecordingsView } = panel.panelWin;
+ 
+   let profilerData = { threads: [gThread] };
+ 
+-  is(Services.prefs.getBoolPref(JIT_PREF), false, "show JIT Optimizations pref off by default");
++  Services.prefs.setBoolPref(JIT_PREF, true);
+ 
+   // Make two recordings, so we have one to switch to later, as the
+   // second one will have fake sample data
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+   yield DetailsView.selectView("js-calltree");
+ 
+   yield injectAndRenderProfilerData();
+ 
+-  Services.prefs.setBoolPref(JIT_PREF, true);
+   // Click the frame
+   let rendered = once(JITOptimizationsView, EVENTS.OPTIMIZATIONS_RENDERED);
+   mousedown(window, $$(".call-tree-item")[2]);
+   yield rendered;
+ 
+   ok($("#jit-optimizations-view").classList.contains("empty"),
+     "platform meta frame shows as empty");
+ 
+@@ -59,21 +58,18 @@ function* spawnTest() {
+     let recording = PerformanceController.getCurrentRecording();
+     recording._profile = profilerData;
+ 
+     // Force a rerender
+     let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+     JsCallTreeView.render(OverviewView.getTimeInterval());
+     yield rendered;
+ 
+-    Services.prefs.setBoolPref(JIT_PREF, true);
+     ok($("#jit-optimizations-view").classList.contains("empty"),
+       "JIT Optimizations view has empty message when no frames selected.");
+-
+-     Services.prefs.setBoolPref(JIT_PREF, false);
+   }
+ }
+ 
+ let gUniqueStacks = new RecordingUtils.UniqueStacks();
+ 
+ function uniqStr(s) {
+   return gUniqueStacks.getOrAddStringIndex(s);
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-options-enable-optimizations.js b/browser/devtools/performance/test/browser_perf-options-enable-optimizations.js
+new file mode 100644
+index 0000000..e6b10bd
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-options-enable-optimizations.js
+@@ -0,0 +1,44 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that `enable-jit-optimizations` sets the recording to subsequently
++ * display optimizations info.
++ */
++function* spawnTest() {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController, $, DetailsView, JsCallTreeView } = panel.panelWin;
++  Services.prefs.setBoolPref(JIT_PREF, true);
++
++
++  yield startRecording(panel);
++  let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  yield stopRecording(panel);
++
++  yield DetailsView.selectView("js-calltree");
++  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
++  yield rendered;
++
++  let recording = PerformanceController.getCurrentRecording();
++  is(recording.getConfiguration().withJITOptimizations, true, "recording model has withJITOptimizations as true");
++
++  // Set back to false, should not affect display of first recording
++  info("Disabling enable-jit-optimizations");
++  Services.prefs.setBoolPref(JIT_PREF, false);
++  is($("#jit-optimizations-view").hidden, false, "JIT Optimizations panel is displayed when feature enabled.");
++
++  yield startRecording(panel);
++  rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  yield stopRecording(panel);
++
++  yield DetailsView.selectView("js-calltree");
++  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
++  yield rendered;
++
++  recording = PerformanceController.getCurrentRecording();
++  is(recording.getConfiguration().withJITOptimizations, false, "recording model has withJITOptimizations as false");
++  is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel is hidden when feature disabled");
++
++  yield teardown(panel);
++  finish();
++}
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 7d2e11e..0964d38 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -34,34 +34,34 @@ const FRAMERATE_PREF = "devtools.performance.ui.enable-framerate";
+ const MEMORY_PREF = "devtools.performance.ui.enable-memory";
+ const ALLOCATIONS_PREF = "devtools.performance.ui.enable-allocations";
+ 
+ const PLATFORM_DATA_PREF = "devtools.performance.ui.show-platform-data";
+ const IDLE_PREF = "devtools.performance.ui.show-idle-blocks";
+ const INVERT_PREF = "devtools.performance.ui.invert-call-tree";
+ const INVERT_FLAME_PREF = "devtools.performance.ui.invert-flame-graph";
+ const FLATTEN_PREF = "devtools.performance.ui.flatten-tree-recursion";
+-const JIT_PREF = "devtools.performance.ui.show-jit-optimizations";
++const JIT_PREF = "devtools.performance.ui.enable-jit-optimizations";
+ const EXPERIMENTAL_PREF = "devtools.performance.ui.experimental";
+ 
+ // All tests are asynchronous.
+ waitForExplicitFinish();
+ 
+ gDevTools.testing = true;
+ 
+ let DEFAULT_PREFS = [
+   "devtools.debugger.log",
+   "devtools.performance.ui.invert-call-tree",
+   "devtools.performance.ui.flatten-tree-recursion",
+   "devtools.performance.ui.show-platform-data",
+   "devtools.performance.ui.show-idle-blocks",
+   "devtools.performance.ui.enable-memory",
+   "devtools.performance.ui.enable-allocations",
+   "devtools.performance.ui.enable-framerate",
+-  "devtools.performance.ui.show-jit-optimizations",
++  "devtools.performance.ui.enable-jit-optimizations",
+   "devtools.performance.memory.sample-probability",
+   "devtools.performance.memory.max-log-length",
+   "devtools.performance.profiler.buffer-size",
+   "devtools.performance.profiler.sample-frequency-khz",
+   "devtools.performance.ui.experimental",
+   "devtools.performance.timeline.hidden-markers",
+ ].reduce((prefs, pref) => {
+   prefs[pref] = Preferences.get(pref);
+diff --git a/browser/devtools/performance/test/unit/xpcshell.ini b/browser/devtools/performance/test/unit/xpcshell.ini
+index bae59d6..840e107 100644
+--- a/browser/devtools/performance/test/unit/xpcshell.ini
++++ b/browser/devtools/performance/test/unit/xpcshell.ini
+@@ -5,16 +5,17 @@ tail =
+ firefox-appdir = browser
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
+ [test_frame-utils-01.js]
+ [test_frame-utils-02.js]
+ [test_marker-blueprint.js]
+ [test_marker-utils.js]
+ [test_profiler-categories.js]
++[test_jit-graph-data.js] 
+ [test_jit-model-01.js]
+ [test_jit-model-02.js]
+ [test_tree-model-01.js]
+ [test_tree-model-02.js]
+ [test_tree-model-03.js]
+ [test_tree-model-04.js]
+ [test_tree-model-05.js]
+ [test_tree-model-06.js]
+diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
+index 8672483..a207873 100644
+--- a/browser/devtools/performance/views/details-js-call-tree.js
++++ b/browser/devtools/performance/views/details-js-call-tree.js
+@@ -49,16 +49,17 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+       contentOnly: !PerformanceController.getOption("show-platform-data"),
+       invertTree: PerformanceController.getOption("invert-call-tree"),
+       flattenRecursion: PerformanceController.getOption("flatten-tree-recursion")
+     };
+     let recording = PerformanceController.getCurrentRecording();
+     let profile = recording.getProfile();
+     let threadNode = this._prepareCallTree(profile, interval, options);
+     this._populateCallTree(threadNode, options);
++    this._toggleJITOptimizationsView(recording);
+     this.emit(EVENTS.JS_CALL_TREE_RENDERED);
+   },
+ 
+   /**
+    * Fired on the "link" event for the call tree in this container.
+    */
+   _onLink: function (_, treeItem) {
+     let { url, line } = treeItem.frame.getInfo();
+@@ -124,12 +125,27 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+     // When platform data isn't shown, hide the cateogry labels, since they're
+     // only available for C++ frames. Pass *false* to make them invisible.
+     root.toggleCategories(!options.contentOnly);
+ 
+     // Return the CallView for tests
+     return root;
+   },
+ 
++  /**
++   * Displays or hides the optimizations view based on the recordings
++   * optimizations feature.
++   *
++   * @param {RecordingModel} recording
++   */
++  _toggleJITOptimizationsView: function (recording) {
++    if (recording && recording.getConfiguration().withJITOptimizations) {
++      JITOptimizationsView.show();
++      JITOptimizationsView.render();
++    } else {
++      JITOptimizationsView.hide();
++    }
++  },
++
+   toString: () => "[object JsCallTreeView]"
+ });
+ 
+ EventEmitter.decorate(JsCallTreeView);
+diff --git a/browser/devtools/performance/views/jit-optimizations.js b/browser/devtools/performance/views/jit-optimizations.js
+index 03ffd10..f05d52a 100644
+--- a/browser/devtools/performance/views/jit-optimizations.js
++++ b/browser/devtools/performance/views/jit-optimizations.js
+@@ -20,46 +20,41 @@ let JITOptimizationsView = {
+   _currentFrame: null,
+ 
+   /**
+    * Initialization function called when the tool starts up.
+    */
+   initialize: function () {
+     this.reset = this.reset.bind(this);
+     this._onFocusFrame = this._onFocusFrame.bind(this);
+-    this._toggleVisibility = this._toggleVisibility.bind(this);
+ 
+     this.el = $("#jit-optimizations-view");
+     this.$headerName = $("#jit-optimizations-header .header-function-name");
+     this.$headerFile = $("#jit-optimizations-header .header-file");
+     this.$headerLine = $("#jit-optimizations-header .header-line");
+ 
+     this.tree = new TreeWidget($("#jit-optimizations-raw-view"), {
+       sorted: false,
+       emptyText: JIT_EMPTY_TEXT
+     });
+ 
+     // Start the tree by resetting.
+     this.reset();
+ 
+-    this._toggleVisibility();
+-
+     PerformanceController.on(EVENTS.RECORDING_SELECTED, this.reset);
+-    PerformanceController.on(EVENTS.PREF_CHANGED, this._toggleVisibility);
+     JsCallTreeView.on("focus", this._onFocusFrame);
+   },
+ 
+   /**
+    * Destruction function called when the tool cleans up.
+    */
+   destroy: function () {
+     this.tree = null;
+     this.$headerName = this.$headerFile = this.$headerLine = this.el = null;
+     PerformanceController.off(EVENTS.RECORDING_SELECTED, this.reset);
+-    PerformanceController.off(EVENTS.PREF_CHANGED, this._toggleVisibility);
+     JsCallTreeView.off("focus", this._onFocusFrame);
+   },
+ 
+   /**
+    * Takes a FrameNode, with corresponding optimization data to be displayed
+    * in the view.
+    *
+    * @param {FrameNode} frameNode
+@@ -93,21 +88,30 @@ let JITOptimizationsView = {
+ 
+   /**
+    * Clears out data in the tree.
+    */
+   clear: function () {
+     this.tree.clear();
+   },
+ 
++  show: function () {
++    this.el.hidden = false;
++  },
++
++  hide: function () {
++    this.el.hidden = true;
++  },
++
+   /**
+    * Helper to determine whether or not this view should be enabled.
+    */
+   isEnabled: function () {
+-    return PerformanceController.getOption("show-jit-optimizations");
++    let recording = PerformanceController.getCurrentRecording();
++    return !!(recording && recording.getConfiguration().withJITOptimizations);
+   },
+ 
+   /**
+    * Takes a JITOptimizations object and builds a view containing all attempted
+    * optimizations for this frame. This view is very verbose and meant for those
+    * who understand JIT compilers.
+    */
+   render: function () {
+@@ -377,32 +381,16 @@ let JITOptimizationsView = {
+   _isLinkableURL: function (url) {
+     return url && url.indexOf &&
+        (url.indexOf("http") === 0 ||
+         url.indexOf("resource://") === 0 ||
+         url.indexOf("file://") === 0);
+   },
+ 
+   /**
+-   * Toggles the visibility of the JITOptimizationsView based on the preference
+-   * devtools.performance.ui.show-jit-optimizations.
+-   */
+-
+-  _toggleVisibility: function () {
+-    let enabled = this.isEnabled();
+-    this.el.hidden = !enabled;
+-
+-    // If view is toggled on, and there's a frame node selected,
+-    // attempt to render it
+-    if (enabled) {
+-      this.render();
+-    }
+-  },
+-
+-  /**
+    * Called when the JSCallTreeView focuses on a frame.
+    */
+ 
+   _onFocusFrame: function (_, view) {
+     if (!view.frame) {
+       return;
+     }
+ 
+diff --git a/browser/devtools/performance/views/toolbar.js b/browser/devtools/performance/views/toolbar.js
+index 0b9a57a..0ca02f1 100644
+--- a/browser/devtools/performance/views/toolbar.js
++++ b/browser/devtools/performance/views/toolbar.js
+@@ -88,17 +88,17 @@ let ToolbarView = {
+    * Fired when `devtools.performance.ui.experimental` is changed, or
+    * during init. Toggles the visibility of experimental performance tool options
+    * in the UI options.
+    *
+    * Sets or removes "experimental-enabled" on the menu and main elements,
+    * hiding or showing all elements with class "experimental-option".
+    *
+    * TODO re-enable "#option-enable-memory" permanently once stable in bug 1163350
+-   * TODO re-enable "#option-show-jit-optimizations" permanently once stable in bug 1163351
++   * TODO re-enable "#option-enable-jit-optimizations" permanently once stable in bug 1163351
+    *
+    * @param {boolean} isEnabled
+    */
+   _toggleExperimentalUI: function (isEnabled) {
+     if (isEnabled) {
+       $(".theme-body").classList.add("experimental-enabled");
+       this._popup.classList.add("experimental-enabled");
+     } else {
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+index fa6e30f..2eb8c8e 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.dtd
+@@ -137,21 +137,21 @@
+ <!ENTITY profilerUI.enableAllocations.tooltiptext "Record Object allocations while profiling.">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.enableFramerate): This string
+   -  is displayed next to a checkbox determining whether or not framerate
+   -  is recorded. -->
+ <!ENTITY profilerUI.enableFramerate             "Record Framerate">
+ <!ENTITY profilerUI.enableFramerate.tooltiptext "Record framerate while profiling.">
+ 
+-<!-- LOCALIZATION NOTE (profilerUI.showJITOptimizations): This string
++<!-- LOCALIZATION NOTE (profilerUI.enableJITOptimizations): This string
+   -  is displayed next to a checkbox determining whether or not JIT optimization data
+-  -  should be shown. -->
+-<!ENTITY profilerUI.showJITOptimizations             "Show JIT Optimizations">
+-<!ENTITY profilerUI.showJITOptimizations.tooltiptext "Show JIT optimization data sampled in each frame of the JS call tree.">
++  -  should be recorded. -->
++<!ENTITY profilerUI.enableJITOptimizations             "Record JIT Optimizations">
++<!ENTITY profilerUI.enableJITOptimizations.tooltiptext "Record JIT optimization data sampled in each JavaScript frame.">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.JITOptimizationsTitle): This string
+   -  is displayed as the title of the JIT Optimizations panel. -->
+ <!ENTITY profilerUI.JITOptimizationsTitle "JIT Optimizations">
+ 
+ <!-- LOCALIZATION NOTE (profilerUI.console.recordingNoticeStart/recordingNoticeEnd):
+   -  This string is displayed when a recording is selected that started via console.profile.
+   -  Wraps the command used to start, like "Currently recording via console.profile("label")" -->
+-- 
+2.2.1
+
