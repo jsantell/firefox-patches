@@ -1,0 +1,1008 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 19 Jun 2015 20:32:17 -0700
+Subject: Bug 1150299 - Display a graph of optimization tiers over time
+ in the optimizations view. Also link opt notifications in call tree to the
+ appropriate frame in the optimizations view. r=vp
+
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index ee4df8a..3c84da7 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -444,13 +444,36 @@ function isChromeScheme(location, i) {
+     return false;
+   }
+ }
+ 
+ function isNumeric(c) {
+   return c >= CHAR_CODE_0 && c <= CHAR_CODE_9;
+ }
+ 
++/**
++ * Takes an inverted ThreadNode and searches its youngest frames for
++ * a FrameNode with matching location.
++ *
++ * @param {ThreadNode} threadNode
++ * @param {string} location
++ * @return {?FrameNode}
++ */
++function findFrameByLocation (threadNode, location) {
++  if (!threadNode.inverted) {
++    throw new Error("FrameUtils.findFrameByLocation only supports leaf nodes in an inverted tree.");
++  }
++
++  let calls = threadNode.calls;
++  for (let i = 0; i < calls.length; i++) {
++    if (calls[i].location === location) {
++      return calls[i];
++    }
++  }
++  return null;
++}
++
++exports.findFrameByLocation = findFrameByLocation;
+ exports.computeIsContentAndCategory = computeIsContentAndCategory;
+ exports.parseLocation = parseLocation;
+ exports.getInflatedFrameCache = getInflatedFrameCache;
+ exports.getOrAddInflatedFrame = getOrAddInflatedFrame;
+ exports.InflatedFrame = InflatedFrame;
+diff --git a/browser/devtools/performance/modules/logic/jit.js b/browser/devtools/performance/modules/logic/jit.js
+index 1a8b28d..55bf52d 100644
+--- a/browser/devtools/performance/modules/logic/jit.js
++++ b/browser/devtools/performance/modules/logic/jit.js
+@@ -264,64 +264,56 @@ const IMPLEMENTATION_NAMES = Object.keys(IMPLEMENTATION_MAP);
+  * Takes data from a FrameNode and computes rendering positions for
+  * a stacked mountain graph, to visualize JIT optimization tiers over time.
+  *
+  * @param {FrameNode} frameNode
+  *                    The FrameNode who's optimizations we're iterating.
+  * @param {Array<number>} sampleTimes
+  *                        An array of every sample time within the range we're counting.
+  *                        From a ThreadNode's `sampleTimes` property.
+- * @param {number} op.startTime
+- *                 The start time of the first sample.
+- * @param {number} op.endTime
+- *                 The end time of the last sample.
+- * @param {number} op.resolution
+- *                 The maximum amount of possible data points returned.
+- *                 Also determines the size in milliseconds of each bucket
+- *                 via `(endTime - startTime) / resolution`
++ * @param {number} bucketSize
++ *                 Size of each bucket in milliseconds.
++ *                 `duration / resolution = bucketSize` in OptimizationsGraph.
+  * @return {?Array<object>}
+  */
+-function createTierGraphDataFromFrameNode (frameNode, sampleTimes, { startTime, endTime, resolution }) {
++function createTierGraphDataFromFrameNode (frameNode, sampleTimes, bucketSize) {
+   if (!frameNode.hasOptimizations()) {
+     return;
+   }
+ 
+   let tierData = frameNode.getOptimizationTierData();
+-  let duration = endTime - startTime;
+   let stringTable = frameNode._stringTable;
+   let output = [];
+   let implEnum;
+ 
+   let tierDataIndex = 0;
+   let nextOptSample = tierData[tierDataIndex];
+ 
+   // Bucket data
+   let samplesInCurrentBucket = 0;
+   let currentBucketStartTime = sampleTimes[0];
+   let bucket = [];
+-  // Size of each bucket in milliseconds
+-  let bucketSize = Math.ceil(duration / resolution);
+ 
+   // Iterate one after the samples, so we can finalize the last bucket
+   for (let i = 0; i <= sampleTimes.length; i++) {
+     let sampleTime = sampleTimes[i];
+ 
+     // If this sample is in the next bucket, or we're done
+     // checking sampleTimes and on the last iteration, finalize previous bucket
+     if (sampleTime >= (currentBucketStartTime + bucketSize) ||
+         i >= sampleTimes.length) {
+ 
+       let dataPoint = {};
+-      dataPoint.ys = [];
+-      dataPoint.x = currentBucketStartTime;
++      dataPoint.values = [];
++      dataPoint.delta = currentBucketStartTime;
+ 
+       // Map the opt site counts as a normalized percentage (0-1)
+       // of its count in context of total samples this bucket
+       for (let j = 0; j < IMPLEMENTATION_NAMES.length; j++) {
+-        dataPoint.ys[j] = (bucket[j] || 0) / (samplesInCurrentBucket || 1);
++        dataPoint.values[j] = (bucket[j] || 0) / (samplesInCurrentBucket || 1);
+       }
+       output.push(dataPoint);
+ 
+       // Set the new start time of this bucket and reset its count
+       currentBucketStartTime += bucketSize;
+       samplesInCurrentBucket = 0;
+       bucket = [];
+     }
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index e3f6f99..814dfb4 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -34,16 +34,17 @@ function ThreadNode(thread, options = {}) {
+   if (options.endTime == void 0 || options.startTime == void 0) {
+     throw new Error("ThreadNode requires both `startTime` and `endTime`.");
+   }
+   this.samples = 0;
+   this.sampleTimes = [];
+   this.youngestFrameSamples = 0;
+   this.calls = [];
+   this.duration = options.endTime - options.startTime;
++  this.inverted = options.invertTree;
+ 
+   let { samples, stackTable, frameTable, stringTable, allocationsTable } = thread;
+ 
+   // Nothing to do if there are no samples.
+   if (samples.data.length === 0) {
+     return;
+   }
+ 
+@@ -223,20 +224,18 @@ ThreadNode.prototype = {
+           calls = prevCalls;
+         }
+ 
+         let frameNode = getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame,
+                                           mutableFrameKeyOptions.isMetaCategoryOut,
+                                           leafTable);
+         if (isLeaf) {
+           frameNode.youngestFrameSamples++;
+-          if (inflatedFrame.optimizations) {
+-            frameNode._addOptimizations(inflatedFrame.optimizations, inflatedFrame.implementation,
+-                                        sampleTime, stringTable);
+-          }
++          frameNode._addOptimizations(inflatedFrame.optimizations, inflatedFrame.implementation,
++                                      sampleTime, stringTable);
+         }
+         frameNode.samples++;
+ 
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
+       }
+ 
+@@ -395,23 +394,23 @@ FrameNode.prototype = {
+     // by JITOptimizations, if optimization information is actually displayed.
+     if (site) {
+       let opts = this._optimizations;
+       if (opts === null) {
+         opts = this._optimizations = [];
+         this._stringTable = stringTable;
+       }
+       opts.push(site);
++    }
+ 
+-      if (this._tierData === null) {
+-        this._tierData = [];
+-      }
+-      // Record type of implementation used and the sample time
+-      this._tierData.push({ implementation, time });
++    if (this._tierData === null) {
++      this._tierData = [];
+     }
++    // Record type of implementation used and the sample time
++    this._tierData.push({ implementation, time });
+   },
+ 
+   _clone: function () {
+     let newNode = new FrameNode(this.key, this, this.isMetaCategory);
+     newNode._merge(this);
+     return newNode;
+   },
+ 
+diff --git a/browser/devtools/performance/modules/widgets/graphs.js b/browser/devtools/performance/modules/widgets/graphs.js
+index 9d0fe93..02ed628 100644
+--- a/browser/devtools/performance/modules/widgets/graphs.js
++++ b/browser/devtools/performance/modules/widgets/graphs.js
+@@ -7,53 +7,61 @@
+  * This file contains the base line graph that all Performance line graphs use.
+  */
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { Heritage } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ const LineGraphWidget = require("devtools/shared/widgets/LineGraphWidget");
+ const BarGraphWidget = require("devtools/shared/widgets/BarGraphWidget");
++const MountainGraphWidget = require("devtools/shared/widgets/MountainGraphWidget");
+ const { CanvasGraphUtils } = require("devtools/shared/widgets/Graphs");
+ 
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ 
+ loader.lazyRequireGetter(this, "colorUtils",
+   "devtools/css-color", true);
+ loader.lazyRequireGetter(this, "getColor",
+   "devtools/shared/theme", true);
+ loader.lazyRequireGetter(this, "ProfilerGlobal",
+   "devtools/performance/global");
+ loader.lazyRequireGetter(this, "TimelineGlobal",
+   "devtools/performance/global");
+ loader.lazyRequireGetter(this, "MarkersOverview",
+   "devtools/performance/markers-overview", true);
++loader.lazyRequireGetter(this, "createTierGraphDataFromFrameNode",
++  "devtools/performance/jit", true);
+ 
+ /**
+  * For line graphs
+  */
+ const HEIGHT = 35; // px
+ const STROKE_WIDTH = 1; // px
+ const DAMPEN_VALUES = 0.95;
+ const CLIPHEAD_LINE_COLOR = "#666";
+ const SELECTION_LINE_COLOR = "#555";
+-const SELECTION_BACKGROUND_COLOR_NAME = "highlight-blue";
+-const FRAMERATE_GRAPH_COLOR_NAME = "highlight-green";
+-const MEMORY_GRAPH_COLOR_NAME = "highlight-blue";
++const SELECTION_BACKGROUND_COLOR_NAME = "graphs-blue";
++const FRAMERATE_GRAPH_COLOR_NAME = "graphs-green";
++const MEMORY_GRAPH_COLOR_NAME = "graphs-blue";
+ 
+ /**
+  * For timeline overview
+  */
+ const MARKERS_GRAPH_HEADER_HEIGHT = 14; // px
+ const MARKERS_GRAPH_ROW_HEIGHT = 10; // px
+ const MARKERS_GROUP_VERTICAL_PADDING = 4; // px
+ 
+ /**
++ * For optimization graph
++ */
++const OPTIMIZATIONS_GRAPH_RESOLUTION = 100;
++
++/**
+  * A base class for performance graphs to inherit from.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the overview.
+  * @param string metric
+  *        The unit of measurement for this graph.
+  */
+ function PerformanceGraph(parent, metric) {
+@@ -81,17 +89,17 @@ PerformanceGraph.prototype = Heritage.extend(LineGraphWidget.prototype, {
+ 
+   /**
+    * Sets the theme via `theme` to either "light" or "dark",
+    * and updates the internal styling to match. Requires a redraw
+    * to see the effects.
+    */
+   setTheme: function (theme) {
+     theme = theme || "light";
+-    let mainColor = getColor(this.mainColor || "highlight-blue", theme);
++    let mainColor = getColor(this.mainColor || "graphs-blue", theme);
+     this.backgroundColor = getColor("body-background", theme);
+     this.strokeColor = mainColor;
+     this.backgroundGradientStart = colorUtils.setAlpha(mainColor, 0.2);
+     this.backgroundGradientEnd = colorUtils.setAlpha(mainColor, 0.2);
+     this.selectionBackgroundColor = colorUtils.setAlpha(getColor(SELECTION_BACKGROUND_COLOR_NAME, theme), 0.25);
+     this.selectionStripesColor = "rgba(255, 255, 255, 0.1)";
+     this.maximumLineColor = colorUtils.setAlpha(mainColor, 0.4);
+     this.averageLineColor = colorUtils.setAlpha(mainColor, 0.7);
+@@ -417,12 +425,88 @@ GraphsController.prototype = {
+       if (graph = yield this.isAvailable(graphName)) {
+         enabled.push(graph);
+       }
+     }
+     return this._enabledGraphs = enabled;
+   }),
+ };
+ 
++/**
++ * A base class for performance graphs to inherit from.
++ *
++ * @param nsIDOMNode parent
++ *        The parent node holding the overview.
++ * @param string metric
++ *        The unit of measurement for this graph.
++ */
++function OptimizationsGraph(parent) {
++  MountainGraphWidget.call(this, parent);
++  this.setTheme();
++}
++
++OptimizationsGraph.prototype = Heritage.extend(MountainGraphWidget.prototype, {
++
++  render: Task.async(function *(threadNode, frameNode) {
++    // Regardless if we draw or clear the graph, wait
++    // until its ready.
++    yield this.ready();
++
++    if (!threadNode || !frameNode) {
++      this.setData([]);
++      return;
++    }
++
++    let { sampleTimes } = threadNode;
++
++    if (!sampleTimes.length) {
++      this.setData([]);
++      return;
++    }
++
++    // Take startTime/endTime from samples recorded, rather than
++    // using duration directly from threadNode, as the first sample that
++    // equals the startTime does not get recorded.
++    let startTime = sampleTimes[0];
++    let endTime = sampleTimes[sampleTimes.length - 1];
++
++    let bucketSize = (endTime - startTime) / OPTIMIZATIONS_GRAPH_RESOLUTION;
++    let data = createTierGraphDataFromFrameNode(frameNode, sampleTimes, bucketSize);
++
++    // If for some reason we don't have data (like the frameNode doesn't
++    // have optimizations, but it shouldn't be at this point if it doesn't),
++    // log an error.
++    if (!data) {
++      Cu.reportError(`FrameNode#${frameNode.location} does not have optimizations data to render.`);
++      return;
++    }
++
++    this.dataOffsetX = startTime;
++    yield this.setData(data);
++  }),
++
++  /**
++   * Sets the theme via `theme` to either "light" or "dark",
++   * and updates the internal styling to match. Requires a redraw
++   * to see the effects.
++   */
++  setTheme: function (theme) {
++    theme = theme || "light";
++
++    let interpreterColor = getColor("graphs-red", theme);
++    let baselineColor = getColor("graphs-blue", theme);
++    let ionColor = getColor("graphs-green", theme);
++
++    this.format = [
++      { color: interpreterColor },
++      { color: baselineColor },
++      { color: ionColor },
++    ];
++
++    this.backgroundColor = getColor("body-background", theme);
++  }
++});
++
++exports.OptimizationsGraph = OptimizationsGraph;
+ exports.FramerateGraph = FramerateGraph;
+ exports.MemoryGraph = MemoryGraph;
+ exports.TimelineGraph = TimelineGraph;
+ exports.GraphsController = GraphsController;
+diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
+index 3676ef6..d00fd47 100644
+--- a/browser/devtools/performance/modules/widgets/tree-view.js
++++ b/browser/devtools/performance/modules/widgets/tree-view.js
+@@ -118,16 +118,17 @@ function CallView({
+ 
+   this.caller = caller;
+   this.frame = frame;
+   this.hidden = hidden;
+   this.inverted = inverted;
+   this.showOptimizationHint = showOptimizationHint;
+ 
+   this._onUrlClick = this._onUrlClick.bind(this);
++  this._onOptClick = this._onOptClick.bind(this);
+ };
+ 
+ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   /**
+    * Creates the view for this tree node.
+    * @param nsIDOMNode document
+    * @param nsIDOMNode arrowNode
+    * @return nsIDOMNode
+@@ -266,16 +267,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+     // Render optimization link to JIT view if the frame
+     // has optimizations
+     if (this.root.showOptimizationHint && frameInfo.hasOptimizations && !frameInfo.isMetaCategory) {
+       let icon = doc.createElement("description");
+       icon.setAttribute("tooltiptext", VIEW_OPTIMIZATIONS_TOOLTIP);
+       icon.setAttribute("type", "linkable");
+       icon.className = "opt-icon";
+       cell.appendChild(icon);
++      icon.addEventListener("mousedown", this._onOptClick);
+     }
+ 
+     // Don't render a name label node if there's no function name. A different
+     // location label node will be rendered instead.
+     if (frameName) {
+       let nameNode = doc.createElement("description");
+       nameNode.className = "plain call-tree-name";
+       nameNode.setAttribute("flex", "1");
+@@ -429,16 +431,25 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+     if (!visible) {
+       this.container.setAttribute("categories-hidden", "");
+     } else {
+       this.container.removeAttribute("categories-hidden");
+     }
+   },
+ 
+   /**
++   * Handler for the "click" event on an optimization notification.
++   */
++  _onOptClick: function(e) {
++    e.preventDefault();
++    e.stopPropagation();
++    this.root.emit("optimization", this.frame);
++  },
++
++  /**
+    * Handler for the "click" event on the url node of this call view.
+    */
+   _onUrlClick: function(e) {
+     e.preventDefault();
+     e.stopPropagation();
+     this.root.emit("link", this);
+   },
+ });
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 494b5df..5e4f0ec 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -20,26 +20,30 @@ loader.lazyRequireGetter(this, "L10N",
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/performance/markers", true);
+ loader.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/performance/recording-utils");
+ loader.lazyRequireGetter(this, "RecordingModel",
+   "devtools/performance/recording-model", true);
+ loader.lazyRequireGetter(this, "GraphsController",
+   "devtools/performance/graphs", true);
++loader.lazyRequireGetter(this, "OptimizationsGraph",
++  "devtools/performance/graphs", true);
+ loader.lazyRequireGetter(this, "WaterfallHeader",
+   "devtools/performance/waterfall-ticks", true);
+ loader.lazyRequireGetter(this, "MarkerView",
+   "devtools/performance/marker-view", true);
+ loader.lazyRequireGetter(this, "MarkerDetails",
+   "devtools/performance/marker-details", true);
+ loader.lazyRequireGetter(this, "MarkerUtils",
+   "devtools/performance/marker-utils");
+ loader.lazyRequireGetter(this, "WaterfallUtils",
+   "devtools/performance/waterfall-utils");
++loader.lazyRequireGetter(this, "FrameUtils",
++  "devtools/performance/frame-utils");
+ loader.lazyRequireGetter(this, "CallView",
+   "devtools/performance/tree-view", true);
+ loader.lazyRequireGetter(this, "ThreadNode",
+   "devtools/performance/tree-model", true);
+ loader.lazyRequireGetter(this, "FrameNode",
+   "devtools/performance/tree-model", true);
+ loader.lazyRequireGetter(this, "JITOptimizations",
+   "devtools/performance/jit", true);
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 9ee944e..0e44281 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -75,17 +75,17 @@
+                 class="experimental-option"
+                 type="checkbox"
+                 data-pref="enable-jit-optimizations"
+                 label="&profilerUI.enableJITOptimizations;"
+                 tooltiptext="&profilerUI.enableJITOptimizations.tooltiptext;"/>
+     </menupopup>
+   </popupset>
+ 
+-  <hbox class="theme-body" flex="1">
++  <hbox id="body" class="theme-body" flex="1">
+ 
+     <!-- Sidebar: controls and recording list -->
+     <vbox id="recordings-pane">
+       <toolbar id="recordings-toolbar"
+                class="devtools-toolbar">
+         <hbox id="recordings-controls"
+               class="devtools-toolbarbutton-group">
+           <toolbarbutton id="main-record-button"
+@@ -328,17 +328,17 @@
+               </vbox>
+ 
+               <!-- Memory FlameChart -->
+               <hbox id="memory-flamegraph-view" flex="1">
+               </hbox>
+ 
+               <!-- JIT View -->
+               <hbox id="optimizations-view" flex="1">
+-                <hbox id="graph-placeholder" flex="1">
++                <hbox id="optimizations-graph" flex="1">
+                 </hbox>
+                 <splitter id="optimizations-splitter" class="devtools-side-splitter"/>
+                 <tabbox id="optimizations-tabs"
+                         class="devtools-sidebar-tabs"
+                         handleCtrlTab="false">
+                   <tabs>
+                     <tab id="optimizations-optimizations-tab"
+                          label="Optimizations" />
+diff --git a/browser/devtools/performance/test/unit/test_jit-graph-data.js b/browser/devtools/performance/test/unit/test_jit-graph-data.js
+index 0ec7617..5243fd7 100644
+--- a/browser/devtools/performance/test/unit/test_jit-graph-data.js
++++ b/browser/devtools/performance/test/unit/test_jit-graph-data.js
+@@ -31,75 +31,74 @@ add_task(function test() {
+ 
+   equal(root.samples, SAMPLE_COUNT / 2, "root has correct amount of samples");
+   equal(root.sampleTimes.length, SAMPLE_COUNT / 2, "root has correct amount of sample times");
+   // Add time offset since the first sample begins TIME_OFFSET after startTime
+   equal(root.sampleTimes[0], startTime + TIME_OFFSET, "root recorded first sample time in scope");
+   equal(root.sampleTimes[root.sampleTimes.length - 1], endTime, "root recorded last sample time in scope");
+ 
+   let frame = getFrameNodePath(root, "X");
+-  let data = createTierGraphDataFromFrameNode(frame, root.sampleTimes, { startTime, endTime, resolution: RESOLUTION });
++  let data = createTierGraphDataFromFrameNode(frame, root.sampleTimes, (endTime-startTime)/RESOLUTION);
+ 
+   let TIME_PER_WINDOW = SAMPLE_COUNT / 2 / RESOLUTION * TIME_PER_SAMPLE;
+ 
+   for (let i = 0; i < 10; i++) {
+-    equal(data[i].x, startTime + TIME_OFFSET + (TIME_PER_WINDOW * i), "first window has correct x");
+-    equal(data[i].ys[0], 0.2, "first window has 2 frames in interpreter");
+-    equal(data[i].ys[1], 0.2, "first window has 2 frames in baseline");
+-    equal(data[i].ys[2], 0.2, "first window has 2 frames in ion");
++    equal(data[i].delta, startTime + TIME_OFFSET + (TIME_PER_WINDOW * i), "first window has correct x");
++    equal(data[i].values[0], 0.2, "first window has 2 frames in interpreter");
++    equal(data[i].values[1], 0.2, "first window has 2 frames in baseline");
++    equal(data[i].values[2], 0.2, "first window has 2 frames in ion");
+   }
+   for (let i = 10; i < 20; i++) {
+-    equal(data[i].x, startTime + TIME_OFFSET + (TIME_PER_WINDOW * i), "second window has correct x");
+-    equal(data[i].ys[0], 0, "second window observed no optimizations");
+-    equal(data[i].ys[1], 0, "second window observed no optimizations");
+-    equal(data[i].ys[2], 0, "second window observed no optimizations");
++    equal(data[i].delta, startTime + TIME_OFFSET + (TIME_PER_WINDOW * i), "second window has correct x");
++    equal(data[i].values[0], 0, "second window observed no optimizations");
++    equal(data[i].values[1], 0, "second window observed no optimizations");
++    equal(data[i].values[2], 0, "second window observed no optimizations");
+   }
+   for (let i = 20; i < 30; i++) {
+-    equal(data[i].x, startTime + TIME_OFFSET + (TIME_PER_WINDOW * i), "third window has correct x");
+-    equal(data[i].ys[0], 0.3, "third window has 3 frames in interpreter");
+-    equal(data[i].ys[1], 0, "third window has 0 frames in baseline");
+-    equal(data[i].ys[2], 0, "third window has 0 frames in ion");
++    equal(data[i].delta, startTime + TIME_OFFSET + (TIME_PER_WINDOW * i), "third window has correct x");
++    equal(data[i].values[0], 0.3, "third window has 3 frames in interpreter");
++    equal(data[i].values[1], 0, "third window has 0 frames in baseline");
++    equal(data[i].values[2], 0, "third window has 0 frames in ion");
+   }
+ });
+ 
+ let gUniqueStacks = new RecordingUtils.UniqueStacks();
+ 
+ function uniqStr(s) {
+   return gUniqueStacks.getOrAddStringIndex(s);
+ }
+ 
+ const TIER_PATTERNS = [
+   // 0-99
+-  ["X", "X", "X", "X", "X", "X", "X", "X", "X", "X"],
++  ["X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0"],
+   // 100-199
+-  ["X", "X", "X", "X", "X", "X", "X", "X", "X", "X"],
++  ["X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0"],
+   // 200-299
+-  ["X", "X", "X", "X", "X", "X", "X", "X", "X", "X"],
++  ["X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0"],
+   // 300-399
+-  ["X", "X", "X", "X", "X", "X", "X", "X", "X", "X"],
++  ["X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0"],
+   // 400-499
+-  ["X", "X", "X", "X", "X", "X", "X", "X", "X", "X"],
++  ["X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0"],
+ 
+   // 500-599
+-  // Test current frames in all opts, including that
+-  // the same frame with no opts does not get counted
+-  ["X", "X", "A", "A", "X_1", "X_2", "X_1", "X_2", "X_0", "X_0"],
++  // Test current frames in all opts
++  ["A", "A", "A", "A", "X_1", "X_2", "X_1", "X_2", "X_0", "X_0"],
+ 
+   // 600-699
+   // Nothing for current frame
+   ["A", "B", "A", "B", "A", "B", "A", "B", "A", "B"],
+ 
+   // 700-799
+   // A few frames where the frame is not the leaf node
+   ["X_2 -> Y", "X_2 -> Y", "X_2 -> Y", "X_0", "X_0", "X_0", "A", "A", "A", "A"],
+ 
+   // 800-899
+-  ["X", "X", "X", "X", "X", "X", "X", "X", "X", "X"],
++  ["X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0"],
+   // 900-999
+-  ["X", "X", "X", "X", "X", "X", "X", "X", "X", "X"],
++  ["X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0", "X_0"],
+ ];
+ 
+ function createSample (i, frames) {
+   let sample = {};
+   sample.time = i * TIME_PER_SAMPLE;
+   sample.frames = [{ location: "(root)" }];
+   if (i === 0) {
+     return sample;
+diff --git a/browser/devtools/performance/views/details-optimizations.js b/browser/devtools/performance/views/details-optimizations.js
+index d0a667c..677a1d8 100644
+--- a/browser/devtools/performance/views/details-optimizations.js
++++ b/browser/devtools/performance/views/details-optimizations.js
+@@ -12,32 +12,38 @@ let OptimizationsView = Heritage.extend(DetailsSubview, {
+ 
+   rangeChangeDebounceTime: 75, // ms
+ 
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     DetailsSubview.initialize.call(this);
+-    this.reset = this.reset.bind(this);
+     this.tabs = $("#optimizations-tabs");
++    this.graph = new OptimizationsGraph($("#optimizations-graph"));
++    this.graph.setTheme(PerformanceController.getTheme());
++
++    this._onThemeChanged = this._onThemeChanged.bind(this);
+     this._onFramesListSelect = this._onFramesListSelect.bind(this);
+ 
+     OptimizationsListView.initialize();
+     FramesListView.initialize({ container: $("#frames-tabpanel") });
+     FramesListView.on("select", this._onFramesListSelect);
++    PerformanceController.on(EVENTS.THEME_CHANGED, this._onThemeChanged);
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     DetailsSubview.destroy.call(this);
+-    this.tabs = this._threadNode = this._frameNode = null;
++    this._recording = this.tabs = this._threadNode = this._frameNode = null;
+ 
++    PerformanceController.off(EVENTS.THEME_CHANGED, this._onThemeChanged);
++    JsCallTreeView.off("optimization", this._onCallTreeOptimizationClick);
+     FramesListView.off("select", this._onFramesListSelect);
+     FramesListView.destroy();
+     OptimizationsListView.destroy();
+   },
+ 
+   /**
+    * Selects a tab by name.
+    *
+@@ -64,39 +70,70 @@ let OptimizationsView = Heritage.extend(DetailsSubview, {
+   render: function (interval={}) {
+     let options = {
+       contentOnly: !PerformanceController.getOption("show-platform-data"),
+       flattenRecursion: PerformanceController.getOption("flatten-tree-recursion"),
+       // Always invert the tree for the optimizations view so we can quickly
+       // get leaves
+       invertTree: true,
+     };
++
+     let recording = PerformanceController.getCurrentRecording();
++    // If this a new recording, clear out the thread and frame nodes,
++    // because we don't want to attempt to select a frame node in the new
++    // recording with an identical location
++    // TODO test for this bug 1176056
++    if (recording !== this._recording) {
++      this.frameNode = null;
++    }
++    this._recording = recording;
++
+     let profile = recording.getProfile();
+ 
+-    this.reset();
+     // TODO bug 1175662
+     // Share thread nodes between details view
+     this.threadNode = this._prepareThreadNode(profile, interval, options);
+     this.emit(EVENTS.OPTIMIZATIONS_RENDERED);
+   },
+ 
+   /**
+    * The main thread node used in this recording that contains
+    * all potential frame nodes to select.
+    */
+   set threadNode(threadNode) {
+     if (threadNode === this._threadNode) {
+       return;
+     }
+     this._threadNode = threadNode;
+-    // Also clear out the current frame node as its no
+-    // longer relevent
+-    this.frameNode = null;
+-    this._setAndRenderFramesList();
++
++    FramesListView.setCurrentThread(this.threadNode);
++    FramesListView.render();
++
++    // If we're setting a threadNode that exists (that is, not clearing it,
++    // like on recording selection), that means we're probably getting
++    // a new selection range in the same recording. If we have a frame node
++    // selected, attempt to reselect a frame node representing the same
++    // location in the new thread node.
++    //
++    // TODO test for this bug 1176056, both when finding a similar
++    // frame node and when not finding a similar frame node (due to
++    // new selection not containing that frame)
++    let frameNode = null;
++    if (threadNode !== null && this.frameNode) {
++      frameNode = FrameUtils.findFrameByLocation(threadNode, this.frameNode.location);
++      if (frameNode) {
++        this.frameNode = frameNode;
++      }
++    }
++
++    // If we couldn't find a similar frame node in the new thread node, clear it
++    // out, as there's no possible selection.
++    if (!frameNode) {
++      this.frameNode = null;
++    }
+   },
+   get threadNode() {
+     return this._threadNode;
+   },
+ 
+   /**
+    * frameNode is the frame node selected currently to inspect
+    * the optimization tiers over time and strategies.
+@@ -106,69 +143,69 @@ let OptimizationsView = Heritage.extend(DetailsSubview, {
+       return;
+     }
+     this._frameNode = frameNode;
+ 
+     // If no frame selected, jump to the frame list view. If just selected
+     // a frame, jump to optimizations view.
+     // TODO test for this bug 1176056
+     this.selectTabByName(frameNode ? "optimizations" : "frames");
+-    this._setAndRenderTierGraph();
+-    this._setAndRenderOptimizationsList();
++
++    // Ensure the frame is highlighted in the list if this
++    // came from a selection via other means (selection change,
++    // via call tree, etc)
++    FramesListView.selectFrameNode(this.frameNode);
++    OptimizationsListView.setCurrentFrame(this.frameNode);
++    OptimizationsListView.render();
++    this.graph.render(this.threadNode, this.frameNode);
+   },
+ 
+   get frameNode() {
+     return this._frameNode;
+   },
+ 
+   /**
+-   * Clears the frameNode so that tier and opts list
+-   * views are cleared.
+-   */
+-  reset: function () {
+-    this.threadNode = this.frameNode = null;
+-  },
+-
+-  /**
+    * Called when the recording is stopped and prepares data to
+    * populate the graph.
+    */
+   _prepareThreadNode: function (profile, { startTime, endTime }, options) {
+     let thread = profile.threads[0];
+     let { contentOnly, invertTree, flattenRecursion } = options;
+     let threadNode = new ThreadNode(thread, { startTime, endTime, contentOnly, invertTree, flattenRecursion });
+     return threadNode;
+   },
+ 
+   /**
+-   * Renders the tier graph.
+-   */
+-  _setAndRenderTierGraph: function () {
+-    // TODO bug 1150299
+-  },
+-
+-  /**
+-   * Renders the frames list.
++   * Called when a frame is selected via the FramesListView
+    */
+-  _setAndRenderFramesList: function () {
+-    FramesListView.setCurrentThread(this.threadNode);
+-    FramesListView.render();
++  _onFramesListSelect: function (_, frameNode) {
++    this.frameNode = frameNode;
+   },
+ 
+   /**
+-   * Renders the optimizations list.
++   * Called when `devtools.theme` changes.
+    */
+-  _setAndRenderOptimizationsList: function () {
+-    OptimizationsListView.setCurrentFrame(this.frameNode);
+-    OptimizationsListView.render();
++  _onThemeChanged: function (_, theme) {
++    this.graph.setTheme(theme);
++    this.graph.refresh({ force: true });
+   },
+ 
+-  /**
+-   * Called when a frame is selected via the FramesListView
+-   */
+-  _onFramesListSelect: function (_, frameNode) {
++  _onCallTreeOptimizationClick: Task.async(function *(_, frameNode) {
++    yield DetailsView.selectView("optimizations");
+     this.frameNode = frameNode;
+-  },
++  }),
+ 
+   toString: () => "[object OptimizationsView]"
+ });
+ 
+ EventEmitter.decorate(OptimizationsView);
++
++/**
++ * TODO
++ * This is ugly -- this is because when clicking on a call tree
++ * opt icon, if the opt view isn't initialized yet, it won't be listening to the
++ * event. This should probably be pulled out in some sort of view sharing
++ * thing when we add extensibility features in bug 1174053, including things
++ * like linking to the debugger.
++ */
++OptimizationsView._onCallTreeOptimizationClick =
++  OptimizationsView._onCallTreeOptimizationClick.bind(OptimizationsView);
++JsCallTreeView.on("optimization", OptimizationsView._onCallTreeOptimizationClick);
+diff --git a/browser/devtools/performance/views/frames-list.js b/browser/devtools/performance/views/frames-list.js
+index 0fd691b..0176cfb 100644
+--- a/browser/devtools/performance/views/frames-list.js
++++ b/browser/devtools/performance/views/frames-list.js
+@@ -28,16 +28,17 @@ let FramesListView = {
+ 
+     this.container.appendChild(this.list);
+   },
+ 
+   /**
+    * Destruction function called when the tool cleans up.
+    */
+   destroy: function () {
++    this._selectedItem = null;
+     this.list.removeEventListener("click", this._onFrameListClick, false);
+     this.container.innerHTML = "";
+     this.container = this.list = null;
+   },
+ 
+   /**
+    * Sets the thread node used for subsequent rendering.
+    *
+@@ -72,43 +73,58 @@ let FramesListView = {
+       el.textContent = label;
+       el.setAttribute("tooltip", label);
+       el.setAttribute("data-location", frame.location);
+       this.list.appendChild(el);
+     }
+   },
+ 
+   /**
+-   * Fired when a frame in the list is clicked.
++   * Highlight and trigger an event for selecting `frame`.
++   * Optionally can pass in a `target` to save looking it up.
++   */
++  selectFrameNode: function (frame, target) {
++    if (!frame) {
++      return;
++    }
++    target = target || this.list.querySelector(`li[data-location="${frame.location}"]`);
++
++    if (!target) {
++      return;
++    }
++
++    // set the selected class on element, remove it
++    // from previous element
++    if (this._selectedItem) {
++      this._selectedItem.classList.remove("selected");
++    }
++    this._selectedItem = target;
++    target.classList.add("selected");
++  },
++
++  /**
++   * Fired when a frame in the list is clicked. Emits
++   * "select" event if frame found.
+    */
+   _onFrameListClick: function (e) {
+     // If no threadNode (no renders), abort;
+     // also only allow left click to trigger this event
+     if (!this.threadNode || e.button !== 0) {
+       return;
+     }
+ 
+     let target = e.target;
+     let location = target.getAttribute("data-location");
+     if (!location) {
+       return;
+     }
+ 
+-    for (let frame of this.threadNode.calls) {
+-      if (frame.location === location) {
+-        // If found, set the selected class on element, remove it
+-        // from previous element, and emit event "select"
+-        if (this._selectedItem) {
+-          this._selectedItem.classList.remove("selected");
+-        }
+-        this._selectedItem = target;
+-        target.classList.add("selected");
+-        console.log("Emitting select on", this, frame);
+-        this.emit("select", frame);
+-        break;
+-      }
++    let frame = FrameUtils.findFrameByLocation(this.threadNode, location);
++    if (frame) {
++      this.selectFrameNode(frame, target);
++      this.emit("select", frame);
+     }
+   },
+ 
+   toString: () => "[object FramesListView]"
+ };
+ 
+ EventEmitter.decorate(FramesListView);
+diff --git a/browser/devtools/shared/widgets/MountainGraphWidget.js b/browser/devtools/shared/widgets/MountainGraphWidget.js
+index 58a6f2d..ccc5e7d 100644
+--- a/browser/devtools/shared/widgets/MountainGraphWidget.js
++++ b/browser/devtools/shared/widgets/MountainGraphWidget.js
+@@ -7,17 +7,17 @@ const { AbstractCanvasGraph, CanvasGraphUtils } = require("devtools/shared/widge
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ 
+ // Bar graph constants.
+ 
+ const GRAPH_DAMPEN_VALUES_FACTOR = 0.9;
+ 
+ const GRAPH_BACKGROUND_COLOR = "#ddd";
+-const GRAPH_STROKE_WIDTH = 2; // px
++const GRAPH_STROKE_WIDTH = 1; // px
+ const GRAPH_STROKE_COLOR = "rgba(255,255,255,0.9)";
+ const GRAPH_HELPER_LINES_DASH = [5]; // px
+ const GRAPH_HELPER_LINES_WIDTH = 1; // px
+ 
+ const GRAPH_CLIPHEAD_LINE_COLOR = "#fff";
+ const GRAPH_SELECTION_LINE_COLOR = "#fff";
+ const GRAPH_SELECTION_BACKGROUND_COLOR = "rgba(44,187,15,0.25)";
+ const GRAPH_SELECTION_STRIPES_COLOR = "rgba(255,255,255,0.1)";
+@@ -120,18 +120,18 @@ MountainGraphWidget.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+       throw "The graph format traits are mandatory to style the data source.";
+     }
+     let { canvas, ctx } = this._getNamedCanvas("mountain-graph-data");
+     let width = this._width;
+     let height = this._height;
+ 
+     let totalSections = this.format.length;
+     let totalTicks = this._data.length;
+-    let firstTick = this._data[0].delta;
+-    let lastTick = this._data[totalTicks - 1].delta;
++    let firstTick = totalTicks ? this._data[0].delta : 0;
++    let lastTick = totalTicks ? this._data[totalTicks - 1].delta : 0;
+ 
+     let duration = this.dataDuration || lastTick;
+     let dataScaleX = this.dataScaleX = width / (duration - this.dataOffsetX);
+     let dataScaleY = this.dataScaleY = height * this.dampenValuesFactor;
+ 
+     // Draw the graph.
+ 
+     let prevHeights = Array.from({ length: totalTicks }).fill(0);
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index df7d8cb..dda2cba 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -669,16 +669,21 @@ description.opt-icon::before {
+ }
+ .opt-icon[severity=warning]::before {
+   background-position: -24px -24px;
+ }
+ .opt-icon[type=linkable]::before {
+   cursor: pointer;
+ }
+ 
++#frames-tabpanel {
++  height: 100vh;
++  overflow: scroll;
++}
++
+ ul.frames-list {
+   list-style-type: none;
+   padding: 0px;
+   margin: 0px;
+ }
+ 
+ ul.frames-list li {
+   cursor: pointer;
+-- 
+2.2.1
+

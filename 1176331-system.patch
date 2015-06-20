@@ -1,0 +1,792 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 19 Jun 2015 13:56:59 -0700
+Subject: Bug 1176331 - Create a system module to consolidate usage of fetching device/system/os/constant information. r=jryans,bgrins
+
+diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
+index b4bf6cc..35ce9f2 100644
+--- a/browser/devtools/framework/toolbox.js
++++ b/browser/devtools/framework/toolbox.js
+@@ -1,14 +1,14 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ /* globals gDevTools, DOMHelpers, toolboxStrings, InspectorFront, Selection,
+-   CommandUtils, DevToolsUtils, screenManager, oscpu, Hosts, is64Bit,
+-   osString, showDoorhanger, getHighlighterUtils, getPerformanceFront */
++   CommandUtils, DevToolsUtils, Hosts, osString, showDoorhanger,
++   getHighlighterUtils, getPerformanceFront */
+ 
+ "use strict";
+ 
+ const MAX_ORDINAL = 99;
+ const ZOOM_PREF = "devtools.toolbox.zoomValue";
+ const SPLITCONSOLE_ENABLED_PREF = "devtools.toolbox.splitconsoleEnabled";
+ const SPLITCONSOLE_HEIGHT_PREF = "devtools.toolbox.splitconsoleHeight";
+ const MIN_ZOOM = 0.5;
+@@ -56,29 +56,21 @@ loader.lazyRequireGetter(this, "Selection",
+ loader.lazyRequireGetter(this, "InspectorFront",
+   "devtools/server/actors/inspector", true);
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ loader.lazyRequireGetter(this, "showDoorhanger",
+   "devtools/shared/doorhanger", true);
+ loader.lazyRequireGetter(this, "getPerformanceFront",
+   "devtools/performance/front", true);
++loader.lazyRequireGetter(this, "system",
++  "devtools/toolkit/shared/system");
+ loader.lazyGetter(this, "osString", () => {
+   return Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime).OS;
+ });
+-loader.lazyGetter(this, "screenManager", () => {
+-  return Cc["@mozilla.org/gfx/screenmanager;1"].getService(Ci.nsIScreenManager);
+-});
+-loader.lazyGetter(this, "oscpu", () => {
+-  return Cc["@mozilla.org/network/protocol;1?name=http"]
+-           .getService(Ci.nsIHttpProtocolHandler).oscpu;
+-});
+-loader.lazyGetter(this, "is64Bit", () => {
+-  return Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULAppInfo).is64Bit;
+-});
+ loader.lazyGetter(this, "registerHarOverlay", () => {
+   return require("devtools/netmonitor/har/toolbox-overlay.js").register;
+ });
+ 
+ // White-list buttons that can be toggled to prevent adding prefs for
+ // addons that have manually inserted toolbarbuttons into DOM.
+ // (By default, supported target is only local tab)
+ const ToolboxButtons = exports.ToolboxButtons = [
+@@ -432,21 +424,19 @@ Toolbox.prototype = {
+ 
+       this.emit("ready");
+     }.bind(this)).then(null, console.error.bind(console));
+   },
+ 
+   _pingTelemetry: function() {
+     this._telemetry.toolOpened("toolbox");
+ 
+-    this._telemetry.logOncePerBrowserVersion(OS_HISTOGRAM,
+-                                             this._getOsCpu());
+-    this._telemetry.logOncePerBrowserVersion(OS_IS_64_BITS, is64Bit ? 1 : 0);
+-    this._telemetry.logOncePerBrowserVersion(SCREENSIZE_HISTOGRAM,
+-                                             this._getScreenDimensions());
++    this._telemetry.logOncePerBrowserVersion(OS_HISTOGRAM, system.getOSCPU());
++    this._telemetry.logOncePerBrowserVersion(OS_IS_64_BITS, system.is64Bit ? 1 : 0);
++    this._telemetry.logOncePerBrowserVersion(SCREENSIZE_HISTOGRAM, system.getScreenDimensions());
+   },
+ 
+   /**
+    * Because our panels are lazy loaded this is a good place to watch for
+    * "pref-changed" events.
+    * @param  {String} event
+    *         The event type, "pref-changed".
+    * @param  {Object} data
+@@ -1796,91 +1786,16 @@ Toolbox.prototype = {
+    * Get the toolbox's notification box
+    *
+    * @return The notification box element.
+    */
+   getNotificationBox: function() {
+     return this.doc.getElementById("toolbox-notificationbox");
+   },
+ 
+-  _getScreenDimensions: function() {
+-    let width = {};
+-    let height = {};
+-
+-    screenManager.primaryScreen.GetRect({}, {}, width, height);
+-    let dims = width.value + "x" + height.value;
+-
+-    if (width.value < 800 || height.value < 600) {
+-      return 0;
+-    }
+-    if (dims === "800x600") {
+-      return 1;
+-    }
+-    if (dims === "1024x768") {
+-      return 2;
+-    }
+-    if (dims === "1280x800") {
+-      return 3;
+-    }
+-    if (dims === "1280x1024") {
+-      return 4;
+-    }
+-    if (dims === "1366x768") {
+-      return 5;
+-    }
+-    if (dims === "1440x900") {
+-      return 6;
+-    }
+-    if (dims === "1920x1080") {
+-      return 7;
+-    }
+-    if (dims === "2560×1440") {
+-      return 8;
+-    }
+-    if (dims === "2560×1600") {
+-      return 9;
+-    }
+-    if (dims === "2880x1800") {
+-      return 10;
+-    }
+-    if (width.value > 2880 || height.value > 1800) {
+-      return 12;
+-    }
+-
+-    // Other dimension such as a VM.
+-    return 11;
+-  },
+-
+-  _getOsCpu: function() {
+-    if (oscpu.includes("NT 5.1") || oscpu.includes("NT 5.2")) {
+-      return 0;
+-    }
+-    if (oscpu.includes("NT 6.0")) {
+-      return 1;
+-    }
+-    if (oscpu.includes("NT 6.1")) {
+-      return 2;
+-    }
+-    if (oscpu.includes("NT 6.2")) {
+-      return 3;
+-    }
+-    if (oscpu.includes("NT 6.3")) {
+-      return 4;
+-    }
+-    if (oscpu.includes("OS X")) {
+-      return 5;
+-    }
+-    if (oscpu.includes("Linux")) {
+-      return 6;
+-    }
+-
+-    // Other OS.
+-    return 12;
+-  },
+-
+   /**
+    * Destroy the current host, and remove event listeners from its frame.
+    *
+    * @return {promise} to be resolved when the host is destroyed.
+    */
+   destroyHost: function() {
+     // The host iframe's contentDocument may already be gone.
+     if (this.doc) {
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index e847c94..187b46a 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -94,17 +94,16 @@ browser.jar:
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/webaudioeditor/views/properties.js        (webaudioeditor/views/properties.js)
+     content/browser/devtools/webaudioeditor/views/automation.js        (webaudioeditor/views/automation.js)
+     content/browser/devtools/performance.xul                           (performance/performance.xul)
+-*   content/browser/devtools/performance/system.js                     (performance/system.js)
+     content/browser/devtools/performance/performance-controller.js     (performance/performance-controller.js)
+     content/browser/devtools/performance/performance-view.js           (performance/performance-view.js)
+     content/browser/devtools/performance/views/overview.js             (performance/views/overview.js)
+     content/browser/devtools/performance/views/toolbar.js              (performance/views/toolbar.js)
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/details-subview.js      (performance/views/details-abstract-subview.js)
+     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
+     content/browser/devtools/performance/views/details-js-call-tree.js      (performance/views/details-js-call-tree.js)
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index 494b5df..788aa73 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -1,22 +1,28 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
++const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++const { devtools: loader } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
++const require = loader.require;
++
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { Heritage, ViewHelpers, WidgetMethods } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ 
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
++loader.lazyRequireGetter(this, "system",
++  "devtools/toolkit/shared/system");
+ 
+ // Logic modules
+ 
+ loader.lazyRequireGetter(this, "L10N",
+   "devtools/performance/global", true);
+ loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+   "devtools/performance/markers", true);
+ loader.lazyRequireGetter(this, "RecordingUtils",
+@@ -524,17 +530,17 @@ let PerformanceController = {
+   getMultiprocessStatus: function () {
+     // If testing, set both supported and enabled to true so we
+     // have realtime rendering tests in non-e10s. This function is
+     // overridden wholesale in tests when we want to test multiprocess support
+     // specifically.
+     if (gDevTools.testing) {
+       return { supported: true, enabled: true };
+     }
+-    let supported = SYSTEM.MULTIPROCESS_SUPPORTED;
++    let supported = system.constants.E10S_TESTING_ONLY;
+     // This is only checked on tool startup -- requires a restart if
+     // e10s subsequently enabled.
+     let enabled = this._e10s;
+     return { supported, enabled };
+   },
+ 
+   /**
+    * Called on init, sets an `e10s` attribute on the main view container with
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 5f5f62b..a37730e 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -9,17 +9,16 @@
+ <?xml-stylesheet href="chrome://browser/skin/devtools/performance.css" type="text/css"?>
+ <!DOCTYPE window [
+   <!ENTITY % profilerDTD SYSTEM "chrome://browser/locale/devtools/profiler.dtd">
+   %profilerDTD;
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+   <script src="chrome://browser/content/devtools/theme-switching.js"/>
+-  <script type="application/javascript" src="performance/system.js"/>
+   <script type="application/javascript" src="performance/performance-controller.js"/>
+   <script type="application/javascript" src="performance/performance-view.js"/>
+   <script type="application/javascript" src="performance/views/overview.js"/>
+   <script type="application/javascript" src="performance/views/toolbar.js"/>
+   <script type="application/javascript" src="performance/views/details-subview.js"/>
+   <script type="application/javascript" src="performance/views/details-waterfall.js"/>
+   <script type="application/javascript" src="performance/views/details-js-call-tree.js"/>
+   <script type="application/javascript" src="performance/views/details-js-flamegraph.js"/>
+diff --git a/browser/devtools/performance/system.js b/browser/devtools/performance/system.js
+deleted file mode 100644
+index 1011a278..0000000
+--- a/browser/devtools/performance/system.js
++++ /dev/null
+@@ -1,20 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-/**
+- * A dump file to attach preprocessing directives consumable to the controller
+- * without littering our code with directives.
+- */
+-
+-const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+-const { devtools: loader } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+-const require = loader.require;
+-
+-const SYSTEM = {};
+-
+-// If e10s is possible on the platform.
+-#ifdef E10S_TESTING_ONLY
+-SYSTEM.MULTIPROCESS_SUPPORTED = true;
+-#endif
+diff --git a/toolkit/devtools/server/actors/device.js b/toolkit/devtools/server/actors/device.js
+index 994b027..d8944c7 100644
+--- a/toolkit/devtools/server/actors/device.js
++++ b/toolkit/devtools/server/actors/device.js
+@@ -4,152 +4,32 @@
+ 
+ const {Cc, Ci, Cu, CC} = require("chrome");
+ const Services = require("Services");
+ const protocol = require("devtools/server/protocol");
+ const {method, RetVal} = protocol;
+ const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+ const {LongStringActor} = require("devtools/server/actors/string");
+ const {DebuggerServer} = require("devtools/server/main");
++const {getSystemInfo, getSetting} = require("devtools/toolkit/shared/system");
+ 
+ Cu.import("resource://gre/modules/PermissionsTable.jsm")
+ 
+-const APP_MAP = {
+-  '{ec8030f7-c20a-464f-9b0e-13a3a9e97384}': 'firefox',
+-  '{3550f703-e582-4d05-9a08-453d09bdfdc6}': 'thunderbird',
+-  '{92650c4d-4b8e-4d2a-b7eb-24ecf4f6b63a}': 'seamonkey',
+-  '{718e30fb-e89b-41dd-9da7-e25a45638b28}': 'sunbird',
+-  '{3c2e2abc-06d4-11e1-ac3b-374f68613e61}': 'b2g',
+-  '{aa3c5121-dab2-40e2-81ca-7ea25febc110}': 'mobile/android',
+-  '{a23983c0-fd0e-11dc-95ff-0800200c9a66}': 'mobile/xul'
+-}
+-
+ let DeviceActor = exports.DeviceActor = protocol.ActorClass({
+   typeName: "device",
+ 
+   _desc: null,
+ 
+-  _getAppIniString : function(section, key) {
+-    let inifile = Services.dirsvc.get("GreD", Ci.nsIFile);
+-    inifile.append("application.ini");
+-
+-    if (!inifile.exists()) {
+-      inifile = Services.dirsvc.get("CurProcD", Ci.nsIFile);
+-      inifile.append("application.ini");
+-    }
+-
+-    if (!inifile.exists()) {
+-      return undefined;
+-    }
+-
+-    let iniParser = Cc["@mozilla.org/xpcom/ini-parser-factory;1"].getService(Ci.nsIINIParserFactory).createINIParser(inifile);
+-    try {
+-      return iniParser.getString(section, key);
+-    } catch (e) {
+-      return undefined;
+-    }
+-  },
+-
+-  _getSetting: function(name) {
+-    let deferred = promise.defer();
+-
+-    if ("@mozilla.org/settingsService;1" in Cc) {
+-      let settingsService = Cc["@mozilla.org/settingsService;1"].getService(Ci.nsISettingsService);
+-      let req = settingsService.createLock().get(name, {
+-        handle: (name, value) => deferred.resolve(value),
+-        handleError: (error) => deferred.reject(error),
+-      });
+-    } else {
+-      deferred.reject(new Error("No settings service"));
+-    }
+-    return deferred.promise;
+-  },
+-
+   getDescription: method(function() {
+-    // Most of this code is inspired from Nightly Tester Tools:
+-    // https://wiki.mozilla.org/Auto-tools/Projects/NightlyTesterTools
+-
+-    let appInfo = Services.appinfo;
+-    let win = Services.wm.getMostRecentWindow(DebuggerServer.chromeWindowType);
+-
+-    desc = {
+-      appid: appInfo.ID,
+-      apptype: APP_MAP[appInfo.ID],
+-      vendor: appInfo.vendor,
+-      name: appInfo.name,
+-      version: appInfo.version,
+-      appbuildid: appInfo.appBuildID,
+-      platformbuildid: appInfo.platformBuildID,
+-      platformversion: appInfo.platformVersion,
+-      geckobuildid: appInfo.platformBuildID,
+-      geckoversion: appInfo.platformVersion,
+-      changeset: this._getAppIniString("App", "SourceStamp"),
+-      locale: Cc["@mozilla.org/chrome/chrome-registry;1"].getService(Ci.nsIXULChromeRegistry).getSelectedLocale("global"),
+-      os: null,
+-      hardware: "unknown",
+-      processor: appInfo.XPCOMABI.split("-")[0],
+-      compiler: appInfo.XPCOMABI.split("-")[1],
+-      brandName: null,
+-      channel: null,
+-      profile: null,
+-    };
+-    if (win) {
+-      let utils = win.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowUtils);
+-      desc.dpi = utils.displayDPI;
+-      desc.useragent = win.navigator.userAgent;
+-      desc.width = win.screen.width;
+-      desc.height = win.screen.height;
+-    }
+-
+-    // Profile
+-    let profd = Services.dirsvc.get("ProfD", Ci.nsILocalFile);
+-    let profservice = Cc["@mozilla.org/toolkit/profile-service;1"].getService(Ci.nsIToolkitProfileService);
+-    var profiles = profservice.profiles;
+-    while (profiles.hasMoreElements()) {
+-      let profile = profiles.getNext().QueryInterface(Ci.nsIToolkitProfile);
+-      if (profile.rootDir.path == profd.path) {
+-        desc.profile = profile.name;
+-        break;
+-      }
+-    }
+-
+-    if (!desc.profile) {
+-      desc.profile = profd.leafName;
+-    }
+-
+-    // Channel
+-    try {
+-      desc.channel = Services.prefs.getCharPref('app.update.channel');
+-    } catch(e) {}
+-
+-    if (desc.apptype == "b2g") {
+-      // B2G specific
+-      desc.os = "B2G";
+-
+-      return this._getSetting('deviceinfo.hardware')
+-      .then(value => desc.hardware = value)
+-      .then(() => this._getSetting('deviceinfo.os'))
+-      .then(value => desc.version = value)
+-      .then(() => desc);
+-    }
+-
+-    // Not B2G
+-    desc.os = appInfo.OS;
+-    let bundle = Services.strings.createBundle("chrome://branding/locale/brand.properties");
+-    if (bundle) {
+-      desc.brandName = bundle.GetStringFromName("brandFullName");
+-    }
+-
+-    return desc;
+-
++    return getSystemInfo();
+   }, {request: {},response: { value: RetVal("json")}}),
+ 
+   getWallpaper: method(function() {
+     let deferred = promise.defer();
+-    this._getSetting("wallpaper.image").then((blob) => {
++    getSetting("wallpaper.image").then((blob) => {
+       let FileReader = CC("@mozilla.org/files/filereader;1");
+       let reader = new FileReader();
+       let conn = this.conn;
+       reader.addEventListener("load", function() {
+         let str = new LongStringActor(conn, reader.result);
+         deferred.resolve(str);
+       });
+       reader.addEventListener("error", function() {
+diff --git a/toolkit/devtools/shared/moz.build b/toolkit/devtools/shared/moz.build
+index 04c268a..7fc0f8e 100644
+--- a/toolkit/devtools/shared/moz.build
++++ b/toolkit/devtools/shared/moz.build
+@@ -5,12 +5,13 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ BROWSER_CHROME_MANIFESTS += ['tests/browser/browser.ini']
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+   'async-storage.js',
+   'framerate.js',
+   'memory.js',
++  'system.js',
+   'timeline.js',
+   'worker-helper.js',
+   'worker.js'
+ ]
+diff --git a/toolkit/devtools/shared/system.js b/toolkit/devtools/shared/system.js
+new file mode 100644
+index 0000000..a1e2c90
+--- /dev/null
++++ b/toolkit/devtools/shared/system.js
+@@ -0,0 +1,309 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Cc, Ci, Cu } = require("chrome");
++const { Task } = require("resource://gre/modules/Task.jsm");
++
++loader.lazyRequireGetter(this, "Services");
++loader.lazyRequireGetter(this, "promise");
++loader.lazyRequireGetter(this, "OS", "resource://gre/modules/commonjs/node/os");
++loader.lazyRequireGetter(this, "DebuggerServer", "devtools/server/main", true);
++loader.lazyRequireGetter(this, "AppConstants",
++  "resource://gre/modules/AppConstants.jsm", true);
++loader.lazyGetter(this, "screenManager", () => {
++  return Cc["@mozilla.org/gfx/screenmanager;1"].getService(Ci.nsIScreenManager);
++});
++loader.lazyGetter(this, "oscpu", () => {
++  return Cc["@mozilla.org/network/protocol;1?name=http"]
++           .getService(Ci.nsIHttpProtocolHandler).oscpu;
++});
++
++const APP_MAP = {
++  "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}": "firefox",
++  "{3550f703-e582-4d05-9a08-453d09bdfdc6}": "thunderbird",
++  "{92650c4d-4b8e-4d2a-b7eb-24ecf4f6b63a}": "seamonkey",
++  "{718e30fb-e89b-41dd-9da7-e25a45638b28}": "sunbird",
++  "{3c2e2abc-06d4-11e1-ac3b-374f68613e61}": "b2g",
++  "{aa3c5121-dab2-40e2-81ca-7ea25febc110}": "mobile/android",
++  "{a23983c0-fd0e-11dc-95ff-0800200c9a66}": "mobile/xul"
++};
++
++let CACHED_INFO = null;
++
++function *getSystemInfo() {
++  if (CACHED_INFO) {
++    return CACHED_INFO;
++  }
++
++  let appInfo = Services.appinfo;
++  let win = Services.wm.getMostRecentWindow(DebuggerServer.chromeWindowType);
++  let [processor, compiler] = appInfo.XPCOMABI.split("-");
++  let dpi, useragent, width, height, os, hardware, version, brandName;
++  let appid = appInfo.ID;
++  let apptype = APP_MAP[appid];
++  let geckoVersion = appInfo.platformVersion;
++
++  // B2G specific
++  if (apptype === "b2g") {
++    os = "B2G";
++    hardware = yield exports.getSetting("deviceinfo.hardware");
++    version = yield exports.getSetting("deviceinfo.os");
++  }
++  // Not B2G
++  else {
++    os = appInfo.OS;
++    version = appInfo.version;
++    hardware = "unknown";
++  }
++
++  let bundle = Services.strings.createBundle("chrome://branding/locale/brand.properties");
++  if (bundle) {
++    brandName = bundle.GetStringFromName("brandFullName");
++  } else {
++    brandName = null;
++  }
++
++  if (win) {
++    let utils = win.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowUtils);
++    dpi = utils.displayDPI;
++    useragent = win.navigator.userAgent;
++    width = win.screen.width;
++    height = win.screen.height;
++  }
++
++  let info = {
++
++    /**
++     * Information from nsIXULAppInfo, regarding
++     * the application itself.
++     */
++
++    // The XUL application's UUID.
++    appid,
++
++    // Name of the app, "firefox", "thunderbird", etc., listed in APP_MAP
++    apptype,
++
++    // Mixed-case or empty string of vendor, like "Mozilla"
++    vendor: appInfo.vendor,
++
++    // Name of the application, like "Firefox", "Thunderbird".
++    name: appInfo.name,
++
++    // The application's version, for example "0.8.0+" or "3.7a1pre".
++    // Typically, the version of Firefox, for example.
++    // It is different than the version of Gecko or the XULRunner platform.
++    // On B2G, this is the Gaia version.
++    version,
++
++    // The application's build ID/date, for example "2004051604".
++    appbuildid: appInfo.appBuildID,
++
++    // The application's changeset.
++    changeset: exports.getAppIniString("App", "SourceStamp"),
++
++    // The build ID/date of Gecko and the XULRunner platform.
++    platformbuildid: appInfo.platformBuildID,
++    geckobuildid: appInfo.platformBuildID,
++
++    // The version of Gecko or XULRunner platform, for example "1.8.1.19" or
++    // "1.9.3pre". In "Firefox 3.7 alpha 1" the application version is "3.7a1pre"
++    // while the platform version is "1.9.3pre"
++    platformversion: geckoVersion,
++    geckoversion: geckoVersion,
++
++    // Locale used in this build
++    locale: Cc["@mozilla.org/chrome/chrome-registry;1"].getService(Ci.nsIXULChromeRegistry).getSelectedLocale("global"),
++
++    /**
++     * Information regarding the operating system.
++     */
++
++    // Returns the endianness of teh architecture: either "LE" or "BE"
++    endianness: OS.endianness(),
++
++    // Returns the hostname of the machine
++    hostname: OS.hostname(),
++
++    // Name of the OS type. Typically the same as `uname -s`. Possible values:
++    // https://developer.mozilla.org/en/OS_TARGET
++    // Also may be "B2G".
++    os,
++    platform: os,
++
++    // hardware and version info from `deviceinfo.hardware`
++    // and `deviceinfo.os`.
++    hardware,
++
++    // Type of process architecture running:
++    // "arm", "ia32", "x86", "x64"
++    // Alias to both `arch` and `processor` for node/deviceactor compat
++    arch: processor,
++    processor,
++
++    // Name of compiler used for build:
++    // `'msvc', 'n32', 'gcc2', 'gcc3', 'sunc', 'ibmc'...`
++    compiler,
++
++    // Returns EOL character for the OS
++    EOL: OS.EOL,
++
++    // Location for the current profile
++    profile: getProfileLocation(),
++
++    // Update channel
++    channel: AppConstants.MOZ_UPDATE_CHANNEL,
++
++    dpi,
++    useragent,
++    width,
++    height,
++    brandName,
++  };
++
++  CACHED_INFO = info;
++  return info;
++}
++
++function getProfileLocation() {
++  let profd = Services.dirsvc.get("ProfD", Ci.nsILocalFile);
++  let profservice = Cc["@mozilla.org/toolkit/profile-service;1"].getService(Ci.nsIToolkitProfileService);
++  var profiles = profservice.profiles;
++  while (profiles.hasMoreElements()) {
++    let profile = profiles.getNext().QueryInterface(Ci.nsIToolkitProfile);
++    if (profile.rootDir.path == profd.path) {
++      return profile = profile.name;
++    }
++  }
++
++  return profd.leafName;
++}
++
++function getAppIniString(section, key) {
++  let inifile = Services.dirsvc.get("GreD", Ci.nsIFile);
++  inifile.append("application.ini");
++
++  if (!inifile.exists()) {
++    inifile = Services.dirsvc.get("CurProcD", Ci.nsIFile);
++    inifile.append("application.ini");
++  }
++
++  if (!inifile.exists()) {
++    return undefined;
++  }
++
++  let iniParser = Cc["@mozilla.org/xpcom/ini-parser-factory;1"].getService(Ci.nsIINIParserFactory).createINIParser(inifile);
++  try {
++    return iniParser.getString(section, key);
++  } catch (e) {
++    return undefined;
++  }
++}
++
++/**
++ * Function for fetching screen dimensions and returning
++ * an enum for Telemetry.
++ */
++function getScreenDimensions() {
++  let width = {};
++  let height = {};
++
++  screenManager.primaryScreen.GetRect({}, {}, width, height);
++  let dims = width.value + "x" + height.value;
++
++  if (width.value < 800 || height.value < 600) {
++    return 0;
++  }
++  if (dims === "800x600") {
++    return 1;
++  }
++  if (dims === "1024x768") {
++    return 2;
++  }
++  if (dims === "1280x800") {
++    return 3;
++  }
++  if (dims === "1280x1024") {
++    return 4;
++  }
++  if (dims === "1366x768") {
++    return 5;
++  }
++  if (dims === "1440x900") {
++    return 6;
++  }
++  if (dims === "1920x1080") {
++    return 7;
++  }
++  if (dims === "2560×1440") {
++    return 8;
++  }
++  if (dims === "2560×1600") {
++    return 9;
++  }
++  if (dims === "2880x1800") {
++    return 10;
++  }
++  if (width.value > 2880 || height.value > 1800) {
++    return 12;
++  }
++
++  // Other dimension such as a VM.
++  return 11;
++}
++
++/**
++ * Function for fetching OS CPU and returning
++ * an enum for Telemetry.
++ */
++function getOSCPU() {
++  if (oscpu.includes("NT 5.1") || oscpu.includes("NT 5.2")) {
++    return 0;
++  }
++  if (oscpu.includes("NT 6.0")) {
++    return 1;
++  }
++  if (oscpu.includes("NT 6.1")) {
++    return 2;
++  }
++  if (oscpu.includes("NT 6.2")) {
++    return 3;
++  }
++  if (oscpu.includes("NT 6.3")) {
++    return 4;
++  }
++  if (oscpu.includes("OS X")) {
++    return 5;
++  }
++  if (oscpu.includes("Linux")) {
++    return 6;
++  }
++
++  // Other OS.
++  return 12;
++}
++
++function getSetting(name) {
++  let deferred = promise.defer();
++
++  if ("@mozilla.org/settingsService;1" in Cc) {
++    let settingsService = Cc["@mozilla.org/settingsService;1"].getService(Ci.nsISettingsService);
++    let req = settingsService.createLock().get(name, {
++      handle: (name, value) => deferred.resolve(value),
++      handleError: (error) => deferred.reject(error),
++    });
++  } else {
++    deferred.reject(new Error("No settings service"));
++  }
++  return deferred.promise;
++}
++
++exports.is64Bit = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULAppInfo).is64Bit;
++exports.getSystemInfo = Task.async(getSystemInfo);
++exports.getAppIniString = getAppIniString;
++exports.getSetting = getSetting;
++exports.getScreenDimensions = getScreenDimensions;
++exports.getOSCPU = getOSCPU;
++exports.constants = AppConstants;
+-- 
+2.2.1
+

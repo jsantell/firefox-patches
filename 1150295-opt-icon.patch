@@ -1,0 +1,487 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 17 Jun 2015 14:31:15 -0700
+Subject: Bug 1150295 - Display an icon next to frames in the call tree that contain viewable optimization data. r=vp,a=kwierso
+
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index 1148695..e3f6f99 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -454,16 +454,17 @@ FrameNode.prototype = {
+    */
+   _computeInfo: function() {
+     let categoryData = CATEGORY_MAPPINGS[this.category] || {};
+     let parsedData = FrameUtils.parseLocation(this.location, this.line, this.column);
+     parsedData.nodeType = "Frame";
+     parsedData.categoryData = categoryData;
+     parsedData.isContent = this.isContent;
+     parsedData.isMetaCategory = this.isMetaCategory;
++    parsedData.hasOptimizations = this.hasOptimizations();
+ 
+     return this._data = parsedData;
+   },
+ 
+   /**
+    * Returns whether or not the frame node has an JITOptimizations model.
+    *
+    * @return {Boolean}
+diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
+index 9c53ccc..3676ef6 100644
+--- a/browser/devtools/performance/modules/widgets/tree-view.js
++++ b/browser/devtools/performance/modules/widgets/tree-view.js
+@@ -11,16 +11,18 @@
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { L10N } = require("devtools/performance/global");
+ const { Heritage } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeItem.jsm");
+ 
+ const MILLISECOND_UNITS = L10N.getStr("table.ms");
+ const PERCENTAGE_UNITS = L10N.getStr("table.percentage");
+ const URL_LABEL_TOOLTIP = L10N.getStr("table.url.tooltiptext");
++const VIEW_OPTIMIZATIONS_TOOLTIP = L10N.getStr("table.view-optimizations.tooltiptext");
++
+ const CALL_TREE_INDENTATION = 16; // px
+ 
+ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
+   let dataA = frameA.getDisplayedData();
+   let dataB = frameB.getDisplayedData();
+   if (this.inverted) {
+     // Invert trees, sort by selfPercentage, and then totalPercentage
+     if (dataA.selfPercentage === dataB.selfPercentage) {
+@@ -80,20 +82,24 @@ const sum = vals => vals.reduce((a, b) => a + b, 0);
+  * @param number autoExpandDepth [optional]
+  *        The depth to which the tree should automatically expand. Defualts to
+  *        the caller's `autoExpandDepth` if a caller exists, otherwise defaults
+  *        to DEFAULT_AUTO_EXPAND_DEPTH.
+  * @param object visibleCells
+  *        An object specifying which cells are visible in the tree. Defaults to
+  *        the caller's `visibleCells` if a caller exists, otherwise defaults
+  *        to DEFAULT_VISIBLE_CELLS.
++ * @param boolean showOptimizationHint [optional]
++ *        Whether or not to show an icon indicating if the frame has optimization
++ *        data.
+  */
+ function CallView({
+   caller, frame, level, hidden, inverted,
+-  sortingPredicate, autoExpandDepth, visibleCells
++  sortingPredicate, autoExpandDepth, visibleCells,
++  showOptimizationHint
+ }) {
+   AbstractTreeItem.call(this, {
+     parent: caller,
+     level: level|0 - (hidden ? 1 : 0)
+   });
+ 
+   this.sortingPredicate = sortingPredicate != null
+     ? sortingPredicate
+@@ -109,16 +115,17 @@ function CallView({
+     ? visibleCells
+     : caller ? caller.visibleCells
+              : Object.create(DEFAULT_VISIBLE_CELLS);
+ 
+   this.caller = caller;
+   this.frame = frame;
+   this.hidden = hidden;
+   this.inverted = inverted;
++  this.showOptimizationHint = showOptimizationHint;
+ 
+   this._onUrlClick = this._onUrlClick.bind(this);
+ };
+ 
+ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   /**
+    * Creates the view for this tree node.
+    * @param nsIDOMNode document
+@@ -251,16 +258,26 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   },
+   _createFunctionCell: function(doc, arrowNode, frameName, frameInfo, frameLevel) {
+     let cell = doc.createElement("hbox");
+     cell.className = "call-tree-cell";
+     cell.style.MozMarginStart = (frameLevel * CALL_TREE_INDENTATION) + "px";
+     cell.setAttribute("type", "function");
+     cell.appendChild(arrowNode);
+ 
++    // Render optimization link to JIT view if the frame
++    // has optimizations
++    if (this.root.showOptimizationHint && frameInfo.hasOptimizations && !frameInfo.isMetaCategory) {
++      let icon = doc.createElement("description");
++      icon.setAttribute("tooltiptext", VIEW_OPTIMIZATIONS_TOOLTIP);
++      icon.setAttribute("type", "linkable");
++      icon.className = "opt-icon";
++      cell.appendChild(icon);
++    }
++
+     // Don't render a name label node if there's no function name. A different
+     // location label node will be rendered instead.
+     if (frameName) {
+       let nameNode = doc.createElement("description");
+       nameNode.className = "plain call-tree-name";
+       nameNode.setAttribute("flex", "1");
+       nameNode.setAttribute("crop", "end");
+       nameNode.setAttribute("value", frameName);
+@@ -275,16 +292,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+     // Don't render an expando-arrow for leaf nodes.
+     let hasDescendants = Object.keys(this.frame.calls).length > 0;
+     if (!hasDescendants) {
+       arrowNode.setAttribute("invisible", "");
+     }
+ 
+     return cell;
+   },
++
+   _appendFunctionDetailsCells: function(doc, cell, frameInfo) {
+     if (frameInfo.fileName) {
+       let urlNode = doc.createElement("description");
+       urlNode.className = "plain call-tree-url";
+       urlNode.setAttribute("flex", "1");
+       urlNode.setAttribute("crop", "end");
+       urlNode.setAttribute("value", frameInfo.fileName);
+       urlNode.setAttribute("tooltiptext", URL_LABEL_TOOLTIP + " → " + frameInfo.url);
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 761bad3..a5fc5dc 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -132,15 +132,16 @@ skip-if = os == 'linux' # Bug 1172120
+ [browser_profiler_tree-view-03.js]
+ [browser_profiler_tree-view-04.js]
+ [browser_profiler_tree-view-05.js]
+ [browser_profiler_tree-view-06.js]
+ [browser_profiler_tree-view-07.js]
+ [browser_profiler_tree-view-08.js]
+ [browser_profiler_tree-view-09.js]
+ [browser_profiler_tree-view-10.js]
++[browser_profiler_tree-view-11.js]
+ [browser_timeline-filters-01.js]
+ [browser_timeline-filters-02.js]
+ [browser_timeline-waterfall-background.js]
+ [browser_timeline-waterfall-generic.js]
+ [browser_timeline-waterfall-rerender.js]
+ [browser_timeline-waterfall-sidebar.js]
+ skip-if = os == 'linux' # Bug 1161817
+diff --git a/browser/devtools/performance/test/browser_profiler_tree-view-11.js b/browser/devtools/performance/test/browser_profiler_tree-view-11.js
+new file mode 100644
+index 0000000..7cf99c3
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_profiler_tree-view-11.js
+@@ -0,0 +1,153 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that if a recording set `withJITOptimizations` on, then an
++ * icon is next to the frame with optimizations
++ */
++
++const RecordingUtils = devtools.require("devtools/performance/recording-utils");
++const { CATEGORY_MASK } = devtools.require("devtools/performance/global");
++
++function* spawnTest() {
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, $, $$, window, PerformanceController } = panel.panelWin;
++  let { OverviewView, DetailsView, JITOptimizationsView, JsCallTreeView, RecordingsView } = panel.panelWin;
++
++  let profilerData = { threads: [gThread] };
++
++  Services.prefs.setBoolPref(JIT_PREF, true);
++  Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
++  Services.prefs.setBoolPref(INVERT_PREF, false);
++
++  // Make two recordings, so we have one to switch to later, as the
++  // second one will have fake sample data
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  yield DetailsView.selectView("js-calltree");
++
++  yield injectAndRenderProfilerData();
++
++  let rows = $$("#js-calltree-view .call-tree-item");
++  is(rows.length, 4, "4 call tree rows exist");
++  for (let row of rows) {
++    let name = $(".call-tree-name", row).value;
++    switch (name) {
++      case "A":
++        ok($(".opt-icon", row), "found an opt icon on a leaf node with opt data");
++        break;
++      case "C":
++        ok(!$(".opt-icon", row), "frames without opt data do not have an icon");
++        break;
++      case "Gecko":
++        ok(!$(".opt-icon", row), "meta category frames with opt data do not have an icon");
++        break;
++      case "(root)":
++        ok(!$(".opt-icon", row), "root frame certainly does not have opt data");
++        break;
++      default:
++        ok(false, `Unidentified frame: ${name}`);
++        break;
++    }
++  }
++
++  yield teardown(panel);
++  finish();
++
++  function *injectAndRenderProfilerData() {
++    // Get current recording and inject our mock data
++    info("Injecting mock profile data");
++    let recording = PerformanceController.getCurrentRecording();
++    recording._profile = profilerData;
++
++    // Force a rerender
++    let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++    JsCallTreeView.render(OverviewView.getTimeInterval());
++    yield rendered;
++  }
++}
++
++let gUniqueStacks = new RecordingUtils.UniqueStacks();
++
++function uniqStr(s) {
++  return gUniqueStacks.getOrAddStringIndex(s);
++}
++
++// Since deflateThread doesn't handle deflating optimization info, use
++// placeholder names A_O1, B_O2, and B_O3, which will be used to manually
++// splice deduped opts into the profile.
++let gThread = RecordingUtils.deflateThread({
++  samples: [{
++    time: 0,
++    frames: [
++      { location: "(root)" }
++    ]
++  }, {
++    time: 5,
++    frames: [
++      { location: "(root)" },
++      { location: "A (http://foo:1)" },
++    ]
++  }, {
++    time: 5 + 1,
++    frames: [
++      { location: "(root)" },
++      { location: "C (http://foo/bar/baz:56)" }
++    ]
++  }, {
++    time: 5 + 1 + 2,
++    frames: [
++      { location: "(root)" },
++      { category: CATEGORY_MASK("other"),  location: "PlatformCode" }
++    ]
++  }],
++  markers: []
++}, gUniqueStacks);
++
++// 3 RawOptimizationSites
++let gRawSite1 = {
++  _testFrameInfo: { name: "A", line: "12", file: "@baz" },
++  line: 12,
++  column: 2,
++  types: [{
++    mirType: uniqStr("Object"),
++    site: uniqStr("A (http://foo/bar/bar:12)"),
++    typeset: [{
++        keyedBy: uniqStr("constructor"),
++        name: uniqStr("Foo"),
++        location: uniqStr("A (http://foo/bar/baz:12)")
++    }, {
++        keyedBy: uniqStr("primitive"),
++        location: uniqStr("self-hosted")
++    }]
++  }],
++  attempts: {
++    schema: {
++      outcome: 0,
++      strategy: 1
++    },
++    data: [
++      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
++      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
++      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
++    ]
++  }
++};
++
++gThread.frameTable.data.forEach((frame) => {
++  const LOCATION_SLOT = gThread.frameTable.schema.location;
++  const OPTIMIZATIONS_SLOT = gThread.frameTable.schema.optimizations;
++
++  let l = gThread.stringTable[frame[LOCATION_SLOT]];
++  switch (l) {
++  case "A (http://foo:1)":
++    frame[LOCATION_SLOT] = uniqStr("A (http://foo:1)");
++    frame[OPTIMIZATIONS_SLOT] = gRawSite1;
++    break;
++  case "PlatformCode":
++    frame[LOCATION_SLOT] = uniqStr("PlatformCode");
++    frame[OPTIMIZATIONS_SLOT] = gRawSite1;
++    break;
++  }
++});
+diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
+index e43afcb..53ea801 100644
+--- a/browser/devtools/performance/views/details-js-call-tree.js
++++ b/browser/devtools/performance/views/details-js-call-tree.js
+@@ -6,17 +6,17 @@
+ /**
+  * CallTree view containing profiler call tree, controlled by DetailsView.
+  */
+ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+ 
+   rerenderPrefs: [
+     "invert-call-tree",
+     "show-platform-data",
+-    "flatten-tree-recursion"
++    "flatten-tree-recursion",
+   ],
+ 
+   rangeChangeDebounceTime: 75, // ms
+ 
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+@@ -37,23 +37,24 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+ 
+   /**
+    * Method for handling all the set up for rendering a new call tree.
+    *
+    * @param object interval [optional]
+    *        The { startTime, endTime }, in milliseconds.
+    */
+   render: function (interval={}) {
++    let recording = PerformanceController.getCurrentRecording();
++    let profile = recording.getProfile();
+     let options = {
+       contentOnly: !PerformanceController.getOption("show-platform-data"),
+       invertTree: PerformanceController.getOption("invert-call-tree"),
+-      flattenRecursion: PerformanceController.getOption("flatten-tree-recursion")
++      flattenRecursion: PerformanceController.getOption("flatten-tree-recursion"),
++      showOptimizationHint: recording.getConfiguration().withJITOptimizations,
+     };
+-    let recording = PerformanceController.getCurrentRecording();
+-    let profile = recording.getProfile();
+     let threadNode = this._prepareCallTree(profile, interval, options);
+     this._populateCallTree(threadNode, options);
+     this.emit(EVENTS.JS_CALL_TREE_RENDERED);
+   },
+ 
+   /**
+    * Fired on the "link" event for the call tree in this container.
+    */
+@@ -99,24 +100,28 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+ 
+     let root = new CallView({
+       frame: frameNode,
+       inverted: inverted,
+       // The synthesized root node is hidden in inverted call trees.
+       hidden: inverted,
+       // Call trees should only auto-expand when not inverted. Passing undefined
+       // will default to the CALL_TREE_AUTO_EXPAND depth.
+-      autoExpandDepth: inverted ? 0 : undefined
++      autoExpandDepth: inverted ? 0 : undefined,
++      enableOptimizations: options.enableOptimizations
+     });
+ 
+     // Bind events.
+     root.on("link", this._onLink);
+ 
+     // Pipe "focus" events to the view, mostly for tests
+     root.on("focus", () => this.emit("focus"));
++    // TODO tests for optimization event and rendering
++    // optimization bubbles in call tree
++    root.on("optimization", (_, node) => this.emit("optimization", node));
+ 
+     // Clear out other call trees.
+     this.container.innerHTML = "";
+     root.attachTo(this.container);
+ 
+     // When platform data isn't shown, hide the cateogry labels, since they're
+     // only available for C++ frames. Pass *false* to make them invisible.
+     root.toggleCategories(!options.contentOnly);
+diff --git a/browser/locales/en-US/chrome/browser/devtools/profiler.properties b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+index 5ab4658..c798e55 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/profiler.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/profiler.properties
+@@ -106,16 +106,22 @@ table.idle=(idle)
+ # labels which, when clicked, jump to the debugger.
+ table.url.tooltiptext=View source in Debugger
+ 
+ # LOCALIZATION NOTE (table.zoom.tooltiptext):
+ # This string is displayed in the call tree as the tooltip text for the 'zoom'
+ # buttons (small magnifying glass icons) which spawn a new tab.
+ table.zoom.tooltiptext=Inspect frame in new tab
+ 
++# LOCALIZATION NOTE (table.view-optimizations.tooltiptext):
++# This string is displayed in the icon displayed next to frames that
++# have optimization data
++table.view-optimizations.tooltiptext=View optimizations in JIT View
++
++
+ # LOCALIZATION NOTE (recordingsList.saveDialogTitle):
+ # This string is displayed as a title for saving a recording to disk.
+ recordingsList.saveDialogTitle=Save profile…
+ 
+ # LOCALIZATION NOTE (recordingsList.saveDialogJSONFilter):
+ # This string is displayed as a filter for saving a recording to disk.
+ recordingsList.saveDialogJSONFilter=JSON Files
+ 
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 53a42fb..df7d8cb 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -636,35 +636,48 @@ menuitem.marker-color-graphs-blue:before,
+ }
+ .opt-url:hover {
+   text-decoration: underline;
+ }
+ .opt-url.debugger-link {
+   cursor: pointer;
+ }
+ 
+-#jit-optimizations-view .opt-icon::before {
++.opt-icon::before {
+   content: "";
+   background-image: url(chrome://browser/skin/devtools/webconsole.svg);
+   background-repeat: no-repeat;
+   background-size: 72px 60px;
++  /* show grey "i" bubble by default */
++  background-position: -36px -36px;
+   width: 12px;
+   height: 12px;
+   display: inline-block;
+ 
+-  margin: 5px 6px 0 0;
+   max-height: 12px;
+ }
+-.theme-light #jit-optimizations-view .opt-icon::before {
++
++#jit-optimizations-view .opt-icon::before {
++  margin: 5px 6px 0 0;
++}
++description.opt-icon {
++  margin: 0px 0px 0px 0px;
++}
++description.opt-icon::before {
++  margin: 1px 4px 0px 0px;
++}
++.theme-light .opt-icon::before {
+   background-image: url(chrome://browser/skin/devtools/webconsole.svg#light-icons);
+ }
+-
+-#jit-optimizations-view .opt-icon[severity=warning]::before {
++.opt-icon[severity=warning]::before {
+   background-position: -24px -24px;
+ }
++.opt-icon[type=linkable]::before {
++  cursor: pointer;
++}
+ 
+ ul.frames-list {
+   list-style-type: none;
+   padding: 0px;
+   margin: 0px;
+ }
+ 
+ ul.frames-list li {
+-- 
+2.2.1
+

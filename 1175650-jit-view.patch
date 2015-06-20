@@ -1,0 +1,931 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 18 Jun 2015 12:59:46 -0700
+Subject: Bug 1175650 - skeleton view for JIT Optimizations in the performance tool. r=vp,a=kwierso
+
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index e847c94..f301160 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -106,18 +106,20 @@ browser.jar:
+     content/browser/devtools/performance/views/toolbar.js              (performance/views/toolbar.js)
+     content/browser/devtools/performance/views/details.js              (performance/views/details.js)
+     content/browser/devtools/performance/views/details-subview.js      (performance/views/details-abstract-subview.js)
+     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
+     content/browser/devtools/performance/views/details-js-call-tree.js      (performance/views/details-js-call-tree.js)
+     content/browser/devtools/performance/views/details-js-flamegraph.js     (performance/views/details-js-flamegraph.js)
+     content/browser/devtools/performance/views/details-memory-call-tree.js  (performance/views/details-memory-call-tree.js)
+     content/browser/devtools/performance/views/details-memory-flamegraph.js (performance/views/details-memory-flamegraph.js)
++    content/browser/devtools/performance/views/details-optimizations.js     (performance/views/details-optimizations.js)
++    content/browser/devtools/performance/views/optimizations-list.js        (performance/views/optimizations-list.js)
++    content/browser/devtools/performance/views/frames-list.js               (performance/views/frames-list.js)
+     content/browser/devtools/performance/views/recordings.js           (performance/views/recordings.js)
+-    content/browser/devtools/performance/views/jit-optimizations.js    (performance/views/jit-optimizations.js)
+     content/browser/devtools/commandline.css                           (commandline/commandline.css)
+     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
+     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
+ *   content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
+     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
+     content/browser/devtools/framework/toolbox-options.js              (framework/toolbox-options.js)
+     content/browser/devtools/framework/toolbox.xul                     (framework/toolbox.xul)
+     content/browser/devtools/framework/options-panel.css               (framework/options-panel.css)
+diff --git a/browser/devtools/performance/modules/logic/recording-model.js b/browser/devtools/performance/modules/logic/recording-model.js
+index a31b99b..5fd125b 100644
+--- a/browser/devtools/performance/modules/logic/recording-model.js
++++ b/browser/devtools/performance/modules/logic/recording-model.js
+@@ -180,18 +180,17 @@ RecordingModel.prototype = {
+       return Date.now() - this._localStartTime;
+     } else {
+       return this._duration;
+     }
+   },
+ 
+   /**
+    * Returns configuration object of specifying whether the recording
+-   * was started withTicks, withMemory and withAllocations and other
+-   * recording options.
++   * was started withTicks, withMemory and withAllocations, and other configurations.
+    * @return object
+    */
+   getConfiguration: function () {
+     return this._configuration;
+   },
+ 
+   /**
+    * Gets the accumulated markers in the current recording.
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index 1f05884..1148695 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -464,17 +464,17 @@ FrameNode.prototype = {
+   },
+ 
+   /**
+    * Returns whether or not the frame node has an JITOptimizations model.
+    *
+    * @return {Boolean}
+    */
+   hasOptimizations: function () {
+-    return !!this._optimizations;
++    return !this.isMetaCategory && !!this._optimizations;
+   },
+ 
+   /**
+    * Returns the underlying JITOptimizations model representing
+    * the optimization attempts occuring in this frame.
+    *
+    * @return {JITOptimizations|null}
+    */
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 5f5f62b..9ee944e 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -20,19 +20,21 @@
+   <script type="application/javascript" src="performance/views/overview.js"/>
+   <script type="application/javascript" src="performance/views/toolbar.js"/>
+   <script type="application/javascript" src="performance/views/details-subview.js"/>
+   <script type="application/javascript" src="performance/views/details-waterfall.js"/>
+   <script type="application/javascript" src="performance/views/details-js-call-tree.js"/>
+   <script type="application/javascript" src="performance/views/details-js-flamegraph.js"/>
+   <script type="application/javascript" src="performance/views/details-memory-call-tree.js"/>
+   <script type="application/javascript" src="performance/views/details-memory-flamegraph.js"/>
++  <script type="application/javascript" src="performance/views/details-optimizations.js"/>
+   <script type="application/javascript" src="performance/views/details.js"/>
+   <script type="application/javascript" src="performance/views/recordings.js"/>
+-  <script type="application/javascript" src="performance/views/jit-optimizations.js"/>
++  <script type="application/javascript" src="performance/views/optimizations-list.js"/>
++  <script type="application/javascript" src="performance/views/frames-list.js"/>
+ 
+   <popupset id="performance-options-popupset">
+     <menupopup id="performance-filter-menupopup"/>
+     <menupopup id="performance-options-menupopup">
+       <menuitem id="option-show-platform-data"
+                 type="checkbox"
+                 data-pref="show-platform-data"
+                 label="&profilerUI.showPlatformData;"
+@@ -135,16 +137,21 @@
+                          label="Allocations Tree"
+                          hidden="true"
+                          data-view="memory-calltree" />
+           <toolbarbutton id="select-memory-flamegraph-view"
+                          class="devtools-toolbarbutton devtools-button"
+                          label="Allocations Chart"
+                          hidden="true"
+                          data-view="memory-flamegraph" />
++          <toolbarbutton id="select-optimizations-view"
++                         class="devtools-toolbarbutton devtools-button"
++                         label="Optimizations"
++                         hidden="true"
++                         data-view="optimizations" />
+         </hbox>
+         <spacer flex="1"></spacer>
+         <hbox id="performance-toolbar-controls-options"
+               class="devtools-toolbarbutton-group">
+           <toolbarbutton id="performance-options-button"
+                          class="devtools-toolbarbutton devtools-option-toolbarbutton"
+                          popup="performance-options-menupopup"
+                          tooltiptext="&profilerUI.options.gear.tooltiptext;"/>
+@@ -288,30 +295,16 @@
+                     <label class="plain call-tree-header"
+                            type="function"
+                            crop="end"
+                            value="&profilerUI.table.function;"
+                            tooltiptext="&profilerUI.table.function.tooltip;"/>
+                   </hbox>
+                   <vbox class="call-tree-cells-container" flex="1"/>
+                 </vbox>
+-
+-                <splitter id="js-call-tree-splitter" class="devtools-side-splitter"/>
+-
+-                <vbox id="jit-optimizations-view" hidden="true">
+-                  <toolbar id="jit-optimizations-toolbar" class="devtools-toolbar">
+-                    <hbox id="jit-optimizations-header">
+-                      <span class="jit-optimizations-title">&profilerUI.JITOptimizationsTitle;</span>
+-                      <span class="header-function-name" />
+-                      <span class="header-file opt-url debugger-link" />
+-                      <span class="header-line opt-line" />
+-                    </hbox>
+-                  </toolbar>
+-                  <vbox id="jit-optimizations-raw-view"></vbox>
+-                </vbox>
+               </hbox>
+ 
+               <!-- JS FlameChart -->
+               <hbox id="js-flamegraph-view" flex="1">
+               </hbox>
+ 
+               <!-- Memory Tree -->
+               <vbox id="memory-calltree-view" flex="1">
+@@ -333,15 +326,55 @@
+                 </hbox>
+                 <vbox class="call-tree-cells-container" flex="1"/>
+               </vbox>
+ 
+               <!-- Memory FlameChart -->
+               <hbox id="memory-flamegraph-view" flex="1">
+               </hbox>
+ 
++              <!-- JIT View -->
++              <hbox id="optimizations-view" flex="1">
++                <hbox id="graph-placeholder" flex="1">
++                </hbox>
++                <splitter id="optimizations-splitter" class="devtools-side-splitter"/>
++                <tabbox id="optimizations-tabs"
++                        class="devtools-sidebar-tabs"
++                        handleCtrlTab="false">
++                  <tabs>
++                    <tab id="optimizations-optimizations-tab"
++                         label="Optimizations" />
++                    <tab id="optimizations-frames-tab"
++                         label="Frames" />
++                  </tabs>
++                  <tabpanels flex="1">
++
++                    <!-- Optimizations Panel -->
++                    <tabpanel id="optimizations-tabpanel"
++                              class="tabpanel-content">
++                      <vbox id="jit-optimizations-view">
++                        <toolbar id="jit-optimizations-toolbar" class="devtools-toolbar">
++                          <hbox id="jit-optimizations-header">
++                            <span class="jit-optimizations-title">&profilerUI.JITOptimizationsTitle;</span>
++                            <span class="header-function-name" />
++                            <span class="header-file opt-url debugger-link" />
++                            <span class="header-line opt-line" />
++                          </hbox>
++                        </toolbar>
++                        <vbox id="jit-optimizations-raw-view"></vbox>
++                      </vbox>
++                    </tabpanel>
++
++                    <!-- Frames Panel -->
++                    <tabpanel id="frames-tabpanel"
++                              class="tabpanel-content">
++                    </tabpanel>
++                  </tabpanels>
++                </tabbox>
++              </hbox>
++              <!-- /JIT View -->
+             </deck>
+           </deck>
+         </vbox>
+       </deck>
+     </vbox>
+   </hbox>
+ </window>
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 47e4606..761bad3 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -61,18 +61,18 @@ support-files =
+ [browser_perf-front-profiler-02.js]
+ [browser_perf-front-profiler-03.js]
+ [browser_perf-front-profiler-04.js]
+ #[browser_perf-front-profiler-05.js] bug 1077464
+ #[browser_perf-front-profiler-06.js]
+ [browser_perf-front-01.js]
+ [browser_perf-front-02.js]
+ [browser_perf-highlighted.js]
+-[browser_perf-jit-view-01.js]
+-[browser_perf-jit-view-02.js]
++#[browser_perf-jit-view-01.js] bug 1176056
++#[browser_perf-jit-view-02.js] bug 1176056
+ [browser_perf-loading-01.js]
+ [browser_perf-loading-02.js]
+ [browser_perf-marker-details-01.js]
+ skip-if = os == 'linux' # Bug 1172120
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-03.js]
+ [browser_perf-options-invert-call-tree-01.js]
+diff --git a/browser/devtools/performance/test/browser_perf-options-enable-optimizations.js b/browser/devtools/performance/test/browser_perf-options-enable-optimizations.js
+index e6b10bd..6d42a16 100644
+--- a/browser/devtools/performance/test/browser_perf-options-enable-optimizations.js
++++ b/browser/devtools/performance/test/browser_perf-options-enable-optimizations.js
+@@ -1,44 +1,45 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that `enable-jit-optimizations` sets the recording to subsequently
+- * display optimizations info.
++ * enable the Optimizations View.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, PerformanceController, $, DetailsView, JsCallTreeView } = panel.panelWin;
++  let { EVENTS, PerformanceController, $, DetailsView, WaterfallView, OptimizationsView } = panel.panelWin;
+   Services.prefs.setBoolPref(JIT_PREF, true);
+ 
+ 
+   yield startRecording(panel);
+-  let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  let rendered = once(OptimizationsView, EVENTS.OPTIMIZATIONS_RENDERED);
+   yield stopRecording(panel);
+ 
+-  yield DetailsView.selectView("js-calltree");
+-  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
++  yield DetailsView.selectView("optimizations");
++  ok(DetailsView.isViewSelected(OptimizationsView), "The Optimizations View is now selected.");
+   yield rendered;
+ 
+   let recording = PerformanceController.getCurrentRecording();
+   is(recording.getConfiguration().withJITOptimizations, true, "recording model has withJITOptimizations as true");
+ 
+   // Set back to false, should not affect display of first recording
+   info("Disabling enable-jit-optimizations");
+   Services.prefs.setBoolPref(JIT_PREF, false);
+-  is($("#jit-optimizations-view").hidden, false, "JIT Optimizations panel is displayed when feature enabled.");
++  is($("#select-optimizations-view").hidden, false,
++    "JIT Optimizations selector still available since the recording has it enabled.");
+ 
+   yield startRecording(panel);
+-  rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   yield stopRecording(panel);
+ 
+-  yield DetailsView.selectView("js-calltree");
+-  ok(DetailsView.isViewSelected(JsCallTreeView), "The call tree is now selected.");
++  ok(DetailsView.isViewSelected(WaterfallView), "The waterfall view is now selected.");
+   yield rendered;
+ 
+   recording = PerformanceController.getCurrentRecording();
+   is(recording.getConfiguration().withJITOptimizations, false, "recording model has withJITOptimizations as false");
+-  is($("#jit-optimizations-view").hidden, true, "JIT Optimizations panel is hidden when feature disabled");
++  is($("#select-optimizations-view").hidden, true,
++    "JIT Optimizations selector is hidden if recording did not enable optimizations.");
+ 
+   yield teardown(panel);
+   finish();
+ }
+diff --git a/browser/devtools/performance/views/details-js-call-tree.js b/browser/devtools/performance/views/details-js-call-tree.js
+index a207873..e43afcb 100644
+--- a/browser/devtools/performance/views/details-js-call-tree.js
++++ b/browser/devtools/performance/views/details-js-call-tree.js
+@@ -17,29 +17,26 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+   rangeChangeDebounceTime: 75, // ms
+ 
+   /**
+    * Sets up the view with event binding.
+    */
+   initialize: function () {
+     DetailsSubview.initialize.call(this);
+ 
+-    this._onPrefChanged = this._onPrefChanged.bind(this);
+     this._onLink = this._onLink.bind(this);
+ 
+     this.container = $("#js-calltree-view .call-tree-cells-container");
+-    JITOptimizationsView.initialize();
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     this.container = null;
+-    JITOptimizationsView.destroy();
+     DetailsSubview.destroy.call(this);
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering a new call tree.
+    *
+    * @param object interval [optional]
+    *        The { startTime, endTime }, in milliseconds.
+@@ -49,17 +46,16 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+       contentOnly: !PerformanceController.getOption("show-platform-data"),
+       invertTree: PerformanceController.getOption("invert-call-tree"),
+       flattenRecursion: PerformanceController.getOption("flatten-tree-recursion")
+     };
+     let recording = PerformanceController.getCurrentRecording();
+     let profile = recording.getProfile();
+     let threadNode = this._prepareCallTree(profile, interval, options);
+     this._populateCallTree(threadNode, options);
+-    this._toggleJITOptimizationsView(recording);
+     this.emit(EVENTS.JS_CALL_TREE_RENDERED);
+   },
+ 
+   /**
+    * Fired on the "link" event for the call tree in this container.
+    */
+   _onLink: function (_, treeItem) {
+     let { url, line } = treeItem.frame.getInfo();
+@@ -109,43 +105,27 @@ let JsCallTreeView = Heritage.extend(DetailsSubview, {
+       // Call trees should only auto-expand when not inverted. Passing undefined
+       // will default to the CALL_TREE_AUTO_EXPAND depth.
+       autoExpandDepth: inverted ? 0 : undefined
+     });
+ 
+     // Bind events.
+     root.on("link", this._onLink);
+ 
+-    // Pipe "focus" events to the view, used by
+-    // tests and JITOptimizationsView.
+-    root.on("focus", (_, node) => this.emit("focus", node));
++    // Pipe "focus" events to the view, mostly for tests
++    root.on("focus", () => this.emit("focus"));
+ 
+     // Clear out other call trees.
+     this.container.innerHTML = "";
+     root.attachTo(this.container);
+ 
+     // When platform data isn't shown, hide the cateogry labels, since they're
+     // only available for C++ frames. Pass *false* to make them invisible.
+     root.toggleCategories(!options.contentOnly);
+ 
+     // Return the CallView for tests
+     return root;
+   },
+ 
+-  /**
+-   * Displays or hides the optimizations view based on the recordings
+-   * optimizations feature.
+-   *
+-   * @param {RecordingModel} recording
+-   */
+-  _toggleJITOptimizationsView: function (recording) {
+-    if (recording && recording.getConfiguration().withJITOptimizations) {
+-      JITOptimizationsView.show();
+-      JITOptimizationsView.render();
+-    } else {
+-      JITOptimizationsView.hide();
+-    }
+-  },
+-
+   toString: () => "[object JsCallTreeView]"
+ });
+ 
+ EventEmitter.decorate(JsCallTreeView);
+diff --git a/browser/devtools/performance/views/details-optimizations.js b/browser/devtools/performance/views/details-optimizations.js
+new file mode 100644
+index 0000000..d0a667c
+--- /dev/null
++++ b/browser/devtools/performance/views/details-optimizations.js
+@@ -0,0 +1,174 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++let OptimizationsView = Heritage.extend(DetailsSubview, {
++
++  rerenderPrefs: [
++    "show-platform-data",
++    "flatten-tree-recursion",
++  ],
++
++  rangeChangeDebounceTime: 75, // ms
++
++  /**
++   * Sets up the view with event binding.
++   */
++  initialize: function () {
++    DetailsSubview.initialize.call(this);
++    this.reset = this.reset.bind(this);
++    this.tabs = $("#optimizations-tabs");
++    this._onFramesListSelect = this._onFramesListSelect.bind(this);
++
++    OptimizationsListView.initialize();
++    FramesListView.initialize({ container: $("#frames-tabpanel") });
++    FramesListView.on("select", this._onFramesListSelect);
++  },
++
++  /**
++   * Unbinds events.
++   */
++  destroy: function () {
++    DetailsSubview.destroy.call(this);
++    this.tabs = this._threadNode = this._frameNode = null;
++
++    FramesListView.off("select", this._onFramesListSelect);
++    FramesListView.destroy();
++    OptimizationsListView.destroy();
++  },
++
++  /**
++   * Selects a tab by name.
++   *
++   * @param {string} name
++   *                 Can be "frames" or "optimizations"
++   */
++  selectTabByName: function (name="frames") {
++    switch(name) {
++    case "optimizations":
++      this.tabs.selectedIndex = 0;
++      break;
++    case "frames":
++      this.tabs.selectedIndex = 1;
++      break;
++    }
++  },
++
++  /**
++   * Method for handling all the set up for rendering a new call tree.
++   *
++   * @param object interval [optional]
++   *        The { startTime, endTime }, in milliseconds.
++   */
++  render: function (interval={}) {
++    let options = {
++      contentOnly: !PerformanceController.getOption("show-platform-data"),
++      flattenRecursion: PerformanceController.getOption("flatten-tree-recursion"),
++      // Always invert the tree for the optimizations view so we can quickly
++      // get leaves
++      invertTree: true,
++    };
++    let recording = PerformanceController.getCurrentRecording();
++    let profile = recording.getProfile();
++
++    this.reset();
++    // TODO bug 1175662
++    // Share thread nodes between details view
++    this.threadNode = this._prepareThreadNode(profile, interval, options);
++    this.emit(EVENTS.OPTIMIZATIONS_RENDERED);
++  },
++
++  /**
++   * The main thread node used in this recording that contains
++   * all potential frame nodes to select.
++   */
++  set threadNode(threadNode) {
++    if (threadNode === this._threadNode) {
++      return;
++    }
++    this._threadNode = threadNode;
++    // Also clear out the current frame node as its no
++    // longer relevent
++    this.frameNode = null;
++    this._setAndRenderFramesList();
++  },
++  get threadNode() {
++    return this._threadNode;
++  },
++
++  /**
++   * frameNode is the frame node selected currently to inspect
++   * the optimization tiers over time and strategies.
++   */
++  set frameNode(frameNode) {
++    if (frameNode === this._frameNode) {
++      return;
++    }
++    this._frameNode = frameNode;
++
++    // If no frame selected, jump to the frame list view. If just selected
++    // a frame, jump to optimizations view.
++    // TODO test for this bug 1176056
++    this.selectTabByName(frameNode ? "optimizations" : "frames");
++    this._setAndRenderTierGraph();
++    this._setAndRenderOptimizationsList();
++  },
++
++  get frameNode() {
++    return this._frameNode;
++  },
++
++  /**
++   * Clears the frameNode so that tier and opts list
++   * views are cleared.
++   */
++  reset: function () {
++    this.threadNode = this.frameNode = null;
++  },
++
++  /**
++   * Called when the recording is stopped and prepares data to
++   * populate the graph.
++   */
++  _prepareThreadNode: function (profile, { startTime, endTime }, options) {
++    let thread = profile.threads[0];
++    let { contentOnly, invertTree, flattenRecursion } = options;
++    let threadNode = new ThreadNode(thread, { startTime, endTime, contentOnly, invertTree, flattenRecursion });
++    return threadNode;
++  },
++
++  /**
++   * Renders the tier graph.
++   */
++  _setAndRenderTierGraph: function () {
++    // TODO bug 1150299
++  },
++
++  /**
++   * Renders the frames list.
++   */
++  _setAndRenderFramesList: function () {
++    FramesListView.setCurrentThread(this.threadNode);
++    FramesListView.render();
++  },
++
++  /**
++   * Renders the optimizations list.
++   */
++  _setAndRenderOptimizationsList: function () {
++    OptimizationsListView.setCurrentFrame(this.frameNode);
++    OptimizationsListView.render();
++  },
++
++  /**
++   * Called when a frame is selected via the FramesListView
++   */
++  _onFramesListSelect: function (_, frameNode) {
++    this.frameNode = frameNode;
++  },
++
++  toString: () => "[object OptimizationsView]"
++});
++
++EventEmitter.decorate(OptimizationsView);
+diff --git a/browser/devtools/performance/views/details.js b/browser/devtools/performance/views/details.js
+index 05872da..f14754f 100644
+--- a/browser/devtools/performance/views/details.js
++++ b/browser/devtools/performance/views/details.js
+@@ -34,16 +34,21 @@ let DetailsView = {
+       actors: ["memory"],
+       features: ["withAllocations"]
+     },
+     "memory-flamegraph": {
+       id: "memory-flamegraph-view",
+       view: MemoryFlameGraphView,
+       actors: ["memory", "timeline"],
+       features: ["withAllocations"]
++    },
++    "optimizations": {
++      id: "optimizations-view",
++      view: OptimizationsView,
++      features: ["withJITOptimizations"],
+     }
+   },
+ 
+   /**
+    * Sets up the view with event binding, initializes subviews.
+    */
+   initialize: Task.async(function *() {
+     this.el = $("#details-pane");
+diff --git a/browser/devtools/performance/views/frames-list.js b/browser/devtools/performance/views/frames-list.js
+new file mode 100644
+index 0000000..0fd691b
+--- /dev/null
++++ b/browser/devtools/performance/views/frames-list.js
+@@ -0,0 +1,114 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const HTML_NS = "http://www.w3.org/1999/xhtml";
++const PERCENTAGE_UNITS = L10N.getStr("table.percentage");
++
++/**
++ * View for rendering a list of all youngest-frames in a profiler recording.
++ */
++
++let FramesListView = {
++
++  // Current `<li>` element selected.
++  _selectedItem: null,
++
++  /**
++   * Initialization function called when the tool starts up.
++   */
++  initialize: function ({ container }) {
++    this._onFrameListClick = this._onFrameListClick.bind(this);
++
++    this.container = container;
++    this.list = document.createElementNS(HTML_NS, "ul");
++    this.list.setAttribute("class", "frames-list");
++    this.list.addEventListener("click", this._onFrameListClick, false);
++
++    this.container.appendChild(this.list);
++  },
++
++  /**
++   * Destruction function called when the tool cleans up.
++   */
++  destroy: function () {
++    this.list.removeEventListener("click", this._onFrameListClick, false);
++    this.container.innerHTML = "";
++    this.container = this.list = null;
++  },
++
++  /**
++   * Sets the thread node used for subsequent rendering.
++   *
++   * @param {ThreadNode} threadNode
++   */
++  setCurrentThread: function (threadNode) {
++    this.threadNode = threadNode;
++  },
++
++  /**
++   * Renders a list of leaf frames with optimizations in
++   * order of hotness from the current ThreadNode.
++   */
++  render: function () {
++    this.list.innerHTML = "";
++
++    if (!this.threadNode) {
++      return;
++    }
++
++    let totalSamples = this.threadNode.samples;
++    let sortedFrames = this.threadNode.calls.sort((a, b) => a.youngestFrameSamples < b.youngestFrameSamples ? 1 : -1);
++    for (let frame of sortedFrames) {
++      if (!frame.hasOptimizations()) {
++        continue;
++      }
++      let info = frame.getInfo();
++      let el = document.createElementNS(HTML_NS, "li");
++      let percentage = frame.youngestFrameSamples / totalSamples * 100;
++      let percentageText = L10N.numberWithDecimals(percentage, 2) + PERCENTAGE_UNITS;
++      let label = `(${percentageText}) ${info.functionName}`;
++      el.textContent = label;
++      el.setAttribute("tooltip", label);
++      el.setAttribute("data-location", frame.location);
++      this.list.appendChild(el);
++    }
++  },
++
++  /**
++   * Fired when a frame in the list is clicked.
++   */
++  _onFrameListClick: function (e) {
++    // If no threadNode (no renders), abort;
++    // also only allow left click to trigger this event
++    if (!this.threadNode || e.button !== 0) {
++      return;
++    }
++
++    let target = e.target;
++    let location = target.getAttribute("data-location");
++    if (!location) {
++      return;
++    }
++
++    for (let frame of this.threadNode.calls) {
++      if (frame.location === location) {
++        // If found, set the selected class on element, remove it
++        // from previous element, and emit event "select"
++        if (this._selectedItem) {
++          this._selectedItem.classList.remove("selected");
++        }
++        this._selectedItem = target;
++        target.classList.add("selected");
++        console.log("Emitting select on", this, frame);
++        this.emit("select", frame);
++        break;
++      }
++    }
++  },
++
++  toString: () => "[object FramesListView]"
++};
++
++EventEmitter.decorate(FramesListView);
+diff --git a/browser/devtools/performance/views/jit-optimizations.js b/browser/devtools/performance/views/optimizations-list.js
+similarity index 87%
+rename from browser/devtools/performance/views/jit-optimizations.js
+rename to browser/devtools/performance/views/optimizations-list.js
+index f05d52a..57a1cc9 100644
+--- a/browser/devtools/performance/views/jit-optimizations.js
++++ b/browser/devtools/performance/views/optimizations-list.js
+@@ -5,57 +5,51 @@
+ 
+ const URL_LABEL_TOOLTIP = L10N.getStr("table.url.tooltiptext");
+ const OPTIMIZATION_FAILURE = L10N.getStr("jit.optimizationFailure");
+ const JIT_SAMPLES = L10N.getStr("jit.samples2");
+ const JIT_EMPTY_TEXT = L10N.getStr("jit.empty");
+ const PROPNAME_MAX_LENGTH = 4;
+ 
+ /**
+- * View for rendering JIT Optimization data. The terminology and types
+- * used here can be referenced:
++ * View for rendering a list of all optmizations found in a frame.
++ * The terminology and types used here can be referenced:
+  * @see browser/devtools/performance/modules/logic/jit.js
+  */
+ 
+-let JITOptimizationsView = {
++let OptimizationsListView = {
+ 
+   _currentFrame: null,
+ 
+   /**
+    * Initialization function called when the tool starts up.
+    */
+   initialize: function () {
+     this.reset = this.reset.bind(this);
+-    this._onFocusFrame = this._onFocusFrame.bind(this);
+ 
+     this.el = $("#jit-optimizations-view");
+     this.$headerName = $("#jit-optimizations-header .header-function-name");
+     this.$headerFile = $("#jit-optimizations-header .header-file");
+     this.$headerLine = $("#jit-optimizations-header .header-line");
+ 
+     this.tree = new TreeWidget($("#jit-optimizations-raw-view"), {
+       sorted: false,
+       emptyText: JIT_EMPTY_TEXT
+     });
+ 
+     // Start the tree by resetting.
+     this.reset();
+-
+-    PerformanceController.on(EVENTS.RECORDING_SELECTED, this.reset);
+-    JsCallTreeView.on("focus", this._onFocusFrame);
+   },
+ 
+   /**
+    * Destruction function called when the tool cleans up.
+    */
+   destroy: function () {
+     this.tree = null;
+     this.$headerName = this.$headerFile = this.$headerLine = this.el = null;
+-    PerformanceController.off(EVENTS.RECORDING_SELECTED, this.reset);
+-    JsCallTreeView.off("focus", this._onFocusFrame);
+   },
+ 
+   /**
+    * Takes a FrameNode, with corresponding optimization data to be displayed
+    * in the view.
+    *
+    * @param {FrameNode} frameNode
+    */
+@@ -88,42 +82,22 @@ let JITOptimizationsView = {
+ 
+   /**
+    * Clears out data in the tree.
+    */
+   clear: function () {
+     this.tree.clear();
+   },
+ 
+-  show: function () {
+-    this.el.hidden = false;
+-  },
+-
+-  hide: function () {
+-    this.el.hidden = true;
+-  },
+-
+-  /**
+-   * Helper to determine whether or not this view should be enabled.
+-   */
+-  isEnabled: function () {
+-    let recording = PerformanceController.getCurrentRecording();
+-    return !!(recording && recording.getConfiguration().withJITOptimizations);
+-  },
+-
+   /**
+    * Takes a JITOptimizations object and builds a view containing all attempted
+    * optimizations for this frame. This view is very verbose and meant for those
+    * who understand JIT compilers.
+    */
+   render: function () {
+-    if (!this.isEnabled()) {
+-      return;
+-    }
+-
+     let frameNode = this.getCurrentFrame();
+ 
+     if (!frameNode) {
+       this.reset();
+       return;
+     }
+ 
+     let view = this.tree;
+@@ -380,36 +354,13 @@ let JITOptimizationsView = {
+ 
+   _isLinkableURL: function (url) {
+     return url && url.indexOf &&
+        (url.indexOf("http") === 0 ||
+         url.indexOf("resource://") === 0 ||
+         url.indexOf("file://") === 0);
+   },
+ 
+-  /**
+-   * Called when the JSCallTreeView focuses on a frame.
+-   */
+-
+-  _onFocusFrame: function (_, view) {
+-    if (!view.frame) {
+-      return;
+-    }
+-
+-    // Only attempt to rerender if this is new -- focus is called even
+-    // when the window removes focus and comes back, so this prevents
+-    // repeating rendering of the same frame
+-    let shouldRender = this.getCurrentFrame() !== view.frame;
+-
+-    // Save the frame even if the view is disabled, so we can
+-    // render it if it becomes enabled
+-    this.setCurrentFrame(view.frame);
+-
+-    if (shouldRender) {
+-      this.render();
+-    }
+-  },
+-
+-  toString: () => "[object JITOptimizationsView]"
++  toString: () => "[object OptimizationsListView]"
+ 
+ };
+ 
+-EventEmitter.decorate(JITOptimizationsView);
++EventEmitter.decorate(OptimizationsListView);
+diff --git a/browser/themes/shared/devtools/performance.inc.css b/browser/themes/shared/devtools/performance.inc.css
+index 3f45e2e..53a42fb 100644
+--- a/browser/themes/shared/devtools/performance.inc.css
++++ b/browser/themes/shared/devtools/performance.inc.css
+@@ -64,16 +64,20 @@
+   list-style-image: url(performance-icons.svg#details-call-tree);
+ }
+ 
+ #select-js-flamegraph-view,
+ #select-memory-flamegraph-view {
+   list-style-image: url(performance-icons.svg#details-flamegraph);
+ }
+ 
++#select-optimizations-view {
++  list-style-image: url(profiler-stopwatch.svg);
++}
++
+ /* Recording buttons */
+ 
+ #main-record-button {
+   list-style-image: url(profiler-stopwatch.svg);
+ }
+ 
+ #main-record-button[checked] {
+   list-style-image: url(profiler-stopwatch-checked.svg);
+@@ -652,16 +656,30 @@ menuitem.marker-color-graphs-blue:before,
+ .theme-light #jit-optimizations-view .opt-icon::before {
+   background-image: url(chrome://browser/skin/devtools/webconsole.svg#light-icons);
+ }
+ 
+ #jit-optimizations-view .opt-icon[severity=warning]::before {
+   background-position: -24px -24px;
+ }
+ 
++ul.frames-list {
++  list-style-type: none;
++  padding: 0px;
++  margin: 0px;
++}
++
++ul.frames-list li {
++  cursor: pointer;
++}
++
++ul.frames-list li.selected {
++  background-color: var(--theme-selection-background);
++  color: var(--theme-selection-color);
++}
+ 
+ /**
+  * Configurable Options
+  *
+  * Elements can be tagged with a class and visibility is controlled via a
+  * preference being applied or removed.
+  */
+ 
+-- 
+2.2.1
+
