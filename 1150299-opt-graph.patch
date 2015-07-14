@@ -1,8 +1,6 @@
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Fri, 19 Jun 2015 20:32:17 -0700
-Subject: Bug 1150299 - Display a graph of optimization tiers over time
- in the optimizations view. Also link opt notifications in call tree to the
- appropriate frame in the optimizations view. r=vp
+Subject: Bug 1150299 - Display a graph of optimization tiers over time in the optimizations view. Also link opt notifications in call tree to the appropriate frame in the optimizations view. r=vp
 
 diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
 index ee4df8a..3c84da7 100644
@@ -46,10 +44,10 @@ index ee4df8a..3c84da7 100644
  exports.getOrAddInflatedFrame = getOrAddInflatedFrame;
  exports.InflatedFrame = InflatedFrame;
 diff --git a/browser/devtools/performance/modules/logic/jit.js b/browser/devtools/performance/modules/logic/jit.js
-index 1a8b28d..55bf52d 100644
+index 1a8b28d..cb439ab 100644
 --- a/browser/devtools/performance/modules/logic/jit.js
 +++ b/browser/devtools/performance/modules/logic/jit.js
-@@ -264,64 +264,56 @@ const IMPLEMENTATION_NAMES = Object.keys(IMPLEMENTATION_MAP);
+@@ -264,70 +264,76 @@ const IMPLEMENTATION_NAMES = Object.keys(IMPLEMENTATION_MAP);
   * Takes data from a FrameNode and computes rendering positions for
   * a stacked mountain graph, to visualize JIT optimization tiers over time.
   *
@@ -92,6 +90,9 @@ index 1a8b28d..55bf52d 100644
    let bucket = [];
 -  // Size of each bucket in milliseconds
 -  let bucketSize = Math.ceil(duration / resolution);
++
++  // Store previous data point so we can have straight vertical lines
++  let previousValues;
  
    // Iterate one after the samples, so we can finalize the last bucket
    for (let i = 0; i <= sampleTimes.length; i++) {
@@ -113,14 +114,31 @@ index 1a8b28d..55bf52d 100644
        for (let j = 0; j < IMPLEMENTATION_NAMES.length; j++) {
 -        dataPoint.ys[j] = (bucket[j] || 0) / (samplesInCurrentBucket || 1);
 +        dataPoint.values[j] = (bucket[j] || 0) / (samplesInCurrentBucket || 1);
++      }
++
++      // Push the values from the previous bucket to the same time
++      // as the current bucket so we get a straight vertical line.
++      if (previousValues) {
++        let data = Object.create(null);
++        data.values = previousValues;
++        data.delta = currentBucketStartTime;
++        output.push(data);
        }
++
        output.push(dataPoint);
  
        // Set the new start time of this bucket and reset its count
        currentBucketStartTime += bucketSize;
        samplesInCurrentBucket = 0;
++      previousValues = dataPoint.values;
        bucket = [];
      }
+ 
+     // If this sample observed an optimization in this frame, record it
+     if (nextOptSample && nextOptSample.time === sampleTime) {
+       // If no implementation defined, it was the "interpreter".
+       implEnum = IMPLEMENTATION_MAP[stringTable[nextOptSample.implementation] || "interpreter"];
+       bucket[implEnum] = (bucket[implEnum] || 0) + 1;
 diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
 index e3f6f99..814dfb4 100644
 --- a/browser/devtools/performance/modules/logic/tree-model.js

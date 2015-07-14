@@ -1,0 +1,1939 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 8 Jul 2015 14:22:27 -0700
+Subject: Bug 1159389 - Migrate profiler actor to use new form of protocol.js actors, and become a standalone module consumed by actors. r=vp,jryans
+
+diff --git a/browser/devtools/performance/modules/logic/actors.js b/browser/devtools/performance/modules/logic/actors.js
+index 7a8b21e..0cefcac 100644
+--- a/browser/devtools/performance/modules/logic/actors.js
++++ b/browser/devtools/performance/modules/logic/actors.js
+@@ -14,16 +14,18 @@ loader.lazyRequireGetter(this, "Poller",
+ loader.lazyRequireGetter(this, "CompatUtils",
+   "devtools/performance/compatibility");
+ loader.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/performance/recording-utils");
+ loader.lazyRequireGetter(this, "TimelineFront",
+   "devtools/server/actors/timeline", true);
+ loader.lazyRequireGetter(this, "MemoryFront",
+   "devtools/server/actors/memory", true);
++loader.lazyRequireGetter(this, "ProfilerFront",
++  "devtools/server/actors/profiler", true);
+ 
+ // how often do we pull allocation sites from the memory actor
+ const ALLOCATION_SITE_POLL_TIMER = 200; // ms
+ 
+ // how often do we check the status of the profiler's circular buffer
+ const PROFILER_CHECK_TIMER = 5000; // ms
+ 
+ const MEMORY_ACTOR_METHODS = [
+@@ -53,40 +55,40 @@ function ProfilerFrontFacade (target) {
+ }
+ 
+ ProfilerFrontFacade.prototype = {
+   EVENTS: ["console-api-profiler", "profiler-stopped"],
+ 
+   // Connects to the targets underlying real ProfilerFront.
+   connect: Task.async(function*() {
+     let target = this._target;
+-    this._actor = yield CompatUtils.getProfiler(target);
++    this._front = new ProfilerFront(target.client, target.form);
+ 
+     // Fetch and store information about the SPS profiler and
+     // server profiler.
+     this.traits = {};
+     this.traits.filterable = target.getTrait("profilerDataFilterable");
+ 
+     // Directly register to event notifications when connected
+     // to hook into `console.profile|profileEnd` calls.
+     yield this.registerEventNotifications({ events: this.EVENTS });
+-    // TODO bug 1159389, listen directly to actor if supporting new front
+-    target.client.addListener("eventNotification", this._onProfilerEvent);
++    this.EVENTS.forEach(e => this._front.on(e, this._onProfilerEvent));
+   }),
+ 
+   /**
+    * Unregisters events for the underlying profiler actor.
+    */
+   destroy: Task.async(function *() {
+     if (this._poller) {
+       yield this._poller.destroy();
+     }
++
++    this.EVENTS.forEach(e => this._front.off(e, this._onProfilerEvent));
+     yield this.unregisterEventNotifications({ events: this.EVENTS });
+-    // TODO bug 1159389, listen directly to actor if supporting new front
+-    this._target.client.removeListener("eventNotification", this._onProfilerEvent);
++    yield this._front.destroy();
+   }),
+ 
+   /**
+    * Starts the profiler actor, if necessary.
+    *
+    * @option {number?} bufferSize
+    * @option {number?} sampleFrequency
+    */
+@@ -100,33 +102,40 @@ ProfilerFrontFacade.prototype = {
+     if (!this._poller.isPolling()) {
+       this._poller.on();
+     }
+ 
+     // Start the profiler only if it wasn't already active. The built-in
+     // nsIPerformance module will be kept recording, because it's the same instance
+     // for all targets and interacts with the whole platform, so we don't want
+     // to affect other clients by stopping (or restarting) it.
+-    let { isActive, currentTime, position, generation, totalSize } = yield this.getStatus();
++    let status = yield this.getStatus();
++
++    // This should only occur during teardown
++    if (!status) {
++      return;
++    }
++
++    let { isActive, currentTime, position, generation, totalSize } = status;
+ 
+     if (isActive) {
+       this.emit("profiler-already-active");
+       return { startTime: currentTime, position, generation, totalSize };
+     }
+ 
+     // Translate options from the recording model into profiler-specific
+     // options for the nsIProfiler
+     let profilerOptions = {
+       entries: options.bufferSize,
+       interval: options.sampleFrequency ? (1000 / (options.sampleFrequency * 1000)) : void 0
+     };
+ 
+     let startInfo = yield this.startProfiler(profilerOptions);
+     let startTime = 0;
+-    if ('currentTime' in startInfo) {
++    if ("currentTime" in startInfo) {
+       startTime = startInfo.currentTime;
+     }
+ 
+     this.emit("profiler-activated");
+     return { startTime, position, generation, totalSize };
+   }),
+ 
+   /**
+@@ -137,17 +146,17 @@ ProfilerFrontFacade.prototype = {
+   stop: Task.async(function *() {
+     yield this._poller.off();
+   }),
+ 
+   /**
+    * Wrapper around `profiler.isActive()` to take profiler status data and emit.
+    */
+   getStatus: Task.async(function *() {
+-    let data = yield (CompatUtils.actorCompatibilityBridge("isActive").call(this));
++    let data = yield CompatUtils.callFrontMethod("isActive").call(this);
+     // If no data, the last poll for `isActive()` was wrapping up, and the target.client
+     // is now null, so we no longer have data, so just abort here.
+     if (!data) {
+       return;
+     }
+ 
+     // If TEST_PROFILER_FILTER_STATUS defined (via array of fields), filter
+     // out any field from isActive, used only in tests. Used to filter out
+@@ -164,17 +173,17 @@ ProfilerFrontFacade.prototype = {
+     this.emit("profiler-status", data);
+     return data;
+   }),
+ 
+   /**
+    * Returns profile data from now since `startTime`.
+    */
+   getProfile: Task.async(function *(options) {
+-    let profilerData = yield (CompatUtils.actorCompatibilityBridge("getProfile").call(this, options));
++    let profilerData = yield CompatUtils.callFrontMethod("getProfile").call(this, options);
+     // If the backend is not deduped, dedupe it ourselves, as rest of the code
+     // expects a deduped profile.
+     if (profilerData.profile.meta.version === 2) {
+       RecordingUtils.deflateProfile(profilerData.profile);
+     }
+ 
+     // If the backend does not support filtering by start and endtime on platform (< Fx40),
+     // do it on the client (much slower).
+@@ -186,17 +195,19 @@ ProfilerFrontFacade.prototype = {
+   }),
+ 
+   /**
+    * Invoked whenever a registered event was emitted by the profiler actor.
+    *
+    * @param object response
+    *        The data received from the backend.
+    */
+-  _onProfilerEvent: function (_, { topic, subject, details }) {
++  _onProfilerEvent: function (data) {
++    let { subject, topic, details } = data;
++
+     if (topic === "console-api-profiler") {
+       if (subject.action === "profile") {
+         this.emit("console-profile-start", details);
+       } else if (subject.action === "profileEnd") {
+         this.emit("console-profile-end", details);
+       }
+     } else if (topic === "profiler-stopped") {
+       this.emit("profiler-stopped");
+@@ -219,37 +230,37 @@ function TimelineFrontFacade (target) {
+   EventEmitter.decorate(this);
+ }
+ 
+ TimelineFrontFacade.prototype = {
+   EVENTS: ["markers", "frames", "memory", "ticks"],
+ 
+   connect: Task.async(function*() {
+     let supported = yield CompatUtils.timelineActorSupported(this._target);
+-    this._actor = supported ?
++    this._front = supported ?
+                   new TimelineFront(this._target.client, this._target.form) :
+                   new CompatUtils.MockTimelineFront();
+ 
+     this.IS_MOCK = !supported;
+ 
+     // Binds underlying actor events and consolidates them to a `timeline-data`
+     // exposed event.
+     this.EVENTS.forEach(type => {
+       let handler = this[`_on${type}`] = this._onTimelineData.bind(this, type);
+-      this._actor.on(type, handler);
++      this._front.on(type, handler);
+     });
+   }),
+ 
+   /**
+    * Override actor's destroy, so we can unregister listeners before
+    * destroying the underlying actor.
+    */
+   destroy: Task.async(function *() {
+-    this.EVENTS.forEach(type => this._actor.off(type, this[`_on${type}`]));
+-    yield this._actor.destroy();
++    this.EVENTS.forEach(type => this._front.off(type, this[`_on${type}`]));
++    yield this._front.destroy();
+   }),
+ 
+   /**
+    * An aggregate of all events (markers, frames, memory, ticks) and exposes
+    * to PerformanceFront as a single event.
+    */
+   _onTimelineData: function (type, ...data) {
+     this.emit("timeline-data", type, ...data);
+@@ -266,31 +277,31 @@ function MemoryFrontFacade (target) {
+   this._pullAllocationSites = this._pullAllocationSites.bind(this);
+ 
+   EventEmitter.decorate(this);
+ }
+ 
+ MemoryFrontFacade.prototype = {
+   connect: Task.async(function*() {
+     let supported = yield CompatUtils.memoryActorSupported(this._target);
+-    this._actor = supported ?
++    this._front = supported ?
+                   new MemoryFront(this._target.client, this._target.form) :
+                   new CompatUtils.MockMemoryFront();
+ 
+     this.IS_MOCK = !supported;
+   }),
+ 
+   /**
+    * Disables polling and destroys actor.
+    */
+   destroy: Task.async(function *() {
+     if (this._poller) {
+       yield this._poller.destroy();
+     }
+-    yield this._actor.destroy();
++    yield this._front.destroy();
+   }),
+ 
+   /**
+    * Starts polling for allocation information.
+    */
+   start: Task.async(function *(options) {
+     if (!options.withAllocations) {
+       return 0;
+@@ -369,15 +380,15 @@ MemoryFrontFacade.prototype = {
+ 
+     deferred.resolve();
+   }),
+ 
+   toString: () => "[object MemoryFrontFacade]"
+ };
+ 
+ // Bind all the methods that directly proxy to the actor
+-PROFILER_ACTOR_METHODS.forEach(m => ProfilerFrontFacade.prototype[m] = CompatUtils.actorCompatibilityBridge(m));
+-TIMELINE_ACTOR_METHODS.forEach(m => TimelineFrontFacade.prototype[m] = CompatUtils.actorCompatibilityBridge(m));
+-MEMORY_ACTOR_METHODS.forEach(m => MemoryFrontFacade.prototype[m] = CompatUtils.actorCompatibilityBridge(m));
++PROFILER_ACTOR_METHODS.forEach(m => ProfilerFrontFacade.prototype[m] = CompatUtils.callFrontMethod(m));
++TIMELINE_ACTOR_METHODS.forEach(m => TimelineFrontFacade.prototype[m] = CompatUtils.callFrontMethod(m));
++MEMORY_ACTOR_METHODS.forEach(m => MemoryFrontFacade.prototype[m] = CompatUtils.callFrontMethod(m));
+ 
+ exports.ProfilerFront = ProfilerFrontFacade;
+ exports.TimelineFront = TimelineFrontFacade;
+ exports.MemoryFront = MemoryFrontFacade;
+diff --git a/browser/devtools/performance/modules/logic/compatibility.js b/browser/devtools/performance/modules/logic/compatibility.js
+index d9a2d10..3fbe5f3 100644
+--- a/browser/devtools/performance/modules/logic/compatibility.js
++++ b/browser/devtools/performance/modules/logic/compatibility.js
+@@ -96,83 +96,29 @@ function timelineActorSupported(target) {
+   if (target.TEST_MOCK_TIMELINE_ACTOR) {
+     return false;
+   }
+ 
+   return target.hasActor("timeline");
+ }
+ 
+ /**
+- * Returns a promise resolving to the location of the profiler actor
+- * within this context.
+- *
+- * @param {TabTarget} target
+- * @return {Promise<ProfilerActor>}
++ * Returns a function to be used as a method on an "Front" in ./actors.
++ * Calls the underlying actor's method.
+  */
+-function getProfiler (target) {
+-  let deferred = promise.defer();
+-  // Chrome and content process targets already have obtained a reference
+-  // to the profiler tab actor. Use it immediately.
+-  if (target.form && target.form.profilerActor) {
+-    deferred.resolve(target.form.profilerActor);
+-  }
+-  // Check if we already have a grip to the `listTabs` response object
+-  // and, if we do, use it to get to the profiler actor.
+-  else if (target.root && target.root.profilerActor) {
+-    deferred.resolve(target.root.profilerActor);
+-  }
+-  // Otherwise, call `listTabs`.
+-  else {
+-    target.client.listTabs(({ profilerActor }) => deferred.resolve(profilerActor));
+-  }
+-  return deferred.promise;
+-}
+-
+-/**
+- * Makes a request to an actor that does not have the modern `Front`
+- * interface.
+- */
+-function legacyRequest (target, actor, method, args) {
+-  let deferred = promise.defer();
+-  let data = args[0] || {};
+-  data.to = actor;
+-  data.type = method;
+-  target.client.request(data, deferred.resolve);
+-  return deferred.promise;
+-}
+-
+-/**
+- * Returns a function to be used as a method on an "Actor" in ./actors.
+- * Calls the underlying actor's method, supporting the modern `Front`
+- * interface if possible, otherwise, falling back to using
+- * `legacyRequest`.
+- */
+-function actorCompatibilityBridge (method) {
++function callFrontMethod (method) {
+   return function () {
+     // If there's no target or client on this actor facade,
+     // abort silently -- this occurs in tests when polling occurs
+     // after the test ends, when tests do not wait for toolbox destruction
+     // (which will destroy the actor facade, turning off the polling).
+     if (!this._target || !this._target.client) {
+       return;
+     }
+-    // Check to see if this is a modern ActorFront, which has its
+-    // own `request` method. Also, check if its a mock actor, as it mimicks
+-    // the ActorFront interface.
+-    // The profiler actor does not currently support the modern `Front`
+-    // interface, so we have to manually push packets to it.
+-    // TODO bug 1159389, fix up profiler actor to not need this, however
+-    // we will need it for backwards compat
+-    if (this.IS_MOCK || this._actor.request) {
+-      return this._actor[method].apply(this._actor, arguments);
+-    }
+-    else {
+-      return legacyRequest(this._target, this._actor, method, arguments);
+-    }
++    return this._front[method].apply(this._front, arguments);
+   };
+ }
+ 
+ exports.MockMemoryFront = MockMemoryFront;
+ exports.MockTimelineFront = MockTimelineFront;
+ exports.memoryActorSupported = memoryActorSupported;
+ exports.timelineActorSupported = timelineActorSupported;
+-exports.getProfiler = getProfiler;
+-exports.actorCompatibilityBridge = actorCompatibilityBridge;
++exports.callFrontMethod = callFrontMethod;
+diff --git a/browser/devtools/performance/test/browser_markers-cycle-collection.js b/browser/devtools/performance/test/browser_markers-cycle-collection.js
+index eb75544..a845019 100644
+--- a/browser/devtools/performance/test/browser_markers-cycle-collection.js
++++ b/browser/devtools/performance/test/browser_markers-cycle-collection.js
+@@ -40,11 +40,15 @@ function* spawnTest () {
+ 
+   yield Promise.all([
+     waitForMarkerType(front, "nsCycleCollector::Collect"),
+     waitForMarkerType(front, "nsCycleCollector::ForgetSkippable")
+   ]);
+   ok(true, "Got expected cycle collection events");
+ 
+   yield front.stopRecording();
++
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_markers-gc.js b/browser/devtools/performance/test/browser_markers-gc.js
+index 8e46d95..0d87f59 100644
+--- a/browser/devtools/performance/test/browser_markers-gc.js
++++ b/browser/devtools/performance/test/browser_markers-gc.js
+@@ -30,16 +30,19 @@ function* spawnTest () {
+   ok(markers.length > 0, "found atleast one GC marker");
+   ok(markers.every(({start}) => typeof start === "number" && start > 0 && start < maxMarkerTime),
+     "All markers have a start time between the valid range.");
+   ok(markers.every(({end}) => typeof end === "number" && end > 0 && end < maxMarkerTime),
+     "All markers have an end time between the valid range.");
+   ok(markers.every(({causeName}) => typeof causeName === "string"),
+     "All markers have a causeName.");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ 
+   function handler (_, name, m) {
+     if (name === "markers" && m[0].name === "GarbageCollection") {
+       markers = m;
+     }
+   }
+diff --git a/browser/devtools/performance/test/browser_markers-parse-html.js b/browser/devtools/performance/test/browser_markers-parse-html.js
+index 10aba17..9a537e2 100644
+--- a/browser/devtools/performance/test/browser_markers-parse-html.js
++++ b/browser/devtools/performance/test/browser_markers-parse-html.js
+@@ -20,16 +20,19 @@ function* spawnTest () {
+ 
+   front.off("timeline-data", handler);
+   yield front.stopRecording(model);
+ 
+   info(`Got ${markers.length} markers.`);
+ 
+   ok(markers.every(({name}) => name === "Parse HTML"), "All markers found are Parse HTML markers");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ 
+   function handler (_, name, _markers) {
+     if (name !== "markers") {
+       return;
+     }
+ 
+diff --git a/browser/devtools/performance/test/browser_markers-styles.js b/browser/devtools/performance/test/browser_markers-styles.js
+index 917a4b3..3a935c9 100644
+--- a/browser/devtools/performance/test/browser_markers-styles.js
++++ b/browser/devtools/performance/test/browser_markers-styles.js
+@@ -22,16 +22,19 @@ function* spawnTest () {
+ 
+   info(`Got ${markers.length} markers.`);
+ 
+   ok(markers.every(({name}) => name === "Styles"), "All markers found are Styles markers");
+   ok(markers.length, "found some restyle markers");
+ 
+   ok(markers.some(({restyleHint}) => restyleHint != void 0), "some markers have a restyleHint property");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ 
+   function handler (_, name, m) {
+     if (name === "markers") {
+       markers = markers.concat(m.filter(marker => marker.name === "Styles"));
+     }
+   }
+diff --git a/browser/devtools/performance/test/browser_markers-timestamp.js b/browser/devtools/performance/test/browser_markers-timestamp.js
+index 86cc6d5..de111a4 100644
+--- a/browser/devtools/performance/test/browser_markers-timestamp.js
++++ b/browser/devtools/performance/test/browser_markers-timestamp.js
+@@ -31,16 +31,19 @@ function* spawnTest () {
+   ok(markers.length === 2, "found 2 TimeStamp markers");
+   ok(markers.every(({start}) => typeof start === "number" && start > 0 && start < maxMarkerTime),
+     "All markers have a start time between the valid range.");
+   ok(markers.every(({end}) => typeof end === "number" && end > 0 && end < maxMarkerTime),
+     "All markers have an end time between the valid range.");
+   is(markers[0].causeName, void 0, "Unlabeled timestamps have an empty causeName");
+   is(markers[1].causeName, "myLabel", "Labeled timestamps have correct causeName");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ 
+   function handler (_, name, m) {
+     if (name === "markers") {
+       markers = markers.concat(m.filter(marker => marker.name === "TimeStamp"));
+     }
+   }
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-01.js b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+index dc45184..9adf947 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-01.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-01.js
+@@ -40,11 +40,14 @@ function* spawnTest() {
+   yield front.stopRecording(recording);
+ 
+   ok(typeof recording.getDuration() === "number",
+     "The front.stopRecording() allows recording to get a duration.");
+ 
+   ok(recording.getDuration() >= 0,
+     "The profilerEndTime is after profilerStartTime.");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-03.js b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+index e639232..0b449bb 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-03.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-03.js
+@@ -39,11 +39,14 @@ function* spawnTest() {
+   yield front.stopRecording(recording);
+ 
+   ok(typeof recording.getDuration() === "number",
+     "The front.stopRecording() allows recording to get a duration.");
+ 
+   ok(recording.getDuration() >= 0,
+     "The profilerEndTime is after profilerStartTime.");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-compatibility-06.js b/browser/devtools/performance/test/browser_perf-compatibility-06.js
+index 834ef76..f1ebe60 100644
+--- a/browser/devtools/performance/test/browser_perf-compatibility-06.js
++++ b/browser/devtools/performance/test/browser_perf-compatibility-06.js
+@@ -22,11 +22,14 @@ function* spawnTest() {
+     is(stats.position, void 0, "profiler-status has void `position`");
+     count++;
+   }
+ 
+   is(model.getBufferUsage(), null, "model should have `null` for its buffer usage");
+   yield front.stopRecording(model);
+   is(model.getBufferUsage(), null, "after recording, model should still have `null` for its buffer usage");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-data-massaging-01.js b/browser/devtools/performance/test/browser_perf-data-massaging-01.js
+index 8b957a0..0d45873 100644
+--- a/browser/devtools/performance/test/browser_perf-data-massaging-01.js
++++ b/browser/devtools/performance/test/browser_perf-data-massaging-01.js
+@@ -32,18 +32,16 @@ function* spawnTest() {
+   info("Started profiling at: " + secondRecordingStartTime);
+ 
+   busyWait(WAIT_TIME); // allow the profiler module to sample more cpu activity
+ 
+   yield front.stopRecording(secondRecording);
+   let secondRecordingProfile = secondRecording.getProfile();
+   let secondRecordingSamples = secondRecordingProfile.threads[0].samples.data;
+ 
+-  isnot(secondRecording._profilerStartTime, 0,
+-    "The profiling start time should not be 0 on the second recording.");
+   ok(secondRecording.getDuration() >= WAIT_TIME,
+     "The second recording duration is correct.");
+ 
+   const TIME_SLOT = secondRecordingProfile.threads[0].samples.schema.time;
+   ok(secondRecordingSamples[0][TIME_SLOT] < secondRecordingStartTime,
+     "The second recorded sample times were normalized.");
+   ok(secondRecordingSamples[0][TIME_SLOT] > 0,
+     "The second recorded sample times were normalized correctly.");
+diff --git a/browser/devtools/performance/test/browser_perf-front-01.js b/browser/devtools/performance/test/browser_perf-front-01.js
+index dcc2ec7..9c09b33 100644
+--- a/browser/devtools/performance/test/browser_perf-front-01.js
++++ b/browser/devtools/performance/test/browser_perf-front-01.js
+@@ -42,11 +42,14 @@ function* spawnTest() {
+   ok(typeof recording.getDuration() === "number",
+     "The front.stopRecording() gives the recording model a stop time and duration.");
+   ok(recording.getDuration() > 0,
+     "The front.stopRecording() gives a positive duration amount.");
+ 
+   is((yield front._request("memory", "getState")), "detached",
+     "Memory actor is detached when stopping recording with allocations.");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-front-02.js b/browser/devtools/performance/test/browser_perf-front-02.js
+index 96d23fc6..c0de1e1 100644
+--- a/browser/devtools/performance/test/browser_perf-front-02.js
++++ b/browser/devtools/performance/test/browser_perf-front-02.js
+@@ -25,11 +25,14 @@ function* spawnTest() {
+   info(timelineStart2);
+   ok(typeof timelineStart1 === "number", "first timeline start returned a number");
+   ok(typeof timelineStart2 === "number", "second timeline start returned a number");
+   ok(typeof memoryStart1 === "number", "first memory start returned a number");
+   ok(typeof memoryStart2 === "number", "second memory start returned a number");
+   ok(timelineStart1 < timelineStart2, "can start timeline actor twice and get different start times");
+   ok(memoryStart1 < memoryStart2, "can start memory actor twice and get different start times");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js b/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
+index abd1994..a50b239 100644
+--- a/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
++++ b/browser/devtools/performance/test/browser_perf-front-basic-profiler-01.js
+@@ -22,11 +22,14 @@ function* spawnTest() {
+ 
+   yield busyWait(WAIT_TIME);
+ 
+   let stopModel = yield front.stopRecording(startModel);
+ 
+   ok(stopModel.getProfile(), "recording model has a profile after stopping.");
+   ok(stopModel.getDuration(), "recording model has a duration after stopping.");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+index 0fc6d3b..b860acb 100644
+--- a/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
++++ b/browser/devtools/performance/test/browser_perf-front-basic-timeline-01.js
+@@ -29,16 +29,19 @@ function* spawnTest() {
+   yield Promise.all(Object.keys(deferreds).map(type => deferreds[type].promise));
+   yield front.stopRecording();
+   front.off("timeline-data", handler);
+ 
+   is(counters.markers.length, 1, "one marker event fired.");
+   is(counters.memory.length, 3, "three memory events fired.");
+   is(counters.ticks.length, 3, "three ticks events fired.");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ 
+   function handler (_, name, ...args) {
+     if (name === "markers") {
+       if (counters.markers.length >= 1) { return; }
+       let [markers] = args;
+       ok(markers[0].start, "received atleast one marker with `start`");
+diff --git a/browser/devtools/performance/test/browser_perf-recording-model-02.js b/browser/devtools/performance/test/browser_perf-recording-model-02.js
+index d6e2858..1f691fc 100644
+--- a/browser/devtools/performance/test/browser_perf-recording-model-02.js
++++ b/browser/devtools/performance/test/browser_perf-recording-model-02.js
+@@ -33,11 +33,14 @@ function* spawnTest() {
+   }
+ 
+   ok(checkCount >= 1, "atleast 1 event were fired until the buffer was filled");
+   is(lastBufferStatus, 1, "buffer usage cannot surpass 100%");
+   yield front.stopRecording(model);
+ 
+   is(model.getBufferUsage(), null, "getBufferUsage() should be null when no longer recording.");
+ 
++  // Destroy the front before removing tab to ensure no
++  // lingering requests
++  yield front.destroy();
+   yield removeTab(target.tab);
+   finish();
+ }
+diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
+index 80a2293..6795724 100644
+--- a/toolkit/devtools/server/actors/profiler.js
++++ b/toolkit/devtools/server/actors/profiler.js
+@@ -1,355 +1,222 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-const {Cc, Ci, Cu, Cr} = require("chrome");
+-const Services = require("Services");
+-const DevToolsUtils = require("devtools/toolkit/DevToolsUtils.js");
+-
+-let DEFAULT_PROFILER_OPTIONS = {
+-  // When using the DevTools Performance Tools, this will be overridden
+-  // by the pref `devtools.performance.profiler.buffer-size`.
+-  entries: Math.pow(10, 7),
+-  // When using the DevTools Performance Tools, this will be overridden
+-  // by the pref `devtools.performance.profiler.sample-rate-khz`.
+-  interval: 1,
+-  features: ["js"],
+-  threadFilters: ["GeckoMain"]
+-};
+ 
+-/**
+- * The nsIProfiler is target agnostic and interacts with the whole platform.
+- * Therefore, special care needs to be given to make sure different actor
+- * consumers (i.e. "toolboxes") don't interfere with each other.
+- */
+-let gProfilerConsumers = 0;
++"use strict";
+ 
+-loader.lazyGetter(this, "nsIProfilerModule", () => {
+-  return Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++const { Cu } = require("chrome");
++const protocol = require("devtools/server/protocol");
++const { custom, method, RetVal, Arg, Option, types } = protocol;
++const { Profiler } = require("devtools/toolkit/shared/profiler");
++const { actorBridge } = require("devtools/server/actors/common");
++
++loader.lazyRequireGetter(this, "events", "sdk/event/core");
++loader.lazyRequireGetter(this, "extend", "sdk/util/object", true);
++
++types.addType("profiler-data", {
++  // On Fx42+, the profile is only deserialized on the front; older
++  // servers will get the profiler data as an object from nsIProfiler,
++  // causing one parse/stringify cycle, then again implicitly in a packet.
++  read: (v) => {
++    if (typeof v.profile === "string") {
++      // Create a new response object since `profile` is read only.
++      let newValue = Object.create(null);
++      newValue.profile = JSON.parse(v.profile);
++      newValue.currentTime = v.currentTime;
++      return newValue;
++    }
++    return v;
++  }
+ });
+ 
+ /**
+- * The profiler actor provides remote access to the built-in nsIProfiler module.
++ * This actor wraps the Profiler module at toolkit/devtools/shared/profiler.js
++ * and provides RDP definitions.
++ *
++ * @see toolkit/devtools/shared/profiler.js for documentation.
+  */
+-function ProfilerActor() {
+-  gProfilerConsumers++;
+-  this._observedEvents = new Set();
+-}
+-
+-ProfilerActor.prototype = {
+-  actorPrefix: "profiler",
+-  disconnect: function() {
+-    for (let event of this._observedEvents) {
+-      Services.obs.removeObserver(this, event);
+-    }
+-    this._observedEvents = null;
+-    this.onStopProfiler();
+-
+-    gProfilerConsumers--;
+-    checkProfilerConsumers();
+-  },
++let ProfilerActor = exports.ProfilerActor = protocol.ActorClass({
++  typeName: "profiler",
+ 
+   /**
+-   * Returns an array of feature strings, describing the profiler features
+-   * that are available on this platform. Can be called while the profiler
+-   * is stopped.
++   * The set of events the ProfilerActor emits over RDP.
+    */
+-  onGetFeatures: function() {
+-    return { features: nsIProfilerModule.GetFeatures([]) };
+-  },
+-
+-  /**
+-   * Returns an object with the values of the current status of the
+-   * circular buffer in the profiler, returning `position`, `totalSize`,
+-   * and the current `generation` of the buffer.
+-   */
+-  onGetBufferInfo: function() {
+-    let position = {}, totalSize = {}, generation = {};
+-    nsIProfilerModule.GetBufferInfo(position, totalSize, generation);
+-    return {
+-      position: position.value,
+-      totalSize: totalSize.value,
+-      generation: generation.value
++  events: {
++    "console-api-profiler": {
++      data: Arg(0, "json"),
++    },
++    "profiler-started": {
++      data: Arg(0, "json"),
++    },
++    "profiler-stopped": {
++      data: Arg(0, "json"),
++    },
++
++    // Only for older geckos, pre-protocol.js ProfilerActor (<Fx42).
++    // Emitted on other events as a transition from older profiler events
++    // to newer ones.
++    "eventNotification": {
++      subject: Option(0, "json"),
++      topic: Option(0, "string"),
++      details: Option(0, "json")
+     }
+   },
+ 
+-  /**
+-   * Returns the configuration used that was originally passed in to start up the
+-   * profiler. Used for tests, and does not account for others using nsIProfiler.
+-   */
+-  onGetStartOptions: function() {
+-    return this._profilerStartOptions || {};
+-  },
+-
+-  /**
+-   * Starts the nsIProfiler module. Doing so will discard any samples
+-   * that might have been accumulated so far.
+-   *
+-   * @param number entries [optional]
+-   * @param number interval [optional]
+-   * @param array:string features [optional]
+-   * @param array:string threadFilters [description]
+-   */
+-  onStartProfiler: function(request = {}) {
+-    let options = this._profilerStartOptions = {
+-      entries: request.entries || DEFAULT_PROFILER_OPTIONS.entries,
+-      interval: request.interval || DEFAULT_PROFILER_OPTIONS.interval,
+-      features: request.features || DEFAULT_PROFILER_OPTIONS.features,
+-      threadFilters: request.threadFilters || DEFAULT_PROFILER_OPTIONS.threadFilters,
+-    };
++  initialize: function (conn) {
++    protocol.Actor.prototype.initialize.call(this, conn);
++    this._onProfilerEvent = this._onProfilerEvent.bind(this);
+ 
+-    // The start time should be before any samples we might be
+-    // interested in.
+-    let currentTime = nsIProfilerModule.getElapsedTime();
+-
+-    nsIProfilerModule.StartProfiler(
+-      options.entries,
+-      options.interval,
+-      options.features,
+-      options.features.length,
+-      options.threadFilters,
+-      options.threadFilters.length
+-    );
+-    let { position, totalSize, generation } = this.onGetBufferInfo();
+-
+-    return { started: true, position, totalSize, generation, currentTime };
++    this.bridge = new Profiler();
++    events.on(this.bridge, "*", this._onProfilerEvent);
+   },
+ 
+   /**
+-   * Stops the nsIProfiler module, if no other client is using it.
++   * `disconnect` method required to call destroy, since this
++   * actor is not managed by a parent actor.
+    */
+-  onStopProfiler: function() {
+-    // Actually stop the profiler only if the last client has stopped profiling.
+-    // Since this is a root actor, and the profiler module interacts with the
+-    // whole platform, we need to avoid a case in which the profiler is stopped
+-    // when there might be other clients still profiling.
+-    if (gProfilerConsumers == 1) {
+-      nsIProfilerModule.StopProfiler();
+-    }
+-    return { started: false };
++  disconnect: function() {
++    this.destroy();
+   },
+ 
+-  /**
+-   * Verifies whether or not the nsIProfiler module has started.
+-   * If already active, the current time is also returned.
+-   */
+-  onIsActive: function() {
+-    let isActive = nsIProfilerModule.IsActive();
+-    let elapsedTime = isActive ? nsIProfilerModule.getElapsedTime() : undefined;
+-    let { position, totalSize, generation } = this.onGetBufferInfo();
+-    return { isActive: isActive, currentTime: elapsedTime, position, totalSize, generation };
++  destroy: function() {
++    events.off(this.bridge, "*", this._onProfilerEvent);
++    this.bridge.destroy();
++    protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+-  /**
+-   * Returns a stringified JSON object that describes the shared libraries
+-   * which are currently loaded into our process. Can be called while the
+-   * profiler is stopped.
+-   */
+-  onGetSharedLibraryInformation: function() {
+-    return { sharedLibraryInformation: nsIProfilerModule.getSharedLibraryInformation() };
+-  },
++  startProfiler: actorBridge("start", {
++    // Write out every property in the request, since we want all these options to be
++    // on the packet's top-level for backwards compatibility, when the profiler actor
++    // was not using protocol.js (<Fx42)
++    request: {
++      entries: Option(0, "nullable:number"),
++      interval: Option(0, "nullable:number"),
++      features: Option(0, "nullable:array:string"),
++      threadFilters: Option(0, "nullable:array:string"),
++    },
++    response: RetVal("json"),
++  }),
++
++  stopProfiler: actorBridge("stop", {
++    response: RetVal("json"),
++  }),
++
++  getProfile: actorBridge("getProfile", {
++    request: {
++      startTime: Option(0, "nullable:number"),
++      stringify: Option(0, "nullable:boolean")
++    },
++    response: RetVal("profiler-data")
++  }),
++
++  getFeatures: actorBridge("getFeatures", {
++    response: RetVal("json")
++  }),
++
++  getBufferInfo: actorBridge("getBufferInfo", {
++    response: RetVal("json")
++  }),
++
++  getStartOptions: actorBridge("getStartOptions", {
++    response: RetVal("json")
++  }),
++
++  isActive: actorBridge("isActive", {
++    response: RetVal("json")
++  }),
++
++  getSharedLibraryInformation: actorBridge("getSharedLibraryInformation", {
++    response: RetVal("json")
++  }),
++
++  registerEventNotifications: actorBridge("registerEventNotifications", {
++    // Explicitly enumerate the arguments
++    // @see ProfilerActor#startProfiler
++    request: {
++      events: Option(0, "nullable:array:string"),
++    },
++    response: RetVal("json")
++  }),
++
++  unregisterEventNotifications: actorBridge("unregisterEventNotifications", {
++    // Explicitly enumerate the arguments
++    // @see ProfilerActor#startProfiler
++    request: {
++      events: Option(0, "nullable:array:string"),
++    },
++    response: RetVal("json")
++  }),
+ 
+   /**
+-   * Returns all the samples accumulated since the profiler was started,
+-   * along with the current time. The data has the following format:
+-   * {
+-   *   libs: string,
+-   *   meta: {
+-   *     interval: number,
+-   *     platform: string,
+-   *     ...
+-   *   },
+-   *   threads: [{
+-   *     samples: [{
+-   *       frames: [{
+-   *         line: number,
+-   *         location: string,
+-   *         category: number
+-   *       } ... ],
+-   *       name: string
+-   *       responsiveness: number
+-   *       time: number
+-   *     } ... ]
+-   *   } ... ]
+-   * }
+-   *
+-   *
+-   * @param number startTime
+-   *        Since the circular buffer will only grow as long as the profiler lives,
+-   *        the buffer can contain unwanted samples. Pass in a `startTime` to only retrieve
+-   *        samples that took place after the `startTime`, with 0 being when the profiler
+-   *        just started.
++   * Pipe events from Profiler module to this actor.
+    */
+-  onGetProfile: function(request) {
+-    let startTime = request.startTime || 0;
+-    let profile = nsIProfilerModule.getProfileData(startTime);
+-    return { profile: profile, currentTime: nsIProfilerModule.getElapsedTime() };
++  _onProfilerEvent: function (eventName, ...data) {
++    events.emit(this, eventName, ...data);
+   },
++});
+ 
+-  /**
+-   * Registers for certain event notifications.
+-   * Currently supported events:
+-   *   - "console-api-profiler"
+-   *   - "profiler-started"
+-   *   - "profiler-stopped"
+-   */
+-  onRegisterEventNotifications: function(request) {
+-    let response = [];
+-    for (let event of request.events) {
+-      if (this._observedEvents.has(event)) {
+-        continue;
+-      }
+-      Services.obs.addObserver(this, event, false);
+-      this._observedEvents.add(event);
+-      response.push(event);
+-    }
+-    return { registered: response };
++/**
++ * This can be used on older Profiler implementations, but the methods cannot
++ * be changed -- you must introduce a new method, and detect the server.
++ */
++exports.ProfilerFront = protocol.FrontClass(ProfilerActor, {
++  initialize: function(client, form) {
++    protocol.Front.prototype.initialize.call(this, client, form);
++    this.actorID = form.profilerActor;
++    this.manage(this);
++
++    this._onProfilerEvent = this._onProfilerEvent.bind(this);
++    events.on(this, "*", this._onProfilerEvent);
+   },
+ 
+-  /**
+-   * Unregisters from certain event notifications.
+-   * Currently supported events:
+-   *   - "console-api-profiler"
+-   *   - "profiler-started"
+-   *   - "profiler-stopped"
+-   */
+-  onUnregisterEventNotifications: function(request) {
+-    let response = [];
+-    for (let event of request.events) {
+-      if (!this._observedEvents.has(event)) {
+-        continue;
+-      }
+-      Services.obs.removeObserver(this, event);
+-      this._observedEvents.delete(event);
+-      response.push(event);
+-    }
+-    return { unregistered: response };
++  destroy: function () {
++    events.off(this, "*", this._onProfilerEvent);
++    protocol.Front.prototype.destroy.call(this);
+   },
+ 
+   /**
+-   * Callback for all observed notifications.
+-   * @param object subject
+-   * @param string topic
+-   * @param object data
++   * If using the protocol.js Fronts, then make stringify default,
++   * since the read/write mechanisms will expose it as an object anyway, but
++   * this lets other consumers who connect directly (xpcshell tests, Gecko Profiler) to
++   * have unchanged behaviour.
+    */
+-  observe: DevToolsUtils.makeInfallible(function(subject, topic, data) {
+-    // Create JSON objects suitable for transportation across the RDP,
+-    // by breaking cycles and making a copy of the `subject` and `data` via
+-    // JSON.stringifying those values with a replacer that omits properties
+-    // known to introduce cycles, and then JSON.parsing the result.
+-    // This spends some CPU cycles, but it's simple.
+-    subject = (subject && !Cu.isXrayWrapper(subject) && subject.wrappedJSObject) || subject;
+-    subject = JSON.parse(JSON.stringify(subject, cycleBreaker));
+-    data = (data && !Cu.isXrayWrapper(data) && data.wrappedJSObject) || data;
+-    data = JSON.parse(JSON.stringify(data, cycleBreaker));
+-
+-    // Sends actor, type and other additional information over the remote
+-    // debugging protocol to any profiler clients.
+-    let reply = details => {
+-      this.conn.send({
+-        from: this.actorID,
+-        type: "eventNotification",
+-        subject: subject,
+-        topic: topic,
+-        data: data,
+-        details: details
+-      });
+-    };
+-
+-    switch (topic) {
+-      case "console-api-profiler":
+-        return void reply(this._handleConsoleEvent(subject, data));
+-      case "profiler-started":
+-      case "profiler-stopped":
+-      default:
+-        return void reply();
+-    }
+-  }, "ProfilerActor.prototype.observe"),
++  getProfile: custom(function (options) {
++    return this._getProfile(extend({ stringify: true }, options));
++  }, {
++    impl: "_getProfile"
++  }),
+ 
+   /**
+-   * Handles `console.profile` and `console.profileEnd` invocations and
+-   * creates an appropriate response sent over the protocol.
+-   * @param object subject
+-   * @param object data
+-   * @return object
++   * Also emit an old `eventNotification` for older consumers of the profiler.
+    */
+-  _handleConsoleEvent: function(subject, data) {
+-    // An optional label may be specified when calling `console.profile`.
+-    // If that's the case, stringify it and send it over with the response.
+-    let { action, arguments: args } = subject;
+-    let profileLabel = args.length > 0 ? args[0] + "" : undefined;
+-
+-    // If the event was generated from `console.profile` or `console.profileEnd`
+-    // we need to start the profiler right away and then just notify the client.
+-    // Otherwise, we'll lose precious samples.
+-
+-    if (action === "profile" || action === "profileEnd") {
+-      let { isActive, currentTime } = this.onIsActive();
++  _onProfilerEvent: function (eventName, data) {
++    // If this event already passed through once, don't repropagate
++    if (data.relayed) {
++      return;
++    }
++    data.relayed = true;
+ 
+-      // Start the profiler only if it wasn't already active. Otherwise, any
+-      // samples that might have been accumulated so far will be discarded.
+-      if (!isActive && action === "profile") {
+-        this.onStartProfiler();
+-        return {
+-          profileLabel: profileLabel,
+-          currentTime: 0
+-        };
+-      }
+-      // Otherwise, if inactive and a call to profile end, send
+-      // an empty object because we can't do anything with this.
+-      else if (!isActive) {
+-        return {};
++    // If this is `eventNotification`, this is coming from an older Gecko (<Fx42)
++    // that doesn't use protocol.js style events. Massage it to emit a protocol.js
++    // style event as well.
++    if (eventName === "eventNotification") {
++      events.emit(this, data.topic, data);
++    }
++    // Otherwise if a modern protocol.js event, emit it also as `eventNotification`
++    // for compatibility reasons on the client (like for any add-ons/Gecko Profiler using this
++    // event) and log a deprecation message if there is a listener.
++    else {
++      this.conn.emit("eventNotification", {
++        subject: data.subject,
++        topic: data.topic,
++        data: data.data,
++        details: data.details
++      });
++      if (this.conn._getListeners("eventNotification").length) {
++        Cu.reportError(`
++          ProfilerActor's "eventNotification" on the DebuggerClient has been deprecated.
++          Use the ProfilerFront found in "devtools/server/actors/profiler".`);
+       }
+-
+-      // Otherwise, the profiler is already active, so just send
+-      // to the front the current time, label, and the notification
+-      // adds the action as well.
+-      return {
+-        profileLabel: profileLabel,
+-        currentTime: currentTime
+-      };
+     }
+-  }
+-};
+-
+-exports.ProfilerActor = ProfilerActor;
+-
+-/**
+- * JSON.stringify callback used in ProfilerActor.prototype.observe.
+- */
+-function cycleBreaker(key, value) {
+-  if (key == "wrappedJSObject") {
+-    return undefined;
+-  }
+-  return value;
+-}
+-
+-/**
+- * Asserts the value sanity of `gProfilerConsumers`.
+- */
+-function checkProfilerConsumers() {
+-  if (gProfilerConsumers < 0) {
+-    let msg = "Somehow the number of started profilers is now negative.";
+-    DevToolsUtils.reportException("ProfilerActor", msg);
+-  }
+-}
+-
+-/**
+- * The request types this actor can handle.
+- * At the moment there are two known users of the Profiler actor:
+- * the devtools and the Gecko Profiler addon, which uses the debugger
+- * protocol to get profiles from Fennec.
+- */
+-ProfilerActor.prototype.requestTypes = {
+-  "getBufferInfo": ProfilerActor.prototype.onGetBufferInfo,
+-  "getFeatures": ProfilerActor.prototype.onGetFeatures,
+-  "startProfiler": ProfilerActor.prototype.onStartProfiler,
+-  "stopProfiler": ProfilerActor.prototype.onStopProfiler,
+-  "isActive": ProfilerActor.prototype.onIsActive,
+-  "getSharedLibraryInformation": ProfilerActor.prototype.onGetSharedLibraryInformation,
+-  "getProfile": ProfilerActor.prototype.onGetProfile,
+-  "registerEventNotifications": ProfilerActor.prototype.onRegisterEventNotifications,
+-  "unregisterEventNotifications": ProfilerActor.prototype.onUnregisterEventNotifications,
+-  "getStartOptions": ProfilerActor.prototype.onGetStartOptions
+-};
++  },
++});
+diff --git a/toolkit/devtools/server/actors/root.js b/toolkit/devtools/server/actors/root.js
+index e84822b..3a42463 100644
+--- a/toolkit/devtools/server/actors/root.js
++++ b/toolkit/devtools/server/actors/root.js
+@@ -166,17 +166,17 @@ RootActor.prototype = {
+     // if allocChromeProcess is defined, but not true, it means that root actor
+     // no longer expose tab actors, but also that getProcess forbids
+     // exposing actors for security reasons
+     get allowChromeProcess() {
+       return DebuggerServer.allowChromeProcess;
+     },
+     // Whether or not `getProfile()` supports specifying a `startTime`
+     // and `endTime` to filter out samples. Fx40+
+-    profilerDataFilterable: true
++    profilerDataFilterable: true,
+   },
+ 
+   /**
+    * Return a 'hello' packet as specified by the Remote Debugging Protocol.
+    */
+   sayHello: function() {
+     return {
+       from: this.actorID,
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_events-01.js b/toolkit/devtools/server/tests/unit/test_profiler_events-01.js
+index 7b11631..ec05b79 100644
+--- a/toolkit/devtools/server/tests/unit/test_profiler_events-01.js
++++ b/toolkit/devtools/server/tests/unit/test_profiler_events-01.js
+@@ -3,104 +3,60 @@
+ 
+ "use strict";
+ 
+ /**
+  * Tests the event notification service for the profiler actor.
+  */
+ 
+ const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++const { ProfilerFront } = devtools.require("devtools/server/actors/profiler");
+ 
+-function run_test()
+-{
+-  get_chrome_actors((client, form) => {
+-    let actor = form.profilerActor;
+-    activate_profiler(client, actor, () => {
+-      test_events(client, actor, () => {
+-        client.close(do_test_finished);
+-      });
+-    });
+-  })
+-
+-  do_test_pending();
++function run_test() {
++  run_next_test();
+ }
+ 
+-function activate_profiler(client, actor, callback)
+-{
+-  client.request({ to: actor, type: "startProfiler" }, response => {
+-    do_check_true(response.started);
+-    client.request({ to: actor, type: "isActive" }, response => {
+-      do_check_true(response.isActive);
+-      callback();
+-    });
+-  });
+-}
+-
+-function register_events(client, actor, events, callback)
+-{
+-  client.request({
+-    to: actor,
+-    type: "registerEventNotifications",
+-    events: events
+-  }, callback);
+-}
++add_task(function *() {
++  let [client, form] = yield getChromeActors();
++  let front = new ProfilerFront(client, form);
+ 
+-function unregister_events(client, actor, events, callback)
+-{
+-  client.request({
+-    to: actor,
+-    type: "unregisterEventNotifications",
+-    events: events
+-  }, callback);
+-}
+-
+-function emit_and_wait_for_event(client, subject, topic, data, callback)
+-{
++  let events = [0, 0, 0, 0];
++  front.on("console-api-profiler", () => events[0]++);
++  front.on("profiler-started", () => events[1]++);
++  front.on("profiler-stopped", () => events[2]++);
+   client.addListener("eventNotification", (type, response) => {
+-    do_check_eq(type, "eventNotification");
+-    do_check_eq(response.topic, topic);
+-    do_check_eq(typeof response.subject, "object");
+-
+-    delete subject.wrappedJSObject;
+-    do_check_eq(JSON.stringify(response.subject), JSON.stringify(subject));
+-
+-    do_check_eq(response.data, data);
+-    callback();
++    do_check_true(type === "eventNotification");
++    events[3]++;
+   });
+ 
+-  // Make sure cyclic objects are handled before sending them over the protocol.
+-  // See ProfilerActor.prototype.observe for more information.
+-  subject.wrappedJSObject = subject;
+-  Services.obs.notifyObservers(subject, topic, data);
+-}
+-
+-function test_events(client, actor, callback)
+-{
+-  register_events(client, actor, ["foo", "bar"], response => {
+-    do_check_eq(typeof response.registered, "object");
+-    do_check_eq(response.registered.length, 2);
+-    do_check_eq(response.registered[0], "foo");
+-    do_check_eq(response.registered[1], "bar");
+-
+-    register_events(client, actor, ["foo"], response => {
+-      do_check_eq(typeof response.registered, "object");
+-      do_check_eq(response.registered.length, 0);
+-
+-      emit_and_wait_for_event(client, { hello: "world" }, "foo", "bar", () => {
+-
+-        unregister_events(client, actor, ["foo", "bar", "baz"], response => {
+-          do_check_eq(typeof response.unregistered, "object");
+-          do_check_eq(response.unregistered.length, 2);
+-          do_check_eq(response.unregistered[0], "foo");
+-          do_check_eq(response.unregistered[1], "bar");
+-
+-          // All events being now unregistered, sending an event shouldn't
+-          // do anything. If it does, the eventNotification listeners added
+-          // above will catch the event and fail on the data.event test.
+-          Services.obs.notifyObservers(null, "foo", null);
+-          Services.obs.notifyObservers(null, "bar", null);
+-
+-          callback();
+-        });
+-      });
+-    });
+-  });
++  yield front.startProfiler();
++  yield front.stopProfiler();
++
++  // All should be empty without binding events
++  do_check_true(events[0] === 0);
++  do_check_true(events[1] === 0);
++  do_check_true(events[2] === 0);
++  do_check_true(events[3] === 0);
++
++  let ret = yield front.registerEventNotifications({ events: ["console-api-profiler", "profiler-started", "profiler-stopped"] });
++  do_check_true(ret.registered.length === 3);
++
++  yield front.startProfiler();
++  do_check_true(events[0] === 0);
++  do_check_true(events[1] === 1);
++  do_check_true(events[2] === 0);
++  do_check_true(events[3] === 1, "compatibility events supported for eventNotifications");
++
++  yield front.stopProfiler();
++  do_check_true(events[0] === 0);
++  do_check_true(events[1] === 1);
++  do_check_true(events[2] === 1);
++  do_check_true(events[3] === 2, "compatibility events supported for eventNotifications");
++
++  ret = yield front.unregisterEventNotifications({ events: ["console-api-profiler", "profiler-started", "profiler-stopped"] });
++  do_check_true(ret.registered.length === 3);
++});
++
++function getChromeActors () {
++  let deferred = promise.defer();
++  get_chrome_actors((client, form) => deferred.resolve([client, form]));
++  return deferred.promise;
+ }
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_events-02.js b/toolkit/devtools/server/tests/unit/test_profiler_events-02.js
+deleted file mode 100644
+index 11984f2..0000000
+--- a/toolkit/devtools/server/tests/unit/test_profiler_events-02.js
++++ /dev/null
+@@ -1,69 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-"use strict";
+-
+-/**
+- * Tests the event notification service for the profiler actor, specifically
+- * for when the profiler is started and stopped.
+- */
+-
+-const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+-
+-function run_test()
+-{
+-  get_chrome_actors((client, form) => {
+-    let actor = form.profilerActor;
+-    activate_profiler(client, actor, () => {
+-      test_events(client, actor, () => {
+-        client.close(do_test_finished);
+-      });
+-    });
+-  })
+-
+-  do_test_pending();
+-}
+-
+-function activate_profiler(client, actor, callback)
+-{
+-  client.request({ to: actor, type: "startProfiler" }, response => {
+-    do_check_true(response.started);
+-    client.request({ to: actor, type: "isActive" }, response => {
+-      do_check_true(response.isActive);
+-      callback();
+-    });
+-  });
+-}
+-
+-function register_events(client, actor, events, callback)
+-{
+-  client.request({
+-    to: actor,
+-    type: "registerEventNotifications",
+-    events: events
+-  }, callback);
+-}
+-
+-function wait_for_event(client, topic, callback)
+-{
+-  client.addListener("eventNotification", (type, response) => {
+-    do_check_eq(type, "eventNotification");
+-
+-    if (response.topic == topic) {
+-      callback();
+-    }
+-  });
+-}
+-
+-function test_events(client, actor, callback)
+-{
+-  register_events(client, actor, ["profiler-started", "profiler-stopped"], () => {
+-    wait_for_event(client, "profiler-started", () => {
+-      wait_for_event(client, "profiler-stopped", () => {
+-        callback();
+-      });
+-      Profiler.StopProfiler();
+-    });
+-    Profiler.StartProfiler(1000000, 1, ["js"], 1);
+-  });
+-}
+diff --git a/toolkit/devtools/server/tests/unit/xpcshell.ini b/toolkit/devtools/server/tests/unit/xpcshell.ini
+index a0a2e52..07690cd 100644
+--- a/toolkit/devtools/server/tests/unit/xpcshell.ini
++++ b/toolkit/devtools/server/tests/unit/xpcshell.ini
+@@ -227,17 +227,16 @@ reason = bug 820380
+ skip-if = toolkit == "gonk"
+ reason = bug 820380
+ [test_breakpoint-actor-map.js]
+ [test_profiler_activation-01.js]
+ [test_profiler_activation-02.js]
+ [test_profiler_close.js]
+ [test_profiler_data.js]
+ [test_profiler_events-01.js]
+-[test_profiler_events-02.js]
+ [test_profiler_getbufferinfo.js]
+ [test_profiler_getfeatures.js]
+ [test_profiler_getsharedlibraryinformation.js]
+ [test_unsafeDereference.js]
+ [test_add_actors.js]
+ [test_trace_actor-01.js]
+ [test_trace_actor-02.js]
+ [test_trace_actor-03.js]
+diff --git a/toolkit/devtools/shared/moz.build b/toolkit/devtools/shared/moz.build
+index 7fc0f8e..86e4c1b 100644
+--- a/toolkit/devtools/shared/moz.build
++++ b/toolkit/devtools/shared/moz.build
+@@ -5,13 +5,14 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ BROWSER_CHROME_MANIFESTS += ['tests/browser/browser.ini']
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+   'async-storage.js',
+   'framerate.js',
+   'memory.js',
++  'profiler.js',
+   'system.js',
+   'timeline.js',
+   'worker-helper.js',
+   'worker.js'
+ ]
+diff --git a/toolkit/devtools/shared/profiler.js b/toolkit/devtools/shared/profiler.js
+new file mode 100644
+index 0000000..6e5961a
+--- /dev/null
++++ b/toolkit/devtools/shared/profiler.js
+@@ -0,0 +1,438 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Cc, Ci, Cu } = require("chrome");
++const Services = require("Services");
++const { Class } = require("sdk/core/heritage");
++loader.lazyRequireGetter(this, "events", "sdk/event/core");
++loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
++loader.lazyRequireGetter(this, "DevToolsUtils", "devtools/toolkit/DevToolsUtils.js");
++
++// Events piped from system observers to Profiler instances.
++const PROFILER_SYSTEM_EVENTS = [
++  "console-api-profiler",
++  "profiler-started",
++  "profiler-stopped"
++];
++
++loader.lazyGetter(this, "nsIProfilerModule", () => {
++  return Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++});
++
++let DEFAULT_PROFILER_OPTIONS = {
++  // When using the DevTools Performance Tools, this will be overridden
++  // by the pref `devtools.performance.profiler.buffer-size`.
++  entries: Math.pow(10, 7),
++  // When using the DevTools Performance Tools, this will be overridden
++  // by the pref `devtools.performance.profiler.sample-rate-khz`.
++  interval: 1,
++  features: ["js"],
++  threadFilters: ["GeckoMain"]
++};
++
++/**
++ * Main interface for interacting with nsIProfiler
++ */
++const ProfilerManager = (function () {
++  let consumers = new Set();
++
++  return {
++    /**
++     * The nsIProfiler is target agnostic and interacts with the whole platform.
++     * Therefore, special care needs to be given to make sure different profiler
++     * consumers (i.e. "toolboxes") don't interfere with each other. Register
++     * the instance here.
++     */
++    addInstance: function (instance) {
++      consumers.add(instance);
++
++      // Lazily register events
++      this.registerEventListeners();
++    },
++
++    removeInstance: function (instance) {
++      consumers.delete(instance);
++
++      if (this.length < 0) {
++        let msg = "Somehow the number of started profilers is now negative.";
++        DevToolsUtils.reportException("Profiler", msg);
++      }
++
++      if (this.length === 0) {
++        this.unregisterEventListeners();
++        this.stop();
++      }
++    },
++
++    /**
++     * Starts the nsIProfiler module. Doing so will discard any samples
++     * that might have been accumulated so far.
++     *
++     * @param {number} entries [optional]
++     * @param {number} interval [optional]
++     * @param {Array<string>} features [optional]
++     * @param {Array<string>} threadFilters [description]
++     *
++     * @return {object}
++     */
++    start: function (options = {}) {
++      let config = this._profilerStartOptions = {
++        entries: options.entries || DEFAULT_PROFILER_OPTIONS.entries,
++        interval: options.interval || DEFAULT_PROFILER_OPTIONS.interval,
++        features: options.features || DEFAULT_PROFILER_OPTIONS.features,
++        threadFilters: options.threadFilters || DEFAULT_PROFILER_OPTIONS.threadFilters,
++      };
++
++      // The start time should be before any samples we might be
++      // interested in.
++      let currentTime = nsIProfilerModule.getElapsedTime();
++
++      nsIProfilerModule.StartProfiler(
++        config.entries,
++        config.interval,
++        config.features,
++        config.features.length,
++        config.threadFilters,
++        config.threadFilters.length
++      );
++      let { position, totalSize, generation } = this.getBufferInfo();
++
++      return { started: true, position, totalSize, generation, currentTime };
++    },
++
++    stop: function () {
++      // Actually stop the profiler only if the last client has stopped profiling.
++      // Since this is used as a root actor, and the profiler module interacts with the
++      // whole platform, we need to avoid a case in which the profiler is stopped
++      // when there might be other clients still profiling.
++      if (this.length <= 1) {
++        nsIProfilerModule.StopProfiler();
++      }
++      return { started: false };
++    },
++
++    /**
++     * Returns all the samples accumulated since the profiler was started,
++     * along with the current time. The data has the following format:
++     * {
++     *   libs: string,
++     *   meta: {
++     *     interval: number,
++     *     platform: string,
++     *     ...
++     *   },
++     *   threads: [{
++     *     samples: [{
++     *       frames: [{
++     *         line: number,
++     *         location: string,
++     *         category: number
++     *       } ... ],
++     *       name: string
++     *       responsiveness: number
++     *       time: number
++     *     } ... ]
++     *   } ... ]
++     * }
++     *
++     *
++     * @param number startTime
++     *        Since the circular buffer will only grow as long as the profiler lives,
++     *        the buffer can contain unwanted samples. Pass in a `startTime` to only retrieve
++     *        samples that took place after the `startTime`, with 0 being when the profiler
++     *        just started.
++     * @param boolean stringify
++     *        Whether or not the returned profile object should be a string or not to save
++     *        JSON parse/stringify cycle if emitting over RDP.
++     */
++    getProfile: function (options) {
++      let startTime = options.startTime || 0;
++      let profile = options.stringify ?
++        nsIProfilerModule.GetProfile(startTime) :
++        nsIProfilerModule.getProfileData(startTime);
++
++      return { profile: profile, currentTime: nsIProfilerModule.getElapsedTime() };
++    },
++
++    /**
++     * Returns an array of feature strings, describing the profiler features
++     * that are available on this platform. Can be called while the profiler
++     * is stopped.
++     *
++     * @return {object}
++     */
++    getFeatures: function () {
++      return { features: nsIProfilerModule.GetFeatures([]) };
++    },
++
++    /**
++     * Returns an object with the values of the current status of the
++     * circular buffer in the profiler, returning `position`, `totalSize`,
++     * and the current `generation` of the buffer.
++     *
++     * @return {object}
++     */
++    getBufferInfo: function() {
++      let position = {}, totalSize = {}, generation = {};
++      nsIProfilerModule.GetBufferInfo(position, totalSize, generation);
++      return {
++        position: position.value,
++        totalSize: totalSize.value,
++        generation: generation.value
++      }
++    },
++
++    /**
++     * Returns the configuration used that was originally passed in to start up the
++     * profiler. Used for tests, and does not account for others using nsIProfiler.
++     *
++     * @param {object}
++     */
++    getStartOptions: function() {
++      return this._profilerStartOptions || {};
++    },
++
++    /**
++     * Verifies whether or not the nsIProfiler module has started.
++     * If already active, the current time is also returned.
++     *
++     * @return {object}
++     */
++    isActive: function() {
++      let isActive = nsIProfilerModule.IsActive();
++      let elapsedTime = isActive ? nsIProfilerModule.getElapsedTime() : undefined;
++      let { position, totalSize, generation } = this.getBufferInfo();
++      return { isActive: isActive, currentTime: elapsedTime, position, totalSize, generation };
++    },
++
++    /**
++     * Returns a stringified JSON object that describes the shared libraries
++     * which are currently loaded into our process. Can be called while the
++     * profiler is stopped.
++     */
++    getSharedLibraryInformation: function() {
++      return { sharedLibraryInformation: nsIProfilerModule.getSharedLibraryInformation() };
++    },
++
++    /**
++     * Number of profiler instances.
++     *
++     * @return {number}
++     */
++    get length() {
++      return consumers.size;
++    },
++
++    /**
++     * Callback for all observed notifications.
++     * @param object subject
++     * @param string topic
++     * @param object data
++     */
++    observe: sanitizeHandler(function (subject, topic, data) {
++      let details;
++
++      // An optional label may be specified when calling `console.profile`.
++      // If that's the case, stringify it and send it over with the response.
++      let { action, arguments: args } = subject || {};
++      let profileLabel = args && args.length > 0 ? `${args[0]}` : void 0;
++
++      let subscribers = Array.from(consumers).filter(c => c.subscribedEvents.has(topic));
++
++      // If no consumers are listening, bail out
++      if (subscribers.length === 0) {
++        return;
++      }
++
++      // If the event was generated from `console.profile` or `console.profileEnd`
++      // we need to start the profiler right away and then just notify the client.
++      // Otherwise, we'll lose precious samples.
++      if (topic === "console-api-profiler" && (action === "profile" || action === "profileEnd")) {
++        let { isActive, currentTime } = this.isActive();
++
++        // Start the profiler only if it wasn't already active. Otherwise, any
++        // samples that might have been accumulated so far will be discarded.
++        if (!isActive && action === "profile") {
++          this.start();
++          details = { profileLabel, currentTime: 0 };
++        }
++        // Otherwise, if inactive and a call to profile end, do nothing
++        // and don't emit event.
++        else if (!isActive) {
++          return;
++        }
++
++        // Otherwise, the profiler is already active, so just send
++        // to the front the current time, label, and the notification
++        // adds the action as well.
++        details = { profileLabel, currentTime };
++      }
++
++      // Propagate the event to the profiler instances that
++      // are subscribed to this event.
++      for (let subscriber of subscribers) {
++        events.emit(subscriber, topic, { subject, topic, data, details });
++      }
++    }, "ProfilerManager.observe"),
++
++    /**
++     * Registers handlers for the following events to be emitted
++     * on active Profiler instances:
++     *   - "console-api-profiler"
++     *   - "profiler-started"
++     *   - "profiler-stopped"
++     *
++     * The ProfilerManager listens to all events, and individual
++     * consumers filter which events they are interested in.
++     */
++    registerEventListeners: function () {
++      if (!this._eventsRegistered) {
++        PROFILER_SYSTEM_EVENTS.forEach(eventName =>
++          Services.obs.addObserver(this, eventName, false));
++        this._eventsRegistered = true;
++      }
++    },
++
++    /**
++     * Unregisters handlers for all system events.
++     */
++    unregisterEventListeners: function () {
++      if (this._eventsRegistered) {
++        PROFILER_SYSTEM_EVENTS.forEach(eventName => Services.obs.removeObserver(this, eventName));
++        this._eventsRegistered = false;
++      }
++    }
++  };
++})();
++
++/**
++ * The profiler actor provides remote access to the built-in nsIProfiler module.
++ */
++let Profiler = exports.Profiler = Class({
++  extends: EventTarget,
++
++  initialize: function () {
++    this.subscribedEvents = new Set();
++    ProfilerManager.addInstance(this);
++  },
++
++  destroy: function() {
++    this.subscribedEvents = null;
++    ProfilerManager.removeInstance(this);
++  },
++
++  /**
++   * @see ProfilerManager.start
++   */
++  start: function (options) { return ProfilerManager.start(options); },
++
++  /**
++   * @see ProfilerManager.stop
++   */
++  stop: function () { return ProfilerManager.stop(); },
++
++  /**
++   * @see ProfilerManager.getProfile
++   */
++  getProfile: function (request={}) { return ProfilerManager.getProfile(request); },
++
++  /**
++   * @see ProfilerManager.getFeatures
++   */
++  getFeatures: function() { return ProfilerManager.getFeatures(); },
++
++  /**
++   * @see ProfilerManager.getBufferInfo
++   */
++  getBufferInfo: function() { return ProfilerManager.getBufferInfo(); },
++
++  /**
++   * @see ProfilerManager.getStartOptions
++   */
++  getStartOptions: function() { return ProfilerManager.getStartOptions(); },
++
++  /**
++   * @see ProfilerManager.isActive
++   */
++  isActive: function() { return ProfilerManager.isActive(); },
++
++  /**
++   * @see ProfilerManager.isActive
++   */
++  getSharedLibraryInformation: function() { return ProfilerManager.getSharedLibraryInformation(); },
++
++  /**
++   * Subscribes this instance to one of several events defined in
++   * an events array.
++   * - "console-api-profiler",
++   * - "profiler-started",
++   * - "profiler-stopped"
++   *
++   * @param {Array<string>} data.event
++   * @return {object}
++   */
++  registerEventNotifications: function(data={}) {
++    let response = [];
++    (data.events || []).forEach(e => {
++      if (!this.subscribedEvents.has(e)) {
++        this.subscribedEvents.add(e);
++        response.push(e);
++      }
++    });
++    return { registered: response };
++  },
++
++  /**
++   * Unsubscribes this instance to one of several events defined in
++   * an events array.
++   *
++   * @param {Array<string>} data.event
++   * @return {object}
++   */
++  unregisterEventNotifications: function(data={}) {
++    let response = [];
++    (data.events || []).forEach(e => {
++      if (this.subscribedEvents.has(e)) {
++        this.subscribedEvents.delete(e);
++        response.push(e);
++      }
++    });
++    return { registered: response };
++  },
++});
++
++/**
++ * JSON.stringify callback used in Profiler.prototype.observe.
++ */
++function cycleBreaker(key, value) {
++  if (key == "wrappedJSObject") {
++    return undefined;
++  }
++  return value;
++}
++
++/**
++ * Create JSON objects suitable for transportation across the RDP,
++ * by breaking cycles and making a copy of the `subject` and `data` via
++ * JSON.stringifying those values with a replacer that omits properties
++ * known to introduce cycles, and then JSON.parsing the result.
++ * This spends some CPU cycles, but it's simple.
++ *
++ * @TODO Also wraps it in a `makeInfallible` -- is this still necessary?
++ *
++ * @param {function} handler
++ * @return {function}
++ */
++function sanitizeHandler (handler, identifier) {
++  return DevToolsUtils.makeInfallible(function (subject, topic, data) {
++    subject = (subject && !Cu.isXrayWrapper(subject) && subject.wrappedJSObject) || subject;
++    subject = JSON.parse(JSON.stringify(subject, cycleBreaker));
++    data = (data && !Cu.isXrayWrapper(data) && data.wrappedJSObject) || data;
++    data = JSON.parse(JSON.stringify(data, cycleBreaker));
++
++    // Pass in clean data to the underlying handler
++    return handler.call(this, subject, topic, data);
++  }, identifier);
++}
+-- 
+2.2.1
+
