@@ -3,10 +3,29 @@ Date: Mon, 13 Jul 2015 17:24:24 -0700
 Subject: Bug 1175760 - Set recording configurations based on UI prefs, but also target support overrides UI prefs. r=vp
 
 diff --git a/browser/devtools/performance/modules/logic/front.js b/browser/devtools/performance/modules/logic/front.js
-index 3b9d30e..5fd2966 100644
+index 3b9d30e..eb737d7 100644
 --- a/browser/devtools/performance/modules/logic/front.js
 +++ b/browser/devtools/performance/modules/logic/front.js
-@@ -311,26 +311,31 @@ PerformanceFront.prototype = {
+@@ -12,16 +12,18 @@ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ loader.lazyRequireGetter(this, "extend",
+   "sdk/util/object", true);
+ 
+ loader.lazyRequireGetter(this, "Actors",
+   "devtools/performance/actors");
+ loader.lazyRequireGetter(this, "RecordingModel",
+   "devtools/performance/recording-model", true);
++loader.lazyRequireGetter(this, "normalizePerformanceFeatures",
++  "devtools/performance/recording-utils", true);
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
+ 
+ loader.lazyImporter(this, "gDevTools",
+   "resource:///modules/devtools/gDevTools.jsm");
+ 
+ /**
+  * A cache of all PerformanceFront instances.
+@@ -311,26 +313,31 @@ PerformanceFront.prototype = {
     *
     * @param object options
     *        An options object to pass to the actors. Supported properties are
@@ -16,7 +35,7 @@ index 3b9d30e..5fd2966 100644
     */
    startRecording: Task.async(function*(options = {}) {
 -    let model = new RecordingModel(options);
-+    let model = new RecordingModel(this._normalizeOptions(options));
++    let model = new RecordingModel(normalizePerformanceFeatures(options, this.getActorSupport()));
 +
      this.emit("recording-starting", model);
  
@@ -42,53 +61,83 @@ index 3b9d30e..5fd2966 100644
  
      // Signify to the model that the recording has started,
      // populate with data and store the recording model here.
-@@ -414,16 +419,46 @@ PerformanceFront.prototype = {
-   getActorSupport: function () {
-     return {
-       memory: this._memorySupported,
-       timeline: this._timelineSupported
-     };
-   },
+diff --git a/browser/devtools/performance/modules/logic/recording-utils.js b/browser/devtools/performance/modules/logic/recording-utils.js
+index 095999d..f74007c 100644
+--- a/browser/devtools/performance/modules/logic/recording-utils.js
++++ b/browser/devtools/performance/modules/logic/recording-utils.js
+@@ -1,21 +1,54 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
  
-   /**
-+   * Takes an options object for `startRecording`, and normalizes
-+   * it based off of server support. For example, if the user
-+   * requests to record memory `withMemory = true`, but the server does
-+   * not support that feature, then the `false` will overwrite user preference
-+   * in order to define the recording with what is actually available, not
-+   * what the user initially requested.
-+   *
-+   * @param {object} options
-+   * @param {boolean}
-+   */
-+  _normalizeOptions: function (options) {
-+    let support = this.getActorSupport();
-+    let supportOptions = Object.create(null);
+ const { Cc, Ci, Cu, Cr } = require("chrome");
++loader.lazyRequireGetter(this, "extend",
++  "sdk/util/object", true);
+ 
+ /**
+  * Utility functions for managing recording models and their internal data,
+  * such as filtering profile samples or offsetting timestamps.
+  */
+ 
+ /**
++ * Takes an options object for `startRecording`, and normalizes
++ * it based off of server support. For example, if the user
++ * requests to record memory `withMemory = true`, but the server does
++ * not support that feature, then the `false` will overwrite user preference
++ * in order to define the recording with what is actually available, not
++ * what the user initially requested.
++ *
++ * @param {object} options
++ * @param {boolean} support.timeline
++ * @param {boolean} support.memory
++ * @param {boolean}
++ */
++function normalizePerformanceFeatures (options, support) {
++  let supportOptions = Object.create(null);
 +
-+    // TODO bug 1172180 disable `withAllocations` and `withJITOptimizations` when using the
-+    // pseudo front, as we only want to support it directly from the real actor
-+    // in Fx42+
-+    if (!support.memory) {
-+      supportOptions.withMemory = false;
-+      supportOptions.withAllocations = false;
-+    }
-+    if (!support.timeline) {
-+      supportOptions.withMarkers = false;
-+      supportOptions.withTicks = false;
-+    }
++  // TODO bug 1172180 disable `withAllocations` and `withJITOptimizations` when using the
++  // pseudo front, as we only want to support it directly from the real actor
++  // in Fx42+
++  if (!support.memory) {
++    supportOptions.withMemory = false;
++    supportOptions.withAllocations = false;
++  }
++  if (!support.timeline) {
++    supportOptions.withMarkers = false;
++    supportOptions.withTicks = false;
++  }
 +
-+    return extend(options, supportOptions);
-+  },
++  return extend(options, supportOptions);
++}
 +
-+  /**
-    * Checks all currently stored recording models and returns a boolean
-    * if there is a session currently being recorded.
-    *
-    * @return Boolean
-    */
-   isRecording: function () {
-     return this._recordings.some(recording => recording.isRecording());
-   },
++/**
+  * Filters all the samples in the provided profiler data to be more recent
+  * than the specified start time.
+  *
+  * @param object profile
+  *        The profiler data received from the backend.
+  * @param number profilerStartTime
+  *        The earliest acceptable sample time (in milliseconds).
+  */
+@@ -526,16 +559,17 @@ UniqueStacks.prototype.getOrAddStackIndex = function(prefixIndex, frameIndex) {
+   stackTable.push([prefixIndex, frameIndex]);
+   return index;
+ };
+ 
+ UniqueStacks.prototype.getOrAddStringIndex = function(s) {
+   return this._uniqueStrings.getOrAddStringIndex(s);
+ };
+ 
++exports.normalizePerformanceFeatures = normalizePerformanceFeatures;
+ exports.filterSamples = filterSamples;
+ exports.offsetSampleTimes = offsetSampleTimes;
+ exports.offsetMarkerTimes = offsetMarkerTimes;
+ exports.offsetAndScaleTimestamps = offsetAndScaleTimestamps;
+ exports.getProfileThreadFromAllocations = getProfileThreadFromAllocations;
+ exports.deflateProfile = deflateProfile;
+ exports.deflateThread = deflateThread;
+ exports.UniqueStrings = UniqueStrings;
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
 index cb7ea13..1d984c4 100644
 --- a/browser/devtools/performance/performance-controller.js
