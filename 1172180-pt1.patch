@@ -1,0 +1,436 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 15 Jul 2015 15:40:45 -0700
+Subject: Bug 1172180 - Add polling events for profiler/buffer status on the profiler itself. r=vp
+
+diff --git a/toolkit/devtools/server/actors/profiler.js b/toolkit/devtools/server/actors/profiler.js
+index 6795724..5b09285 100644
+--- a/toolkit/devtools/server/actors/profiler.js
++++ b/toolkit/devtools/server/actors/profiler.js
+@@ -46,16 +46,19 @@ let ProfilerActor = exports.ProfilerActor = protocol.ActorClass({
+       data: Arg(0, "json"),
+     },
+     "profiler-started": {
+       data: Arg(0, "json"),
+     },
+     "profiler-stopped": {
+       data: Arg(0, "json"),
+     },
++    "profiler-status": {
++      data: Arg(0, "json"),
++    },
+ 
+     // Only for older geckos, pre-protocol.js ProfilerActor (<Fx42).
+     // Emitted on other events as a transition from older profiler events
+     // to newer ones.
+     "eventNotification": {
+       subject: Option(0, "json"),
+       topic: Option(0, "string"),
+       details: Option(0, "json")
+@@ -142,16 +145,21 @@ let ProfilerActor = exports.ProfilerActor = protocol.ActorClass({
+     // Explicitly enumerate the arguments
+     // @see ProfilerActor#startProfiler
+     request: {
+       events: Option(0, "nullable:array:string"),
+     },
+     response: RetVal("json")
+   }),
+ 
++  setProfilerStatusInterval: actorBridge("setProfilerStatusInterval", {
++    request: { interval: Arg(0, "number") },
++    oneway: true
++  }),
++
+   /**
+    * Pipe events from Profiler module to this actor.
+    */
+   _onProfilerEvent: function (eventName, ...data) {
+     events.emit(this, eventName, ...data);
+   },
+ });
+ 
+diff --git a/toolkit/devtools/server/tests/unit/test_profiler_events-02.js b/toolkit/devtools/server/tests/unit/test_profiler_events-02.js
+new file mode 100644
+index 0000000..73d5db2
+--- /dev/null
++++ b/toolkit/devtools/server/tests/unit/test_profiler_events-02.js
+@@ -0,0 +1,70 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++"use strict";
++
++/**
++ * Tests the event notification service for the profiler actor.
++ */
++
++const Profiler = Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
++const MAX_PROFILER_ENTRIES = 10000000;
++const { ProfilerFront } = devtools.require("devtools/server/actors/profiler");
++const { waitForTime } = DevToolsUtils;
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let [client, form] = yield getChromeActors();
++  let front = new ProfilerFront(client, form);
++
++  // Ensure the profiler is not running when the test starts (it could
++  // happen if the MOZ_PROFILER_STARTUP environment variable is set).
++  Profiler.StopProfiler();
++  let eventsCalled = 0;
++  let handledThreeTimes = promise.defer();
++
++  front.on("profiler-status", (response) => {
++    dump("'profiler-status' fired\n");
++    do_check_true(typeof response.position === "number");
++    do_check_true(typeof response.totalSize === "number");
++    do_check_true(typeof response.generation === "number");
++    do_check_true(response.position > 0 && response.position < response.totalSize);
++    do_check_true(response.totalSize === MAX_PROFILER_ENTRIES);
++    // There's no way we'll fill the buffer in this test.
++    do_check_true(response.generation === 0);
++
++    eventsCalled++;
++    if (eventsCalled > 2) {
++      handledThreeTimes.resolve();
++    }
++  });
++
++  yield front.setProfilerStatusInterval(1);
++  dump("Set the profiler-status event interval to 1\n");
++  yield front.startProfiler();
++  yield waitForTime(500);
++  yield front.stopProfiler();
++
++  do_check_true(eventsCalled === 0, "No 'profiler-status' events should be fired before registering.");
++
++  let ret = yield front.registerEventNotifications({ events: ["profiler-status"] });
++  do_check_true(ret.registered.length === 1);
++
++  yield front.startProfiler();
++  yield handledThreeTimes.promise;
++  yield front.stopProfiler();
++  do_check_true(eventsCalled >= 3, "profiler-status fired atleast three times while recording");
++
++  let totalEvents = eventsCalled;
++  yield waitForTime(50);
++  do_check_true(totalEvents === eventsCalled, "No more profiler-status events after recording.");
++});
++
++function getChromeActors () {
++  let deferred = promise.defer();
++  get_chrome_actors((client, form) => deferred.resolve([client, form]));
++  return deferred.promise;
++}
+diff --git a/toolkit/devtools/server/tests/unit/xpcshell.ini b/toolkit/devtools/server/tests/unit/xpcshell.ini
+index 3b1184b..4bdd36e 100644
+--- a/toolkit/devtools/server/tests/unit/xpcshell.ini
++++ b/toolkit/devtools/server/tests/unit/xpcshell.ini
+@@ -224,16 +224,17 @@ reason = bug 820380
+ skip-if = toolkit == "gonk"
+ reason = bug 820380
+ [test_breakpoint-actor-map.js]
+ [test_profiler_activation-01.js]
+ [test_profiler_activation-02.js]
+ [test_profiler_close.js]
+ [test_profiler_data.js]
+ [test_profiler_events-01.js]
++[test_profiler_events-02.js]
+ [test_profiler_getbufferinfo.js]
+ [test_profiler_getfeatures.js]
+ [test_profiler_getsharedlibraryinformation.js]
+ [test_unsafeDereference.js]
+ [test_add_actors.js]
+ [test_ignore_caught_exceptions.js]
+ [test_requestTypes.js]
+ reason = bug 937197
+diff --git a/toolkit/devtools/shared/profiler.js b/toolkit/devtools/shared/profiler.js
+index 6e5961a..ff81107 100644
+--- a/toolkit/devtools/shared/profiler.js
++++ b/toolkit/devtools/shared/profiler.js
+@@ -4,24 +4,28 @@
+ "use strict";
+ 
+ const { Cc, Ci, Cu } = require("chrome");
+ const Services = require("Services");
+ const { Class } = require("sdk/core/heritage");
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
+ loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
+ loader.lazyRequireGetter(this, "DevToolsUtils", "devtools/toolkit/DevToolsUtils.js");
++loader.lazyRequireGetter(this, "DeferredTask", "resource://gre/modules/DeferredTask.jsm", true);
+ 
+ // Events piped from system observers to Profiler instances.
+ const PROFILER_SYSTEM_EVENTS = [
+   "console-api-profiler",
+   "profiler-started",
+   "profiler-stopped"
+ ];
+ 
++// How often the "profiler-status" is emitted by default
++const BUFFER_STATUS_INTERVAL_DEFAULT = 5000; // ms
++
+ loader.lazyGetter(this, "nsIProfilerModule", () => {
+   return Cc["@mozilla.org/tools/profiler;1"].getService(Ci.nsIProfiler);
+ });
+ 
+ let DEFAULT_PROFILER_OPTIONS = {
+   // When using the DevTools Performance Tools, this will be overridden
+   // by the pref `devtools.performance.profiler.buffer-size`.
+   entries: Math.pow(10, 7),
+@@ -34,16 +38,23 @@ let DEFAULT_PROFILER_OPTIONS = {
+ 
+ /**
+  * Main interface for interacting with nsIProfiler
+  */
+ const ProfilerManager = (function () {
+   let consumers = new Set();
+ 
+   return {
++
++    // How often the "profiler-status" is emitted
++    _profilerStatusInterval: BUFFER_STATUS_INTERVAL_DEFAULT,
++
++    // How many subscribers there
++    _profilerStatusSubscribers: 0,
++
+     /**
+      * The nsIProfiler is target agnostic and interacts with the whole platform.
+      * Therefore, special care needs to be given to make sure different profiler
+      * consumers (i.e. "toolboxes") don't interfere with each other. Register
+      * the instance here.
+      */
+     addInstance: function (instance) {
+       consumers.add(instance);
+@@ -94,27 +105,29 @@ const ProfilerManager = (function () {
+         config.interval,
+         config.features,
+         config.features.length,
+         config.threadFilters,
+         config.threadFilters.length
+       );
+       let { position, totalSize, generation } = this.getBufferInfo();
+ 
++      this._updateProfilerStatusPolling();
+       return { started: true, position, totalSize, generation, currentTime };
+     },
+ 
+     stop: function () {
+       // Actually stop the profiler only if the last client has stopped profiling.
+       // Since this is used as a root actor, and the profiler module interacts with the
+       // whole platform, we need to avoid a case in which the profiler is stopped
+       // when there might be other clients still profiling.
+       if (this.length <= 1) {
+         nsIProfilerModule.StopProfiler();
+       }
++      this._updateProfilerStatusPolling();
+       return { started: false };
+     },
+ 
+     /**
+      * Returns all the samples accumulated since the profiler was started,
+      * along with the current time. The data has the following format:
+      * {
+      *   libs: string,
+@@ -234,23 +247,16 @@ const ProfilerManager = (function () {
+     observe: sanitizeHandler(function (subject, topic, data) {
+       let details;
+ 
+       // An optional label may be specified when calling `console.profile`.
+       // If that's the case, stringify it and send it over with the response.
+       let { action, arguments: args } = subject || {};
+       let profileLabel = args && args.length > 0 ? `${args[0]}` : void 0;
+ 
+-      let subscribers = Array.from(consumers).filter(c => c.subscribedEvents.has(topic));
+-
+-      // If no consumers are listening, bail out
+-      if (subscribers.length === 0) {
+-        return;
+-      }
+-
+       // If the event was generated from `console.profile` or `console.profileEnd`
+       // we need to start the profiler right away and then just notify the client.
+       // Otherwise, we'll lose precious samples.
+       if (topic === "console-api-profiler" && (action === "profile" || action === "profileEnd")) {
+         let { isActive, currentTime } = this.isActive();
+ 
+         // Start the profiler only if it wasn't already active. Otherwise, any
+         // samples that might have been accumulated so far will be discarded.
+@@ -267,19 +273,17 @@ const ProfilerManager = (function () {
+         // Otherwise, the profiler is already active, so just send
+         // to the front the current time, label, and the notification
+         // adds the action as well.
+         details = { profileLabel, currentTime };
+       }
+ 
+       // Propagate the event to the profiler instances that
+       // are subscribed to this event.
+-      for (let subscriber of subscribers) {
+-        events.emit(subscriber, topic, { subject, topic, data, details });
+-      }
++      this.emitEvent(topic, { subject, topic, data, details });
+     }, "ProfilerManager.observe"),
+ 
+     /**
+      * Registers handlers for the following events to be emitted
+      * on active Profiler instances:
+      *   - "console-api-profiler"
+      *   - "profiler-started"
+      *   - "profiler-stopped"
+@@ -298,32 +302,93 @@ const ProfilerManager = (function () {
+     /**
+      * Unregisters handlers for all system events.
+      */
+     unregisterEventListeners: function () {
+       if (this._eventsRegistered) {
+         PROFILER_SYSTEM_EVENTS.forEach(eventName => Services.obs.removeObserver(this, eventName));
+         this._eventsRegistered = false;
+       }
++    },
++
++    /**
++     * Takes an event name and additional data and emits them
++     * through each profiler instance that is subscribed to the event.
++     *
++     * @param {string} eventName
++     * @param {object} data
++     */
++    emitEvent: function (eventName, data) {
++      let subscribers = Array.from(consumers).filter(c => c.subscribedEvents.has(eventName));
++
++      for (let subscriber of subscribers) {
++        events.emit(subscriber, eventName, data);
++      }
++    },
++
++    /**
++     * Updates the frequency that the "profiler-status" event is emitted
++     * during recording.
++     *
++     * @param {number} interval
++     */
++    setProfilerStatusInterval: function (interval) {
++      this._profilerStatusInterval = interval;
++      if (this._poller) {
++        this._poller._delayMs = interval;
++      }
++    },
++
++    subscribeToProfilerStatusEvents: function () {
++      this._profilerStatusSubscribers++;
++      this._updateProfilerStatusPolling();
++    },
++
++    unsubscribeToProfilerStatusEvents: function () {
++      this._profilerStatusSubscribers--;
++      this._updateProfilerStatusPolling();
++    },
++
++    /**
++     * Will enable or disable "profiler-status" events depending on
++     * if there are subscribers and if the profiler is current recording.
++     */
++    _updateProfilerStatusPolling: function () {
++      if (this._profilerStatusSubscribers > 0 && nsIProfilerModule.IsActive()) {
++        if (!this._poller) {
++          this._poller = new DeferredTask(this._emitProfilerStatus.bind(this), this._profilerStatusInterval);
++        }
++        this._poller.arm();
++      }
++      // No subscribers; turn off if it exists.
++      else if (this._poller) {
++        this._poller.disarm();
++      }
++    },
++
++    _emitProfilerStatus: function () {
++      this.emitEvent("profiler-status", this.isActive());
++      this._poller.arm();
+     }
+   };
+ })();
+ 
+ /**
+  * The profiler actor provides remote access to the built-in nsIProfiler module.
+  */
+ let Profiler = exports.Profiler = Class({
+   extends: EventTarget,
+ 
+   initialize: function () {
+     this.subscribedEvents = new Set();
+     ProfilerManager.addInstance(this);
+   },
+ 
+   destroy: function() {
++    this.unregisterEventNotifications({ events: Array.from(this.subscribedEvents) });
+     this.subscribedEvents = null;
+     ProfilerManager.removeInstance(this);
+   },
+ 
+   /**
+    * @see ProfilerManager.start
+    */
+   start: function (options) { return ProfilerManager.start(options); },
+@@ -359,29 +424,38 @@ let Profiler = exports.Profiler = Class({
+   isActive: function() { return ProfilerManager.isActive(); },
+ 
+   /**
+    * @see ProfilerManager.isActive
+    */
+   getSharedLibraryInformation: function() { return ProfilerManager.getSharedLibraryInformation(); },
+ 
+   /**
++   * @see ProfilerManager.setProfilerStatusInterval
++   */
++  setProfilerStatusInterval: function(interval) { return ProfilerManager.setProfilerStatusInterval(interval); },
++
++  /**
+    * Subscribes this instance to one of several events defined in
+    * an events array.
+    * - "console-api-profiler",
+    * - "profiler-started",
+    * - "profiler-stopped"
++   * - "profiler-status"
+    *
+    * @param {Array<string>} data.event
+    * @return {object}
+    */
+   registerEventNotifications: function(data={}) {
+     let response = [];
+     (data.events || []).forEach(e => {
+       if (!this.subscribedEvents.has(e)) {
++        if (e === "profiler-status") {
++          ProfilerManager.subscribeToProfilerStatusEvents();
++        }
+         this.subscribedEvents.add(e);
+         response.push(e);
+       }
+     });
+     return { registered: response };
+   },
+ 
+   /**
+@@ -390,16 +464,19 @@ let Profiler = exports.Profiler = Class({
+    *
+    * @param {Array<string>} data.event
+    * @return {object}
+    */
+   unregisterEventNotifications: function(data={}) {
+     let response = [];
+     (data.events || []).forEach(e => {
+       if (this.subscribedEvents.has(e)) {
++        if (e === "profiler-status") {
++          ProfilerManager.unsubscribeToProfilerStatusEvents();
++        }
+         this.subscribedEvents.delete(e);
+         response.push(e);
+       }
+     });
+     return { registered: response };
+   },
+ });
+ 
+-- 
+2.2.1
+

@@ -1,0 +1,116 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 17 Jul 2015 14:56:16 -0700
+Subject: Bug 1164325 - failing test case
+
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-12.js b/browser/devtools/performance/test/unit/test_tree-model-12.js
+new file mode 100644
+index 0000000..6fb7886
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_tree-model-12.js
+@@ -0,0 +1,86 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the costs for recursive frames does not overcount the collapsed
++ * samples.
++ */
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function () {
++  let { ThreadNode } = devtools.require("devtools/performance/tree-model");
++  let thread = new ThreadNode(gThread, { startTime: 0, endTime: 50 });
++
++  /**
++   * Samples
++   *
++   * A->B
++   * A->B
++   * A->B->C->B
++   * D->B
++   */
++
++  [ // total, self, name
++    [ 100, 0, "(root)", [
++      [ 25, 0, "D", [
++        [ 25, 25, "B"]
++      ]],
++      [ 75, 0, "A", [
++        [ 75, 50, "B", [
++          [ 25, 0, "C", [
++            [ 25, 25, "B"]
++          ]]
++        ]]
++      ]],
++    ]],
++  ].forEach(compareFrameInfo(thread));
++});
++
++function compareFrameInfo (root, parent) {
++  parent = parent || root;
++  return function (def) {
++    let [total, self, name, children] = def;
++    let node = getFrameNodePath(parent, name);
++    let data = node.getInfo({ root });
++    equal(total, data.totalPercentage, `${name} has correct total percentage: ${data.totalPercentage}`);
++    equal(self, data.selfPercentage, `${name} has correct self percentage: ${data.selfPercentage}`);
++    if (children) {
++      children.forEach(compareFrameInfo(root, node));
++    }
++  }
++}
++
++let gThread = synthesizeProfileForTest([{
++  time: 5,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++    { location: "C" },
++    { location: "B" },
++  ]
++}, {
++  time: 10,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++  ]
++}, {
++  time: 15,
++  frames: [
++    { location: "(root)" },
++    { location: "A" },
++    { location: "B" },
++  ]
++}, {
++  time: 20,
++  frames: [
++    { location: "(root)" },
++    { location: "D" },
++    { location: "B" },
++  ]
++}]);
+diff --git a/browser/devtools/performance/test/unit/xpcshell.ini b/browser/devtools/performance/test/unit/xpcshell.ini
+index 135568f..cb99b29 100644
+--- a/browser/devtools/performance/test/unit/xpcshell.ini
++++ b/browser/devtools/performance/test/unit/xpcshell.ini
+@@ -19,11 +19,12 @@ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ [test_tree-model-04.js]
+ [test_tree-model-05.js]
+ [test_tree-model-06.js]
+ [test_tree-model-07.js]
+ [test_tree-model-08.js]
+ [test_tree-model-09.js]
+ [test_tree-model-10.js]
+ [test_tree-model-11.js]
++[test_tree-model-12.js]
+ [test_waterfall-utils-collapse-01.js]
+ [test_waterfall-utils-collapse-02.js]
+ [test_waterfall-utils-collapse-03.js]
+-- 
+2.2.1
+

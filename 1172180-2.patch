@@ -1,0 +1,385 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 17 Jul 2015 12:21:45 -0700
+Subject: Bug 1172180 - part 2 - add ability to auto drain allocation logs in memory component via a timer and on GC. r=fitzgen
+
+diff --git a/toolkit/devtools/server/actors/memory.js b/toolkit/devtools/server/actors/memory.js
+index 78d6b41..2b1b6f4 100644
+--- a/toolkit/devtools/server/actors/memory.js
++++ b/toolkit/devtools/server/actors/memory.js
+@@ -24,17 +24,17 @@ types.addDictType("AllocationsRecordingOptions", {
+   maxLogLength: "number"
+ });
+ 
+ /**
+  * An actor that returns memory usage data for its parent actor's window.
+  * A tab-scoped instance of this actor will measure the memory footprint of its
+  * parent tab. A global-scoped instance however, will measure the memory
+  * footprint of the chrome window referenced by the root actor.
+- * 
++ *
+  * This actor wraps the Memory module at toolkit/devtools/shared/memory.js
+  * and provides RDP definitions.
+  *
+  * @see toolkit/devtools/shared/memory.js for documentation.
+  */
+ let MemoryActor = exports.MemoryActor = protocol.ActorClass({
+   typeName: "memory",
+ 
+@@ -46,28 +46,38 @@ let MemoryActor = exports.MemoryActor = protocol.ActorClass({
+   events: {
+     // Same format as the data passed to the
+     // `Debugger.Memory.prototype.onGarbageCollection` hook. See
+     // `js/src/doc/Debugger/Debugger.Memory.md` for documentation.
+     "garbage-collection": {
+       type: "garbage-collection",
+       data: Arg(0, "json"),
+     },
++
++    // Same data as the data from `getAllocations` -- only fired if
++    // `autoDrain` set during `startRecordingAllocations`.
++    "allocations": {
++      type: "allocations",
++      data: Arg(0, "json"),
++    },
+   },
+ 
+   initialize: function(conn, parent, frameCache = new StackFrameCache()) {
+     protocol.Actor.prototype.initialize.call(this, conn);
+ 
+     this._onGarbageCollection = this._onGarbageCollection.bind(this);
++    this._onAllocations = this._onAllocations.bind(this);
+     this.bridge = new Memory(parent, frameCache);
+     this.bridge.on("garbage-collection", this._onGarbageCollection);
++    this.bridge.on("allocations", this._onAllocations);
+   },
+ 
+   destroy: function() {
+     this.bridge.off("garbage-collection", this._onGarbageCollection);
++    this.bridge.off("allocations", this._onAllocations);
+     this.bridge.destroy();
+     protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+   attach: actorBridge("attach", {
+     request: {},
+     response: {
+       type: "attached"
+@@ -140,16 +150,20 @@ let MemoryActor = exports.MemoryActor = protocol.ActorClass({
+   residentUnique: actorBridge("residentUnique", {
+     request: {},
+     response: { value: RetVal("number") }
+   }),
+ 
+   _onGarbageCollection: function (data) {
+     events.emit(this, "garbage-collection", data);
+   },
++
++  _onAllocations: function (data) {
++    events.emit(this, "allocations", data);
++  },
+ });
+ 
+ exports.MemoryFront = protocol.FrontClass(MemoryActor, {
+   initialize: function(client, form) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+     this.actorID = form.memoryActor;
+     this.manage(this);
+   }
+diff --git a/toolkit/devtools/server/tests/mochitest/chrome.ini b/toolkit/devtools/server/tests/mochitest/chrome.ini
+index 4350d14..5c08202 100644
+--- a/toolkit/devtools/server/tests/mochitest/chrome.ini
++++ b/toolkit/devtools/server/tests/mochitest/chrome.ini
+@@ -71,16 +71,17 @@ skip-if = buildapp == 'mulet'
+ [test_makeGlobalObjectReference.html]
+ [test_memory.html]
+ [test_memory_allocations_01.html]
+ [test_memory_allocations_02.html]
+ [test_memory_allocations_03.html]
+ [test_memory_allocations_04.html]
+ [test_memory_allocations_05.html]
+ [test_memory_allocations_06.html]
++[test_memory_allocations_07.html]
+ [test_memory_attach_01.html]
+ [test_memory_attach_02.html]
+ [test_memory_census.html]
+ [test_memory_gc_01.html]
+ [test_memory_gc_events.html]
+ [test_preference.html]
+ [test_registerActor.html]
+ [test_SaveHeapSnapshot.html]
+diff --git a/toolkit/devtools/server/tests/mochitest/memory-helpers.js b/toolkit/devtools/server/tests/mochitest/memory-helpers.js
+index 30b8836..5c7c323 100644
+--- a/toolkit/devtools/server/tests/mochitest/memory-helpers.js
++++ b/toolkit/devtools/server/tests/mochitest/memory-helpers.js
+@@ -53,8 +53,15 @@ function destroyServerAndFinish(client) {
+   });
+ }
+ 
+ function waitForTime(ms) {
+   return new Promise((resolve, reject) => {
+     setTimeout(resolve, ms);
+   });
+ }
++
++function waitUntil(predicate) {
++  if (predicate()) {
++    return Promise.resolve(true);
++  }
++  return new Promise(resolve => setTimeout(() => waitUntil(predicate).then(() => resolve(true)), 10));
++}
+diff --git a/toolkit/devtools/server/tests/mochitest/test_memory_allocations_07.html b/toolkit/devtools/server/tests/mochitest/test_memory_allocations_07.html
+new file mode 100644
+index 0000000..0133a27
+--- /dev/null
++++ b/toolkit/devtools/server/tests/mochitest/test_memory_allocations_07.html
+@@ -0,0 +1,76 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Bug 1132764 - Test controlling the maximum allocations log length over the RDP.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Memory monitoring actor test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body>
++<pre id="test">
++<script src="memory-helpers.js" type="application/javascript;version=1.8"></script>
++<script>
++window.onload = function() {
++  SimpleTest.waitForExplicitFinish();
++
++  Task.spawn(function* () {
++    var { memory, client } = yield startServerAndGetSelectedTabMemory();
++    yield memory.attach();
++
++    var allocs = [];
++    var eventsFired = 0;
++    var intervalId = null;
++    function onAlloc () {
++      eventsFired++;
++    }
++    function startAllocating () {
++      intervalId = setInterval(() => {
++        for (var i = 100000; --i;) {
++          allocs.push(new Object());
++        }
++      }, 1);
++    }
++    function stopAllocating () {
++      clearInterval(intervalId);
++    }
++
++    memory.on("allocations", onAlloc);
++
++    yield memory.startRecordingAllocations({
++      drainAllocationsTimeout: 10
++    });
++
++    yield waitUntil(() => eventsFired > 5);
++    ok(eventsFired > 5, "Some allocation events fired without allocating much via auto drain");
++    yield memory.stopRecordingAllocations();
++
++    // Set a really high auto drain timer so we can test if
++    // it fires on GC
++    eventsFired = 0;
++    var startTime = performance.now();
++    var drainTimer = 1000000;
++    yield memory.startRecordingAllocations({
++      drainAllocationsTimeout: drainTimer
++    });
++
++    startAllocating();
++    yield waitUntil(() => {
++      Cu.forceGC();
++      return eventsFired > 1;
++    });
++    stopAllocating();
++    ok(performance.now() - drainTimer < startTime, "Allocation events fired on GC before timer");
++    yield memory.stopRecordingAllocations();
++
++    memory.off("allocations", onAlloc);
++    yield memory.detach();
++    destroyServerAndFinish(client);
++  });
++};
++</script>
++</pre>
++</body>
++</html>
+diff --git a/toolkit/devtools/shared/memory.js b/toolkit/devtools/shared/memory.js
+index 4409617..aa6ffb3 100644
+--- a/toolkit/devtools/shared/memory.js
++++ b/toolkit/devtools/shared/memory.js
+@@ -5,18 +5,21 @@
+ "use strict";
+ 
+ const { Cc, Ci, Cu } = require("chrome");
+ const { reportException } = require("devtools/toolkit/DevToolsUtils");
+ const { Class } = require("sdk/core/heritage");
+ const { expectState } = require("devtools/server/actors/common");
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
+ loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
++loader.lazyRequireGetter(this, "DeferredTask",
++  "resource://gre/modules/DeferredTask.jsm", true);
+ loader.lazyRequireGetter(this, "StackFrameCache",
+-                         "devtools/server/actors/utils/stack", true);
++  "devtools/server/actors/utils/stack", true);
++
+ /**
+  * A class that returns memory data for a parent actor's window.
+  * Using a tab-scoped actor with this instance will measure the memory footprint of its
+  * parent tab. Using a global-scoped actor instance however, will measure the memory
+  * footprint of the chrome window referenced by its root actor.
+  *
+  * To be consumed by actor's, like MemoryActor using this module to
+  * send information over RDP, and TimelineActor for using more light-weight
+@@ -32,16 +35,17 @@ let Memory = exports.Memory = Class({
+     this.parent = parent;
+     this._mgr = Cc["@mozilla.org/memory-reporter-manager;1"]
+                   .getService(Ci.nsIMemoryReporterManager);
+     this.state = "detached";
+     this._dbg = null;
+     this._frameCache = frameCache;
+ 
+     this._onGarbageCollection = this._onGarbageCollection.bind(this);
++    this._emitAllocations = this._emitAllocations.bind(this);
+     this._onWindowReady = this._onWindowReady.bind(this);
+ 
+     events.on(this.parent, "window-ready", this._onWindowReady);
+   },
+ 
+   destroy: function() {
+     events.off(this.parent, "window-ready", this._onWindowReady);
+ 
+@@ -114,61 +118,79 @@ let Memory = exports.Memory = Class({
+         this._clearDebuggees();
+         this._frameCache.initFrames();
+       }
+       this.dbg.addDebuggees();
+     }
+   },
+ 
+   /**
+-   * Handler for GC events on the Debugger.Memory instance.
+-   */
+-  _onGarbageCollection: function (data) {
+-    events.emit(this, "garbage-collection", data);
+-  },
+-
+-  /**
+    * Take a census of the heap. See js/src/doc/Debugger/Debugger.Memory.md for
+    * more information.
+    */
+   takeCensus: expectState("attached", function() {
+     return this.dbg.memory.takeCensus();
+   }, `taking census`),
+ 
+   /**
+    * Start recording allocation sites.
+    *
+-   * @param AllocationsRecordingOptions options
+-   *        See the protocol.js definition of AllocationsRecordingOptions above.
++   * @param {number} options.probability
++   *                 The probability we sample any given allocation when recording allocations.
++   *                 Must be between 0 and 1 -- defaults to 1.
++   * @param {number} options.maxLogLength
++   *                 The maximum number of allocation events to keep in the
++   *                 log. If new allocs occur while at capacity, oldest allocs are lost.
++   *                 Must fit in a 32 bit signed integer.
++   * @param {number} options.drainAllocationsTimeout
++   *                 A number in milliseconds of how often, at least, an `allocation` event
++   *                 gets emitted (and drained), and also emits and drains on every GC event,
++   *                 resetting the timer.
+    */
+   startRecordingAllocations: expectState("attached", function(options = {}) {
+     if (this.dbg.memory.trackingAllocationSites) {
+       return Date.now();
+     }
+ 
+     this._frameCache.initFrames();
+ 
+     this.dbg.memory.allocationSamplingProbability = options.probability != null
+       ? options.probability
+       : 1.0;
++
++    this.drainAllocationsTimeoutTimer = typeof options.drainAllocationsTimeout === "number" ? options.drainAllocationsTimeout : null;
++
++    if (this.drainAllocationsTimeoutTimer != null) {
++      if (this._poller) {
++        this._poller.disarm();
++      }
++      this._poller = new DeferredTask(this._emitAllocations, this.drainAllocationsTimeoutTimer);
++      this._poller.arm();
++    }
++
+     if (options.maxLogLength != null) {
+       this.dbg.memory.maxAllocationsLogLength = options.maxLogLength;
+     }
+     this.dbg.memory.trackingAllocationSites = true;
+ 
+     return Date.now();
+   }, `starting recording allocations`),
+ 
+   /**
+    * Stop recording allocation sites.
+    */
+   stopRecordingAllocations: expectState("attached", function() {
+     this.dbg.memory.trackingAllocationSites = false;
+     this._clearFrames();
+ 
++    if (this._poller) {
++      this._poller.disarm();
++      this._poller = null;
++    }
++
+     return Date.now();
+   }, `stopping recording allocations`),
+ 
+   /**
+    * Return settings used in `startRecordingAllocations` for `probability`
+    * and `maxLogLength`. Currently only uses in tests.
+    */
+   getAllocationsSettings: expectState("attached", function() {
+@@ -327,10 +349,35 @@ let Memory = exports.Memory = Class({
+       reportException("MemoryBridge.prototype.measure", e);
+     }
+ 
+     return result;
+   },
+ 
+   residentUnique: function () {
+     return this._mgr.residentUnique;
+-  }
++  },
++
++  /**
++   * Handler for GC events on the Debugger.Memory instance.
++   */
++  _onGarbageCollection: function (data) {
++    events.emit(this, "garbage-collection", data);
++
++    // If `drainAllocationsTimeout` set, fire an allocations event with the drained log,
++    // which will restart the timer.
++    if (this._poller) {
++      this._poller.disarm();
++      this._emitAllocations();
++    }
++  },
++
++
++  /**
++   * Called on `drainAllocationsTimeoutTimer` interval if and only if set during `startRecordingAllocations`,
++   * or on a garbage collection event if drainAllocationsTimeout was set.
++   * Drains allocation log and emits as an event and restarts the timer.
++   */
++  _emitAllocations: function () {
++    events.emit(this, "allocations", this.getAllocations());
++    this._poller.arm();
++  },
+ });
+-- 
+2.2.1
+
