@@ -1,0 +1,308 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 4 Aug 2015 16:49:03 -0700
+Subject: Bug 1177558 - Change devtools memory module to return docshell time rather than Date.now() to match epoch from allocations, and add tests. r=fitzgen
+
+diff --git a/browser/devtools/performance/modules/logic/recording-model.js b/browser/devtools/performance/modules/logic/recording-model.js
+index 5fd125b..3d829fc 100644
+--- a/browser/devtools/performance/modules/logic/recording-model.js
++++ b/browser/devtools/performance/modules/logic/recording-model.js
+@@ -366,19 +366,18 @@ RecordingModel.prototype = {
+         break;
+       }
+       // Accumulate allocation sites into an array. Furthermore, the timestamps
+       // do not have a zero epoch, and are microseconds instead of milliseconds,
+       // so offset all of them by the start time, also converting from µs to ms.
+       case "allocations": {
+         if (!config.withAllocations) { break; }
+         let [{ sites, timestamps, frames, counts }] = data;
+-        let timeOffset = this._memoryStartTime * 1000;
+-        let timeScale = 1000;
+-        RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset, timeScale);
++        let timeOffset = this._memoryStartTime;
++        RecordingUtils.offsetAndScaleTimestamps(timestamps, timeOffset);
+         pushAll(this._allocations.sites, sites);
+         pushAll(this._allocations.timestamps, timestamps);
+         pushAll(this._allocations.frames, frames);
+         pushAll(this._allocations.counts, counts);
+         break;
+       }
+     }
+   },
+diff --git a/browser/devtools/performance/modules/logic/recording-utils.js b/browser/devtools/performance/modules/logic/recording-utils.js
+index f74007c..5d033e5 100644
+--- a/browser/devtools/performance/modules/logic/recording-utils.js
++++ b/browser/devtools/performance/modules/logic/recording-utils.js
+@@ -101,17 +101,19 @@ function offsetMarkerTimes(markers, timeOffset) {
+  * @param number timeOffset
+  *        The amount of time to offset by (in milliseconds).
+  * @param number timeScale
+  *        The factor to scale by, after offsetting.
+  */
+ function offsetAndScaleTimestamps(timestamps, timeOffset, timeScale) {
+   for (let i = 0, len = timestamps.length; i < len; i++) {
+     timestamps[i] -= timeOffset;
+-    timestamps[i] /= timeScale;
++    if (timeScale) {
++      timestamps[i] /= timeScale;
++    }
+   }
+ }
+ 
+ /**
+  * Cache used in `RecordingUtils.getProfileThreadFromAllocations`.
+  */
+ let gProfileThreadFromAllocationCache = new WeakMap();
+ 
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 13e157fa..119e62e 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -1,12 +1,13 @@
+ [DEFAULT]
+ tags = devtools
+ subsuite = devtools
+ support-files =
++  doc_allocs.html
+   doc_force_cc.html
+   doc_force_gc.html
+   doc_innerHTML.html
+   doc_markers.html
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
+diff --git a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+index be67422..db486ae 100644
+--- a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+@@ -1,32 +1,34 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that the memory call tree view renders content after recording.
+  */
+ function* spawnTest() {
+-  let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, DetailsView, MemoryCallTreeView } = panel.panelWin;
++  let { panel } = yield initPerformance(ALLOCS_URL);
++  let { EVENTS, $$, PerformanceController, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test.
+   Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   yield startRecording(panel);
+-  yield busyWait(100);
++  yield waitUntil(() => PerformanceController.getCurrentRecording().getAllocations().timestamps.length);
+   yield stopRecording(panel);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   yield DetailsView.selectView("memory-calltree");
+   ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   ok(true, "MemoryCallTreeView rendered after recording is stopped.");
+ 
++  ok($$("#memory-calltree-view .call-tree-item").length, "there are several allocations rendered.");
++
+   yield startRecording(panel);
+   yield busyWait(100);
+ 
+   rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   yield stopRecording(panel);
+   yield rendered;
+ 
+   ok(true, "MemoryCallTreeView rendered again after recording completed a second time.");
+diff --git a/browser/devtools/performance/test/doc_allocs.html b/browser/devtools/performance/test/doc_allocs.html
+new file mode 100644
+index 0000000..fced650
+--- /dev/null
++++ b/browser/devtools/performance/test/doc_allocs.html
+@@ -0,0 +1,25 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Performance test page</title>
++  </head>
++
++  <body>
++    <script type="text/javascript">
++      var allocs = [];
++      function test() {
++        for (var i = 0; i < 10; i++) {
++          allocs.push({});
++        }
++      }
++
++      // Prevent this script from being garbage collected.
++      window.setInterval(test, 1);
++    </script>
++  </body>
++
++</html>
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 3bb0dcb..f46bb96 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -19,16 +19,17 @@ let { getPerformanceFront, PerformanceFront } = devtools.require("devtools/perfo
+ let TargetFactory = devtools.TargetFactory;
+ 
+ let mm = null;
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
+ const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
+ const MARKERS_URL = EXAMPLE_URL + "doc_markers.html";
++const ALLOCS_URL = EXAMPLE_URL + "doc_allocs.html";
+ 
+ const MEMORY_SAMPLE_PROB_PREF = "devtools.performance.memory.sample-probability";
+ const MEMORY_MAX_LOG_LEN_PREF = "devtools.performance.memory.max-log-length";
+ const PROFILER_BUFFER_SIZE_PREF = "devtools.performance.profiler.buffer-size";
+ const PROFILER_SAMPLE_RATE_PREF = "devtools.performance.profiler.sample-frequency-khz";
+ 
+ const FRAMERATE_PREF = "devtools.performance.ui.enable-framerate";
+ const MEMORY_PREF = "devtools.performance.ui.enable-memory";
+diff --git a/toolkit/devtools/shared/memory.js b/toolkit/devtools/shared/memory.js
+index aa6ffb3..e7039a1 100644
+--- a/toolkit/devtools/shared/memory.js
++++ b/toolkit/devtools/shared/memory.js
+@@ -90,44 +90,52 @@ let Memory = exports.Memory = Class({
+    * Gets the current MemoryBridge attach/detach state.
+    */
+   getState: function () {
+     return this.state;
+   },
+ 
+   _clearDebuggees: function() {
+     if (this._dbg) {
+-      if (this.dbg.memory.trackingAllocationSites) {
++      if (this.isRecordingAllocations()) {
+         this.dbg.memory.drainAllocationsLog();
+       }
+       this._clearFrames();
+       this.dbg.removeAllDebuggees();
+     }
+   },
+ 
+   _clearFrames: function() {
+-    if (this.dbg.memory.trackingAllocationSites) {
++    if (this.isRecordingAllocations()) {
+       this._frameCache.clearFrames();
+     }
+   },
+ 
+   /**
+    * Handler for the parent actor's "window-ready" event.
+    */
+   _onWindowReady: function({ isTopLevel }) {
+     if (this.state == "attached") {
+-      if (isTopLevel && this.dbg.memory.trackingAllocationSites) {
++      if (isTopLevel && this.isRecordingAllocations()) {
+         this._clearDebuggees();
+         this._frameCache.initFrames();
+       }
+       this.dbg.addDebuggees();
+     }
+   },
+ 
+   /**
++   * Returns a boolean indicating whether or not allocation
++   * sites are being tracked.
++   */
++  isRecordingAllocations: function () {
++    return this.dbg.memory.trackingAllocationSites;
++  },
++
++  /**
+    * Take a census of the heap. See js/src/doc/Debugger/Debugger.Memory.md for
+    * more information.
+    */
+   takeCensus: expectState("attached", function() {
+     return this.dbg.memory.takeCensus();
+   }, `taking census`),
+ 
+   /**
+@@ -141,18 +149,18 @@ let Memory = exports.Memory = Class({
+    *                 log. If new allocs occur while at capacity, oldest allocs are lost.
+    *                 Must fit in a 32 bit signed integer.
+    * @param {number} options.drainAllocationsTimeout
+    *                 A number in milliseconds of how often, at least, an `allocation` event
+    *                 gets emitted (and drained), and also emits and drains on every GC event,
+    *                 resetting the timer.
+    */
+   startRecordingAllocations: expectState("attached", function(options = {}) {
+-    if (this.dbg.memory.trackingAllocationSites) {
+-      return Date.now();
++    if (this.isRecordingAllocations()) {
++      return this._getCurrentTime();
+     }
+ 
+     this._frameCache.initFrames();
+ 
+     this.dbg.memory.allocationSamplingProbability = options.probability != null
+       ? options.probability
+       : 1.0;
+ 
+@@ -166,32 +174,35 @@ let Memory = exports.Memory = Class({
+       this._poller.arm();
+     }
+ 
+     if (options.maxLogLength != null) {
+       this.dbg.memory.maxAllocationsLogLength = options.maxLogLength;
+     }
+     this.dbg.memory.trackingAllocationSites = true;
+ 
+-    return Date.now();
++    return this._getCurrentTime();
+   }, `starting recording allocations`),
+ 
+   /**
+    * Stop recording allocation sites.
+    */
+   stopRecordingAllocations: expectState("attached", function() {
++    if (!this.isRecordingAllocations()) {
++      return this._getCurrentTime();
++    }
+     this.dbg.memory.trackingAllocationSites = false;
+     this._clearFrames();
+ 
+     if (this._poller) {
+       this._poller.disarm();
+       this._poller = null;
+     }
+ 
+-    return Date.now();
++    return this._getCurrentTime();
+   }, `stopping recording allocations`),
+ 
+   /**
+    * Return settings used in `startRecordingAllocations` for `probability`
+    * and `maxLogLength`. Currently only uses in tests.
+    */
+   getAllocationsSettings: expectState("attached", function() {
+     return {
+@@ -375,9 +386,17 @@ let Memory = exports.Memory = Class({
+    * Called on `drainAllocationsTimeoutTimer` interval if and only if set during `startRecordingAllocations`,
+    * or on a garbage collection event if drainAllocationsTimeout was set.
+    * Drains allocation log and emits as an event and restarts the timer.
+    */
+   _emitAllocations: function () {
+     events.emit(this, "allocations", this.getAllocations());
+     this._poller.arm();
+   },
++
++  /**
++   * Accesses the docshell to return the current process time.
++   */
++  _getCurrentTime: function () {
++    return (this.parent.isRootActor ? this.parent.docShell : this.parent.originalDocShell).now();
++  },
++
+ });
+-- 
+2.2.1
+

@@ -3,7 +3,7 @@ Date: Thu, 23 Jul 2015 08:25:06 -0700
 Subject: Bug 1172180 - Create a PerformanceActor, and migrate existing pseudo PerformanceFront to a legacy front. r=vp
 
 diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
-index 3509717..f38b768 100644
+index 3509717..3343608 100644
 --- a/browser/devtools/framework/toolbox.js
 +++ b/browser/devtools/framework/toolbox.js
 @@ -1,14 +1,14 @@
@@ -13,7 +13,7 @@ index 3509717..f38b768 100644
  /* globals gDevTools, DOMHelpers, toolboxStrings, InspectorFront, Selection,
     CommandUtils, DevToolsUtils, Hosts, osString, showDoorhanger,
 -   getHighlighterUtils, getPerformanceFront */
-+   getHighlighterUtils, PerformanceFront */
++   getHighlighterUtils, createPerformanceFront */
  
  "use strict";
  
@@ -52,7 +52,7 @@ index 3509717..f38b768 100644
    this._onBottomHostMinimized = this._onBottomHostMinimized.bind(this);
    this._onBottomHostMaximized = this._onBottomHostMaximized.bind(this);
    this._onToolSelectWhileMinimized = this._onToolSelectWhileMinimized.bind(this);
-+  this._onConsoleProfileStart = this._onConsoleProfileStart.bind(this);
++  this._onPerformanceFrontEvent = this._onPerformanceFrontEvent.bind(this);
    this._onBottomHostWillChange = this._onBottomHostWillChange.bind(this);
    this._toggleMinimizeMode = this._toggleMinimizeMode.bind(this);
  
@@ -61,7 +61,7 @@ index 3509717..f38b768 100644
    if (!hostType) {
      hostType = Services.prefs.getCharPref(this._prefs.LAST_HOST);
    }
-@@ -1982,42 +1983,80 @@ Toolbox.prototype = {
+@@ -1982,42 +1983,81 @@ Toolbox.prototype = {
    initPerformance: Task.async(function*() {
      // If target does not have profiler actor (addons), do not
      // even register the shared performance connection.
@@ -78,7 +78,7 @@ index 3509717..f38b768 100644
 -    this._performance = getPerformanceFront(this.target);
 -    yield this.performance.open();
 +    this._performance = createPerformanceFront(this._target);
-+    this.performance.on("*", this._onConsoleProfileStart);
++    this.performance.on("*", this._onPerformanceFrontEvent);
 +
 +    yield this.performance.connect();
 +
@@ -97,42 +97,43 @@ index 3509717..f38b768 100644
      if (!this.performance) {
        return;
      }
-+    this.performance.off("*", this._onConsoleProfileStart);
++    this.performance.off("*", this._onPerformanceFrontEvent);
      yield this.performance.destroy();
      this._performance = null;
    }),
  
    /**
-+   * Called as soon as `console.profile` occurs so we can set up the
-+   * performance tool front. The performance actor handles everything else.
++   * Called when any event comes from the PerformanceFront. If the performance tool is already
++   * loaded when the first event comes in, immediately unbind this handler, as this is
++   * only used to queue up observed recordings before the performance tool can handle them,
++   * which will only occur when `console.profile()` recordings are started before the tool loads.
 +   */
-+  _onConsoleProfileStart: Task.async(function *(eventName, recording) {
-+    // For the first event only, if it's a console-profile-start event,
-+    // the only event that can occur before the panel is loaded, start
-+    // listening to events to subsequently seed the panel. Otherwise, remove
-+    // this handler as the panel is already handling it.
-+    if (!this.performance._witnessedEvent) {
-+      this.performance._witnessedEvent = true;
-+      if (eventName !== "console-profile-start") {
-+        this.performance.off("*", this._onConsoleProfileStart);
-+        return;
-+      }
++  _onPerformanceFrontEvent: Task.async(function *(eventName, recording) {
++    if (this.getPanel("performance")) {
++      this.performance.off("*", this._onPerformanceFrontEvent);
++      return;
 +    }
 +
-+    let recs = this.performance._toBeSeededRecordings = this.performance._toBeSeededRecordings || [];
-+    if (!this.performance._seeding) {
-+      this.performance._seeding = true;
++    let recordings = this.performance._toBeSeededRecordings = this.performance._toBeSeededRecordings || [];
 +
-+      // Load the panel and ensure that the panel is set up before seeding
-+      // the recordings.
-+      let panel = yield this.loadTool("performance");
++    // Before any console recordings, we'll get a `console-profile-start` recording
++    // warning us that a recording will come later (via `recording-started`), so
++    // start to boot up the tool and populate the tool with any other recordings
++    // observed during that time.
++    if (eventName === "console-profile-start" && !this.performance._waitForToolOpen) {
++      this.performance._waitForToolOpen = this.loadTool("performance");
++      let panel = yield this.performance._waitForToolOpen;
 +      yield panel.open();
 +
-+      panel.panelWin.PerformanceController.populateRecordings(recs);
-+      this.performance.off("*", this._onConsoleProfileStart);
-+      return;
-+    } else if (eventName === "recording-started") {
-+      recs.push(recording);
++      panel.panelWin.PerformanceController.populateRecordings(recordings);
++      this.performance.off("*", this._onPerformanceFrontEvent);
++    }
++
++    // Otherwise, if it's a recording-started event, we've already started loading
++    // the tool, so just store this recording in our array to be later populated
++    // once the tool loads.
++    if (eventName === "recording-started") {
++      recordings.push(recording);
 +    }
 +  }),
 +
@@ -4883,6 +4884,29 @@ index bef3bb3..7abbfae 100644
      let durationMillis = model.getDuration().toFixed(0);
      let durationNode = $(".recording-item-duration", recordingItem.target);
      durationNode.setAttribute("value",
+diff --git a/browser/devtools/shared/test/head.js b/browser/devtools/shared/test/head.js
+index e0f9f0a..9835ad9 100644
+--- a/browser/devtools/shared/test/head.js
++++ b/browser/devtools/shared/test/head.js
+@@ -246,17 +246,17 @@ function* openAndCloseToolbox(nbOfTimes, usageTime, toolId) {
+     yield gDevTools.closeToolbox(target);
+   }
+ }
+ 
+ /**
+  * Synthesize a profile for testing.
+  */
+ function synthesizeProfileForTest(samples) {
+-  const RecordingUtils = devtools.require("devtools/performance/recording-utils");
++  const RecordingUtils = devtools.require("devtools/toolkit/performance/utils");
+ 
+   samples.unshift({
+     time: 0,
+     frames: []
+   });
+ 
+   let uniqueStacks = new RecordingUtils.UniqueStacks();
+   return RecordingUtils.deflateThread({
 diff --git a/toolkit/devtools/moz.build b/toolkit/devtools/moz.build
 index 11db268..c44fe85 100644
 --- a/toolkit/devtools/moz.build
@@ -6122,10 +6146,10 @@ index 0000000..2f766a7
 +]
 diff --git a/toolkit/devtools/performance/recorder.js b/toolkit/devtools/performance/recorder.js
 new file mode 100644
-index 0000000..6a87af7
+index 0000000..5caa1cb
 --- /dev/null
 +++ b/toolkit/devtools/performance/recorder.js
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,462 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6167,6 +6191,10 @@ index 0000000..6a87af7
 +  "profiler-stopped",
 +  "profiler-status"
 +];
++
++// Max time in milliseconds for the allocations event to occur, which will
++// occur on every GC, or at least as often as DRAIN_ALLOCATIONS_TIMEOUT.
++const DRAIN_ALLOCATIONS_TIMEOUT = 2000;
 +
 +/**
 + * A connection to underlying actors (profiler, memory, framerate, etc.)
@@ -6447,7 +6475,9 @@ index 0000000..6a87af7
 +      if (this._memory.getState() === "detached") {
 +        this._memory.attach();
 +      }
-+      memoryStart = this._memory.startRecordingAllocations(mapRecordingOptions("memory", options));
++      memoryStart = this._memory.startRecordingAllocations(extend(mapRecordingOptions("memory", options), {
++        drainAllocationsTimeout: DRAIN_ALLOCATIONS_TIMEOUT
++      }));
 +    }
 +
 +    let [profilerStartData, timelineStartData, memoryStartData] = yield promise.all([
@@ -6728,10 +6758,10 @@ index f74007c..c8effc4 100644
  exports.deflateThread = deflateThread;
 diff --git a/toolkit/devtools/server/actors/performance-recording.js b/toolkit/devtools/server/actors/performance-recording.js
 new file mode 100644
-index 0000000..392deda
+index 0000000..944545c
 --- /dev/null
 +++ b/toolkit/devtools/server/actors/performance-recording.js
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,350 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6744,7 +6774,6 @@ index 0000000..392deda
 +const { actorBridge } = require("devtools/server/actors/common");
 +
 +loader.lazyRequireGetter(this, "events", "sdk/event/core");
-+loader.lazyRequireGetter(this, "when", "sdk/event/utils", true);
 +loader.lazyRequireGetter(this, "merge", "sdk/util/object", true);
 +loader.lazyRequireGetter(this, "PerformanceIO",
 +  "devtools/toolkit/performance/io");
@@ -7070,7 +7099,7 @@ index 0000000..392deda
 +      // so offset all of them by the start time, also converting from µs to ms.
 +      case "allocations": {
 +        if (!config.withAllocations) { break; }
-+        let { sites, timestamps, frames, counts } = data;
++        let { allocations: sites, allocationsTimestamps: timestamps, frames, counts } = data;
 +        RecordingUtils.offsetAndScaleTimestamps(timestamps, this._startTime);
 +        RecordingUtils.pushAll(this._allocations.sites, sites);
 +        RecordingUtils.pushAll(this._allocations.timestamps, timestamps);
