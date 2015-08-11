@@ -1,0 +1,115 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 10 Aug 2015 18:43:19 -0700
+Subject: Bug 1193110 - Do not close toolbox without waiting for PerformanceActor to finish connecting and tearing down. r=jryans
+
+diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
+index 6d441b4..86b01d5 100644
+--- a/browser/devtools/framework/toolbox.js
++++ b/browser/devtools/framework/toolbox.js
+@@ -407,26 +407,17 @@ Toolbox.prototype = {
+       yield promise.all([
+         splitConsolePromise,
+         buttonsPromise,
+         framesPromise
+       ]);
+ 
+       // Lazily connect to the profiler here and don't wait for it to complete,
+       // used to intercept console.profile calls before the performance tools are open.
+-      let profilerReady = this.initPerformance();
+-
+-      // However, while testing, we must wait for the performance connection to
+-      // finish, as most tests shut down without waiting for a toolbox
+-      // destruction event, resulting in the shared profiler connection being
+-      // opened and closed outside of the test that originally opened the
+-      // toolbox.
+-      if (DevToolsUtils.testing) {
+-        yield profilerReady;
+-      }
++      this.initPerformance();
+ 
+       this.emit("ready");
+     }.bind(this)).then(null, console.error.bind(console));
+   },
+ 
+   _pingTelemetry: function() {
+     this._telemetry.toolOpened("toolbox");
+ 
+@@ -1982,40 +1973,44 @@ Toolbox.prototype = {
+    */
+   initPerformance: Task.async(function*() {
+     // If target does not have profiler actor (addons), do not
+     // even register the shared performance connection.
+     if (!this.target.hasActor("profiler")) {
+       return;
+     }
+ 
+-    if (this.performance) {
+-      yield this.performance.connect();
+-      return this.performance;
++    if (this._performanceConnection) {
++      return this._performanceConnection.promise;
+     }
+ 
++    this._performanceConnection = promise.defer();
++
+     this._performance = createPerformanceFront(this._target);
+     this.performance.on("*", this._onPerformanceFrontEvent);
+ 
+     yield this.performance.connect();
+ 
+     // Emit an event when connected, but don't wait on startup for this.
+     this.emit("profiler-connected");
+ 
+-    return this.performance;
++    this._performanceConnection.resolve(this.performance);
++    return this._performanceConnection.promise;
+   }),
+ 
+   /**
+    * Disconnects the underlying Performance actor. If the connection
+    * has not finished initializing, as opening a toolbox does not wait,
+    * the performance connection destroy method will wait for it on its own.
+    */
+   destroyPerformance: Task.async(function*() {
+-    if (!this.performance) {
+-      return;
++    // If still connecting to performance actor, allow the
++    // actor to resolve its connection before attempting to destroy.
++    if (this._performanceConnection) {
++      yield this._performanceConnection.promise;
+     }
+     this.performance.off("*", this._onPerformanceFrontEvent);
+     yield this.performance.destroy();
+     this._performance = null;
+   }),
+ 
+   /**
+    * Called when any event comes from the PerformanceFront. If the performance tool is already
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index 53a2c14..ff5e61c 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -218,16 +218,20 @@ function initPerformance(aUrl, tool="performance", targetOps={}) {
+     // to smokescreen test different servers where memory or timeline actors
+     // may not exist. Possible options that will actually work:
+     // TEST_PERFORMANCE_LEGACY_FRONT = true
+     // TEST_MOCK_TIMELINE_ACTOR = true
+     // TEST_PROFILER_FILTER_STATUS = array
+     merge(target, targetOps);
+ 
+     let toolbox = yield gDevTools.showToolbox(target, tool);
++
++    // Wait for the performance tool to be spun up
++    yield toolbox.initPerformance();
++
+     let panel = toolbox.getCurrentPanel();
+     return { target, panel, toolbox };
+   });
+ }
+ 
+ /**
+  * Initializes a webconsole panel. Returns a target, panel and toolbox reference.
+  * Also returns a console property that allows calls to `profile` and `profileEnd`.
+-- 
+2.2.1
+

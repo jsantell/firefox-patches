@@ -1,0 +1,219 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 7 Aug 2015 12:33:42 -0700
+Subject: Bug 1191508 - remove counts test for memory module now that it's removed. r=tromey
+
+diff --git a/toolkit/devtools/server/tests/mochitest/chrome.ini b/toolkit/devtools/server/tests/mochitest/chrome.ini
+index 804bb37..30ade2d 100644
+--- a/toolkit/devtools/server/tests/mochitest/chrome.ini
++++ b/toolkit/devtools/server/tests/mochitest/chrome.ini
+@@ -73,17 +73,16 @@ skip-if = buildapp == 'mulet'
+ [test_makeGlobalObjectReference.html]
+ [test_memory.html]
+ [test_memory_allocations_01.html]
+ [test_memory_allocations_02.html]
+ [test_memory_allocations_03.html]
+ [test_memory_allocations_04.html]
+ [test_memory_allocations_05.html]
+ [test_memory_allocations_06.html]
+-[test_memory_allocations_07.html]
+ [test_memory_attach_01.html]
+ [test_memory_attach_02.html]
+ [test_memory_census.html]
+ [test_memory_gc_01.html]
+ [test_memory_gc_events.html]
+ [test_preference.html]
+ [test_registerActor.html]
+ [test_SaveHeapSnapshot.html]
+diff --git a/toolkit/devtools/server/tests/mochitest/test_memory_allocations_02.html b/toolkit/devtools/server/tests/mochitest/test_memory_allocations_02.html
+index 8a001c1..0133a27 100644
+--- a/toolkit/devtools/server/tests/mochitest/test_memory_allocations_02.html
++++ b/toolkit/devtools/server/tests/mochitest/test_memory_allocations_02.html
+@@ -1,12 +1,12 @@
+ <!DOCTYPE HTML>
+ <html>
+ <!--
+-Bug 1067491 - Test aggregating allocation counts.
++Bug 1132764 - Test controlling the maximum allocations log length over the RDP.
+ -->
+ <head>
+   <meta charset="utf-8">
+   <title>Memory monitoring actor test</title>
+   <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
+   <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
+ </head>
+ <body>
+@@ -15,50 +15,62 @@ Bug 1067491 - Test aggregating allocation counts.
+ <script>
+ window.onload = function() {
+   SimpleTest.waitForExplicitFinish();
+ 
+   Task.spawn(function* () {
+     var { memory, client } = yield startServerAndGetSelectedTabMemory();
+     yield memory.attach();
+ 
+-    yield memory.startRecordingAllocations();
+-    ok(true, "Can start recording allocations");
+-
+-    // Allocate some objects.
+-
+     var allocs = [];
+-    (function allocator() {
+-      for (var i = 0; i < 10; i++) {
+-        allocs.push({});
+-      }
+-    }());
+-
+-    var response = yield memory.getAllocations();
++    var eventsFired = 0;
++    var intervalId = null;
++    function onAlloc () {
++      eventsFired++;
++    }
++    function startAllocating () {
++      intervalId = setInterval(() => {
++        for (var i = 100000; --i;) {
++          allocs.push(new Object());
++        }
++      }, 1);
++    }
++    function stopAllocating () {
++      clearInterval(intervalId);
++    }
+ 
+-    yield memory.stopRecordingAllocations();
+-    ok(true, "Can stop recording allocations");
++    memory.on("allocations", onAlloc);
+ 
+-    // Assert that we have the 10 allocations in the `allocator` frame.
++    yield memory.startRecordingAllocations({
++      drainAllocationsTimeout: 10
++    });
+ 
+-    var index = 0;
+-    var found = false;
++    yield waitUntil(() => eventsFired > 5);
++    ok(eventsFired > 5, "Some allocation events fired without allocating much via auto drain");
++    yield memory.stopRecordingAllocations();
+ 
+-    for (var count of response.counts) {
+-      if (count >= 10
+-          && response.frames[index]
+-          && response.frames[index].functionDisplayName == "allocator") {
+-        found = true;
+-        break;
+-      }
+-      index++;
+-    }
++    // Set a really high auto drain timer so we can test if
++    // it fires on GC
++    eventsFired = 0;
++    var startTime = performance.now();
++    var drainTimer = 1000000;
++    yield memory.startRecordingAllocations({
++      drainAllocationsTimeout: drainTimer
++    });
+ 
+-    ok(found, "Should find the 10 allocations in the allocator frame.");
++    startAllocating();
++    yield waitUntil(() => {
++      Cu.forceGC();
++      return eventsFired > 1;
++    });
++    stopAllocating();
++    ok(performance.now() - drainTimer < startTime, "Allocation events fired on GC before timer");
++    yield memory.stopRecordingAllocations();
+ 
++    memory.off("allocations", onAlloc);
+     yield memory.detach();
+     destroyServerAndFinish(client);
+   });
+ };
+ </script>
+ </pre>
+ </body>
+ </html>
+diff --git a/toolkit/devtools/server/tests/mochitest/test_memory_allocations_07.html b/toolkit/devtools/server/tests/mochitest/test_memory_allocations_07.html
+deleted file mode 100644
+index 0133a27..0000000
+--- a/toolkit/devtools/server/tests/mochitest/test_memory_allocations_07.html
++++ /dev/null
+@@ -1,76 +0,0 @@
+-<!DOCTYPE HTML>
+-<html>
+-<!--
+-Bug 1132764 - Test controlling the maximum allocations log length over the RDP.
+--->
+-<head>
+-  <meta charset="utf-8">
+-  <title>Memory monitoring actor test</title>
+-  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
+-  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
+-</head>
+-<body>
+-<pre id="test">
+-<script src="memory-helpers.js" type="application/javascript;version=1.8"></script>
+-<script>
+-window.onload = function() {
+-  SimpleTest.waitForExplicitFinish();
+-
+-  Task.spawn(function* () {
+-    var { memory, client } = yield startServerAndGetSelectedTabMemory();
+-    yield memory.attach();
+-
+-    var allocs = [];
+-    var eventsFired = 0;
+-    var intervalId = null;
+-    function onAlloc () {
+-      eventsFired++;
+-    }
+-    function startAllocating () {
+-      intervalId = setInterval(() => {
+-        for (var i = 100000; --i;) {
+-          allocs.push(new Object());
+-        }
+-      }, 1);
+-    }
+-    function stopAllocating () {
+-      clearInterval(intervalId);
+-    }
+-
+-    memory.on("allocations", onAlloc);
+-
+-    yield memory.startRecordingAllocations({
+-      drainAllocationsTimeout: 10
+-    });
+-
+-    yield waitUntil(() => eventsFired > 5);
+-    ok(eventsFired > 5, "Some allocation events fired without allocating much via auto drain");
+-    yield memory.stopRecordingAllocations();
+-
+-    // Set a really high auto drain timer so we can test if
+-    // it fires on GC
+-    eventsFired = 0;
+-    var startTime = performance.now();
+-    var drainTimer = 1000000;
+-    yield memory.startRecordingAllocations({
+-      drainAllocationsTimeout: drainTimer
+-    });
+-
+-    startAllocating();
+-    yield waitUntil(() => {
+-      Cu.forceGC();
+-      return eventsFired > 1;
+-    });
+-    stopAllocating();
+-    ok(performance.now() - drainTimer < startTime, "Allocation events fired on GC before timer");
+-    yield memory.stopRecordingAllocations();
+-
+-    memory.off("allocations", onAlloc);
+-    yield memory.detach();
+-    destroyServerAndFinish(client);
+-  });
+-};
+-</script>
+-</pre>
+-</body>
+-</html>
+-- 
+2.2.1
+

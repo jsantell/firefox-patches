@@ -1,0 +1,95 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 6 Aug 2015 13:15:23 -0700
+Subject: Bug 1191153 - Print friendly GC reason names for GC markers in the performance tool. r=fitzgen
+
+diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
+index 0a2208e..cad6ebf 100644
+--- a/browser/devtools/performance/modules/logic/marker-utils.js
++++ b/browser/devtools/performance/modules/logic/marker-utils.js
+@@ -355,16 +355,30 @@ const Formatters = {
+     if ("causeName" in marker && !JS_MARKER_MAP[marker.causeName]) {
+       let cause = PREFS["show-platform-data"] ? marker.causeName : GECKO_SYMBOL;
+       return {
+         [L10N.getStr("marker.field.causeName")]: cause
+       };
+     }
+   },
+ 
++  GCFields: function (marker) {
++    let fields = Object.create(null);
++    let cause = marker.cause;
++    let label = L10N.getStr(`marker.gcreason.label.${cause}`) || cause;
++
++    fields[L10N.getStr("marker.field.causeName")] = label;
++
++    if ("nonincrementalReason" in marker) {
++      fields[L10N.getStr("marker.field.nonIncrementalCause")] = marker.nonincrementalReason;
++    }
++
++    return fields;
++  },
++
+   DOMEventFields: function (marker) {
+     let fields = Object.create(null);
+     if ("type" in marker) {
+       fields[L10N.getStr("marker.field.DOMEventType")] = marker.type;
+     }
+     if ("eventPhase" in marker) {
+       let phase;
+       if (marker.eventPhase === Ci.nsIDOMEvent.AT_TARGET) {
+diff --git a/browser/devtools/performance/modules/markers.js b/browser/devtools/performance/modules/markers.js
+index f112a37..374f70d9 100644
+--- a/browser/devtools/performance/modules/markers.js
++++ b/browser/devtools/performance/modules/markers.js
+@@ -96,20 +96,17 @@ const TIMELINE_BLUEPRINT = {
+     group: 1,
+     colorName: "graphs-yellow",
+     label: L10N.getStr("marker.label.parseXML"),
+   },
+   "GarbageCollection": {
+     group: 1,
+     colorName: "graphs-red",
+     label: Formatters.GCLabel,
+-    fields: [
+-      { property: "causeName", label: L10N.getStr("marker.field.causeName") },
+-      { property: "nonincrementalReason", label: L10N.getStr("marker.field.nonIncrementalCause") }
+-    ],
++    fields: Formatters.GCFields,
+   },
+   "nsCycleCollector::Collect": {
+     group: 1,
+     colorName: "graphs-red",
+     label: L10N.getStr("marker.label.cycleCollection"),
+     fields: Formatters.CycleCollectionFields,
+   },
+   "nsCycleCollector::ForgetSkippable": {
+diff --git a/browser/devtools/performance/test/unit/test_marker-utils.js b/browser/devtools/performance/test/unit/test_marker-utils.js
+index 6b62eef..e4c1329 100644
+--- a/browser/devtools/performance/test/unit/test_marker-utils.js
++++ b/browser/devtools/performance/test/unit/test_marker-utils.js
+@@ -34,16 +34,22 @@ add_task(function () {
+ 
+   fields = Utils.getMarkerFields({ name: "DOMEvent", eventPhase: Ci.nsIDOMEvent.AT_TARGET, type: "mouseclick" });
+   equal(fields.length, 2, "getMarkerFields() returns multiple fields when using a fields function");
+   equal(fields[0].label, "Event Type:", "getMarkerFields() correctly returns fields via function (1)");
+   equal(fields[0].value, "mouseclick", "getMarkerFields() correctly returns fields via function (2)");
+   equal(fields[1].label, "Phase:", "getMarkerFields() correctly returns fields via function (3)");
+   equal(fields[1].value, "Target", "getMarkerFields() correctly returns fields via function (4)");
+ 
++  fields = Utils.getMarkerFields({ name: "GarbageCollection", cause: "ALLOC_TRIGGER" });
++  equal(fields[0].value, "Too Many Allocations", "Uses L10N for GC reasons");
++
++  fields = Utils.getMarkerFields({ name: "GarbageCollection", cause: "NOT_A_GC_REASON" });
++  equal(fields[0].value, "NOT_A_GC_REASON", "Defaults to enum for GC reasons when not L10N'd");
++
+   equal(Utils.getMarkerFields({ name: "Javascript", causeName: "Some Platform Field" })[0].value, "(Gecko)",
+     "Correctly obfuscates JS markers when platform data is off.");
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, true);
+   equal(Utils.getMarkerFields({ name: "Javascript", causeName: "Some Platform Field" })[0].value, "Some Platform Field",
+     "Correctly deobfuscates JS markers when platform data is on.");
+ 
+   equal(Utils.getMarkerClassName("Javascript"), "Function Call",
+     "getMarkerClassName() returns correct string when defined via function");
+-- 
+2.2.1
+

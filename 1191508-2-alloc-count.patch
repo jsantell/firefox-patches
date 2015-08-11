@@ -1,0 +1,496 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 7 Aug 2015 10:50:58 -0700
+Subject: Bug 1191508 part 2: Count allocations on the client side so the count accurately reflects the selection in performance tools. r=shu
+
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index 1d05f6c..ef130839 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -237,49 +237,46 @@ function getInflatedFrameCache(frameTable) {
+ 
+ /**
+  * Get or add an inflated frame to a cache.
+  *
+  * @param object cache
+  * @param number index
+  * @param object frameTable
+  * @param object stringTable
+- * @param object allocationsTable
+  */
+-function getOrAddInflatedFrame(cache, index, frameTable, stringTable, allocationsTable) {
++function getOrAddInflatedFrame(cache, index, frameTable, stringTable) {
+   let inflatedFrame = cache[index];
+   if (inflatedFrame === null) {
+-    inflatedFrame = cache[index] = new InflatedFrame(index, frameTable, stringTable, allocationsTable);
++    inflatedFrame = cache[index] = new InflatedFrame(index, frameTable, stringTable);
+   }
+   return inflatedFrame;
+ };
+ 
+ /**
+  * An intermediate data structured used to hold inflated frames.
+  *
+  * @param number index
+  * @param object frameTable
+  * @param object stringTable
+- * @param object allocationsTable
+  */
+-function InflatedFrame(index, frameTable, stringTable, allocationsTable) {
++function InflatedFrame(index, frameTable, stringTable) {
+   const LOCATION_SLOT = frameTable.schema.location;
+   const IMPLEMENTATION_SLOT = frameTable.schema.implementation;
+   const OPTIMIZATIONS_SLOT = frameTable.schema.optimizations;
+   const LINE_SLOT = frameTable.schema.line;
+   const CATEGORY_SLOT = frameTable.schema.category;
+ 
+   let frame = frameTable.data[index];
+   let category = frame[CATEGORY_SLOT];
+   this.location = stringTable[frame[LOCATION_SLOT]];
+   this.implementation = frame[IMPLEMENTATION_SLOT];
+   this.optimizations = frame[OPTIMIZATIONS_SLOT];
+   this.line = frame[LINE_SLOT];
+   this.column = undefined;
+-  this.allocations = allocationsTable ? allocationsTable[index] : 0;
+   this.category = category;
+   this.isContent = false;
+ 
+   // Attempt to compute if this frame is a content frame, and if not,
+   // its category.
+   //
+   // Since only C++ stack frames have associated category information,
+   // attempt to generate a useful category, fallback to the one provided
+@@ -500,20 +497,20 @@ function getFrameInfo (node, options) {
+ 
+     data.selfDuration = node.youngestFrameSamples / totalSamples * totalDuration;
+     data.selfPercentage = node.youngestFrameSamples / totalSamples * 100;
+     data.totalDuration = node.samples / totalSamples * totalDuration;
+     data.totalPercentage = node.samples / totalSamples * 100;
+     data.COSTS_CALCULATED = true;
+   }
+ 
+-  if (options && options.allocations && !data.ALLOCATIONS_CALCULATED) {
+-    data.totalAllocations = node.allocations + node.calls.reduce((acc, node) => acc + node.allocations, 0);
+-    data.selfAllocations = node.allocations;
+-    data.ALLOCATIONS_CALCULATED = true;
++  if (options && options.allocations && !data.ALLOCATION_DATA_CALCULATED) {
++    data.selfCount = node.youngestFrameSamples;
++    data.totalCount = node.samples;
++    data.ALLOCATION_DATA_CALCULATED = true;
+   }
+ 
+   return data;
+ }
+ 
+ exports.getFrameInfo = getFrameInfo;
+ exports.computeIsContentAndCategory = computeIsContentAndCategory;
+ exports.parseLocation = parseLocation;
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index d7438ee..21d32cb 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -32,24 +32,24 @@ function ThreadNode(thread, options = {}) {
+   }
+   this.samples = 0;
+   this.sampleTimes = [];
+   this.youngestFrameSamples = 0;
+   this.calls = [];
+   this.duration = options.endTime - options.startTime;
+   this.nodeType = "Thread";
+ 
+-  let { samples, stackTable, frameTable, stringTable, allocationsTable } = thread;
++  let { samples, stackTable, frameTable, stringTable } = thread;
+ 
+   // Nothing to do if there are no samples.
+   if (samples.data.length === 0) {
+     return;
+   }
+ 
+-  this._buildInverted(samples, stackTable, frameTable, stringTable, allocationsTable, options);
++  this._buildInverted(samples, stackTable, frameTable, stringTable, options);
+   if (!options.invertTree) {
+     this._uninvert();
+   }
+ }
+ 
+ ThreadNode.prototype = {
+   /**
+    * Build an inverted call tree from profile samples. The format of the
+@@ -62,27 +62,24 @@ ThreadNode.prototype = {
+    * @param object samples
+    *        The raw samples array received from the backend.
+    * @param object stackTable
+    *        The table of deduplicated stacks from the backend.
+    * @param object frameTable
+    *        The table of deduplicated frames from the backend.
+    * @param object stringTable
+    *        The table of deduplicated strings from the backend.
+-   * @param object allocationsTable
+-   *        The table of allocation counts from the backend. Indexed by frame
+-   *        index.
+    * @param object options
+    *        Additional supported options
+    *          - number startTime
+    *          - number endTime
+    *          - boolean contentOnly [optional]
+    *          - boolean invertTree [optional]
+    */
+-  _buildInverted: function buildInverted(samples, stackTable, frameTable, stringTable, allocationsTable, options) {
++  _buildInverted: function buildInverted(samples, stackTable, frameTable, stringTable, options) {
+     function getOrAddFrameNode(calls, isLeaf, frameKey, inflatedFrame, isMetaCategory, leafTable) {
+       // Insert the inflated frame into the call tree at the current level.
+       let frameNode;
+ 
+       // Leaf nodes have fan out much greater than non-leaf nodes, thus the
+       // use of a hash table. Otherwise, do linear search.
+       //
+       // Note that this method is very hot, thus the manual looping over
+@@ -198,17 +195,17 @@ ThreadNode.prototype = {
+         // will make it clear to differentiate (root)->B vs (root)->A->B
+         // when a tree is inverted, a revert of bug 1147604
+         if (stackIndex === null && skipRoot) {
+           break;
+         }
+ 
+         // Inflate the frame.
+         let inflatedFrame = getOrAddInflatedFrame(inflatedFrameCache, frameIndex, frameTable,
+-                                                  stringTable, allocationsTable);
++                                                  stringTable);
+ 
+         // Compute the frame key.
+         mutableFrameKeyOptions.isRoot = stackIndex === null;
+         let frameKey = inflatedFrame.getFrameKey(mutableFrameKeyOptions);
+ 
+         // An empty frame key means this frame should be skipped.
+         if (frameKey === "") {
+           continue;
+@@ -377,21 +374,20 @@ ThreadNode.prototype = {
+  * @param number allocations
+  *        The number of memory allocations performed in this frame.
+  * @param number isContent
+  *        Whether this frame is content.
+  * @param boolean isMetaCategory
+  *        Whether or not this is a platform node that should appear as a
+  *        generalized meta category or not.
+  */
+-function FrameNode(frameKey, { location, line, category, allocations, isContent }, isMetaCategory) {
++function FrameNode(frameKey, { location, line, category, isContent }, isMetaCategory) {
+   this.key = frameKey;
+   this.location = location;
+   this.line = line;
+-  this.allocations = allocations;
+   this.youngestFrameSamples = 0;
+   this.samples = 0;
+   this.calls = [];
+   this.isContent = !!isContent;
+   this._optimizations = null;
+   this._tierData = null;
+   this._stringTable = null;
+   this.isMetaCategory = !!isMetaCategory;
+diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
+index b868801..fe9d804 100644
+--- a/browser/devtools/performance/modules/widgets/tree-view.js
++++ b/browser/devtools/performance/modules/widgets/tree-view.js
+@@ -32,20 +32,20 @@ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
+   }
+   return dataA.totalPercentage < dataB.totalPercentage ? 1 : -1;
+ };
+ 
+ const DEFAULT_AUTO_EXPAND_DEPTH = 3; // depth
+ const DEFAULT_VISIBLE_CELLS = {
+   duration: true,
+   percentage: true,
+-  allocations: false,
++  count: false,
+   selfDuration: true,
+   selfPercentage: true,
+-  selfAllocations: false,
++  selfCount: false,
+   samples: true,
+   function: true
+ };
+ 
+ const clamp = (val, min, max) => Math.max(min, Math.min(max, val));
+ const sum = vals => vals.reduce((a, b) => a + b, 0);
+ 
+ /**
+@@ -129,74 +129,55 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   /**
+    * Creates the view for this tree node.
+    * @param nsIDOMNode document
+    * @param nsIDOMNode arrowNode
+    * @return nsIDOMNode
+    */
+   _displaySelf: function(document, arrowNode) {
+     let frameInfo = this.getDisplayedData();
++    let cells = [];
+ 
+     if (this.visibleCells.duration) {
+-      var durationCell = this._createTimeCell(document, frameInfo.totalDuration);
+-    }
+-    if (this.visibleCells.selfDuration) {
+-      var selfDurationCell = this._createTimeCell(document, frameInfo.selfDuration, true);
++      cells.push(this._createTimeCell(document, frameInfo.totalDuration));
+     }
+     if (this.visibleCells.percentage) {
+-      var percentageCell = this._createExecutionCell(document, frameInfo.totalPercentage);
++      cells.push(this._createExecutionCell(document, frameInfo.totalPercentage));
+     }
+-    if (this.visibleCells.selfPercentage) {
+-      var selfPercentageCell = this._createExecutionCell(document, frameInfo.selfPercentage, true);
++    if (this.visibleCells.count) {
++      cells.push(this._createCountCell(document, frameInfo.totalCount));
++    }
++    if (this.visibleCells.selfDuration) {
++      cells.push(this._createTimeCell(document, frameInfo.selfDuration, true));
+     }
+-    if (this.visibleCells.allocations) {
+-      var allocationsCell = this._createAllocationsCell(document, frameInfo.totalAllocations);
++    if (this.visibleCells.selfPercentage) {
++      cells.push(this._createExecutionCell(document, frameInfo.selfPercentage, true));
+     }
+-    if (this.visibleCells.selfAllocations) {
+-      var selfAllocationsCell = this._createAllocationsCell(document, frameInfo.selfAllocations, true);
++    if (this.visibleCells.selfCount) {
++      cells.push(this._createCountCell(document, frameInfo.selfCount, true));
+     }
+     if (this.visibleCells.samples) {
+-      var samplesCell = this._createSamplesCell(document, frameInfo.samples);
++      cells.push(this._createSamplesCell(document, frameInfo.samples));
+     }
+     if (this.visibleCells.function) {
+-      var functionCell = this._createFunctionCell(document, arrowNode, frameInfo.name, frameInfo, this.level);
++      cells.push(this._createFunctionCell(document, arrowNode, frameInfo.name, frameInfo, this.level));
+     }
+ 
+     let targetNode = document.createElement("hbox");
+     targetNode.className = "call-tree-item";
+     targetNode.setAttribute("origin", frameInfo.isContent ? "content" : "chrome");
+     targetNode.setAttribute("category", frameInfo.categoryData.abbrev || "");
+     targetNode.setAttribute("tooltiptext", frameInfo.tooltiptext);
+ 
+     if (this.hidden) {
+       targetNode.style.display = "none";
+     }
+-    if (this.visibleCells.duration) {
+-      targetNode.appendChild(durationCell);
+-    }
+-    if (this.visibleCells.percentage) {
+-      targetNode.appendChild(percentageCell);
+-    }
+-    if (this.visibleCells.allocations) {
+-      targetNode.appendChild(allocationsCell);
+-    }
+-    if (this.visibleCells.selfDuration) {
+-      targetNode.appendChild(selfDurationCell);
+-    }
+-    if (this.visibleCells.selfPercentage) {
+-      targetNode.appendChild(selfPercentageCell);
+-    }
+-    if (this.visibleCells.selfAllocations) {
+-      targetNode.appendChild(selfAllocationsCell);
+-    }
+-    if (this.visibleCells.samples) {
+-      targetNode.appendChild(samplesCell);
+-    }
+-    if (this.visibleCells.function) {
+-      targetNode.appendChild(functionCell);
++
++    for (let i = 0; i < cells.length; i++) {
++      targetNode.appendChild(cells[i]);
+     }
+ 
+     return targetNode;
+   },
+ 
+   /**
+    * Populates this node in the call tree with the corresponding "callees".
+    * These are defined in the `frame` data source for this call view.
+@@ -234,20 +215,20 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+   _createExecutionCell: function(doc, percentage, isSelf = false) {
+     let cell = doc.createElement("description");
+     cell.className = "plain call-tree-cell";
+     cell.setAttribute("type", isSelf ? "self-percentage" : "percentage");
+     cell.setAttribute("crop", "end");
+     cell.setAttribute("value", L10N.numberWithDecimals(percentage, 2) + PERCENTAGE_UNITS);
+     return cell;
+   },
+-  _createAllocationsCell: function(doc, count, isSelf = false) {
++  _createCountCell: function(doc, count, isSelf = false) {
+     let cell = doc.createElement("description");
+     cell.className = "plain call-tree-cell";
+-    cell.setAttribute("type", isSelf ? "self-allocations" : "allocations");
++    cell.setAttribute("type", isSelf ? "self-count" : "count");
+     cell.setAttribute("crop", "end");
+     cell.setAttribute("value", count || 0);
+     return cell;
+   },
+   _createSamplesCell: function(doc, count) {
+     let cell = doc.createElement("description");
+     cell.className = "plain call-tree-cell";
+     cell.setAttribute("type", "samples");
+@@ -351,17 +332,17 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+    */
+   getDisplayedData: function() {
+     if (this._cachedDisplayedData) {
+       return this._cachedDisplayedData;
+     }
+ 
+     return this._cachedDisplayedData = this.frame.getInfo({
+       root: this.root.frame,
+-      allocations: (this.visibleCells.allocations || this.visibleCells.selfAllocations)
++      allocations: (this.visibleCells.count || this.visibleCells.selfCount)
+     });
+ 
+     /**
+      * When inverting call tree, the costs and times are dependent on position
+      * in the tree. We must only count leaf nodes with self cost, and total costs
+      * dependent on how many times the leaf node was found with a full stack path.
+      *
+      *   Total |  Self | Calls | Function
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index 3f0e38d..a019242 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -300,22 +300,22 @@
+               <!-- JS FlameChart -->
+               <hbox id="js-flamegraph-view" flex="1">
+               </hbox>
+ 
+               <!-- Memory Tree -->
+               <vbox id="memory-calltree-view" flex="1">
+                 <hbox class="call-tree-headers-container">
+                   <label class="plain call-tree-header"
+-                         type="allocations"
++                         type="count"
+                          crop="end"
+                          value="&performanceUI.table.totalAlloc;"
+                          tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
+                   <label class="plain call-tree-header"
+-                         type="self-allocations"
++                         type="self-count"
+                          crop="end"
+                          value="&performanceUI.table.selfAlloc;"
+                          tooltiptext="&performanceUI.table.selfAlloc.tooltip;"/>
+                   <label class="plain call-tree-header"
+                          type="function"
+                          crop="end"
+                          value="&performanceUI.table.function;"/>
+                 </hbox>
+diff --git a/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js b/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js
+index ce0122a..145bf83 100644
+--- a/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js
++++ b/browser/devtools/performance/test/browser_perf-columns-memory-calltree.js
+@@ -7,31 +7,31 @@
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, $, $$, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test.
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+ 
+   yield startRecording(panel);
+-  yield busyWait(1000);
++  yield busyWait(100);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   yield stopRecording(panel);
+   yield DetailsView.selectView("memory-calltree");
+   ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   testCells($, $$, {
+     "duration": false,
+     "percentage": false,
+-    "allocations": true,
++    "count": true,
+     "self-duration": false,
+     "self-percentage": false,
+-    "self-allocations": true,
++    "self-count": true,
+     "samples": false,
+     "function": true
+   });
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+diff --git a/browser/devtools/performance/views/details-memory-call-tree.js b/browser/devtools/performance/views/details-memory-call-tree.js
+index a43c68b..e3382c4 100644
+--- a/browser/devtools/performance/views/details-memory-call-tree.js
++++ b/browser/devtools/performance/views/details-memory-call-tree.js
+@@ -91,18 +91,18 @@ let MemoryCallTreeView = Heritage.extend(DetailsSubview, {
+       // Memory call trees should be sorted by allocations.
+       sortingPredicate: (a, b) => a.frame.allocations < b.frame.allocations ? 1 : -1,
+       // Call trees should only auto-expand when not inverted. Passing undefined
+       // will default to the CALL_TREE_AUTO_EXPAND depth.
+       autoExpandDepth: inverted ? 0 : undefined,
+       // Some cells like the time duration and cost percentage don't make sense
+       // for a memory allocations call tree.
+       visibleCells: {
+-        allocations: true,
+-        selfAllocations: true,
++        selfCount: true,
++        count: true,
+         function: true
+       }
+     });
+ 
+     // Bind events.
+     root.on("link", this._onLink);
+ 
+     // Pipe "focus" events to the view, mostly for tests
+diff --git a/browser/devtools/performance/views/frames-list.js b/browser/devtools/performance/views/frames-list.js
+index 0fd691b..38eeb74 100644
+--- a/browser/devtools/performance/views/frames-list.js
++++ b/browser/devtools/performance/views/frames-list.js
+@@ -96,17 +96,16 @@ let FramesListView = {
+       if (frame.location === location) {
+         // If found, set the selected class on element, remove it
+         // from previous element, and emit event "select"
+         if (this._selectedItem) {
+           this._selectedItem.classList.remove("selected");
+         }
+         this._selectedItem = target;
+         target.classList.add("selected");
+-        console.log("Emitting select on", this, frame);
+         this.emit("select", frame);
+         break;
+       }
+     }
+   },
+ 
+   toString: () => "[object FramesListView]"
+ };
+diff --git a/browser/themes/shared/devtools/performance.css b/browser/themes/shared/devtools/performance.css
+index df7d8cb..8eafa36 100644
+--- a/browser/themes/shared/devtools/performance.css
++++ b/browser/themes/shared/devtools/performance.css
+@@ -216,20 +216,20 @@
+   width: 5vw;
+ }
+ 
+ .call-tree-header[type="samples"],
+ .call-tree-cell[type="samples"] {
+   width: 4.5vw;
+ }
+ 
+-.call-tree-header[type="allocations"],
+-.call-tree-cell[type="allocations"],
+-.call-tree-header[type="self-allocations"],
+-.call-tree-cell[type="self-allocations"] {
++.call-tree-header[type="count"],
++.call-tree-cell[type="count"],
++.call-tree-header[type="self-count"],
++.call-tree-cell[type="self-count"] {
+   width: 9vw;
+ }
+ 
+ .call-tree-header[type="function"],
+ .call-tree-cell[type="function"] {
+   -moz-box-flex: 1;
+ }
+ 
+-- 
+2.2.1
+
