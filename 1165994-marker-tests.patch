@@ -1,0 +1,1183 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 19 Aug 2015 09:49:41 -0700
+Subject: Bug 1165994 - Move marker tests to server side, pull out e10s process communication helpers into their own file. r=vp
+
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 97c59a9..684cad2 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -1,29 +1,22 @@
+ [DEFAULT]
+ tags = devtools
+ subsuite = devtools
+ support-files =
+   doc_allocs.html
+-  doc_force_cc.html
+-  doc_force_gc.html
+   doc_innerHTML.html
+   doc_markers.html
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
+ # that need to be moved over to performance tool
+ 
+ [browser_aaa-run-first-leaktest.js]
+-[browser_markers-cycle-collection.js]
+-[browser_markers-gc.js]
+-[browser_markers-parse-html.js]
+-[browser_markers-styles.js]
+-[browser_markers-timestamp.js]
+ [browser_perf-allocations-to-samples.js]
+ [browser_perf-categories-js-calltree.js]
+ [browser_perf-clear-01.js]
+ [browser_perf-clear-02.js]
+ [browser_perf-columns-js-calltree.js]
+ [browser_perf-columns-memory-calltree.js]
+ [browser_perf-console-record-01.js]
+ [browser_perf-console-record-02.js]
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-04.js b/browser/devtools/performance/test/browser_perf-console-record-04.js
+index 3436bae..d0d4b82 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-04.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-04.js
+@@ -2,17 +2,17 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that the profiler can handle creation and stopping of console profiles
+  * after being opened.
+  */
+ 
+ function* spawnTest() {
+-  loadFrameScripts();
++  PMM_loadFrameScripts(gBrowser);
+   let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
+   let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView } = panel.panelWin;
+ 
+   yield consoleProfile(panel.panelWin, "rust");
+ 
+   let recordings = PerformanceController.getRecordings();
+   is(recordings.length, 1, "a recordings found in the performance panel.");
+   is(recordings[0].isConsole(), true, "recording came from console.profile.");
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-05.js b/browser/devtools/performance/test/browser_perf-console-record-05.js
+index 5abcdda..5e92ce9 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-05.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-05.js
+@@ -2,17 +2,17 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that multiple recordings with the same label (non-overlapping) appear
+  * in the recording list.
+  */
+ 
+ function* spawnTest() {
+-  loadFrameScripts();
++  PMM_loadFrameScripts(gBrowser);
+   let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
+   let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView } = panel.panelWin;
+ 
+   yield consoleProfile(panel.panelWin, "rust");
+ 
+   let recordings = PerformanceController.getRecordings();
+   is(recordings.length, 1, "a recordings found in the performance panel.");
+   is(recordings[0].isConsole(), true, "recording came from console.profile.");
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-06.js b/browser/devtools/performance/test/browser_perf-console-record-06.js
+index 263a16e..e6269ed 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-06.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-06.js
+@@ -1,17 +1,17 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that console recordings can overlap (not completely nested).
+  */
+ 
+ function* spawnTest() {
+-  loadFrameScripts();
++  PMM_loadFrameScripts(gBrowser);
+   let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
+   let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView, WaterfallView } = panel.panelWin;
+ 
+   yield consoleProfile(panel.panelWin, "rust");
+ 
+   let recordings = PerformanceController.getRecordings();
+   is(recordings.length, 1, "a recording found in the performance panel.");
+   is(RecordingsView.selectedItem.attachment, recordings[0],
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-07.js b/browser/devtools/performance/test/browser_perf-console-record-07.js
+index 9e04cf8..9aa9338 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-07.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-07.js
+@@ -3,17 +3,17 @@
+ 
+ /**
+  * Tests that a call to console.profileEnd() with no label ends the
+  * most recent console recording, and console.profileEnd() with a label that does not
+  * match any pending recordings does nothing.
+  */
+ 
+ function* spawnTest() {
+-  loadFrameScripts();
++  PMM_loadFrameScripts(gBrowser);
+   let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
+   let { $, EVENTS, gFront, PerformanceController, OverviewView, RecordingsView, WaterfallView } = panel.panelWin;
+ 
+   yield consoleProfile(panel.panelWin);
+   yield consoleProfile(panel.panelWin, "1");
+   yield consoleProfile(panel.panelWin, "2");
+ 
+   let recordings = PerformanceController.getRecordings();
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-08.js b/browser/devtools/performance/test/browser_perf-console-record-08.js
+index a328f24..0c1fb7f8 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-08.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-08.js
+@@ -17,17 +17,17 @@ function testRecordings (win, expected) {
+   recordings.forEach((recording, i) => {
+     ok(recording.isConsole() == !!(expected[i] & C), `recording ${i+1} has expected console state.`);
+     ok(recording.isRecording() == !!(expected[i] & R), `recording ${i+1} has expected console state.`);
+     ok((recording === current) == !!(expected[i] & S), `recording ${i+1} has expected selected state.`);
+   });
+ }
+ 
+ function* spawnTest() {
+-  loadFrameScripts();
++  PMM_loadFrameScripts(gBrowser);
+   let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController, OverviewView, RecordingsView, WaterfallView } = panel.panelWin;
+ 
+   info("Starting console.profile()...");
+   yield consoleProfile(panel.panelWin);
+   testRecordings(panel.panelWin, [C+S+R]);
+   info("Starting manual recording...");
+   yield startRecording(panel);
+diff --git a/browser/devtools/performance/test/browser_perf-console-record-09.js b/browser/devtools/performance/test/browser_perf-console-record-09.js
+index 35a4522..34ac156 100644
+--- a/browser/devtools/performance/test/browser_perf-console-record-09.js
++++ b/browser/devtools/performance/test/browser_perf-console-record-09.js
+@@ -2,17 +2,17 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that an error is not thrown when clearing out the recordings if there's
+  * an in-progress console profile.
+  */
+ 
+ function* spawnTest() {
+-  loadFrameScripts();
++  PMM_loadFrameScripts(gBrowser);
+   let { target, toolbox, panel } = yield initPerformance(SIMPLE_URL);
+   let win = panel.panelWin;
+   let { gFront, PerformanceController } = win;
+ 
+   info("Starting console.profile()...");
+   yield consoleProfile(win);
+   yield PerformanceController.clearRecordings();
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-recording-notices-03.js b/browser/devtools/performance/test/browser_perf-recording-notices-03.js
+index 763c711..a3a4c82 100644
+--- a/browser/devtools/performance/test/browser_perf-recording-notices-03.js
++++ b/browser/devtools/performance/test/browser_perf-recording-notices-03.js
+@@ -2,17 +2,17 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that recording notices display buffer status when available,
+  * and can switch between different recordings with the correct buffer information
+  * displayed.
+  */
+ function* spawnTest() {
+-  loadFrameScripts();
++  PMM_loadFrameScripts(gBrowser);
+   // Keep it large, but still get to 1% relatively quick
+   Services.prefs.setIntPref(PROFILER_BUFFER_SIZE_PREF, 1000000);
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { gFront, EVENTS, $, PerformanceController, PerformanceView, RecordingsView } = panel.panelWin;
+ 
+   // Set a fast profiler-status update interval
+   yield gFront.setProfilerStatusInterval(10);
+ 
+diff --git a/browser/devtools/performance/test/browser_perf-recording-notices-04.js b/browser/devtools/performance/test/browser_perf-recording-notices-04.js
+index 5edffb6..4ce928f 100644
+--- a/browser/devtools/performance/test/browser_perf-recording-notices-04.js
++++ b/browser/devtools/performance/test/browser_perf-recording-notices-04.js
+@@ -5,17 +5,17 @@
+  * Tests that when a recording overlaps the circular buffer, that
+  * a class is assigned to the recording notices.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { gFront, EVENTS, $, PerformanceController, PerformanceView } = panel.panelWin;
+ 
+   // Make sure the profiler module is stopped so we can set a new buffer limit
+-  PMM_loadProfilerScripts(gBrowser);
++  PMM_loadFrameScripts(gBrowser);
+   yield PMM_stopProfiler();
+   Services.prefs.setIntPref(PROFILER_BUFFER_SIZE_PREF, 1000);
+   // Set a fast profiler-status update interval
+   yield gFront.setProfilerStatusInterval(10);
+ 
+   yield startRecording(panel);
+ 
+   let percent = 0;
+diff --git a/browser/devtools/performance/test/browser_perf-ui-recording.js b/browser/devtools/performance/test/browser_perf-ui-recording.js
+index 644f862..17d6c20 100644
+--- a/browser/devtools/performance/test/browser_perf-ui-recording.js
++++ b/browser/devtools/performance/test/browser_perf-ui-recording.js
+@@ -6,17 +6,17 @@
+  * in the UI.
+  */
+ let WAIT_TIME = 10;
+ 
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+   let { EVENTS, PerformanceController } = panel.panelWin;
+   let front = panel.panelWin.gFront;
+-  PMM_loadProfilerScripts(gBrowser);
++  PMM_loadFrameScripts(gBrowser);
+ 
+   ok(!(yield PMM_isProfilerActive()),
+     "The built-in profiler module should not have been automatically started.");
+ 
+   yield startRecording(panel);
+   busyWait(WAIT_TIME); // allow the profiler module to sample some cpu activity
+ 
+   ok((yield PMM_isProfilerActive()),
+diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
+index ff5e61c..353e226 100644
+--- a/browser/devtools/performance/test/head.js
++++ b/browser/devtools/performance/test/head.js
+@@ -13,18 +13,19 @@ let { TargetFactory } = require("devtools/framework/target");
+ let { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ const DevToolsUtils = require("devtools/toolkit/DevToolsUtils");
+ let { DebuggerServer } = require("devtools/server/main");
+ let { console } = require("resource://gre/modules/devtools/Console.jsm");
+ let { merge } = require("sdk/util/object");
+ let { createPerformanceFront } = require("devtools/server/actors/performance");
+ let RecordingUtils = require("devtools/toolkit/performance/utils");
+ let {
+-  PMM_loadProfilerScripts, PMM_isProfilerActive, PMM_stopProfiler, sendProfilerCommand
+-} = require("devtools/toolkit/shared/profiler");
++  PMM_loadFrameScripts, PMM_isProfilerActive, PMM_stopProfiler,
++  sendProfilerCommand, consoleMethod
++} = require("devtools/toolkit/performance/process-communication");
+ 
+ let mm = null;
+ 
+ const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js"
+ const EXAMPLE_URL = "http://example.com/browser/browser/devtools/performance/test/";
+ const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
+ const MARKERS_URL = EXAMPLE_URL + "doc_markers.html";
+ const ALLOCS_URL = EXAMPLE_URL + "doc_allocs.html";
+@@ -283,31 +284,16 @@ function idleWait(time) {
+ }
+ 
+ function busyWait(time) {
+   let start = Date.now();
+   let stack;
+   while (Date.now() - start < time) { stack = Components.stack; }
+ }
+ 
+-function consoleMethod (...args) {
+-  if (!mm) {
+-    throw new Error("`loadFrameScripts()` must be called before using frame scripts.");
+-  }
+-  // Terrible ugly hack -- this gets stringified when it uses the
+-  // message manager, so an undefined arg in `console.profileEnd()`
+-  // turns into a stringified "null", which is terrible. This method is only used
+-  // for test helpers, so swap out the argument if its undefined with an empty string.
+-  // Differences between empty string and undefined are tested on the front itself.
+-  if (args[1] == null) {
+-    args[1] = "";
+-  }
+-  mm.sendAsyncMessage("devtools:test:console", args);
+-}
+-
+ function* consoleProfile(win, label) {
+   let profileStart = once(win.PerformanceController, win.EVENTS.RECORDING_STARTED);
+   consoleMethod("profile", label);
+   yield profileStart;
+ }
+ 
+ function* consoleProfileEnd(win, label) {
+   let ended = once(win.PerformanceController, win.EVENTS.RECORDING_STOPPED);
+diff --git a/toolkit/devtools/performance/moz.build b/toolkit/devtools/performance/moz.build
+index 2f766a7..62472ad 100644
+--- a/toolkit/devtools/performance/moz.build
++++ b/toolkit/devtools/performance/moz.build
+@@ -1,16 +1,17 @@
+ # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
+   'io.js',
++  'process-communication.js',
+   'recorder.js',
+   'utils.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.performance.legacy += [
+   'legacy/actors.js',
+   'legacy/compatibility.js',
+   'legacy/front.js',
+diff --git a/toolkit/devtools/performance/process-communication.js b/toolkit/devtools/performance/process-communication.js
+new file mode 100644
+index 0000000..4afadba
+--- /dev/null
++++ b/toolkit/devtools/performance/process-communication.js
+@@ -0,0 +1,73 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++/**
++ * The following functions are used in testing to control and inspect
++ * the nsIProfiler in child process content. These should be called from
++ * the parent process.
++ */
++
++const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
++loader.lazyRequireGetter(this, "Task", "resource://gre/modules/Task.jsm", true);
++loader.lazyRequireGetter(this, "uuid", "sdk/util/uuid", true);
++
++let mm = null;
++
++exports.consoleMethod = function (...args) {
++  if (!mm) {
++    throw new Error("`PMM_loadFrameScripts()` must be called before using frame scripts.");
++  }
++
++  // Terrible ugly hack -- this gets stringified when it uses the
++  // message manager, so an undefined arg in `console.profileEnd()`
++  // turns into a stringified "null", which is terrible. This method is only used
++  // for test helpers, so swap out the argument if its undefined with an empty string.
++  // Differences between empty string and undefined are tested on the front itself.
++  if (args[1] == null) {
++    args[1] = "";
++  }
++  mm.sendAsyncMessage("devtools:test:console", args);
++};
++
++exports.PMM_isProfilerActive = function () {
++  return sendProfilerCommand("IsActive");
++};
++
++exports.PMM_stopProfiler = function () {
++  return Task.spawn(function*() {
++    let isActive = (yield sendProfilerCommand("IsActive")).isActive;
++    if (isActive) {
++      return sendProfilerCommand("StopProfiler");
++    }
++  });
++};
++
++exports.PMM_loadFrameScripts = function (gBrowser) {
++  mm = gBrowser.selectedBrowser.messageManager;
++  mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
++};
++
++function sendProfilerCommand (method, args=[]) {
++  if (!mm) {
++    throw new Error("`PMM_loadFrameScripts()` must be called when using MessageManager.");
++  }
++
++  let id = uuid().toString();
++  return new Promise(resolve => {
++    mm.addMessageListener("devtools:test:profiler:response", handler);
++    mm.sendAsyncMessage("devtools:test:profiler", { method, args, id });
++
++    function handler ({ data }) {
++      if (id !== data.id) {
++        return;
++      }
++
++      mm.removeMessageListener("devtools:test:profiler:response", handler);
++      resolve(data.data);
++    }
++  });
++}
++exports.sendProfilerCommand = sendProfilerCommand;
+diff --git a/toolkit/devtools/server/tests/browser/browser.ini b/toolkit/devtools/server/tests/browser/browser.ini
+index 42120cc..eeb61d6 100644
+--- a/toolkit/devtools/server/tests/browser/browser.ini
++++ b/toolkit/devtools/server/tests/browser/browser.ini
+@@ -1,14 +1,17 @@
+ [DEFAULT]
+ tags = devtools
+ subsuite = devtools
+ support-files =
+   head.js
+   animation.html
++  doc_force_cc.html
++  doc_force_gc.html
++  doc_innerHTML.html
+   doc_perf.html
+   navigate-first.html
+   navigate-second.html
+   storage-dynamic-windows.html
+   storage-listings.html
+   storage-unsecured-iframe.html
+   storage-updates.html
+   storage-secured-iframe.html
+@@ -41,16 +44,21 @@ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are
+ [browser_canvasframe_helper_03.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_canvasframe_helper_04.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_canvasframe_helper_05.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_canvasframe_helper_06.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
++[browser_markers-cycle-collection.js]
++[browser_markers-gc.js]
++[browser_markers-parse-html.js]
++[browser_markers-styles.js]
++[browser_markers-timestamp.js]
+ [browser_navigateEvents.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_perf-legacy-front-01.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_perf-legacy-front-02.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_perf-legacy-front-03.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+diff --git a/browser/devtools/performance/test/browser_markers-cycle-collection.js b/toolkit/devtools/server/tests/browser/browser_markers-cycle-collection.js
+similarity index 25%
+rename from browser/devtools/performance/test/browser_markers-cycle-collection.js
+rename to toolkit/devtools/server/tests/browser/browser_markers-cycle-collection.js
+index e1f3536..8a523f3 100644
+--- a/browser/devtools/performance/test/browser_markers-cycle-collection.js
++++ b/toolkit/devtools/server/tests/browser/browser_markers-cycle-collection.js
+@@ -1,54 +1,32 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Test that we get "nsCycleCollector::Collect" and
+  * "nsCycleCollector::ForgetSkippable" markers when we force cycle collection.
+  */
+ 
+-const TEST_URL = EXAMPLE_URL + "doc_force_cc.html"
+-
+-function waitForMarkerType(front, type) {
+-  info("Waiting for marker of type = " + type);
+-  const { promise, resolve } = Promise.defer();
+-
+-  const handler = (name, data) => {
+-    if (name !== "markers") {
+-      return;
+-    }
+-
+-    let markers = data.markers;
+-    info("Got markers: " + JSON.stringify(markers, null, 2));
+-    if (markers.some(m => m.name === type)) {
+-      ok(true, "Found marker of type = " + type);
+-      front.off("timeline-data", handler);
+-      resolve();
+-    }
+-  };
+-  front.on("timeline-data", handler);
+-
+-  return promise;
+-}
+-
+-function* spawnTest () {
++const { PerformanceFront } = require("devtools/server/actors/performance");
++
++add_task(function*() {
+   // This test runs very slowly on linux32 debug EC2 instances.
+   requestLongerTimeout(2);
+ 
+-  let { target, front } = yield initBackend(TEST_URL);
+-
+-  let rec = yield front.startRecording({ withMarkers: true, withTicks: true });
++  let doc = yield addTab(MAIN_DOMAIN + "doc_force_cc.html");
+ 
+-  yield Promise.all([
+-    waitForMarkerType(front, "nsCycleCollector::Collect"),
+-    waitForMarkerType(front, "nsCycleCollector::ForgetSkippable")
+-  ]);
+-  ok(true, "Got expected cycle collection events");
++  initDebuggerServer();
++  let client = new DebuggerClient(DebuggerServer.connectPipe());
++  let form = yield connectDebuggerClient(client);
++  let front = PerformanceFront(client, form);
++  yield front.connect();
++  let rec = yield front.startRecording({ withMarkers: true });
+ 
++  let markers = yield waitForMarkerType(front, ["nsCycleCollector::Collect", "nsCycleCollector::ForgetSkippable"])
+   yield front.stopRecording(rec);
+ 
+-  // Destroy the front before removing tab to ensure no
+-  // lingering requests
+-  yield front.destroy();
+-  yield removeTab(target.tab);
+-  finish();
+-}
++  ok(markers.some(m => m.name === "nsCycleCollector::Collect"), "got some nsCycleCollector::Collect markers");
++  ok(markers.some(m => m.name === "nsCycleCollector::ForgetSkippable"), "got some nsCycleCollector::Collect markers");
++
++  yield closeDebuggerClient(client);
++  gBrowser.removeCurrentTab();
++});
+diff --git a/browser/devtools/performance/test/browser_markers-gc.js b/toolkit/devtools/server/tests/browser/browser_markers-gc.js
+similarity index 15%
+rename from browser/devtools/performance/test/browser_markers-gc.js
+rename to toolkit/devtools/server/tests/browser/browser_markers-gc.js
+index 839028e..548ec2b 100644
+--- a/browser/devtools/performance/test/browser_markers-gc.js
++++ b/toolkit/devtools/server/tests/browser/browser_markers-gc.js
+@@ -1,48 +1,30 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Test that we get a "GarbageCollection" marker.
++ * Test that we get "GarbageCollection" markers.
+  */
+ 
+-const TIME_CLOSE_TO = 10000;
+-const TEST_URL = EXAMPLE_URL + "doc_force_gc.html"
++const { PerformanceFront } = require("devtools/server/actors/performance");
++const MARKER_NAME = "GarbageCollection";
+ 
+-function* spawnTest () {
+-  let { target, front } = yield initBackend(TEST_URL);
+-  let markers;
++add_task(function*() {
++  let doc = yield addTab(MAIN_DOMAIN + "doc_force_gc.html");
+ 
+-  front.on("timeline-data", handler);
+-  let model = yield front.startRecording({ withTicks: true });
++  initDebuggerServer();
++  let client = new DebuggerClient(DebuggerServer.connectPipe());
++  let form = yield connectDebuggerClient(client);
++  let front = PerformanceFront(client, form);
++  yield front.connect();
++  let rec = yield front.startRecording({ withMarkers: true });
+ 
+-  yield waitUntil(() => {
+-    return !!markers;
+-  }, 100);
++  let markers = yield waitForMarkerType(front, MARKER_NAME);
++  yield front.stopRecording(rec);
+ 
+-  front.off("timeline-data", handler);
+-  yield front.stopRecording(model);
+-
+-  info(`Got ${markers.length} markers.`);
+-
+-  ok(markers.every(({name}) => name === "GarbageCollection"), "All markers found are GC markers");
+-  ok(markers.length > 0, "found atleast one GC marker");
+-  ok(markers.every(({start, end}) => typeof start === "number" && start > 0 && start < end),
+-    "All markers have a start time between the valid range.");
+-  ok(markers.every(({end}) => typeof end === "number"),
+-    "All markers have an end time between the valid range.");
++  ok(markers.some(m => m.name === MARKER_NAME), `got some ${MARKER_NAME} markers`);
+   ok(markers.every(({causeName}) => typeof causeName === "string"),
+     "All markers have a causeName.");
+ 
+-  // Destroy the front before removing tab to ensure no
+-  // lingering requests
+-  yield front.destroy();
+-  yield removeTab(target.tab);
+-  finish();
+-
+-  function handler (name, m) {
+-    m = m.markers;
+-    if (name === "markers" && m[0].name === "GarbageCollection") {
+-      markers = m;
+-    }
+-  }
+-}
++  yield closeDebuggerClient(client);
++  gBrowser.removeCurrentTab();
++});
+diff --git a/browser/devtools/performance/test/browser_markers-parse-html.js b/toolkit/devtools/server/tests/browser/browser_markers-parse-html.js
+similarity index 11%
+rename from browser/devtools/performance/test/browser_markers-parse-html.js
+rename to toolkit/devtools/server/tests/browser/browser_markers-parse-html.js
+index 6aa627c..476f62c 100644
+--- a/browser/devtools/performance/test/browser_markers-parse-html.js
++++ b/toolkit/devtools/server/tests/browser/browser_markers-parse-html.js
+@@ -1,46 +1,28 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Test that we get a "Parse HTML" marker when a page sets innerHTML.
++ * Test that we get "Parse HTML" markers.
+  */
+ 
+-const TEST_URL = EXAMPLE_URL + "doc_innerHTML.html"
++const { PerformanceFront } = require("devtools/server/actors/performance");
++const MARKER_NAME = "Parse HTML";
+ 
+-function* spawnTest () {
+-  let { target, front } = yield initBackend(TEST_URL);
+-  let markers = [];
++add_task(function*() {
++  let doc = yield addTab(MAIN_DOMAIN + "doc_innerHTML.html");
+ 
+-  front.on("timeline-data", handler);
+-  let model = yield front.startRecording({ withTicks: true });
++  initDebuggerServer();
++  let client = new DebuggerClient(DebuggerServer.connectPipe());
++  let form = yield connectDebuggerClient(client);
++  let front = PerformanceFront(client, form);
++  yield front.connect();
++  let rec = yield front.startRecording({ withMarkers: true });
+ 
+-  yield waitUntil(() => {
+-    return markers.length;
+-  }, 100);
++  let markers = yield waitForMarkerType(front, MARKER_NAME);
++  yield front.stopRecording(rec);
+ 
+-  front.off("timeline-data", handler);
+-  yield front.stopRecording(model);
++  ok(markers.some(m => m.name === MARKER_NAME), `got some ${MARKER_NAME} markers`);
+ 
+-  info(`Got ${markers.length} markers.`);
+-
+-  ok(markers.every(({name}) => name === "Parse HTML"), "All markers found are Parse HTML markers");
+-
+-  // Destroy the front before removing tab to ensure no
+-  // lingering requests
+-  yield front.destroy();
+-  yield removeTab(target.tab);
+-  finish();
+-
+-  function handler (name, data) {
+-    if (name !== "markers") {
+-      return;
+-    }
+-
+-    data.markers.forEach(marker => {
+-      info(marker.name);
+-      if (marker.name === "Parse HTML") {
+-        markers.push(marker);
+-      }
+-    });
+-  }
+-}
++  yield closeDebuggerClient(client);
++  gBrowser.removeCurrentTab();
++});
+diff --git a/browser/devtools/performance/test/browser_markers-styles.js b/toolkit/devtools/server/tests/browser/browser_markers-styles.js
+similarity index 16%
+rename from browser/devtools/performance/test/browser_markers-styles.js
+rename to toolkit/devtools/server/tests/browser/browser_markers-styles.js
+index 4e5e347..c447e67 100644
+--- a/browser/devtools/performance/test/browser_markers-styles.js
++++ b/toolkit/devtools/server/tests/browser/browser_markers-styles.js
+@@ -1,41 +1,33 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Test that we get a "Styles" marker with the correct meta.
++ * Test that we get "Styles" markers with correct meta.
+  */
+ 
++const { PerformanceFront } = require("devtools/server/actors/performance");
++const MARKER_NAME = "Styles";
+ 
+-function* spawnTest () {
+-  let { target, front } = yield initBackend(SIMPLE_URL);
+-  let markers = [];
++add_task(function*() {
++  let doc = yield addTab(MAIN_DOMAIN + "doc_perf.html");
+ 
+-  front.on("timeline-data", handler);
+-  let model = yield front.startRecording({ withTicks: true });
++  initDebuggerServer();
++  let client = new DebuggerClient(DebuggerServer.connectPipe());
++  let form = yield connectDebuggerClient(client);
++  let front = PerformanceFront(client, form);
++  yield front.connect();
++  let rec = yield front.startRecording({ withMarkers: true });
+ 
+-  yield waitUntil(() => {
++  let markers = yield waitForMarkerType(front, MARKER_NAME, function (markers) {
+     return markers.some(({restyleHint}) => restyleHint != void 0);
+   });
+ 
+-  front.off("timeline-data", handler);
+-  yield front.stopRecording(model);
++  yield front.stopRecording(rec);
+ 
+-  info(`Got ${markers.length} markers.`);
++  ok(markers.some(m => m.name === MARKER_NAME), `got some ${MARKER_NAME} markers`);
++  ok(markers.some(({restyleHint}) => restyleHint != void 0),
++    "Some markers have a restyleHint.");
+ 
+-  ok(markers.every(({name}) => name === "Styles"), "All markers found are Styles markers");
+-  ok(markers.length, "found some restyle markers");
+-
+-  ok(markers.some(({restyleHint}) => restyleHint != void 0), "some markers have a restyleHint property");
+-
+-  // Destroy the front before removing tab to ensure no
+-  // lingering requests
+-  yield front.destroy();
+-  yield removeTab(target.tab);
+-  finish();
+-
+-  function handler (name, data) {
+-    if (name === "markers") {
+-      markers = markers.concat(data.markers.filter(marker => marker.name === "Styles"));
+-    }
+-  }
+-}
++  yield closeDebuggerClient(client);
++  gBrowser.removeCurrentTab();
++});
+diff --git a/browser/devtools/performance/test/browser_markers-timestamp.js b/toolkit/devtools/server/tests/browser/browser_markers-timestamp.js
+similarity index 48%
+rename from browser/devtools/performance/test/browser_markers-timestamp.js
+rename to toolkit/devtools/server/tests/browser/browser_markers-timestamp.js
+index f389fee..ff6a0db 100644
+--- a/browser/devtools/performance/test/browser_markers-timestamp.js
++++ b/toolkit/devtools/server/tests/browser/browser_markers-timestamp.js
+@@ -1,48 +1,40 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Test that we get a "TimeStamp" marker.
+  */
+ 
+-const TIME_CLOSE_TO = 10000;
++const { PerformanceFront } = require("devtools/server/actors/performance");
++const { consoleMethod, PMM_loadFrameScripts } = require("devtools/toolkit/performance/process-communication");
++const MARKER_NAME = "TimeStamp";
+ 
+-function* spawnTest () {
+-  let { target, front } = yield initBackend(SIMPLE_URL);
+-  loadFrameScripts();
+-  let markers = [];
++add_task(function*() {
++  let doc = yield addTab(MAIN_DOMAIN + "doc_perf.html");
+ 
+-  front.on("timeline-data", handler);
+-  let model = yield front.startRecording({ withTicks: true });
++  initDebuggerServer();
++  let client = new DebuggerClient(DebuggerServer.connectPipe());
++  let form = yield connectDebuggerClient(client);
++  let front = PerformanceFront(client, form);
++  yield front.connect();
++  let rec = yield front.startRecording({ withMarkers: true });
+ 
++  PMM_loadFrameScripts(gBrowser);
+   consoleMethod("timeStamp");
+   consoleMethod("timeStamp", "myLabel");
+-  yield waitUntil(() => { return markers.length === 2; }, 100);
+ 
+-  front.off("timeline-data", handler);
+-  yield front.stopRecording(model);
++  let markers = yield waitForMarkerType(front, MARKER_NAME, markers => markers.length >= 2);
+ 
+-  info(`Got ${markers.length} markers.`);
+-
+-  let maxMarkerTime = model._timelineStartTime + model.getDuration() + TIME_CLOSE_TO;
++  yield front.stopRecording(rec);
+ 
+   ok(markers.every(({stack}) => typeof stack === "number"), "All markers have stack references.");
+   ok(markers.every(({name}) => name === "TimeStamp"), "All markers found are TimeStamp markers");
+   ok(markers.length === 2, "found 2 TimeStamp markers");
+   ok(markers.every(({start, end}) => typeof start === "number" && start === end),
+     "All markers have equal start and end times");
+   is(markers[0].causeName, void 0, "Unlabeled timestamps have an empty causeName");
+   is(markers[1].causeName, "myLabel", "Labeled timestamps have correct causeName");
+ 
+-  // Destroy the front before removing tab to ensure no
+-  // lingering requests
+-  yield front.destroy();
+-  yield removeTab(target.tab);
+-  finish();
+-
+-  function handler (name, data) {
+-    if (name === "markers") {
+-      markers = markers.concat(data.markers.filter(marker => marker.name === "TimeStamp"));
+-    }
+-  }
+-}
++  yield closeDebuggerClient(client);
++  gBrowser.removeCurrentTab();
++});
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js b/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js
+index a43ad9a..f66c1a8 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js
+@@ -4,17 +4,16 @@
+ /**
+  * Test basic functionality of PerformanceFront with mock memory and timeline actors.
+  */
+ 
+ let WAIT_TIME = 100;
+ 
+ const { TargetFactory } = require("devtools/framework/target");
+ const { LegacyPerformanceFront } = require("devtools/toolkit/performance/legacy/front");
+-const { defer } = require("sdk/core/promise");
+ const { merge } = require("sdk/util/object");
+ 
+ add_task(function*() {
+   let tab = yield getTab(MAIN_DOMAIN + "doc_perf.html");
+   let target = TargetFactory.forTab(tab);
+   yield target.makeRemote();
+ 
+   merge(target, {
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-02.js b/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-02.js
+index 68117c9..bc96b10 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-02.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-02.js
+@@ -4,17 +4,16 @@
+ /**
+  * Test basic functionality of PerformanceFront without a mock Timeline actor.
+  */
+ 
+ let WAIT_TIME = 100;
+ 
+ const { TargetFactory } = require("devtools/framework/target");
+ const { LegacyPerformanceFront } = require("devtools/toolkit/performance/legacy/front");
+-const { defer } = require("sdk/core/promise");
+ const { merge } = require("sdk/util/object");
+ 
+ add_task(function*() {
+   let tab = yield getTab(MAIN_DOMAIN + "doc_perf.html");
+   let target = TargetFactory.forTab(tab);
+   yield target.makeRemote();
+ 
+   merge(target, {
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js b/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js
+index b83f22f..bdf9ac6 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js
+@@ -3,28 +3,28 @@
+ 
+ /**
+  * Tests if the profiler connection front does not activate the built-in
+  * profiler module if not necessary, and doesn't deactivate it when
+  * a recording is stopped.
+  */
+ 
+ const { PerformanceFront } = require("devtools/server/actors/performance");
+-const { PMM_isProfilerActive, PMM_stopProfiler, PMM_loadProfilerScripts } = require("devtools/toolkit/shared/profiler");
++const { sendProfilerCommand, PMM_isProfilerActive, PMM_stopProfiler, PMM_loadFrameScripts } = require("devtools/toolkit/performance/process-communication");
+ 
+ add_task(function*() {
+   let doc = yield addTab(MAIN_DOMAIN + "doc_perf.html");
+ 
+   initDebuggerServer();
+   let client = new DebuggerClient(DebuggerServer.connectPipe());
+   let form = yield connectDebuggerClient(client);
+   let front = PerformanceFront(client, form);
+   yield front.connect();
+ 
+-  PMM_loadProfilerScripts(gBrowser);
++  PMM_loadFrameScripts(gBrowser);
+ 
+   ok(!(yield PMM_isProfilerActive()),
+     "The built-in profiler module should not have been automatically started.");
+ 
+   let rec = yield front.startRecording();
+   yield front.stopRecording(rec);
+   ok((yield PMM_isProfilerActive()),
+     "The built-in profiler module should still be active (1).");
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js b/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js
+index f50f776..ee039e5 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js
+@@ -2,36 +2,36 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the built-in profiler module doesn't deactivate when the toolbox
+  * is destroyed if there are other consumers using it.
+  */
+ 
+ const { PerformanceFront } = require("devtools/server/actors/performance");
+-const { PMM_isProfilerActive, PMM_stopProfiler, PMM_loadProfilerScripts } = require("devtools/toolkit/shared/profiler");
++const { sendProfilerCommand, PMM_isProfilerActive, PMM_stopProfiler, PMM_loadFrameScripts } = require("devtools/toolkit/performance/process-communication");
+ 
+ add_task(function*() {
+   yield addTab(MAIN_DOMAIN + "doc_perf.html");
+   initDebuggerServer();
+   let client = new DebuggerClient(DebuggerServer.connectPipe());
+   let form = yield connectDebuggerClient(client);
+   let firstFront = PerformanceFront(client, form);
+   yield firstFront.connect();
+ 
+-  PMM_loadProfilerScripts(gBrowser);
++  PMM_loadFrameScripts(gBrowser);
+ 
+   yield firstFront.startRecording();
+ 
+   yield addTab(MAIN_DOMAIN + "doc_perf.html");
+   let client2 = new DebuggerClient(DebuggerServer.connectPipe());
+   let form2 = yield connectDebuggerClient(client2);
+   let secondFront = PerformanceFront(client2, form2);
+   yield secondFront.connect();
+-  PMM_loadProfilerScripts(gBrowser);
++  PMM_loadFrameScripts(gBrowser);
+ 
+   yield secondFront.startRecording();
+ 
+   // Manually teardown the tabs so we can check profiler status
+   yield closeDebuggerClient(client2);
+   ok((yield PMM_isProfilerActive()),
+     "The built-in profiler module should still be active.");
+ 
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js b/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js
+index eeb3714..0c4c243 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js
+@@ -4,21 +4,21 @@
+ /**
+  * Tests if the built-in profiler module is not reactivated if no other
+  * consumer was using it over the remote debugger protocol, and ensures
+  * that the actor will work properly even in such cases (e.g. the Gecko Profiler
+  * addon was installed and automatically activated the profiler module).
+  */
+ 
+ const { PerformanceFront } = require("devtools/server/actors/performance");
+-const { sendProfilerCommand, PMM_isProfilerActive, PMM_stopProfiler, PMM_loadProfilerScripts } = require("devtools/toolkit/shared/profiler");
++const { sendProfilerCommand, PMM_isProfilerActive, PMM_stopProfiler, PMM_loadFrameScripts } = require("devtools/toolkit/performance/process-communication");
+ 
+ add_task(function*() {
+   // Ensure the profiler is already running when the test starts.
+-  PMM_loadProfilerScripts(gBrowser);
++  PMM_loadFrameScripts(gBrowser);
+   let ENTRIES = 1000000;
+   let INTERVAL = 1;
+   let FEATURES = ["js"];
+   yield sendProfilerCommand("StartProfiler", [ENTRIES, INTERVAL, FEATURES, FEATURES.length]);
+ 
+   ok((yield PMM_isProfilerActive()),
+     "The built-in profiler module should still be active.");
+ 
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js b/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js
+index 7ea3668..accdc0d 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js
+@@ -1,17 +1,16 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Test functionality of real time markers.
+  */
+ 
+ const { PerformanceFront } = require("devtools/server/actors/performance");
+-const { defer } = require("sdk/core/promise");
+ 
+ add_task(function*() {
+   let doc = yield addTab(MAIN_DOMAIN + "doc_perf.html");
+ 
+   initDebuggerServer();
+   let client = new DebuggerClient(DebuggerServer.connectPipe());
+   let form = yield connectDebuggerClient(client);
+   let front = PerformanceFront(client, form);
+diff --git a/browser/devtools/performance/test/doc_force_cc.html b/toolkit/devtools/server/tests/browser/doc_force_cc.html
+similarity index 100%
+rename from browser/devtools/performance/test/doc_force_cc.html
+rename to toolkit/devtools/server/tests/browser/doc_force_cc.html
+diff --git a/browser/devtools/performance/test/doc_force_gc.html b/toolkit/devtools/server/tests/browser/doc_force_gc.html
+similarity index 100%
+rename from browser/devtools/performance/test/doc_force_gc.html
+rename to toolkit/devtools/server/tests/browser/doc_force_gc.html
+diff --git a/toolkit/devtools/server/tests/browser/doc_innerHTML.html b/toolkit/devtools/server/tests/browser/doc_innerHTML.html
+new file mode 100644
+index 0000000..84439b1
+--- /dev/null
++++ b/toolkit/devtools/server/tests/browser/doc_innerHTML.html
+@@ -0,0 +1,20 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Performance tool + innerHTML test page</title>
++  </head>
++
++  <body>
++    <script type="text/javascript">
++    window.test = function () {
++      document.body.innerHTML = "<h1>LOL</h1>";
++    };
++    setInterval(window.test, 100);
++    </script>
++  </body>
++
++</html>
+diff --git a/toolkit/devtools/server/tests/browser/head.js b/toolkit/devtools/server/tests/browser/head.js
+index 5e1229e..501f6c1 100644
+--- a/toolkit/devtools/server/tests/browser/head.js
++++ b/toolkit/devtools/server/tests/browser/head.js
+@@ -6,16 +6,17 @@ const Cc = Components.classes;
+ const Ci = Components.interfaces;
+ const Cu = Components.utils;
+ 
+ Cu.import("resource://gre/modules/Services.jsm");
+ const {console} = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+ const {require} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ const {DebuggerClient} = require("devtools/toolkit/client/main");
+ const {DebuggerServer} = require("devtools/server/main");
++const {defer} = require("sdk/core/promise");
+ const DevToolsUtils = require("devtools/toolkit/DevToolsUtils");
+ 
+ const PATH = "browser/toolkit/devtools/server/tests/browser/";
+ const MAIN_DOMAIN = "http://test1.example.org/" + PATH;
+ const ALT_DOMAIN = "http://sectest1.example.org/" + PATH;
+ const ALT_DOMAIN_SECURED = "https://sectest1.example.org:443/" + PATH;
+ 
+ // All tests are asynchronous.
+@@ -34,17 +35,17 @@ let addTab = Task.async(function* (url) {
+   content.location = url;
+   yield loaded;
+ 
+   info("URL '" + url + "' loading complete");
+ 
+   yield new Promise(resolve => {
+     let isBlank = url == "about:blank";
+     waitForFocus(resolve, content, isBlank);
+-  });;
++  });
+ 
+   return tab.linkedBrowser.contentWindow.document;
+ });
+ 
+ function initDebuggerServer() {
+   try {
+     // Sometimes debugger server does not get destroyed correctly by previous
+     // tests.
+@@ -163,9 +164,35 @@ function waitUntil(predicate, interval = 10) {
+   }
+   return new Promise(resolve => {
+     setTimeout(function() {
+       waitUntil(predicate).then(() => resolve(true));
+     }, interval);
+   });
+ }
+ 
+-// EventUtils just doesn't work!
++function waitForMarkerType(front, types, predicate) {
++  types = [].concat(types);
++  predicate = predicate || function(){ return true; };
++  let filteredMarkers = [];
++  let { promise, resolve } = defer();
++
++  info("Waiting for markers of type: " + types);
++
++  function handler (name, data) {
++    if (name !== "markers") {
++      return;
++    }
++
++    let markers = data.markers;
++    info("Got markers: " + JSON.stringify(markers, null, 2));
++
++    filteredMarkers = filteredMarkers.concat(markers.filter(m => types.indexOf(m.name) !== -1));
++
++    if (types.every(t => filteredMarkers.some(m => m.name === t)) && predicate(filteredMarkers)) {
++      front.off("timeline-data", handler);
++      resolve(filteredMarkers);
++    }
++  }
++  front.on("timeline-data", handler);
++
++  return promise;
++}
+diff --git a/toolkit/devtools/shared/profiler.js b/toolkit/devtools/shared/profiler.js
+index ed1d60b..f059cce 100644
+--- a/toolkit/devtools/shared/profiler.js
++++ b/toolkit/devtools/shared/profiler.js
+@@ -1,23 +1,21 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cc, Ci, Cu } = require("chrome");
+ const Services = require("Services");
+ const { Class } = require("sdk/core/heritage");
+-const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
+ loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
+ loader.lazyRequireGetter(this, "DevToolsUtils", "devtools/toolkit/DevToolsUtils.js");
+ loader.lazyRequireGetter(this, "DeferredTask", "resource://gre/modules/DeferredTask.jsm", true);
+ loader.lazyRequireGetter(this, "Task", "resource://gre/modules/Task.jsm", true);
+-loader.lazyRequireGetter(this, "uuid", "sdk/util/uuid", true);
+ 
+ // Events piped from system observers to Profiler instances.
+ const PROFILER_SYSTEM_EVENTS = [
+   "console-api-profiler",
+   "profiler-started",
+   "profiler-stopped"
+ ];
+ 
+@@ -512,54 +510,8 @@ function sanitizeHandler (handler, identifier) {
+     subject = JSON.parse(JSON.stringify(subject, cycleBreaker));
+     data = (data && !Cu.isXrayWrapper(data) && data.wrappedJSObject) || data;
+     data = JSON.parse(JSON.stringify(data, cycleBreaker));
+ 
+     // Pass in clean data to the underlying handler
+     return handler.call(this, subject, topic, data);
+   }, identifier);
+ }
+-
+-/**
+- * The following functions are used in testing to control and inspect
+- * the nsIProfiler in child process content. These should be called from
+- * the parent process.
+- */
+-let mm = null;
+-exports.PMM_isProfilerActive = function () {
+-  return sendProfilerCommand("IsActive");
+-}
+-
+-exports.PMM_stopProfiler = function () {
+-  return Task.spawn(function*() {
+-    let isActive = (yield sendProfilerCommand("IsActive")).isActive;
+-    if (isActive) {
+-      return sendProfilerCommand("StopProfiler");
+-    }
+-  });
+-}
+-
+-exports.PMM_loadProfilerScripts = function (gBrowser) {
+-  mm = gBrowser.selectedBrowser.messageManager;
+-  mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
+-};
+-
+-function sendProfilerCommand (method, args=[]) {
+-  if (!mm) {
+-    throw new Error("`loadFrameScripts()` must be called when using MessageManager.");
+-  }
+-
+-  let id = uuid().toString();
+-  return new Promise(resolve => {
+-    mm.addMessageListener("devtools:test:profiler:response", handler);
+-    mm.sendAsyncMessage("devtools:test:profiler", { method, args, id });
+-
+-    function handler ({ data }) {
+-      if (id !== data.id) {
+-        return;
+-      }
+-
+-      mm.removeMessageListener("devtools:test:profiler:response", handler);
+-      resolve(data.data);
+-    }
+-  });
+-}
+-exports.sendProfilerCommand = sendProfilerCommand;
+-- 
+2.2.1
+

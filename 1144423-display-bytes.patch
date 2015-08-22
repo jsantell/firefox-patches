@@ -1,0 +1,746 @@
+From 61b658265abb11df74cd903a21b14955dda3421d Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 10 Aug 2015 17:58:58 -0700
+Subject: [PATCH 1/2] u
+
+---
+ .../performance/modules/logic/tree-model.js         | 21 +++++++++++++++++++++
+ toolkit/devtools/performance/utils.js               |  9 +++++----
+ 2 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index 21d32cb..0318f9a 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -103,16 +103,17 @@ ThreadNode.prototype = {
+         calls.push(frameNode);
+       }
+ 
+       return frameNode;
+     }
+ 
+     const SAMPLE_STACK_SLOT = samples.schema.stack;
+     const SAMPLE_TIME_SLOT = samples.schema.time;
++    const SAMPLE_BYTESIZE_SLOT = samples.schema.size;
+ 
+     const STACK_PREFIX_SLOT = stackTable.schema.prefix;
+     const STACK_FRAME_SLOT = stackTable.schema.frame;
+ 
+     const InflatedFrame = FrameUtils.InflatedFrame;
+     const getOrAddInflatedFrame = FrameUtils.getOrAddInflatedFrame;
+ 
+     let samplesData = samples.data;
+@@ -132,16 +133,17 @@ ThreadNode.prototype = {
+       isRoot: false,
+       isLeaf: false,
+       isMetaCategoryOut: false
+     };
+ 
+     for (let i = 0; i < samplesData.length; i++) {
+       let sample = samplesData[i];
+       let sampleTime = sample[SAMPLE_TIME_SLOT];
++      let byteSize = sample[SAMPLE_BYTESIZE_SLOT];
+ 
+       // A sample's end time is considered to be its time of sampling. Its
+       // start time is the sampling time of the previous sample.
+       //
+       // Thus, we compare sampleTime <= start instead of < to filter out
+       // samples that end exactly at the start time.
+       if (!sampleTime || sampleTime <= startTime || sampleTime > endTime) {
+         continue;
+@@ -222,16 +224,20 @@ ThreadNode.prototype = {
+                                           mutableFrameKeyOptions.isMetaCategoryOut,
+                                           leafTable);
+         if (isLeaf) {
+           frameNode.youngestFrameSamples++;
+           if (inflatedFrame.optimizations) {
+             frameNode._addOptimizations(inflatedFrame.optimizations, inflatedFrame.implementation,
+                                         sampleTime, stringTable);
+           }
++
++          if (byteSize) {
++            frameNode._addByteSize(byteSize);
++          }
+         }
+ 
+         // Don't overcount flattened recursive frames.
+         if (!shouldFlatten) {
+           frameNode.samples++;
+         }
+ 
+         prevFrameKey = frameKey;
+@@ -388,16 +394,17 @@ function FrameNode(frameKey, { location, line, category, isContent }, isMetaCate
+   this.calls = [];
+   this.isContent = !!isContent;
+   this._optimizations = null;
+   this._tierData = null;
+   this._stringTable = null;
+   this.isMetaCategory = !!isMetaCategory;
+   this.category = category;
+   this.nodeType = "Frame";
++  this.byteSize = 0;
+ }
+ 
+ FrameNode.prototype = {
+   /**
+    * Take optimization data observed for this frame.
+    *
+    * @param object optimizationSite
+    *               Any JIT optimization information attached to the current
+@@ -424,32 +431,46 @@ FrameNode.prototype = {
+       if (this._tierData === null) {
+         this._tierData = [];
+       }
+       // Record type of implementation used and the sample time
+       this._tierData.push({ implementation, time });
+     }
+   },
+ 
++  /**
++   * Takes a bytesize for an allocation sample and adds it to the total
++   * for this frame.
++   *
++   * @param {number} size
++   */
++  _addByteSize: function (size) {
++    this.byteSize += size;
++  },
++
+   _clone: function (samples) {
+     let newNode = new FrameNode(this.key, this, this.isMetaCategory);
+     newNode._merge(this, samples);
+     return newNode;
+   },
+ 
+   _merge: function (otherNode, samples) {
+     if (this === otherNode) {
+       return;
+     }
+ 
+     this.samples += samples;
+     if (otherNode.youngestFrameSamples > 0) {
+       this.youngestFrameSamples += samples;
+     }
+ 
++    if (otherNode.byteSize > 0) {
++      this.byteSize += otherNode.byteSize;
++    }
++
+     if (otherNode._optimizations) {
+       let opts = this._optimizations;
+       if (opts === null) {
+         opts = this._optimizations = [];
+         this._stringTable = otherNode._stringTable;
+       }
+       let otherOpts = otherNode._optimizations;
+       for (let i = 0; i < otherOpts.length; i++) {
+diff --git a/toolkit/devtools/performance/utils.js b/toolkit/devtools/performance/utils.js
+index 4261f40..21210cc 100644
+--- a/toolkit/devtools/performance/utils.js
++++ b/toolkit/devtools/performance/utils.js
+@@ -152,27 +152,27 @@ let gProfileThreadFromAllocationCache = new WeakMap();
+ 
+ /**
+  * Converts allocation data from the memory actor to something that follows
+  * the same structure as the samples data received from the profiler.
+  *
+  * @see MemoryActor.prototype.getAllocations for more information.
+  *
+  * @param object allocations
+- *        A list of { sites, timestamps, frames, counts } arrays.
++ *        A list of { sites, timestamps, frames, sizes } arrays.
+  * @return object
+  *         The "profile" describing the allocations log.
+  */
+ function getProfileThreadFromAllocations(allocations) {
+   let cached = gProfileThreadFromAllocationCache.get(allocations);
+   if (cached) {
+     return cached;
+   }
+ 
+-  let { sites, timestamps, frames } = allocations;
++  let { sites, timestamps, frames, sizes } = allocations;
+   let uniqueStrings = new UniqueStrings();
+ 
+   // Convert allocation frames to the the stack and frame tables expected by
+   // the profiler format.
+   //
+   // Since the allocations log is already presented as a tree, we would be
+   // wasting time if we jumped through the same hoops as deflateProfile below
+   // and instead use the existing structure of the allocations log to build up
+@@ -234,24 +234,24 @@ function getProfileThreadFromAllocations(allocations) {
+ 
+     frameTable[i] = [uniqueStrings.getOrAddStringIndex(location)];
+   }
+ 
+   let samples = new Array(sites.length);
+   let writePos = 0;
+   for (let i = 0; i < sites.length; i++) {
+     // Schema:
+-    //   [stack, time]
++    //   [stack, time, sizes]
+     //
+     // Originally, sites[i] indexes into the frames array. Note that in the
+     // loop above, stackTable[sites[i]] and frames[sites[i]] index the same
+     // information.
+     let stackIndex = sites[i];
+     if (frames[stackIndex]) {
+-      samples[writePos++] = [stackIndex, timestamps[i]];
++      samples[writePos++] = [stackIndex, timestamps[i], sizes[i]];
+     }
+   }
+   samples.length = writePos;
+ 
+   let thread = {
+     name: "allocations",
+     samples: allocationsWithSchema(samples),
+     stackTable: stackTableWithSchema(stackTable),
+@@ -264,16 +264,17 @@ function getProfileThreadFromAllocations(allocations) {
+ }
+ 
+ function allocationsWithSchema (data) {
+   let slot = 0;
+   return {
+     schema: {
+       stack: slot++,
+       time: slot++,
++      byteSize: slot++,
+     },
+     data: data
+   };
+ }
+ 
+ /**
+  * Deduplicates a profile by deduplicating stacks, frames, and strings.
+  *
+-- 
+2.2.1
+
+
+From fa6850577064b480a46489c438aa509f7ca2b464 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 13 Aug 2015 17:03:20 -0400
+Subject: [PATCH 2/2] u
+
+---
+ .../performance/modules/logic/frame-utils.js       |  7 ++
+ .../performance/modules/logic/tree-model.js        | 40 ++++-----
+ .../performance/modules/widgets/tree-view.js       | 96 +++++++++++-----------
+ browser/devtools/performance/performance.xul       | 38 ++++++++-
+ .../server/actors/performance-recording.js         |  2 +
+ 5 files changed, 111 insertions(+), 72 deletions(-)
+
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index ef130839..f8d82c1 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -489,27 +489,34 @@ function getFrameInfo (node, options) {
+   }
+ 
+   // If a root specified, calculate the relative costs in the context of
+   // this call tree. The cached store may already have this, but generate
+   // if it does not.
+   if (options && options.root && !data.COSTS_CALCULATED) {
+     let totalSamples = options.root.samples;
+     let totalDuration = options.root.duration;
++    let totalBytes = options.root.totalBytes;
+ 
+     data.selfDuration = node.youngestFrameSamples / totalSamples * totalDuration;
+     data.selfPercentage = node.youngestFrameSamples / totalSamples * 100;
+     data.totalDuration = node.samples / totalSamples * totalDuration;
+     data.totalPercentage = node.samples / totalSamples * 100;
+     data.COSTS_CALCULATED = true;
+   }
+ 
+   if (options && options.allocations && !data.ALLOCATION_DATA_CALCULATED) {
+     data.selfCount = node.youngestFrameSamples;
+     data.totalCount = node.samples;
++    data.selfCountPercentage = node.youngestFrameSamples / totalSamples * 100;
++    data.totalCountPercentage = node.samples / totalSamples * 100;
++    data.selfSize = node.youngestFrameByteSize;
++    data.totalSize = node.byteSize;
++    data.selfSizePercentage = node.youngestFrameByteSize / totalBytes * 100;;
++    data.totalSizePercentage = node.byteSize / totalBytes * 100;
+     data.ALLOCATION_DATA_CALCULATED = true;
+   }
+ 
+   return data;
+ }
+ 
+ exports.getFrameInfo = getFrameInfo;
+ exports.computeIsContentAndCategory = computeIsContentAndCategory;
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index 0318f9a..ecb27c9 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -31,16 +31,18 @@ function ThreadNode(thread, options = {}) {
+     throw new Error("ThreadNode requires both `startTime` and `endTime`.");
+   }
+   this.samples = 0;
+   this.sampleTimes = [];
+   this.youngestFrameSamples = 0;
+   this.calls = [];
+   this.duration = options.endTime - options.startTime;
+   this.nodeType = "Thread";
++  // Total bytesize of all allocations if enabled
++  this.totalBytes = 0;
+ 
+   let { samples, stackTable, frameTable, stringTable } = thread;
+ 
+   // Nothing to do if there are no samples.
+   if (samples.data.length === 0) {
+     return;
+   }
+ 
+@@ -226,51 +228,54 @@ ThreadNode.prototype = {
+         if (isLeaf) {
+           frameNode.youngestFrameSamples++;
+           if (inflatedFrame.optimizations) {
+             frameNode._addOptimizations(inflatedFrame.optimizations, inflatedFrame.implementation,
+                                         sampleTime, stringTable);
+           }
+ 
+           if (byteSize) {
+-            frameNode._addByteSize(byteSize);
++            frameNode.youngestFrameByteSize += byteSize;
+           }
+         }
+ 
+         // Don't overcount flattened recursive frames.
+         if (!shouldFlatten) {
+           frameNode.samples++;
++          if (byteSize) {
++            frameNode.byteSize += byteSize;
++          }
+         }
+ 
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
+       }
+ 
+       this.samples++;
+       this.sampleTimes.push(sampleTime);
+     }
+   },
+ 
+   /**
+    * Uninverts the call tree after its having been built.
+    */
+   _uninvert: function uninvert() {
+-    function mergeOrAddFrameNode(calls, node, samples) {
++    function mergeOrAddFrameNode(calls, node, samples, size) {
+       // Unlike the inverted call tree, we don't use a root table for the top
+       // level, as in general, there are many fewer entry points than
+       // leaves. Instead, linear search is used regardless of level.
+       for (let i = 0; i < calls.length; i++) {
+         if (calls[i].key === node.key) {
+           let foundNode = calls[i];
+-          foundNode._merge(node, samples);
++          foundNode._merge(node, samples, size);
+           return foundNode.calls;
+         }
+       }
+-      let copy = node._clone(samples);
++      let copy = node._clone(samples, size);
+       calls.push(copy);
+       return copy.calls;
+     }
+ 
+     let workstack = [{ node: this, level: 0 }];
+     let spine = [];
+     let entry;
+ 
+@@ -279,21 +284,23 @@ ThreadNode.prototype = {
+ 
+     // Walk depth-first and keep the current spine (e.g., callstack).
+     while (entry = workstack.pop()) {
+       spine[entry.level] = entry;
+ 
+       let node = entry.node;
+       let calls = node.calls;
+       let callSamples = 0;
++      let totalSize = 0;
+ 
+       // Continue the depth-first walk.
+       for (let i = 0; i < calls.length; i++) {
+         workstack.push({ node: calls[i], level: entry.level + 1 });
+         callSamples += calls[i].samples;
++        totalSize += calls[i].byteSize;
+       }
+ 
+       // The sample delta is used to distinguish stacks.
+       //
+       // Suppose we have the following stack samples:
+       //
+       //   A -> B
+       //   A -> C
+@@ -308,22 +315,23 @@ ThreadNode.prototype = {
+       // with A.samples = 3, B.samples = 1, C.samples = 1.
+       //
+       // A is distinguished as being its own stack because
+       // A.samples - (B.samples + C.samples) > 0.
+       //
+       // Note that bottoming out is a degenerate where callSamples = 0.
+ 
+       let samplesDelta = node.samples - callSamples;
++      let byteSizeDelta = node.byteSize - totalSize;
+       if (samplesDelta > 0) {
+         // Reverse the spine and add them to the uninverted call tree.
+         let uninvertedCalls = rootCalls;
+         for (let level = entry.level; level > 0; level--) {
+           let callee = spine[level];
+-          uninvertedCalls = mergeOrAddFrameNode(uninvertedCalls, callee.node, samplesDelta);
++          uninvertedCalls = mergeOrAddFrameNode(uninvertedCalls, callee.node, samplesDelta, byteSizeDelta);
+         }
+       }
+     }
+ 
+     // Replace the toplevel calls with rootCalls, which now contains the
+     // uninverted roots.
+     this.calls = rootCalls;
+   },
+@@ -395,16 +403,17 @@ function FrameNode(frameKey, { location, line, category, isContent }, isMetaCate
+   this.isContent = !!isContent;
+   this._optimizations = null;
+   this._tierData = null;
+   this._stringTable = null;
+   this.isMetaCategory = !!isMetaCategory;
+   this.category = category;
+   this.nodeType = "Frame";
+   this.byteSize = 0;
++  this.youngestFrameByteSize = 0;
+ }
+ 
+ FrameNode.prototype = {
+   /**
+    * Take optimization data observed for this frame.
+    *
+    * @param object optimizationSite
+    *               Any JIT optimization information attached to the current
+@@ -431,44 +440,35 @@ FrameNode.prototype = {
+       if (this._tierData === null) {
+         this._tierData = [];
+       }
+       // Record type of implementation used and the sample time
+       this._tierData.push({ implementation, time });
+     }
+   },
+ 
+-  /**
+-   * Takes a bytesize for an allocation sample and adds it to the total
+-   * for this frame.
+-   *
+-   * @param {number} size
+-   */
+-  _addByteSize: function (size) {
+-    this.byteSize += size;
+-  },
+-
+-  _clone: function (samples) {
++  _clone: function (samples, size) {
+     let newNode = new FrameNode(this.key, this, this.isMetaCategory);
+-    newNode._merge(this, samples);
++    newNode._merge(this, samples, size);
+     return newNode;
+   },
+ 
+-  _merge: function (otherNode, samples) {
++  _merge: function (otherNode, samples, size) {
+     if (this === otherNode) {
+       return;
+     }
+ 
+     this.samples += samples;
++    this.byteSize += size;
+     if (otherNode.youngestFrameSamples > 0) {
+       this.youngestFrameSamples += samples;
+     }
+ 
+-    if (otherNode.byteSize > 0) {
+-      this.byteSize += otherNode.byteSize;
++    if (otherNode.youngestFrameByteSize > 0) {
++      this.youngestFrameByteSize += otherNode.youngestFrameByteSize;
+     }
+ 
+     if (otherNode._optimizations) {
+       let opts = this._optimizations;
+       if (opts === null) {
+         opts = this._optimizations = [];
+         this._stringTable = otherNode._stringTable;
+       }
+diff --git a/browser/devtools/performance/modules/widgets/tree-view.js b/browser/devtools/performance/modules/widgets/tree-view.js
+index fe9d804..7c54c2c 100644
+--- a/browser/devtools/performance/modules/widgets/tree-view.js
++++ b/browser/devtools/performance/modules/widgets/tree-view.js
+@@ -15,16 +15,45 @@ const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeI
+ 
+ const MILLISECOND_UNITS = L10N.getStr("table.ms");
+ const PERCENTAGE_UNITS = L10N.getStr("table.percentage");
+ const URL_LABEL_TOOLTIP = L10N.getStr("table.url.tooltiptext");
+ const VIEW_OPTIMIZATIONS_TOOLTIP = L10N.getStr("table.view-optimizations.tooltiptext");
+ 
+ const CALL_TREE_INDENTATION = 16; // px
+ 
++/**
++ * Definitions for rendering cells. Triads of class name, property name from
++ * `frame.getInfo()`, and a formatter function.
++ */
++const CELLS = {
++  duration:       ["duration", "totalDuration", FORMATTERS.TIME],
++  percentage:     ["percentage", "totalPercentage", FORMATTERS.PERCENT],
++  selfDuration:   ["self-duration", "selfDuration", FORMATTERS.TIME],
++  selfPercentage: ["self-percentage", "selfPercentage", FORMATTERS.PERCENT],
++  samples:        ["samples", "samples", FORMATTERS.NUMBER],
++
++  selfSize:            ["self-size", "selfSize", FORMATTERS.BYTESIZE],
++  selfSizePercentage:  ["self-size-percentage", "selfSizePercentage", FORMATTERS.PERCENT],
++  selfCount:           ["self-count", "selfCount", FORMATTERS.BYTESIZE],
++  selfCountPercentage: ["self-count-percentage", "selfCountPercentage", FORMATTERS.PERCENT],
++  size:                ["size", "totalSize", FORMATTERS.BYTESIZE],
++  sizePercentage:      ["size-percentage", "totalSizePercentage", FORMATTERS.PERCENT],
++  count:               ["count", "totalCount", FORMATTERS.BYTESIZE],
++  countPercentage:     ["count-percentage", "totalCountPercentage", FORMATTERS.PERCENT],
++};
++const CELL_TYPES = Object.keys(CELLS);
++
++// Used for rendering values in cells
++const FORMATTERS = {
++  TIME: (value) => L10N.numberWithDecimals(value, 2) + " " + MILLISECOND_UNITS,
++  PERCENT: (value) => L10N.numberWithDecimals(value, 2) + " " + PERCENTAGE_UNITS,
++  NUMBER: (value) => value || 0,
++};
++
+ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
+   let dataA = frameA.getDisplayedData();
+   let dataB = frameB.getDisplayedData();
+   if (this.inverted) {
+     // Invert trees, sort by selfPercentage, and then totalPercentage
+     if (dataA.selfPercentage === dataB.selfPercentage) {
+       return dataA.totalPercentage < dataB.totalPercentage ? 1 : -1;
+     }
+@@ -32,22 +61,30 @@ const DEFAULT_SORTING_PREDICATE = (frameA, frameB) => {
+   }
+   return dataA.totalPercentage < dataB.totalPercentage ? 1 : -1;
+ };
+ 
+ const DEFAULT_AUTO_EXPAND_DEPTH = 3; // depth
+ const DEFAULT_VISIBLE_CELLS = {
+   duration: true,
+   percentage: true,
+-  count: false,
+   selfDuration: true,
+   selfPercentage: true,
+-  selfCount: false,
+   samples: true,
+   function: true
++
++  // allocation columns
++  count: false,
++  selfCount: false,
++  size: false,
++  selfSize: false,
++  countPercentage: false,
++  selfCountPercentage: false,
++  sizePercentage: false,
++  selfSizePercentage: false,
+ };
+ 
+ const clamp = (val, min, max) => Math.max(min, Math.min(max, val));
+ const sum = vals => vals.reduce((a, b) => a + b, 0);
+ 
+ /**
+  * An item in a call tree view, which looks like this:
+  *
+@@ -131,37 +168,24 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+    * @param nsIDOMNode document
+    * @param nsIDOMNode arrowNode
+    * @return nsIDOMNode
+    */
+   _displaySelf: function(document, arrowNode) {
+     let frameInfo = this.getDisplayedData();
+     let cells = [];
+ 
+-    if (this.visibleCells.duration) {
+-      cells.push(this._createTimeCell(document, frameInfo.totalDuration));
+-    }
+-    if (this.visibleCells.percentage) {
+-      cells.push(this._createExecutionCell(document, frameInfo.totalPercentage));
+-    }
+-    if (this.visibleCells.count) {
+-      cells.push(this._createCountCell(document, frameInfo.totalCount));
+-    }
+-    if (this.visibleCells.selfDuration) {
+-      cells.push(this._createTimeCell(document, frameInfo.selfDuration, true));
+-    }
+-    if (this.visibleCells.selfPercentage) {
+-      cells.push(this._createExecutionCell(document, frameInfo.selfPercentage, true));
+-    }
+-    if (this.visibleCells.selfCount) {
+-      cells.push(this._createCountCell(document, frameInfo.selfCount, true));
+-    }
+-    if (this.visibleCells.samples) {
+-      cells.push(this._createSamplesCell(document, frameInfo.samples));
++    for (let type of CELL_TYPES) {
++      if (this.visibleCells[type]) {
++        // Inline for speed, but pass in the formatted value via
++        // cell definition, as well as the element type.
++        cells.push(this._createCell(document, CELLS[type][2](frameInfo[CELLS[type][1]]), CELLS[type[0]]);
++      }
+     }
++
+     if (this.visibleCells.function) {
+       cells.push(this._createFunctionCell(document, arrowNode, frameInfo.name, frameInfo, this.level));
+     }
+ 
+     let targetNode = document.createElement("hbox");
+     targetNode.className = "call-tree-item";
+     targetNode.setAttribute("origin", frameInfo.isContent ? "content" : "chrome");
+     targetNode.setAttribute("category", frameInfo.categoryData.abbrev || "");
+@@ -199,48 +223,24 @@ CallView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
+     // if no other sorting predicate was specified on this on the root item.
+     children.sort(this.sortingPredicate.bind(this));
+   },
+ 
+   /**
+    * Functions creating each cell in this call view.
+    * Invoked by `_displaySelf`.
+    */
+-  _createTimeCell: function(doc, duration, isSelf = false) {
++  _createCell: function (doc, value, type) {
+     let cell = doc.createElement("description");
+     cell.className = "plain call-tree-cell";
+-    cell.setAttribute("type", isSelf ? "self-duration" : "duration");
++    cell.setAttribute("type", type);
+     cell.setAttribute("crop", "end");
+     cell.setAttribute("value", L10N.numberWithDecimals(duration, 2) + " " + MILLISECOND_UNITS);
+     return cell;
+   },
+-  _createExecutionCell: function(doc, percentage, isSelf = false) {
+-    let cell = doc.createElement("description");
+-    cell.className = "plain call-tree-cell";
+-    cell.setAttribute("type", isSelf ? "self-percentage" : "percentage");
+-    cell.setAttribute("crop", "end");
+-    cell.setAttribute("value", L10N.numberWithDecimals(percentage, 2) + PERCENTAGE_UNITS);
+-    return cell;
+-  },
+-  _createCountCell: function(doc, count, isSelf = false) {
+-    let cell = doc.createElement("description");
+-    cell.className = "plain call-tree-cell";
+-    cell.setAttribute("type", isSelf ? "self-count" : "count");
+-    cell.setAttribute("crop", "end");
+-    cell.setAttribute("value", count || 0);
+-    return cell;
+-  },
+-  _createSamplesCell: function(doc, count) {
+-    let cell = doc.createElement("description");
+-    cell.className = "plain call-tree-cell";
+-    cell.setAttribute("type", "samples");
+-    cell.setAttribute("crop", "end");
+-    cell.setAttribute("value", count || 0);
+-    return cell;
+-  },
+   _createFunctionCell: function(doc, arrowNode, frameName, frameInfo, frameLevel) {
+     let cell = doc.createElement("hbox");
+     cell.className = "call-tree-cell";
+     cell.style.MozMarginStart = (frameLevel * CALL_TREE_INDENTATION) + "px";
+     cell.setAttribute("type", "function");
+     cell.appendChild(arrowNode);
+ 
+     // Render optimization link to JIT view if the frame
+diff --git a/browser/devtools/performance/performance.xul b/browser/devtools/performance/performance.xul
+index a019242..19c8e71 100644
+--- a/browser/devtools/performance/performance.xul
++++ b/browser/devtools/performance/performance.xul
+@@ -300,25 +300,55 @@
+               <!-- JS FlameChart -->
+               <hbox id="js-flamegraph-view" flex="1">
+               </hbox>
+ 
+               <!-- Memory Tree -->
+               <vbox id="memory-calltree-view" flex="1">
+                 <hbox class="call-tree-headers-container">
+                   <label class="plain call-tree-header"
+-                         type="count"
++                         type="self-size"
++                         crop="end"
++                         value="Self Bytes"
++                         tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
++                  <label class="plain call-tree-header"
++                         type="self-size-percentage"
+                          crop="end"
+-                         value="&performanceUI.table.totalAlloc;"
++                         value="Self Bytes %"
+                          tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
+                   <label class="plain call-tree-header"
+                          type="self-count"
+                          crop="end"
+-                         value="&performanceUI.table.selfAlloc;"
+-                         tooltiptext="&performanceUI.table.selfAlloc.tooltip;"/>
++                         value="Self Count"
++                         tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
++                  <label class="plain call-tree-header"
++                         type="self-count-percentage"
++                         crop="end"
++                         value="Self Count %"
++                         tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
++                  <label class="plain call-tree-header"
++                         type="size"
++                         crop="end"
++                         value="Total Size"
++                         tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
++                  <label class="plain call-tree-header"
++                         type="size-percentage"
++                         crop="end"
++                         value="Total Size %"
++                         tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
++                  <label class="plain call-tree-header"
++                         type="count"
++                         crop="end"
++                         value="Total Count"
++                         tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
++                  <label class="plain call-tree-header"
++                         type="count-percentage"
++                         crop="end"
++                         value="Total Count %"
++                         tooltiptext="&performanceUI.table.totalAlloc.tooltip;"/>
+                   <label class="plain call-tree-header"
+                          type="function"
+                          crop="end"
+                          value="&performanceUI.table.function;"/>
+                 </hbox>
+                 <vbox class="call-tree-cells-container" flex="1"/>
+               </vbox>
+ 
+diff --git a/toolkit/devtools/server/actors/performance-recording.js b/toolkit/devtools/server/actors/performance-recording.js
+index 8c32ee3..34eb6c4 100644
+--- a/toolkit/devtools/server/actors/performance-recording.js
++++ b/toolkit/devtools/server/actors/performance-recording.js
+@@ -331,22 +331,24 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+         break;
+       }
+       // Accumulate allocation sites into an array.
+       case "allocations": {
+         if (!config.withAllocations) { break; }
+         let {
+           allocations: sites,
+           allocationsTimestamps: timestamps,
++          allocationSizes: sizes,
+           frames,
+         } = data;
+ 
+         RecordingUtils.offsetAndScaleTimestamps(timestamps, this._startTime);
+         RecordingUtils.pushAll(this._allocations.sites, sites);
+         RecordingUtils.pushAll(this._allocations.timestamps, timestamps);
+         RecordingUtils.pushAll(this._allocations.frames, frames);
++        RecordingUtils.pushAll(this._allocations.sizes, sizes);
+         break;
+       }
+     }
+   },
+ 
+   toString: () => "[object PerformanceRecordingFront]"
+ }, PerformanceRecordingCommon));
+-- 
+2.2.1
+

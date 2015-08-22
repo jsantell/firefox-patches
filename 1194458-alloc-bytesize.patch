@@ -1,0 +1,1196 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 19 Aug 2015 18:04:50 -0700
+Subject: Bug 1194458 - Calculate bytesize costs per frame for allocations in the performance tools. r=vp,shu
+
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index ef130839..ab4144b 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -483,33 +483,44 @@ function getFrameInfo (node, options) {
+ 
+     // Frame name (function location or some meta information)
+     data.name = data.isMetaCategory ? data.categoryData.label : data.functionName || "";
+     data.tooltiptext = data.isMetaCategory ? data.categoryData.label : node.location || "";
+ 
+     gFrameData.set(node, data);
+   }
+ 
++  // If no options specified, we can't calculate relative values, abort here
++  if (!options) {
++    return data;
++  }
++
+   // If a root specified, calculate the relative costs in the context of
+   // this call tree. The cached store may already have this, but generate
+   // if it does not.
++  let totalSamples = options.root.samples;
++  let totalDuration = options.root.duration;
+   if (options && options.root && !data.COSTS_CALCULATED) {
+-    let totalSamples = options.root.samples;
+-    let totalDuration = options.root.duration;
+-
+     data.selfDuration = node.youngestFrameSamples / totalSamples * totalDuration;
+     data.selfPercentage = node.youngestFrameSamples / totalSamples * 100;
+     data.totalDuration = node.samples / totalSamples * totalDuration;
+     data.totalPercentage = node.samples / totalSamples * 100;
+     data.COSTS_CALCULATED = true;
+   }
+ 
+   if (options && options.allocations && !data.ALLOCATION_DATA_CALCULATED) {
++    let totalBytes = options.root.totalBytes;
+     data.selfCount = node.youngestFrameSamples;
+     data.totalCount = node.samples;
++    data.selfCountPercentage = node.youngestFrameSamples / totalSamples * 100;
++    data.totalCountPercentage = node.samples / totalSamples * 100;
++    data.selfSize = node.youngestFrameByteSize;
++    data.totalSize = node.byteSize;
++    data.selfSizePercentage = node.youngestFrameByteSize / totalBytes * 100;
++    data.totalSizePercentage = node.byteSize / totalBytes * 100;
+     data.ALLOCATION_DATA_CALCULATED = true;
+   }
+ 
+   return data;
+ }
+ 
+ exports.getFrameInfo = getFrameInfo;
+ exports.computeIsContentAndCategory = computeIsContentAndCategory;
+diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
+index 21d32cb..b2b2727 100644
+--- a/browser/devtools/performance/modules/logic/tree-model.js
++++ b/browser/devtools/performance/modules/logic/tree-model.js
+@@ -31,16 +31,18 @@ function ThreadNode(thread, options = {}) {
+     throw new Error("ThreadNode requires both `startTime` and `endTime`.");
+   }
+   this.samples = 0;
+   this.sampleTimes = [];
+   this.youngestFrameSamples = 0;
+   this.calls = [];
+   this.duration = options.endTime - options.startTime;
+   this.nodeType = "Thread";
++  // Total bytesize of all allocations if enabled
++  this.totalBytes = 0;
+ 
+   let { samples, stackTable, frameTable, stringTable } = thread;
+ 
+   // Nothing to do if there are no samples.
+   if (samples.data.length === 0) {
+     return;
+   }
+ 
+@@ -103,16 +105,17 @@ ThreadNode.prototype = {
+         calls.push(frameNode);
+       }
+ 
+       return frameNode;
+     }
+ 
+     const SAMPLE_STACK_SLOT = samples.schema.stack;
+     const SAMPLE_TIME_SLOT = samples.schema.time;
++    const SAMPLE_BYTESIZE_SLOT = samples.schema.size;
+ 
+     const STACK_PREFIX_SLOT = stackTable.schema.prefix;
+     const STACK_FRAME_SLOT = stackTable.schema.frame;
+ 
+     const InflatedFrame = FrameUtils.InflatedFrame;
+     const getOrAddInflatedFrame = FrameUtils.getOrAddInflatedFrame;
+ 
+     let samplesData = samples.data;
+@@ -132,16 +135,17 @@ ThreadNode.prototype = {
+       isRoot: false,
+       isLeaf: false,
+       isMetaCategoryOut: false
+     };
+ 
+     for (let i = 0; i < samplesData.length; i++) {
+       let sample = samplesData[i];
+       let sampleTime = sample[SAMPLE_TIME_SLOT];
++      let byteSize = sample[SAMPLE_BYTESIZE_SLOT];
+ 
+       // A sample's end time is considered to be its time of sampling. Its
+       // start time is the sampling time of the previous sample.
+       //
+       // Thus, we compare sampleTime <= start instead of < to filter out
+       // samples that end exactly at the start time.
+       if (!sampleTime || sampleTime <= startTime || sampleTime > endTime) {
+         continue;
+@@ -222,49 +226,59 @@ ThreadNode.prototype = {
+                                           mutableFrameKeyOptions.isMetaCategoryOut,
+                                           leafTable);
+         if (isLeaf) {
+           frameNode.youngestFrameSamples++;
+           if (inflatedFrame.optimizations) {
+             frameNode._addOptimizations(inflatedFrame.optimizations, inflatedFrame.implementation,
+                                         sampleTime, stringTable);
+           }
++
++          if (byteSize) {
++            frameNode.youngestFrameByteSize += byteSize;
++          }
+         }
+ 
+         // Don't overcount flattened recursive frames.
+         if (!shouldFlatten) {
+           frameNode.samples++;
++          if (byteSize) {
++            frameNode.byteSize += byteSize;
++          }
+         }
+ 
+         prevFrameKey = frameKey;
+         prevCalls = frameNode.calls;
+         isLeaf = mutableFrameKeyOptions.isLeaf = false;
+       }
+ 
+       this.samples++;
+       this.sampleTimes.push(sampleTime);
++      if (byteSize) {
++        this.totalBytes += byteSize;
++      }
+     }
+   },
+ 
+   /**
+    * Uninverts the call tree after its having been built.
+    */
+   _uninvert: function uninvert() {
+-    function mergeOrAddFrameNode(calls, node, samples) {
++    function mergeOrAddFrameNode(calls, node, samples, size) {
+       // Unlike the inverted call tree, we don't use a root table for the top
+       // level, as in general, there are many fewer entry points than
+       // leaves. Instead, linear search is used regardless of level.
+       for (let i = 0; i < calls.length; i++) {
+         if (calls[i].key === node.key) {
+           let foundNode = calls[i];
+-          foundNode._merge(node, samples);
++          foundNode._merge(node, samples, size);
+           return foundNode.calls;
+         }
+       }
+-      let copy = node._clone(samples);
++      let copy = node._clone(samples, size);
+       calls.push(copy);
+       return copy.calls;
+     }
+ 
+     let workstack = [{ node: this, level: 0 }];
+     let spine = [];
+     let entry;
+ 
+@@ -273,21 +287,23 @@ ThreadNode.prototype = {
+ 
+     // Walk depth-first and keep the current spine (e.g., callstack).
+     while (entry = workstack.pop()) {
+       spine[entry.level] = entry;
+ 
+       let node = entry.node;
+       let calls = node.calls;
+       let callSamples = 0;
++      let totalSize = 0;
+ 
+       // Continue the depth-first walk.
+       for (let i = 0; i < calls.length; i++) {
+         workstack.push({ node: calls[i], level: entry.level + 1 });
+         callSamples += calls[i].samples;
++        totalSize += calls[i].byteSize;
+       }
+ 
+       // The sample delta is used to distinguish stacks.
+       //
+       // Suppose we have the following stack samples:
+       //
+       //   A -> B
+       //   A -> C
+@@ -302,22 +318,23 @@ ThreadNode.prototype = {
+       // with A.samples = 3, B.samples = 1, C.samples = 1.
+       //
+       // A is distinguished as being its own stack because
+       // A.samples - (B.samples + C.samples) > 0.
+       //
+       // Note that bottoming out is a degenerate where callSamples = 0.
+ 
+       let samplesDelta = node.samples - callSamples;
++      let byteSizeDelta = node.byteSize - totalSize;
+       if (samplesDelta > 0) {
+         // Reverse the spine and add them to the uninverted call tree.
+         let uninvertedCalls = rootCalls;
+         for (let level = entry.level; level > 0; level--) {
+           let callee = spine[level];
+-          uninvertedCalls = mergeOrAddFrameNode(uninvertedCalls, callee.node, samplesDelta);
++          uninvertedCalls = mergeOrAddFrameNode(uninvertedCalls, callee.node, samplesDelta, byteSizeDelta);
+         }
+       }
+     }
+ 
+     // Replace the toplevel calls with rootCalls, which now contains the
+     // uninverted roots.
+     this.calls = rootCalls;
+   },
+@@ -388,16 +405,18 @@ function FrameNode(frameKey, { location, line, category, isContent }, isMetaCate
+   this.calls = [];
+   this.isContent = !!isContent;
+   this._optimizations = null;
+   this._tierData = null;
+   this._stringTable = null;
+   this.isMetaCategory = !!isMetaCategory;
+   this.category = category;
+   this.nodeType = "Frame";
++  this.byteSize = 0;
++  this.youngestFrameByteSize = 0;
+ }
+ 
+ FrameNode.prototype = {
+   /**
+    * Take optimization data observed for this frame.
+    *
+    * @param object optimizationSite
+    *               Any JIT optimization information attached to the current
+@@ -424,32 +443,37 @@ FrameNode.prototype = {
+       if (this._tierData === null) {
+         this._tierData = [];
+       }
+       // Record type of implementation used and the sample time
+       this._tierData.push({ implementation, time });
+     }
+   },
+ 
+-  _clone: function (samples) {
++  _clone: function (samples, size) {
+     let newNode = new FrameNode(this.key, this, this.isMetaCategory);
+-    newNode._merge(this, samples);
++    newNode._merge(this, samples, size);
+     return newNode;
+   },
+ 
+-  _merge: function (otherNode, samples) {
++  _merge: function (otherNode, samples, size) {
+     if (this === otherNode) {
+       return;
+     }
+ 
+     this.samples += samples;
++    this.byteSize += size;
+     if (otherNode.youngestFrameSamples > 0) {
+       this.youngestFrameSamples += samples;
+     }
+ 
++    if (otherNode.youngestFrameByteSize > 0) {
++      this.youngestFrameByteSize += otherNode.youngestFrameByteSize;
++    }
++
+     if (otherNode._optimizations) {
+       let opts = this._optimizations;
+       if (opts === null) {
+         opts = this._optimizations = [];
+         this._stringTable = otherNode._stringTable;
+       }
+       let otherOpts = otherNode._optimizations;
+       for (let i = 0; i < otherOpts.length; i++) {
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 97c59a9..b94f28e 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -14,17 +14,16 @@ support-files =
+ # that need to be moved over to performance tool
+ 
+ [browser_aaa-run-first-leaktest.js]
+ [browser_markers-cycle-collection.js]
+ [browser_markers-gc.js]
+ [browser_markers-parse-html.js]
+ [browser_markers-styles.js]
+ [browser_markers-timestamp.js]
+-[browser_perf-allocations-to-samples.js]
+ [browser_perf-categories-js-calltree.js]
+ [browser_perf-clear-01.js]
+ [browser_perf-clear-02.js]
+ [browser_perf-columns-js-calltree.js]
+ [browser_perf-columns-memory-calltree.js]
+ [browser_perf-console-record-01.js]
+ [browser_perf-console-record-02.js]
+ [browser_perf-console-record-03.js]
+diff --git a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+index db486ae..0e783c3 100644
+--- a/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
++++ b/browser/devtools/performance/test/browser_perf-details-memory-calltree-render.js
+@@ -7,17 +7,17 @@
+ function* spawnTest() {
+   let { panel } = yield initPerformance(ALLOCS_URL);
+   let { EVENTS, $$, PerformanceController, DetailsView, MemoryCallTreeView } = panel.panelWin;
+ 
+   // Enable memory to test.
+   Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+   yield startRecording(panel);
+-  yield waitUntil(() => PerformanceController.getCurrentRecording().getAllocations().timestamps.length);
++  yield waitUntil(() => PerformanceController.getCurrentRecording().getAllocations().sizes.length);
+   yield stopRecording(panel);
+ 
+   let rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
+   yield DetailsView.selectView("memory-calltree");
+   ok(DetailsView.isViewSelected(MemoryCallTreeView), "The call tree is now selected.");
+   yield rendered;
+ 
+   ok(true, "MemoryCallTreeView rendered after recording is stopped.");
+diff --git a/browser/devtools/performance/test/browser_perf-legacy-front-01.js b/browser/devtools/performance/test/browser_perf-legacy-front-01.js
+index 64095ac..c530d84 100644
+--- a/browser/devtools/performance/test/browser_perf-legacy-front-01.js
++++ b/browser/devtools/performance/test/browser_perf-legacy-front-01.js
+@@ -50,16 +50,17 @@ function *testMockMemory () {
+     "Recording configuration set by target's support, not by UI prefs [No Memory Actor: withTicks]");
+ 
+   ok(markers.length > 0, "markers exist.");
+   ok(ticks.length > 0, "ticks exist.");
+   isEmptyArray(memory, "memory");
+   isEmptyArray(allocations.sites, "allocations.sites");
+   isEmptyArray(allocations.timestamps, "allocations.timestamps");
+   isEmptyArray(allocations.frames, "allocations.frames");
++  isEmptyArray(allocations.sizes, "allocations.sizes");
+ 
+   is($("#overview-pane").hidden, false,
+     "overview pane not hidden when server not supporting memory actors, yet UI prefs request them.");
+   is($("#select-waterfall-view").hidden, false,
+     "waterfall view button not hidden when memory mocked, and UI prefs enable them");
+   is($("#select-js-calltree-view").hidden, false,
+     "jscalltree view button not hidden when memory mocked, and UI prefs enable them");
+   is($("#select-js-flamegraph-view").hidden, false,
+@@ -105,16 +106,17 @@ function *testMockMemoryAndTimeline() {
+   is(config.withTicks, false,
+     "Recording configuration set by target's support, not by UI prefs [No Memory/Timeline Actor: withTicks]");
+   isEmptyArray(markers, "markers");
+   isEmptyArray(ticks, "ticks");
+   isEmptyArray(memory, "memory");
+   isEmptyArray(allocations.sites, "allocations.sites");
+   isEmptyArray(allocations.timestamps, "allocations.timestamps");
+   isEmptyArray(allocations.frames, "allocations.frames");
++  isEmptyArray(allocations.sizes, "allocations.sizes");
+ 
+   is($("#overview-pane").hidden, true,
+     "overview pane hidden when server not supporting memory/timeline actors, yet UI prefs request them.");
+   is($("#select-waterfall-view").hidden, true,
+     "waterfall view button hidden when memory/timeline mocked, and UI prefs enable them");
+   is($("#select-js-calltree-view").hidden, false,
+     "jscalltree view button not hidden when memory/timeline mocked, and UI prefs enable them");
+   is($("#select-js-flamegraph-view").hidden, false,
+diff --git a/browser/devtools/performance/test/browser_perf-legacy-front-02.js b/browser/devtools/performance/test/browser_perf-legacy-front-02.js
+index 946d484..b688dad 100644
+--- a/browser/devtools/performance/test/browser_perf-legacy-front-02.js
++++ b/browser/devtools/performance/test/browser_perf-legacy-front-02.js
+@@ -36,16 +36,17 @@ let test = Task.async(function*() {
+ 
+   isEmptyArray(markers, "markers");
+   isEmptyArray(frames, "frames");
+   isEmptyArray(memory, "memory");
+   isEmptyArray(ticks, "ticks");
+   isEmptyArray(allocations.sites, "allocations.sites");
+   isEmptyArray(allocations.timestamps, "allocations.timestamps");
+   isEmptyArray(allocations.frames, "allocations.frames");
++  isEmptyArray(allocations.sizes, "allocations.sizes");
+ 
+   let sampleCount = 0;
+ 
+   for (let thread of profile.threads) {
+     info("Checking thread: " + thread.name);
+ 
+     for (let sample of thread.samples.data) {
+       sampleCount++;
+diff --git a/browser/devtools/performance/test/browser_perf-legacy-front-04.js b/browser/devtools/performance/test/browser_perf-legacy-front-04.js
+index db5fd7b..44d81c9 100644
+--- a/browser/devtools/performance/test/browser_perf-legacy-front-04.js
++++ b/browser/devtools/performance/test/browser_perf-legacy-front-04.js
+@@ -33,16 +33,17 @@ let test = Task.async(function*() {
+ 
+   is(label, "", "Empty label for mock.");
+   is(typeof duration, "number", "duration is a number");
+   ok(duration > 0, "duration is not 0");
+ 
+   isEmptyArray(allocations.sites, "allocations.sites");
+   isEmptyArray(allocations.timestamps, "allocations.timestamps");
+   isEmptyArray(allocations.frames, "allocations.frames");
++  isEmptyArray(allocations.sizes, "allocations.sizes");
+ 
+   let sampleCount = 0;
+ 
+   for (let thread of profile.threads) {
+     info("Checking thread: " + thread.name);
+ 
+     for (let sample of thread.samples.data) {
+       sampleCount++;
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-04.js b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+index 9854f02..07a2ca2 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-04.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
+@@ -123,17 +123,17 @@ let test = Task.async(function*() {
+   let expected = Object.create({
+     label: "",
+     duration: 10000,
+     markers: [].toSource(),
+     frames: [].toSource(),
+     memory: [].toSource(),
+     ticks: TICKS_DATA.toSource(),
+     profile: RecordingUtils.deflateProfile(JSON.parse(JSON.stringify(PROFILER_DATA))).toSource(),
+-    allocations: ({sites:[], timestamps:[], frames:[]}).toSource(),
++    allocations: ({sites:[], timestamps:[], frames:[], sizes: []}).toSource(),
+     withTicks: true,
+     withMemory: false,
+     sampleFrequency: void 0
+   });
+ 
+   for (let field in expected) {
+     if (!!~["withTicks", "withMemory", "sampleFrequency"].indexOf(field)) {
+       is(importedData.configuration[field], expected[field], `${field} successfully converted in legacy import.`);
+diff --git a/browser/devtools/performance/test/browser_perf-allocations-to-samples.js b/browser/devtools/performance/test/unit/test_perf-utils-allocations-to-samples.js
+similarity index 73%
+rename from browser/devtools/performance/test/browser_perf-allocations-to-samples.js
+rename to browser/devtools/performance/test/unit/test_perf-utils-allocations-to-samples.js
+index 7806ee7..80d29f2 100644
+--- a/browser/devtools/performance/test/browser_perf-allocations-to-samples.js
++++ b/browser/devtools/performance/test/unit/test_perf-utils-allocations-to-samples.js
+@@ -1,27 +1,31 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Tests if allocations data received from the memory actor is properly
++ * Tests if allocations data received from the performance actor is properly
+  * converted to something that follows the same structure as the samples data
+  * received from the profiler.
+  */
+ 
+-function test() {
+-  let output = RecordingUtils.getProfileThreadFromAllocations(TEST_DATA);
+-  is(output.toSource(), EXPECTED_OUTPUT.toSource(), "The output is correct.");
+-
+-  finish();
++function run_test() {
++  run_next_test();
+ }
+ 
++add_task(function () {
++  const { getProfileThreadFromAllocations } = require("devtools/toolkit/performance/utils");
++  let output = getProfileThreadFromAllocations(TEST_DATA);
++  equal(output.toSource(), EXPECTED_OUTPUT.toSource(), "The output is correct.");
++});
++
+ let TEST_DATA = {
+   sites: [0, 0, 1, 2, 3],
+   timestamps: [50, 100, 150, 200, 250],
++  sizes: [0, 0, 100, 200, 300],
+   frames: [
+     null, {
+       source: "A",
+       line: 1,
+       column: 2,
+       functionDisplayName: "x",
+       parent: 0
+     }, {
+@@ -41,21 +45,22 @@ let TEST_DATA = {
+ };
+ 
+ let EXPECTED_OUTPUT = {
+   name: "allocations",
+   samples: {
+     "schema": {
+       "stack": 0,
+       "time": 1,
++      "size": 2,
+     },
+     data: [
+-      [ 1, 150 ],
+-      [ 2, 200 ],
+-      [ 3, 250 ]
++      [ 1, 150, 100 ],
++      [ 2, 200, 200 ],
++      [ 3, 250, 300 ]
+     ]
+   },
+   stackTable: {
+     "schema": {
+       "prefix": 0,
+       "frame": 1
+     },
+     "data": [
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-allocations-01.js b/browser/devtools/performance/test/unit/test_tree-model-allocations-01.js
+new file mode 100644
+index 0000000..883f264
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_tree-model-allocations-01.js
+@@ -0,0 +1,93 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the tree model calculates correct costs/percentages for
++ * allocation frame nodes.
++ */
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function () {
++  let { ThreadNode } = require("devtools/performance/tree-model");
++  const { getProfileThreadFromAllocations } = require("devtools/toolkit/performance/utils");
++  let allocationData = getProfileThreadFromAllocations(TEST_DATA);
++  let thread = new ThreadNode(allocationData, { startTime: 0, endTime: 1000 });
++
++  /**
++   * Values are in order according to:
++   * +-------------+------------+-------------+-------------+------------------------------+
++   * | Self Bytes  | Self Count | Total Bytes | Total Count | Function                     |
++   * +-------------+------------+-------------+-------------+------------------------------+
++   * | 1790272 41% | 8307   17% | 1790372 42% | 8317    18% | V someFunc @ a.j:345:6       |
++   * |     100  1% | 10      1% |     100  1% |   10     1% |   > callerFunc @ b.j:765:34  |
++   * +-------------+------------+-------------+-------------+------------------------------+
++   */
++  [
++    [100, 10, 1, 33, 1000, 100, 3, 100, "x (A:1:2)", [
++      [200, 20, 1, 33, 900, 90, 2, 66, "y (B:3:4)", [
++        [700, 70, 1, 33, 700, 70, 1, 33, "z (C:5:6)"]
++      ]]
++    ]]
++  ].forEach(compareFrameInfo(thread));
++});
++
++function compareFrameInfo (root, parent) {
++  parent = parent || root;
++  let fields = [
++    "selfSize", "selfSizePercentage", "selfCount", "selfCountPercentage",
++    "totalSize", "totalSizePercentage", "totalCount", "totalCountPercentage"
++  ];
++  return function (def) {
++    let children;
++    if (Array.isArray(def[def.length - 1])) {
++      children = def.pop();
++    }
++    let name = def.pop();
++    let expected = def;
++
++    let node = getFrameNodePath(parent, name);
++    let data = node.getInfo({ root, allocations: true });
++
++    fields.forEach((field, i) => {
++      let actual = data[field];
++      if (/percentage/i.test(field)) {
++        actual = Number.parseInt(actual, 10);
++      }
++      equal(actual, expected[i], `${name} has correct ${field}: ${expected[i]}`);
++    });
++
++    if (children) {
++      children.forEach(compareFrameInfo(root, node));
++    }
++  }
++}
++
++let TEST_DATA = {
++  sites: [1, 2, 3],
++  timestamps: [150, 200, 250],
++  sizes: [100, 200, 700],
++  frames: [
++    null, {
++      source: "A",
++      line: 1,
++      column: 2,
++      functionDisplayName: "x",
++      parent: 0
++    }, {
++      source: "B",
++      line: 3,
++      column: 4,
++      functionDisplayName: "y",
++      parent: 1
++    }, {
++      source: "C",
++      line: 5,
++      column: 6,
++      functionDisplayName: "z",
++      parent: 2
++    }
++  ]
++};
+diff --git a/browser/devtools/performance/test/unit/test_tree-model-allocations-02.js b/browser/devtools/performance/test/unit/test_tree-model-allocations-02.js
+new file mode 100644
+index 0000000..3b90837
+--- /dev/null
++++ b/browser/devtools/performance/test/unit/test_tree-model-allocations-02.js
+@@ -0,0 +1,101 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the tree model calculates correct costs/percentages for
++ * allocation frame nodes. Inverted version of test_tree-model-allocations-01.js
++ */
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function () {
++  let { ThreadNode } = require("devtools/performance/tree-model");
++  const { getProfileThreadFromAllocations } = require("devtools/toolkit/performance/utils");
++  let allocationData = getProfileThreadFromAllocations(TEST_DATA);
++  let thread = new ThreadNode(allocationData, { invertTree: true, startTime: 0, endTime: 1000 });
++
++  /**
++   * Values are in order according to:
++   * +-------------+------------+-------------+-------------+------------------------------+
++   * | Self Bytes  | Self Count | Total Bytes | Total Count | Function                     |
++   * +-------------+------------+-------------+-------------+------------------------------+
++   * | 1790272 41% | 8307   17% | 1790372 42% | 8317    18% | V someFunc @ a.j:345:6       |
++   * |     100  1% | 10      1% |     100  1% |   10     1% |   > callerFunc @ b.j:765:34  |
++   * +-------------+------------+-------------+-------------+------------------------------+
++   */
++  [
++    [700, 70, 1, 33, 700, 70, 1, 33, "z (C:5:6)", [
++      [0, 0, 0, 0, 700, 70, 1, 33, "y (B:3:4)", [
++        [0, 0, 0, 0, 700, 70, 1, 33, "x (A:1:2)"]
++      ]]
++    ]],
++    [200, 20, 1, 33, 200, 20, 1, 33, "y (B:3:4)", [
++      [0, 0, 0, 0, 200, 20, 1, 33, "x (A:1:2)"]
++    ]],
++    [100, 10, 1, 33, 100, 10, 1, 33, "x (A:1:2)"]
++  ].forEach(compareFrameInfo(thread));
++});
++
++function compareFrameInfo (root, parent) {
++  parent = parent || root;
++  let fields = [
++    "selfSize", "selfSizePercentage", "selfCount", "selfCountPercentage",
++    "totalSize", "totalSizePercentage", "totalCount", "totalCountPercentage"
++  ];
++
++  return function (def) {
++    let children;
++
++    if (Array.isArray(def[def.length - 1])) {
++      children = def.pop();
++    }
++
++    let name = def.pop();
++    let expected = def;
++
++    let node = getFrameNodePath(parent, name);
++    let data = node.getInfo({ root, allocations: true });
++
++    fields.forEach((field, i) => {
++      let actual = data[field];
++      if (/percentage/i.test(field)) {
++        actual = Number.parseInt(actual, 10);
++      }
++      equal(actual, expected[i], `${name} has correct ${field}: ${expected[i]}`);
++    });
++
++    if (children) {
++      children.forEach(compareFrameInfo(root, node));
++    }
++  }
++}
++
++let TEST_DATA = {
++  sites: [0, 1, 2, 3],
++  timestamps: [0, 150, 200, 250],
++  sizes: [0, 100, 200, 700],
++  frames: [{
++      source: "(root)"
++    }, {
++      source: "A",
++      line: 1,
++      column: 2,
++      functionDisplayName: "x",
++      parent: 0
++    }, {
++      source: "B",
++      line: 3,
++      column: 4,
++      functionDisplayName: "y",
++      parent: 1
++    }, {
++      source: "C",
++      line: 5,
++      column: 6,
++      functionDisplayName: "z",
++      parent: 2
++    }
++  ]
++};
+diff --git a/browser/devtools/performance/test/unit/xpcshell.ini b/browser/devtools/performance/test/unit/xpcshell.ini
+index 59814cc..80dbec6 100644
+--- a/browser/devtools/performance/test/unit/xpcshell.ini
++++ b/browser/devtools/performance/test/unit/xpcshell.ini
+@@ -8,25 +8,28 @@ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ [test_frame-utils-01.js]
+ [test_frame-utils-02.js]
+ [test_marker-blueprint.js]
+ [test_marker-utils.js]
+ [test_profiler-categories.js]
+ [test_jit-graph-data.js] 
+ [test_jit-model-01.js]
+ [test_jit-model-02.js]
++[test_perf-utils-allocations-to-samples.js]
+ [test_tree-model-01.js]
+ [test_tree-model-02.js]
+ [test_tree-model-03.js]
+ [test_tree-model-04.js]
+ [test_tree-model-05.js]
+ [test_tree-model-06.js]
+ [test_tree-model-07.js]
+ [test_tree-model-08.js]
+ [test_tree-model-09.js]
+ [test_tree-model-10.js]
+ [test_tree-model-11.js]
+ [test_tree-model-12.js]
+ [test_tree-model-13.js]
++[test_tree-model-allocations-01.js]
++[test_tree-model-allocations-02.js]
+ [test_waterfall-utils-collapse-01.js]
+ [test_waterfall-utils-collapse-02.js]
+ [test_waterfall-utils-collapse-03.js]
+ [test_waterfall-utils-collapse-04.js]
+diff --git a/toolkit/devtools/performance/io.js b/toolkit/devtools/performance/io.js
+index 32dd2e5..10c41c3 100644
+--- a/toolkit/devtools/performance/io.js
++++ b/toolkit/devtools/performance/io.js
+@@ -139,17 +139,17 @@ function convertLegacyData (legacyData) {
+   // fields just are empty arrays or objects.
+   let data = {
+     label: profilerData.profilerLabel,
+     duration: recordingDuration,
+     markers: [],
+     frames: [],
+     memory: [],
+     ticks: ticksData,
+-    allocations: { sites: [], timestamps: [], frames: [] },
++    allocations: { sites: [], timestamps: [], frames: [], sizes: [] },
+     profile: profilerData.profile,
+     // Fake a configuration object here if there's tick data,
+     // so that it can be rendered
+     configuration: {
+       withTicks: !!ticksData.length,
+       withMarkers: false,
+       withMemory: false,
+       withAllocations: false
+diff --git a/toolkit/devtools/performance/legacy/recording.js b/toolkit/devtools/performance/legacy/recording.js
+index 30ab00d..8680a04 100644
+--- a/toolkit/devtools/performance/legacy/recording.js
++++ b/toolkit/devtools/performance/legacy/recording.js
+@@ -111,17 +111,17 @@ LegacyPerformanceRecording.prototype = {
+     this._bufferPercent = info.position !== void 0 ? 0 : null;
+ 
+     this._recording = true;
+ 
+     this._markers = [];
+     this._frames = [];
+     this._memory = [];
+     this._ticks = [];
+-    this._allocations = { sites: [], timestamps: [], frames: [] };
++    this._allocations = { sites: [], timestamps: [], frames: [], sizes: [] };
+   },
+ 
+   /**
+    * Called when the signal was sent to the front to no longer record more
+    * data, and begin fetching the data. There's some delay during fetching,
+    * even though the recording is stopped, the model is not yet completed until
+    * all the data is fetched.
+    */
+diff --git a/toolkit/devtools/performance/moz.build b/toolkit/devtools/performance/moz.build
+index 2f766a7..a6c55bf 100644
+--- a/toolkit/devtools/performance/moz.build
++++ b/toolkit/devtools/performance/moz.build
+@@ -1,14 +1,16 @@
+ # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
++XPCSHELL_TESTS_MANIFESTS += ['test/xpcshell.ini']
++
+ EXTRA_JS_MODULES.devtools.performance += [
+   'io.js',
+   'recorder.js',
+   'utils.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.performance.legacy += [
+   'legacy/actors.js',
+diff --git a/toolkit/devtools/performance/test/head.js b/toolkit/devtools/performance/test/head.js
+new file mode 100644
+index 0000000..9f3ba75
+--- /dev/null
++++ b/toolkit/devtools/performance/test/head.js
+@@ -0,0 +1,7 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++"use strict";
++
++const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++
++let { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+diff --git a/toolkit/devtools/performance/test/test_perf-utils-allocations-to-samples.js b/toolkit/devtools/performance/test/test_perf-utils-allocations-to-samples.js
+new file mode 100644
+index 0000000..80d29f2
+--- /dev/null
++++ b/toolkit/devtools/performance/test/test_perf-utils-allocations-to-samples.js
+@@ -0,0 +1,93 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests if allocations data received from the performance actor is properly
++ * converted to something that follows the same structure as the samples data
++ * received from the profiler.
++ */
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function () {
++  const { getProfileThreadFromAllocations } = require("devtools/toolkit/performance/utils");
++  let output = getProfileThreadFromAllocations(TEST_DATA);
++  equal(output.toSource(), EXPECTED_OUTPUT.toSource(), "The output is correct.");
++});
++
++let TEST_DATA = {
++  sites: [0, 0, 1, 2, 3],
++  timestamps: [50, 100, 150, 200, 250],
++  sizes: [0, 0, 100, 200, 300],
++  frames: [
++    null, {
++      source: "A",
++      line: 1,
++      column: 2,
++      functionDisplayName: "x",
++      parent: 0
++    }, {
++      source: "B",
++      line: 3,
++      column: 4,
++      functionDisplayName: "y",
++      parent: 1
++    }, {
++      source: "C",
++      line: 5,
++      column: 6,
++      functionDisplayName: null,
++      parent: 2
++    }
++  ]
++};
++
++let EXPECTED_OUTPUT = {
++  name: "allocations",
++  samples: {
++    "schema": {
++      "stack": 0,
++      "time": 1,
++      "size": 2,
++    },
++    data: [
++      [ 1, 150, 100 ],
++      [ 2, 200, 200 ],
++      [ 3, 250, 300 ]
++    ]
++  },
++  stackTable: {
++    "schema": {
++      "prefix": 0,
++      "frame": 1
++    },
++    "data": [
++      null,
++      [ null, 1 ], // x (A:1:2)
++      [ 1, 2 ],    // x (A:1:2) > y (B:3:4)
++      [ 2, 3 ]     // x (A:1:2) > y (B:3:4) > C:5:6
++    ]
++  },
++  frameTable: {
++    "schema": {
++      "location": 0,
++      "implementation": 1,
++      "optimizations": 2,
++      "line": 3,
++      "category": 4
++    },
++    data: [
++      null,
++      [ 0 ],
++      [ 1 ],
++      [ 2 ]
++    ]
++  },
++  "stringTable": [
++    "x (A:1:2)",
++    "y (B:3:4)",
++    "C:5:6"
++  ],
++};
+diff --git a/toolkit/devtools/performance/test/xpcshell.ini b/toolkit/devtools/performance/test/xpcshell.ini
+new file mode 100644
+index 0000000..d84b140
+--- /dev/null
++++ b/toolkit/devtools/performance/test/xpcshell.ini
+@@ -0,0 +1,7 @@
++[DEFAULT]
++tags = devtools
++head = head.js
++tail =
++skip-if = toolkit == 'android' || toolkit == 'gonk'
++
++[test_perf-utils-allocations-to-samples.js]
+diff --git a/toolkit/devtools/performance/utils.js b/toolkit/devtools/performance/utils.js
+index 4261f40..2ebaba7 100644
+--- a/toolkit/devtools/performance/utils.js
++++ b/toolkit/devtools/performance/utils.js
+@@ -152,27 +152,27 @@ let gProfileThreadFromAllocationCache = new WeakMap();
+ 
+ /**
+  * Converts allocation data from the memory actor to something that follows
+  * the same structure as the samples data received from the profiler.
+  *
+  * @see MemoryActor.prototype.getAllocations for more information.
+  *
+  * @param object allocations
+- *        A list of { sites, timestamps, frames, counts } arrays.
++ *        A list of { sites, timestamps, frames, sizes } arrays.
+  * @return object
+  *         The "profile" describing the allocations log.
+  */
+ function getProfileThreadFromAllocations(allocations) {
+   let cached = gProfileThreadFromAllocationCache.get(allocations);
+   if (cached) {
+     return cached;
+   }
+ 
+-  let { sites, timestamps, frames } = allocations;
++  let { sites, timestamps, frames, sizes } = allocations;
+   let uniqueStrings = new UniqueStrings();
+ 
+   // Convert allocation frames to the the stack and frame tables expected by
+   // the profiler format.
+   //
+   // Since the allocations log is already presented as a tree, we would be
+   // wasting time if we jumped through the same hoops as deflateProfile below
+   // and instead use the existing structure of the allocations log to build up
+@@ -234,24 +234,24 @@ function getProfileThreadFromAllocations(allocations) {
+ 
+     frameTable[i] = [uniqueStrings.getOrAddStringIndex(location)];
+   }
+ 
+   let samples = new Array(sites.length);
+   let writePos = 0;
+   for (let i = 0; i < sites.length; i++) {
+     // Schema:
+-    //   [stack, time]
++    //   [stack, time, size]
+     //
+     // Originally, sites[i] indexes into the frames array. Note that in the
+     // loop above, stackTable[sites[i]] and frames[sites[i]] index the same
+     // information.
+     let stackIndex = sites[i];
+     if (frames[stackIndex]) {
+-      samples[writePos++] = [stackIndex, timestamps[i]];
++      samples[writePos++] = [stackIndex, timestamps[i], sizes[i]];
+     }
+   }
+   samples.length = writePos;
+ 
+   let thread = {
+     name: "allocations",
+     samples: allocationsWithSchema(samples),
+     stackTable: stackTableWithSchema(stackTable),
+@@ -264,16 +264,17 @@ function getProfileThreadFromAllocations(allocations) {
+ }
+ 
+ function allocationsWithSchema (data) {
+   let slot = 0;
+   return {
+     schema: {
+       stack: slot++,
+       time: slot++,
++      size: slot++,
+     },
+     data: data
+   };
+ }
+ 
+ /**
+  * Deduplicates a profile by deduplicating stacks, frames, and strings.
+  *
+diff --git a/toolkit/devtools/server/actors/performance-recording.js b/toolkit/devtools/server/actors/performance-recording.js
+index 8c32ee3..d1e5214 100644
+--- a/toolkit/devtools/server/actors/performance-recording.js
++++ b/toolkit/devtools/server/actors/performance-recording.js
+@@ -158,17 +158,17 @@ let PerformanceRecordingActor = exports.PerformanceRecordingActor = protocol.Act
+         generation: meta.generation
+       };
+ 
+       this._recording = true;
+       this._markers = [];
+       this._frames = [];
+       this._memory = [];
+       this._ticks = [];
+-      this._allocations = { sites: [], timestamps: [], frames: [], counts: [] };
++      this._allocations = { sites: [], timestamps: [], frames: [], sizes: [] };
+     }
+   },
+ 
+   destroy: function() {
+     protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+   /**
+@@ -239,17 +239,17 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+   },
+ 
+   initialize: function (client, form, config) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+     this._markers = [];
+     this._frames = [];
+     this._memory = [];
+     this._ticks = [];
+-    this._allocations = { sites: [], timestamps: [], frames: [], counts: [] };
++    this._allocations = { sites: [], timestamps: [], frames: [], sizes: [] };
+   },
+ 
+   destroy: function () {
+     protocol.Front.prototype.destroy.call(this);
+   },
+ 
+   /**
+    * Saves the current recording to a file.
+@@ -331,22 +331,24 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+         break;
+       }
+       // Accumulate allocation sites into an array.
+       case "allocations": {
+         if (!config.withAllocations) { break; }
+         let {
+           allocations: sites,
+           allocationsTimestamps: timestamps,
++          allocationSizes: sizes,
+           frames,
+         } = data;
+ 
+         RecordingUtils.offsetAndScaleTimestamps(timestamps, this._startTime);
+         RecordingUtils.pushAll(this._allocations.sites, sites);
+         RecordingUtils.pushAll(this._allocations.timestamps, timestamps);
+         RecordingUtils.pushAll(this._allocations.frames, frames);
++        RecordingUtils.pushAll(this._allocations.sizes, sizes);
+         break;
+       }
+     }
+   },
+ 
+   toString: () => "[object PerformanceRecordingFront]"
+ }, PerformanceRecordingCommon));
+diff --git a/toolkit/devtools/server/tests/browser/browser.ini b/toolkit/devtools/server/tests/browser/browser.ini
+index 42120cc..d295d18 100644
+--- a/toolkit/devtools/server/tests/browser/browser.ini
++++ b/toolkit/devtools/server/tests/browser/browser.ini
+@@ -1,14 +1,15 @@
+ [DEFAULT]
+ tags = devtools
+ subsuite = devtools
+ support-files =
+   head.js
+   animation.html
++  doc_allocations.html
+   doc_perf.html
+   navigate-first.html
+   navigate-second.html
+   storage-dynamic-windows.html
+   storage-listings.html
+   storage-unsecured-iframe.html
+   storage-updates.html
+   storage-secured-iframe.html
+@@ -43,16 +44,18 @@ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are
+ [browser_canvasframe_helper_04.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_canvasframe_helper_05.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_canvasframe_helper_06.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_navigateEvents.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
++[browser_perf-allocation-data.js]
++skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_perf-legacy-front-01.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_perf-legacy-front-02.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_perf-legacy-front-03.js]
+ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_perf-profiler-01.js]
+ [browser_perf-profiler-02.js]
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-allocation-data.js b/toolkit/devtools/server/tests/browser/browser_perf-allocation-data.js
+new file mode 100644
+index 0000000..13a3996
+--- /dev/null
++++ b/toolkit/devtools/server/tests/browser/browser_perf-allocation-data.js
+@@ -0,0 +1,36 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Test that we have allocation data coming from the front.
++ */
++
++const { PerformanceFront } = require("devtools/server/actors/performance");
++
++add_task(function*() {
++  let doc = yield addTab(MAIN_DOMAIN + "doc_allocations.html");
++
++  initDebuggerServer();
++  let client = new DebuggerClient(DebuggerServer.connectPipe());
++  let form = yield connectDebuggerClient(client);
++  let front = PerformanceFront(client, form);
++  yield front.connect();
++
++  let rec = yield front.startRecording({ withMarkers: true, withAllocations: true, withTicks: true });
++
++  yield waitUntil(() => rec.getAllocations().frames.length);
++  yield waitUntil(() => rec.getAllocations().timestamps.length);
++  yield waitUntil(() => rec.getAllocations().sizes.length);
++  yield waitUntil(() => rec.getAllocations().sites.length);
++
++  yield front.stopRecording(rec);
++
++  let { frames, timestamps, sizes, sites } = rec.getAllocations();
++
++  is(timestamps.length, sizes.length, "we have the same amount of timestamps and sizes");
++  ok(timestamps.every(time => time > 0 && typeof time === "number"), "all timestamps have numeric values");
++  ok(sizes.every(n => n > 0 && typeof n === "number"), "all sizes are positive numbers");
++
++  yield closeDebuggerClient(client);
++  gBrowser.removeCurrentTab();
++});
+diff --git a/toolkit/devtools/server/tests/browser/doc_allocations.html b/toolkit/devtools/server/tests/browser/doc_allocations.html
+new file mode 100644
+index 0000000..9d26df4
+--- /dev/null
++++ b/toolkit/devtools/server/tests/browser/doc_allocations.html
+@@ -0,0 +1,19 @@
++<!DOCTYPE HTML>
++<html>
++<head>
++  <meta charset="utf-8">
++</head>
++<body>
++<script>
++window.onload = function() {
++  var allocs = [];
++  function allocator() {
++    allocs.push(new Object);
++  }
++
++  window.setInterval(allocator, 1);
++};
++</script>
++</pre>
++</body>
++</html>
+-- 
+2.2.1
+

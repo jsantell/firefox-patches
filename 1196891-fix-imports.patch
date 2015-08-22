@@ -1,0 +1,110 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 20 Aug 2015 13:26:49 -0700
+Subject: Bug 1196891 - Fix regression that broke importing of recordings. r=jryans
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index c28061e..da60fa2 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -85,17 +85,17 @@ const EVENTS = {
+   // Emitted by the PerformanceView on clear button click
+   UI_CLEAR_RECORDINGS: "Performance:UI:ClearRecordings",
+ 
+   // Emitted by the PerformanceView on record button click
+   UI_START_RECORDING: "Performance:UI:StartRecording",
+   UI_STOP_RECORDING: "Performance:UI:StopRecording",
+ 
+   // Emitted by the PerformanceView on import button click
+-  UI_RECORDING_IMPORTED: "Performance:UI:ImportRecording",
++  UI_IMPORT_RECORDING: "Performance:UI:ImportRecording",
+   // Emitted by the RecordingsView on export button click
+   UI_EXPORT_RECORDING: "Performance:UI:ExportRecording",
+ 
+   // When a new recording is being tracked in the panel.
+   NEW_RECORDING: "Performance:NewRecording",
+ 
+   // When a recording is started or stopped or stopping via the PerformanceController
+   RECORDING_STATE_CHANGE: "Performance:RecordingStateChange",
+@@ -221,17 +221,17 @@ let PerformanceController = {
+ 
+     this._prefs = require("devtools/performance/global").PREFS;
+     this._prefs.on("pref-changed", this._onPrefChanged);
+ 
+     gFront.on("*", this._onFrontEvent);
+     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+-    PerformanceView.on(EVENTS.UI_RECORDING_IMPORTED, this.importRecording);
++    PerformanceView.on(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.on(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.on(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+     gDevTools.on("pref-changed", this._onThemeChanged);
+   }),
+ 
+   /**
+@@ -239,17 +239,17 @@ let PerformanceController = {
+    */
+   destroy: function() {
+     this._prefs.off("pref-changed", this._onPrefChanged);
+ 
+     gFront.off("*", this._onFrontEvent);
+     ToolbarView.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+-    PerformanceView.off(EVENTS.UI_RECORDING_IMPORTED, this.importRecording);
++    PerformanceView.off(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.off(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+ 
+     gDevTools.off("pref-changed", this._onThemeChanged);
+   },
+ 
+   /**
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-01.js b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+index 2faa1a7..3de78a1 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-01.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+@@ -2,17 +2,17 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the performance tool is able to save and load recordings.
+  */
+ 
+ let test = Task.async(function*() {
+   var { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+-  var { EVENTS, PerformanceController, DetailsView, DetailsSubview } = panel.panelWin;
++  var { EVENTS, PerformanceController, PerformanceView, DetailsView, DetailsSubview } = panel.panelWin;
+ 
+   // Enable allocations to test the memory-calltree and memory-flamegraph.
+   Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(FRAMERATE_PREF, true);
+ 
+   // Need to allow widgets to be updated while hidden, otherwise we can't use
+   // `waitForWidgetsRendered`.
+@@ -44,17 +44,17 @@ let test = Task.async(function*() {
+ 
+   yield exported;
+   ok(true, "The recording data appears to have been successfully saved.");
+ 
+   // Import recording.
+ 
+   let rerendered = waitForWidgetsRendered(panel);
+   let imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
+-  yield PerformanceController.importRecording("", file);
++  PerformanceView.emit(EVENTS.UI_IMPORT_RECORDING, file);
+ 
+   yield imported;
+   ok(true, "The recording data appears to have been successfully imported.");
+ 
+   yield rerendered;
+   ok(true, "The imported data was re-rendered.");
+ 
+   // Verify imported recording.
+-- 
+2.2.1
+

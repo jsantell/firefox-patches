@@ -1,9 +1,8 @@
-From: Jordan Santell <jsantell@mozilla.com>
-Date: Thu, 6 Aug 2015 14:38:45 -0700
+Date: Wed, 12 Aug 2015 21:42:54 -0400
 Subject: Bug 1172180 - Create a PerformanceActor, and migrate existing pseudo PerformanceFront to a legacy front. r=vp
 
 diff --git a/browser/devtools/framework/toolbox.js b/browser/devtools/framework/toolbox.js
-index 3509717..6d441b4 100644
+index 29f3f63..d393452 100644
 --- a/browser/devtools/framework/toolbox.js
 +++ b/browser/devtools/framework/toolbox.js
 @@ -1,14 +1,14 @@
@@ -61,41 +60,42 @@ index 3509717..6d441b4 100644
    if (!hostType) {
      hostType = Services.prefs.getCharPref(this._prefs.LAST_HOST);
    }
-@@ -1982,42 +1983,81 @@ Toolbox.prototype = {
-   initPerformance: Task.async(function*() {
-     // If target does not have profiler actor (addons), do not
-     // even register the shared performance connection.
-     if (!this.target.hasActor("profiler")) {
+@@ -1984,24 +1985,23 @@ Toolbox.prototype = {
        return;
      }
  
-     if (this.performance) {
--      yield this.performance.open();
-+      yield this.performance.connect();
-       return this.performance;
+     if (this._performanceFrontConnection) {
+       return this._performanceFrontConnection.promise;
      }
  
--    this._performance = getPerformanceFront(this.target);
+     this._performanceFrontConnection = promise.defer();
+-
+-    this._performance = getPerformanceFront(this._target);
+-
 -    yield this.performance.open();
 +    this._performance = createPerformanceFront(this._target);
-+    this.performance.on("*", this._onPerformanceFrontEvent);
-+
 +    yield this.performance.connect();
-+
+ 
      // Emit an event when connected, but don't wait on startup for this.
      this.emit("profiler-connected");
  
-     return this.performance;
++    this.performance.on("*", this._onPerformanceFrontEvent);
+     this._performanceFrontConnection.resolve(this.performance);
+     return this._performanceFrontConnection.promise;
    }),
  
    /**
     * Disconnects the underlying Performance actor. If the connection
     * has not finished initializing, as opening a toolbox does not wait,
     * the performance connection destroy method will wait for it on its own.
-    */
-   destroyPerformance: Task.async(function*() {
+@@ -2010,21 +2010,57 @@ Toolbox.prototype = {
      if (!this.performance) {
        return;
+     }
+     // If still connecting to performance actor, allow the
+     // actor to resolve its connection before attempting to destroy.
+     if (this._performanceFrontConnection) {
+       yield this._performanceFrontConnection.promise;
      }
 +    this.performance.off("*", this._onPerformanceFrontEvent);
      yield this.performance.destroy();
@@ -2730,7 +2730,7 @@ index 7c3f472..af781dc 100644
    let profilerData = { threads: [gThread] };
  
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index fa0be18..53a2c14 100644
+index d13572a..ff5e61c 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
 @@ -10,18 +10,21 @@ let { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
@@ -2757,7 +2757,7 @@ index fa0be18..53a2c14 100644
  const SIMPLE_URL = EXAMPLE_URL + "doc_simple-test.html";
  const MARKERS_URL = EXAMPLE_URL + "doc_markers.html";
  const ALLOCS_URL = EXAMPLE_URL + "doc_allocs.html";
-@@ -183,62 +186,60 @@ function initBackend(aUrl, targetOps={}) {
+@@ -183,46 +186,44 @@ function initBackend(aUrl, targetOps={}) {
    }
  
    return Task.spawn(function*() {
@@ -2806,7 +2806,11 @@ index fa0be18..53a2c14 100644
      merge(target, targetOps);
  
      let toolbox = yield gDevTools.showToolbox(target, tool);
-     let panel = toolbox.getCurrentPanel();
+ 
+     // Wait for the performance tool to be spun up
+     yield toolbox.initPerformance();
+ 
+@@ -230,19 +231,19 @@ function initPerformance(aUrl, tool="performance", targetOps={}) {
      return { target, panel, toolbox };
    });
  }
@@ -2828,7 +2832,7 @@ index fa0be18..53a2c14 100644
        }
      };
    });
-@@ -260,23 +261,16 @@ function consoleExecute (console, method, val) {
+@@ -264,23 +265,16 @@ function consoleExecute (console, method, val) {
          resolve();
          return;
        }
@@ -2852,7 +2856,7 @@ index fa0be18..53a2c14 100644
    yield removeTab(tab);
  }
  
-@@ -332,47 +326,42 @@ function mousedown (win, button) {
+@@ -336,47 +330,42 @@ function mousedown (win, button) {
  }
  
  function* startRecording(panel, options = {
@@ -2905,7 +2909,7 @@ index fa0be18..53a2c14 100644
      "The record button should still be checked.");
    ok(!button.hasAttribute("locked"),
      "The record button should not be locked.");
-@@ -381,16 +370,17 @@ function* startRecording(panel, options = {
+@@ -385,16 +374,17 @@ function* startRecording(panel, options = {
  function* stopRecording(panel, options = {
    waitForOverview: true,
    waitForStateChanged: true
@@ -2923,7 +2927,7 @@ index fa0be18..53a2c14 100644
    ok(!button.hasAttribute("locked"),
      "The record button should not be locked yet.");
  
-@@ -422,16 +412,18 @@ function* stopRecording(panel, options = {
+@@ -426,16 +416,18 @@ function* stopRecording(panel, options = {
  
    is(win.PerformanceView.getState(), "recorded",
      "The current state is 'recorded'.");
@@ -2942,7 +2946,7 @@ index fa0be18..53a2c14 100644
      OverviewView,
      WaterfallView,
      JsCallTreeView,
-@@ -541,59 +533,21 @@ function getInflatedStackLocations(thread, sample) {
+@@ -545,59 +537,21 @@ function getInflatedStackLocations(thread, sample) {
    // The profiler tree is inverted, so reverse the array.
    return locations.reverse();
  }
