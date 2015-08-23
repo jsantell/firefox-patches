@@ -1,0 +1,444 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 20 Aug 2015 13:10:47 -0700
+Subject: Bug 1153477 - Add a button to GC markers when allocations are on to snap to all objects allocated from this button to the previous one in the allocations call tree. r=vp,fitzgen
+
+diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
+index 8bb7c45..9e4a361 100644
+--- a/browser/devtools/performance/modules/logic/marker-utils.js
++++ b/browser/devtools/performance/modules/logic/marker-utils.js
+@@ -284,17 +284,47 @@ const DOM = {
+         frameIndex = frame.asyncParent;
+         wasAsyncParent = true;
+       } else {
+         frameIndex = frame.parent;
+       }
+     }
+ 
+     return container;
+-  }
++  },
++
++  /**
++   * Builds any custom fields specific to the marker.
++   *
++   * @param {Document} doc
++   * @param {ProfileTimelineMarker} marker
++   * @param {object} options
++   * @return {Array<Element>}
++   */
++  buildCustom: function (doc, marker, options) {
++    let elements = [];
++
++    if (marker.name === "GarbageCollection" && options.allocations) {
++      let hbox = doc.createElement("hbox");
++      hbox.className = "marker-details-customcontainer";
++
++      let label = doc.createElement("label");
++      label.className = "custom-button devtools-button";
++      label.setAttribute("value", "Show allocation triggers");
++      label.setAttribute("type", "show-allocations");
++      label.setAttribute("data-action", JSON.stringify({
++        endTime: marker.start, action: "show-allocations"
++      }));
++
++      hbox.appendChild(label);
++      elements.push(hbox);
++    }
++
++    return elements;
++  },
+ };
+ 
+ /**
+  * Mapping of JS marker causes to a friendlier form. Only
+  * markers that are considered "from content" should be labeled here.
+  */
+ const JS_MARKER_MAP = {
+   "<script> element":          L10N.getStr("marker.label.javascript.scriptElement"),
+diff --git a/browser/devtools/performance/modules/widgets/marker-details.js b/browser/devtools/performance/modules/widgets/marker-details.js
+index 01b74c3..5784826 100644
+--- a/browser/devtools/performance/modules/widgets/marker-details.js
++++ b/browser/devtools/performance/modules/widgets/marker-details.js
+@@ -83,24 +83,27 @@ MarkerDetails.prototype = {
+ 
+   /**
+    * Populates view with marker's details.
+    *
+    * @param object params
+    *        An options object holding:
+    *          - marker: The marker to display.
+    *          - frames: Array of stack frame information; see stack.js.
++   *          - allocations: Whether or not allocations were enabled for this recording. [optional]
+    */
+-  render: function({ marker, frames }) {
++  render: function (options) {
++    let { marker, frames } = options;
+     this.empty();
+ 
+     let elements = [];
+     elements.push(MarkerUtils.DOM.buildTitle(this._document, marker));
+     elements.push(MarkerUtils.DOM.buildDuration(this._document, marker));
+     MarkerUtils.DOM.buildFields(this._document, marker).forEach(f => elements.push(f));
++    MarkerUtils.DOM.buildCustom(this._document, marker, options).forEach(f => elements.push(f));
+ 
+     // Build a stack element -- and use the "startStack" label if
+     // we have both a startStack and endStack.
+     if (marker.stack) {
+       let type = marker.endStack ? "startStack" : "stack";
+       elements.push(MarkerUtils.DOM.buildStackTrace(this._document, {
+         frameIndex: marker.stack, frames, type
+       }));
+@@ -121,19 +124,17 @@ MarkerDetails.prototype = {
+    * for the moment.
+    */
+   _onClick: function (e) {
+     let data = findActionFromEvent(e.target, this._parent);
+     if (!data) {
+       return;
+     }
+ 
+-    if (data.action === "view-source") {
+-      this.emit("view-source", data.url, data.line);
+-    }
++    this.emit(data.action, data);
+   },
+ 
+   /**
+    * Handles the "mouseup" event on the marker details view splitter.
+    */
+   _onSplitterMouseUp: function() {
+     this.emit("resize");
+   }
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index 684cad2..c1ee105 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -26,16 +26,17 @@ support-files =
+ [browser_perf-console-record-06.js]
+ [browser_perf-console-record-07.js]
+ [browser_perf-console-record-08.js]
+ [browser_perf-console-record-09.js]
+ [browser_perf-details-calltree-render.js]
+ [browser_perf-details-flamegraph-render.js]
+ [browser_perf-details-memory-calltree-render.js]
+ [browser_perf-details-memory-flamegraph-render.js]
++[browser_perf-details-waterfall-gc-snap.js]
+ [browser_perf-details-waterfall-render.js]
+ [browser_perf-details-01.js]
+ [browser_perf-details-02.js]
+ [browser_perf-details-03.js]
+ [browser_perf-details-04.js]
+ [browser_perf-details-05.js]
+ [browser_perf-details-06.js]
+ [browser_perf-details-07.js]
+diff --git a/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js b/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
+similarity index 19%
+rename from browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js
+rename to browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
+index 88c7feb..a0d3337 100644
+--- a/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js
++++ b/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
+@@ -1,40 +1,118 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that the waterfall view renders content after recording.
+  */
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, PerformanceController, DetailsView, WaterfallView } = panel.panelWin;
++  let { $, $$, EVENTS, PerformanceController, OverviewView, DetailsView, WaterfallView, MemoryCallTreeView } = panel.panelWin;
++  let EPSILON = WaterfallView.MARKER_EPSILON;
++
++  // Disable non GC markers so we don't have nested markers and marker index
++  // matches DOM index.
++  PerformanceController.setPref("hidden-markers", Array.reduce($$("menuitem"), (disabled, item) => {
++    let type = item.getAttribute("marker-type");
++    if (type && type !== "GarbageCollection") {
++      disabled.push(type);
++    }
++    return disabled;
++  }, []));
++
++  Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+ 
+-  Services.prefs.setBoolPref(ALLOCATIONS_PREF, false);
+   yield startRecording(panel);
+   yield waitUntil(hasGCMarkers(PerformanceController));
+-
+   let rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   yield stopRecording(panel);
+   ok(DetailsView.isViewSelected(WaterfallView),
+     "The waterfall view is selected by default in the details view.");
+   yield rendered;
+ 
++  let bars = $$(".waterfall-marker-bar");
++  let markers = PerformanceController.getCurrentRecording().getMarkers();
++  let gcMarkers = markers.filter(m => m.name === "GarbageCollection");
++
++  ok(bars.length >= 2, "should have atleast 2 GC markers rendered");
++
++  /**
++   * Check when it's the first GC marker
++   */
++
++  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[0]);
++  let showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']");
++  ok(showAllocsButton, "GC buttons when allocations are enabled");
++
++  rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
++  EventUtils.sendMouseEvent({ type: "click" }, showAllocsButton);
++  yield rendered;
++
++  is(OverviewView.getTimeInterval().startTime, 0, "When clicking first GC, should use 0 as start time");
++  is(OverviewView.getTimeInterval().endTime, gcMarkers[0].start - EPSILON, "Correct end time range");
++
++  let duration = PerformanceController.getCurrentRecording().getDuration();
++  rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  OverviewView.setTimeInterval({ startTime: 0, endTime: duration });
++  yield DetailsView.selectView("waterfall");
++  yield rendered;
++
++  /**
++   * Check when there is a previous GC marker
++   */
++
++  bars = $$(".waterfall-marker-bar");
++  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[1]);
++  showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']");
++  ok(showAllocsButton, "GC buttons when allocations are enabled");
++
++  rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
++  EventUtils.sendMouseEvent({ type: "click" }, showAllocsButton);
++  yield rendered;
++
++  is(OverviewView.getTimeInterval().startTime, gcMarkers[0].end + EPSILON,
++    "selection start range is previous GC marker's end time");
++  is(OverviewView.getTimeInterval().endTime, gcMarkers[1].start - EPSILON,
++    "selection end range is current GC marker's start time");
++
++  /**
++   * Now with allocations disabled
++   */
++
++  // Reselect the entire recording -- due to bug 1196945, the new recording
++  // won't reset the selection
++  duration = PerformanceController.getCurrentRecording().getDuration();
++  rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
++  OverviewView.setTimeInterval({ startTime: 0, endTime: duration });
++  yield rendered;
+ 
+   Services.prefs.setBoolPref(ALLOCATIONS_PREF, false);
+   yield startRecording(panel);
+-  yield waitUntil(() => PerformanceController.getCurrentRecording().getMarkers().length);
++  yield waitUntil(hasGCMarkers(PerformanceController));
+ 
+   rendered = once(WaterfallView, EVENTS.WATERFALL_RENDERED);
+   yield stopRecording(panel);
++  ok(DetailsView.isViewSelected(WaterfallView),
++    "The waterfall view is selected by default in the details view.");
+   yield rendered;
+ 
+-  ok(true, "WaterfallView rendered again after recording completed a second time.");
++  ok(true, "WaterfallView rendered after recording is stopped.");
++
++  bars = $$(".waterfall-marker-bar");
++  markers = PerformanceController.getCurrentRecording().getMarkers();
++  gcMarkers = markers.filter(m => m.name === "GarbageCollection");
++
++  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[0]);
++  showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']");
++  ok(!showAllocsButton, "No GC buttons when allocations are disabled");
++
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+ function hasGCMarkers (controller) {
+   return function () {
+-    controller.getCurrentRecording().getMarkers().filter(m => m.name === "GarbageCollection").length >== 2;
++    Cu.forceGC();
++    return controller.getCurrentRecording().getMarkers().filter(m => m.name === "GarbageCollection").length >= 2;
+   };
+ }
+diff --git a/browser/devtools/performance/views/details-waterfall.js b/browser/devtools/performance/views/details-waterfall.js
+index a56f8ad..08e361a 100644
+--- a/browser/devtools/performance/views/details-waterfall.js
++++ b/browser/devtools/performance/views/details-waterfall.js
+@@ -6,16 +6,19 @@
+ const WATERFALL_RESIZE_EVENTS_DRAIN = 100; // ms
+ const MARKER_DETAILS_WIDTH = 200;
+ 
+ /**
+  * Waterfall view containing the timeline markers, controlled by DetailsView.
+  */
+ let WaterfallView = Heritage.extend(DetailsSubview, {
+ 
++  // Smallest unit of time between two markers. Larger by 10x^3 than Number.EPSILON.
++  MARKER_EPSILON: 0.000000000001,
++
+   observedPrefs: [
+     "hidden-markers"
+   ],
+ 
+   rerenderPrefs: [
+     "hidden-markers"
+   ],
+ 
+@@ -27,44 +30,47 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+   initialize: function () {
+     DetailsSubview.initialize.call(this);
+ 
+     this._cache = new WeakMap();
+ 
+     this._onMarkerSelected = this._onMarkerSelected.bind(this);
+     this._onResize = this._onResize.bind(this);
+     this._onViewSource = this._onViewSource.bind(this);
++    this._onShowAllocations = this._onShowAllocations.bind(this);
+     this._hiddenMarkers = PerformanceController.getPref("hidden-markers");
+ 
+     this.headerContainer = $("#waterfall-header");
+     this.breakdownContainer = $("#waterfall-breakdown");
+     this.detailsContainer = $("#waterfall-details");
+     this.detailsSplitter = $("#waterfall-view > splitter");
+ 
+     this.details = new MarkerDetails($("#waterfall-details"), $("#waterfall-view > splitter"));
+     this.details.hidden = true;
+ 
+     this.details.on("resize", this._onResize);
+     this.details.on("view-source", this._onViewSource);
++    this.details.on("show-allocations", this._onShowAllocations);
+     window.addEventListener("resize", this._onResize);
+ 
+     // TODO bug 1167093 save the previously set width, and ensure minimum width
+     this.details.width = MARKER_DETAILS_WIDTH;
+   },
+ 
+   /**
+    * Unbinds events.
+    */
+   destroy: function () {
+     DetailsSubview.destroy.call(this);
+ 
+     this._cache = null;
+ 
+     this.details.off("resize", this._onResize);
+     this.details.off("view-source", this._onViewSource);
++    this.details.off("show-allocations", this._onShowAllocations);
+     window.removeEventListener("resize", this._onResize);
+   },
+ 
+   /**
+    * Method for handling all the set up for rendering a new waterfall.
+    *
+    * @param object interval [optional]
+    *        The { startTime, endTime }, in milliseconds.
+@@ -82,19 +88,20 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+ 
+   /**
+    * Called when a marker is selected in the waterfall view,
+    * updating the markers detail view.
+    */
+   _onMarkerSelected: function (event, marker) {
+     let recording = PerformanceController.getCurrentRecording();
+     let frames = recording.getFrames();
++    let allocations = recording.getConfiguration().withAllocations;
+ 
+     if (event === "selected") {
+-      this.details.render({ toolbox: gToolbox, marker, frames });
++      this.details.render({ marker, frames, allocations });
+       this.details.hidden = false;
+       this._lastSelected = marker;
+     }
+     if (event === "unselected") {
+       this.details.empty();
+     }
+   },
+ 
+@@ -117,18 +124,53 @@ let WaterfallView = Heritage.extend(DetailsSubview, {
+     // Clear the cache as we'll need to recompute the collapsed
+     // marker model
+     this._cache = new WeakMap();
+   },
+ 
+   /**
+    * Called when MarkerDetails view emits an event to view source.
+    */
+-  _onViewSource: function (_, file, line) {
+-    gToolbox.viewSourceInDebugger(file, line);
++  _onViewSource: function (_, data) {
++    gToolbox.viewSourceInDebugger(data.file, data.line);
++  },
++
++  /**
++   * Called when MarkerDetails view emits an event to snap to allocations.
++   */
++  _onShowAllocations: function (_, data) {
++    let { endTime } = data;
++    let startTime = 0;
++    let recording = PerformanceController.getCurrentRecording();
++    let markers = recording.getMarkers();
++
++    let mostRecentGC = null;
++
++    // Iterate over markers looking for the most recent GC marker
++    // before the one who's start time is `endTime`.
++    for (let marker of markers) {
++      // We found the marker whose allocations we're tracking; abort
++      if (marker.start === endTime) {
++        break;
++      }
++      if (marker.name === "GarbageCollection") {
++        mostRecentGC = marker;
++      }
++    }
++
++    if (mostRecentGC) {
++      startTime = mostRecentGC.end;
++    }
++
++    // Adjust times so we don't include the range of these markers themselves.
++    endTime -= this.MARKER_EPSILON;
++    startTime += startTime !== 0 ? this.MARKER_EPSILON : 0;
++
++    OverviewView.setTimeInterval({ startTime, endTime });
++    DetailsView.selectView("memory-calltree");
+   },
+ 
+   /**
+    * Called when the recording is stopped and prepares data to
+    * populate the waterfall tree.
+    */
+   _prepareWaterfallTree: function(markers) {
+     let cached = this._cache.get(markers);
+diff --git a/browser/themes/shared/devtools/performance.css b/browser/themes/shared/devtools/performance.css
+index 8eafa36..06155e8 100644
+--- a/browser/themes/shared/devtools/performance.css
++++ b/browser/themes/shared/devtools/performance.css
+@@ -513,16 +513,21 @@
+   font-size: 1.2em;
+   font-weight: bold;
+ }
+ 
+ .marker-details-duration {
+   font-weight: bold;
+ }
+ 
++.marker-details-customcontainer .custom-button {
++  padding: 2px 5px;
++  border-width: 1px;
++}
++
+ /**
+  * Marker colors
+  */
+ 
+ menuitem.marker-color-graphs-purple:before,
+ .marker-color-graphs-purple {
+   background-color: var(--theme-graphs-purple);
+ }
+-- 
+2.2.1
+
