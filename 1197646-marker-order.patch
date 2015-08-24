@@ -1,0 +1,97 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Sun, 23 Aug 2015 17:41:33 -0700
+Subject: Bug 1197646 - Sort timeline markers when recording is completed, due to GC markers not guaranteeing order. r=vp
+
+diff --git a/toolkit/devtools/server/actors/performance-recording.js b/toolkit/devtools/server/actors/performance-recording.js
+index 8c32ee3..f454c4f 100644
+--- a/toolkit/devtools/server/actors/performance-recording.js
++++ b/toolkit/devtools/server/actors/performance-recording.js
+@@ -231,16 +231,24 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+     this._localStartTime = form.localStartTime;
+     this._recording = form.recording;
+     this._completed = form.completed;
+     this._duration = form.duration;
+ 
+     if (form.profile) {
+       this._profile = form.profile;
+     }
++
++    // Sort again on the client side if we're using realtime markers and the recording
++    // just finished. This is because GC/Compositing markers can come into the array out of order with
++    // the other markers, leading to strange collapsing in waterfall view.
++    if (this._completed && !this._markersSorted) {
++      this._markers = this._markers.sort((a, b) => (a.start > b.start));
++      this._markersSorted = true;
++    }
+   },
+ 
+   initialize: function (client, form, config) {
+     protocol.Front.prototype.initialize.call(this, client, form);
+     this._markers = [];
+     this._frames = [];
+     this._memory = [];
+     this._ticks = [];
+diff --git a/toolkit/devtools/server/tests/browser/browser_markers-gc.js b/toolkit/devtools/server/tests/browser/browser_markers-gc.js
+index 548ec2b..84b0cc37 100644
+--- a/toolkit/devtools/server/tests/browser/browser_markers-gc.js
++++ b/toolkit/devtools/server/tests/browser/browser_markers-gc.js
+@@ -20,11 +20,28 @@ add_task(function*() {
+ 
+   let markers = yield waitForMarkerType(front, MARKER_NAME);
+   yield front.stopRecording(rec);
+ 
+   ok(markers.some(m => m.name === MARKER_NAME), `got some ${MARKER_NAME} markers`);
+   ok(markers.every(({causeName}) => typeof causeName === "string"),
+     "All markers have a causeName.");
+ 
++  markers = rec.getMarkers();
++
++  // Bug 1197646
++  let ordered = true;
++  markers.reduce((previousStart, current, i) => {
++    if (i === 0) {
++      return current.start;
++    }
++    if (current.start < previousStart) {
++      ok(false, `markers must be in order. ${current.name} marker has later start time (${current.start}) thanprevious: ${previousStart}`);
++      ordered = false;
++    }
++    return current.start;
++  });
++
++  is(ordered, true, "All GC and non-GC markers are in order by start time.");
++
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/doc_force_gc.html b/toolkit/devtools/server/tests/browser/doc_force_gc.html
+index 9f2cbf8..f8b6175 100644
+--- a/toolkit/devtools/server/tests/browser/doc_force_gc.html
++++ b/toolkit/devtools/server/tests/browser/doc_force_gc.html
+@@ -5,17 +5,23 @@
+ <html>
+   <head>
+     <meta charset="utf-8"/>
+     <title>Performance tool + garbage collection test page</title>
+   </head>
+ 
+   <body>
+     <script type="text/javascript">
++    var x = 1;
+     window.test = function () {
+       SpecialPowers.Cu.forceGC();
++      document.body.style.borderTop = x + "px solid red";
++      x = 1^x;
++      document.body.innerHeight; // flush pending reflows
++
++      // Prevent this script from being garbage collected.
+       setTimeout(window.test, 100);
+     };
+     test();
+     </script>
+   </body>
+ 
+ </html>
+-- 
+2.2.1
+

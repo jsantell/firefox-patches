@@ -3,7 +3,7 @@ Date: Wed, 19 Aug 2015 18:04:50 -0700
 Subject: Bug 1194458 - Calculate bytesize costs per frame for allocations in the performance tools. r=vp,shu
 
 diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
-index ef130839..ab4144b 100644
+index ef130839..3bd5a0c 100644
 --- a/browser/devtools/performance/modules/logic/frame-utils.js
 +++ b/browser/devtools/performance/modules/logic/frame-utils.js
 @@ -483,33 +483,44 @@ function getFrameInfo (node, options) {
@@ -37,7 +37,7 @@ index ef130839..ab4144b 100644
    }
  
    if (options && options.allocations && !data.ALLOCATION_DATA_CALCULATED) {
-+    let totalBytes = options.root.totalBytes;
++    let totalBytes = options.root.byteSize;
      data.selfCount = node.youngestFrameSamples;
      data.totalCount = node.samples;
 +    data.selfCountPercentage = node.youngestFrameSamples / totalSamples * 100;
@@ -55,10 +55,10 @@ index ef130839..ab4144b 100644
  exports.getFrameInfo = getFrameInfo;
  exports.computeIsContentAndCategory = computeIsContentAndCategory;
 diff --git a/browser/devtools/performance/modules/logic/tree-model.js b/browser/devtools/performance/modules/logic/tree-model.js
-index 21d32cb..b2b2727 100644
+index 21d32cb..44e49df 100644
 --- a/browser/devtools/performance/modules/logic/tree-model.js
 +++ b/browser/devtools/performance/modules/logic/tree-model.js
-@@ -31,16 +31,18 @@ function ThreadNode(thread, options = {}) {
+@@ -31,16 +31,19 @@ function ThreadNode(thread, options = {}) {
      throw new Error("ThreadNode requires both `startTime` and `endTime`.");
    }
    this.samples = 0;
@@ -68,7 +68,8 @@ index 21d32cb..b2b2727 100644
    this.duration = options.endTime - options.startTime;
    this.nodeType = "Thread";
 +  // Total bytesize of all allocations if enabled
-+  this.totalBytes = 0;
++  this.byteSize = 0;
++  this.youngestFrameByteSize = 0;
  
    let { samples, stackTable, frameTable, stringTable } = thread;
  
@@ -77,7 +78,7 @@ index 21d32cb..b2b2727 100644
      return;
    }
  
-@@ -103,16 +105,17 @@ ThreadNode.prototype = {
+@@ -103,16 +106,17 @@ ThreadNode.prototype = {
          calls.push(frameNode);
        }
  
@@ -95,17 +96,24 @@ index 21d32cb..b2b2727 100644
      const getOrAddInflatedFrame = FrameUtils.getOrAddInflatedFrame;
  
      let samplesData = samples.data;
-@@ -132,16 +135,17 @@ ThreadNode.prototype = {
+@@ -129,20 +133,25 @@ ThreadNode.prototype = {
+     // Reused options object passed to InflatedFrame.prototype.getFrameKey.
+     let mutableFrameKeyOptions = {
+       contentOnly: options.contentOnly,
        isRoot: false,
        isLeaf: false,
        isMetaCategoryOut: false
      };
  
++    let byteSize = 0;
      for (let i = 0; i < samplesData.length; i++) {
        let sample = samplesData[i];
        let sampleTime = sample[SAMPLE_TIME_SLOT];
-+      let byteSize = sample[SAMPLE_BYTESIZE_SLOT];
  
++      if (SAMPLE_BYTESIZE_SLOT !== void 0) {
++        byteSize = sample[SAMPLE_BYTESIZE_SLOT];
++      }
++
        // A sample's end time is considered to be its time of sampling. Its
        // start time is the sampling time of the previous sample.
        //
@@ -113,7 +121,8 @@ index 21d32cb..b2b2727 100644
        // samples that end exactly at the start time.
        if (!sampleTime || sampleTime <= startTime || sampleTime > endTime) {
          continue;
-@@ -222,49 +226,59 @@ ThreadNode.prototype = {
+       }
+@@ -222,49 +231,59 @@ ThreadNode.prototype = {
                                            mutableFrameKeyOptions.isMetaCategoryOut,
                                            leafTable);
          if (isLeaf) {
@@ -144,7 +153,7 @@ index 21d32cb..b2b2727 100644
        this.samples++;
        this.sampleTimes.push(sampleTime);
 +      if (byteSize) {
-+        this.totalBytes += byteSize;
++        this.byteSize += byteSize;
 +      }
      }
    },
@@ -176,7 +185,7 @@ index 21d32cb..b2b2727 100644
      let spine = [];
      let entry;
  
-@@ -273,21 +287,23 @@ ThreadNode.prototype = {
+@@ -273,21 +292,23 @@ ThreadNode.prototype = {
  
      // Walk depth-first and keep the current spine (e.g., callstack).
      while (entry = workstack.pop()) {
@@ -185,13 +194,13 @@ index 21d32cb..b2b2727 100644
        let node = entry.node;
        let calls = node.calls;
        let callSamples = 0;
-+      let totalSize = 0;
++      let callByteSize = 0;
  
        // Continue the depth-first walk.
        for (let i = 0; i < calls.length; i++) {
          workstack.push({ node: calls[i], level: entry.level + 1 });
          callSamples += calls[i].samples;
-+        totalSize += calls[i].byteSize;
++        callByteSize += calls[i].byteSize;
        }
  
        // The sample delta is used to distinguish stacks.
@@ -200,7 +209,7 @@ index 21d32cb..b2b2727 100644
        //
        //   A -> B
        //   A -> C
-@@ -302,22 +318,23 @@ ThreadNode.prototype = {
+@@ -302,22 +323,23 @@ ThreadNode.prototype = {
        // with A.samples = 3, B.samples = 1, C.samples = 1.
        //
        // A is distinguished as being its own stack because
@@ -209,7 +218,7 @@ index 21d32cb..b2b2727 100644
        // Note that bottoming out is a degenerate where callSamples = 0.
  
        let samplesDelta = node.samples - callSamples;
-+      let byteSizeDelta = node.byteSize - totalSize;
++      let byteSizeDelta = node.byteSize - callByteSize;
        if (samplesDelta > 0) {
          // Reverse the spine and add them to the uninverted call tree.
          let uninvertedCalls = rootCalls;
@@ -225,7 +234,7 @@ index 21d32cb..b2b2727 100644
      // uninverted roots.
      this.calls = rootCalls;
    },
-@@ -388,16 +405,18 @@ function FrameNode(frameKey, { location, line, category, isContent }, isMetaCate
+@@ -388,16 +410,18 @@ function FrameNode(frameKey, { location, line, category, isContent }, isMetaCate
    this.calls = [];
    this.isContent = !!isContent;
    this._optimizations = null;
@@ -244,7 +253,7 @@ index 21d32cb..b2b2727 100644
     *
     * @param object optimizationSite
     *               Any JIT optimization information attached to the current
-@@ -424,32 +443,37 @@ FrameNode.prototype = {
+@@ -424,32 +448,37 @@ FrameNode.prototype = {
        if (this._tierData === null) {
          this._tierData = [];
        }
@@ -286,18 +295,18 @@ index 21d32cb..b2b2727 100644
        let otherOpts = otherNode._optimizations;
        for (let i = 0; i < otherOpts.length; i++) {
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 97c59a9..b94f28e 100644
+index 684cad2..fdd041e 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -14,17 +14,16 @@ support-files =
+@@ -7,17 +7,16 @@ support-files =
+   doc_markers.html
+   doc_simple-test.html
+   head.js
+ 
+ # Commented out tests are profiler tests
  # that need to be moved over to performance tool
  
  [browser_aaa-run-first-leaktest.js]
- [browser_markers-cycle-collection.js]
- [browser_markers-gc.js]
- [browser_markers-parse-html.js]
- [browser_markers-styles.js]
- [browser_markers-timestamp.js]
 -[browser_perf-allocations-to-samples.js]
  [browser_perf-categories-js-calltree.js]
  [browser_perf-clear-01.js]
@@ -331,7 +340,7 @@ index db486ae..0e783c3 100644
  
    ok(true, "MemoryCallTreeView rendered after recording is stopped.");
 diff --git a/browser/devtools/performance/test/browser_perf-legacy-front-01.js b/browser/devtools/performance/test/browser_perf-legacy-front-01.js
-index 64095ac..c530d84 100644
+index 050a024..d877229 100644
 --- a/browser/devtools/performance/test/browser_perf-legacy-front-01.js
 +++ b/browser/devtools/performance/test/browser_perf-legacy-front-01.js
 @@ -50,16 +50,17 @@ function *testMockMemory () {
@@ -345,7 +354,7 @@ index 64095ac..c530d84 100644
    isEmptyArray(allocations.frames, "allocations.frames");
 +  isEmptyArray(allocations.sizes, "allocations.sizes");
  
-   is($("#overview-pane").hidden, false,
+   is(isVisible($("#overview-pane")), true,
      "overview pane not hidden when server not supporting memory actors, yet UI prefs request them.");
    is($("#select-waterfall-view").hidden, false,
      "waterfall view button not hidden when memory mocked, and UI prefs enable them");
@@ -363,7 +372,7 @@ index 64095ac..c530d84 100644
    isEmptyArray(allocations.frames, "allocations.frames");
 +  isEmptyArray(allocations.sizes, "allocations.sizes");
  
-   is($("#overview-pane").hidden, true,
+   is(isVisible($("#overview-pane")), false,
      "overview pane hidden when server not supporting memory/timeline actors, yet UI prefs request them.");
    is($("#select-waterfall-view").hidden, true,
      "waterfall view button hidden when memory/timeline mocked, and UI prefs enable them");
@@ -371,7 +380,7 @@ index 64095ac..c530d84 100644
      "jscalltree view button not hidden when memory/timeline mocked, and UI prefs enable them");
    is($("#select-js-flamegraph-view").hidden, false,
 diff --git a/browser/devtools/performance/test/browser_perf-legacy-front-02.js b/browser/devtools/performance/test/browser_perf-legacy-front-02.js
-index 946d484..b688dad 100644
+index 9a5a0b4..6bd2c64 100644
 --- a/browser/devtools/performance/test/browser_perf-legacy-front-02.js
 +++ b/browser/devtools/performance/test/browser_perf-legacy-front-02.js
 @@ -36,16 +36,17 @@ let test = Task.async(function*() {
@@ -415,7 +424,7 @@ index db5fd7b..44d81c9 100644
      for (let sample of thread.samples.data) {
        sampleCount++;
 diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-04.js b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
-index 9854f02..07a2ca2 100644
+index 5e0ee6e..9dbc20e 100644
 --- a/browser/devtools/performance/test/browser_perf_recordings-io-04.js
 +++ b/browser/devtools/performance/test/browser_perf_recordings-io-04.js
 @@ -123,17 +123,17 @@ let test = Task.async(function*() {
@@ -794,7 +803,7 @@ index 30ab00d..8680a04 100644
     * all the data is fetched.
     */
 diff --git a/toolkit/devtools/performance/moz.build b/toolkit/devtools/performance/moz.build
-index 2f766a7..a6c55bf 100644
+index 62472ad..d711163 100644
 --- a/toolkit/devtools/performance/moz.build
 +++ b/toolkit/devtools/performance/moz.build
 @@ -1,14 +1,16 @@
@@ -808,12 +817,12 @@ index 2f766a7..a6c55bf 100644
 +
  EXTRA_JS_MODULES.devtools.performance += [
    'io.js',
+   'process-communication.js',
    'recorder.js',
    'utils.js',
  ]
  
  EXTRA_JS_MODULES.devtools.performance.legacy += [
-   'legacy/actors.js',
 diff --git a/toolkit/devtools/performance/test/head.js b/toolkit/devtools/performance/test/head.js
 new file mode 100644
 index 0000000..9f3ba75
@@ -1019,7 +1028,7 @@ index 4261f40..2ebaba7 100644
   * Deduplicates a profile by deduplicating stacks, frames, and strings.
   *
 diff --git a/toolkit/devtools/server/actors/performance-recording.js b/toolkit/devtools/server/actors/performance-recording.js
-index 8c32ee3..d1e5214 100644
+index f454c4f..fea465d 100644
 --- a/toolkit/devtools/server/actors/performance-recording.js
 +++ b/toolkit/devtools/server/actors/performance-recording.js
 @@ -158,17 +158,17 @@ let PerformanceRecordingActor = exports.PerformanceRecordingActor = protocol.Act
@@ -1041,7 +1050,7 @@ index 8c32ee3..d1e5214 100644
    },
  
    /**
-@@ -239,17 +239,17 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+@@ -247,17 +247,17 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
    },
  
    initialize: function (client, form, config) {
@@ -1060,7 +1069,7 @@ index 8c32ee3..d1e5214 100644
  
    /**
     * Saves the current recording to a file.
-@@ -331,22 +331,24 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+@@ -339,22 +339,24 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
          break;
        }
        // Accumulate allocation sites into an array.
@@ -1086,16 +1095,19 @@ index 8c32ee3..d1e5214 100644
    toString: () => "[object PerformanceRecordingFront]"
  }, PerformanceRecordingCommon));
 diff --git a/toolkit/devtools/server/tests/browser/browser.ini b/toolkit/devtools/server/tests/browser/browser.ini
-index 42120cc..d295d18 100644
+index eeb61d6..1637c3b 100644
 --- a/toolkit/devtools/server/tests/browser/browser.ini
 +++ b/toolkit/devtools/server/tests/browser/browser.ini
-@@ -1,14 +1,15 @@
+@@ -1,17 +1,15 @@
  [DEFAULT]
  tags = devtools
  subsuite = devtools
  support-files =
    head.js
    animation.html
+-  doc_force_cc.html
+-  doc_force_gc.html
+-  doc_innerHTML.html
 +  doc_allocations.html
    doc_perf.html
    navigate-first.html
@@ -1105,13 +1117,13 @@ index 42120cc..d295d18 100644
    storage-unsecured-iframe.html
    storage-updates.html
    storage-secured-iframe.html
-@@ -43,16 +44,18 @@ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are
- [browser_canvasframe_helper_04.js]
+@@ -51,16 +49,18 @@ skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are
  skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
- [browser_canvasframe_helper_05.js]
- skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
- [browser_canvasframe_helper_06.js]
- skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
+ [browser_markers-cycle-collection.js]
+ [browser_markers-gc.js]
+ [browser_markers-parse-html.js]
+ [browser_markers-styles.js]
+ [browser_markers-timestamp.js]
  [browser_navigateEvents.js]
  skip-if = e10s # Bug 1183605 - toolkit/devtools/server/tests/browser/ tests are still disabled in E10S
 +[browser_perf-allocation-data.js]

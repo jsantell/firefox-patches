@@ -1,5 +1,5 @@
-From: Jordan Santell <jsantell@gmail.com>
-Date: Mon, 9 Mar 2015 20:18:35 -0700
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Sun, 23 Aug 2015 13:20:29 -0700
 Subject: Bug 1141261 - Implement a queueing system for actor events in web audio editor to execute events in correct order. r=vp
 
 diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
@@ -224,14 +224,14 @@ index 544650a..b69bc06 100644
 +  }
  };
 diff --git a/browser/devtools/webaudioeditor/includes.js b/browser/devtools/webaudioeditor/includes.js
-index 2e6b8ec..10a4ce3 100644
+index 4b9e575..f2c0107 100644
 --- a/browser/devtools/webaudioeditor/includes.js
 +++ b/browser/devtools/webaudioeditor/includes.js
-@@ -11,16 +11,17 @@ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
+@@ -10,16 +10,17 @@ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
  Cu.import("resource:///modules/devtools/gDevTools.jsm");
  
- const devtools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
- const { require } = devtools;
+ const { loader, require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
  
  let { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
  let { EventTarget } = require("sdk/event/target");
@@ -244,13 +244,13 @@ index 2e6b8ec..10a4ce3 100644
  const L10N = new ViewHelpers.L10N(STRINGS_URI);
  const Telemetry = require("devtools/shared/telemetry");
  const telemetry = new Telemetry();
- devtools.lazyImporter(this, "LineGraphWidget",
+ const DevToolsUtils = require("devtools/toolkit/DevToolsUtils");
 diff --git a/browser/devtools/webaudioeditor/modules/queue.js b/browser/devtools/webaudioeditor/modules/queue.js
 new file mode 100644
-index 0000000..02db593
+index 0000000..a9c0778
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/modules/queue.js
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,117 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -288,9 +288,25 @@ index 0000000..02db593
 + * Wrap a function that returns a new function
 + * that executes the original in accordance with the queue.
 + */
++let inc = 0;
++function print (name, id=null, args) {
++  let data = (args||[]).map(a => {
++    if (typeof a === "object") {
++      return Object.keys(a).reduce((vals, val) => {
++        vals += "---" + val +":" + (a[val] && a[val].actorID ? a[val].actorID : a[val]);
++        return vals;
++      }, "");
++    }
++    return a;
++  }).join("_");
++  console.log(name, id, data);
++}
++
 +Queue.prototype.addHandler = function (fn) {
 +  return (...args) => {
-+    this._messages.push([fn, ...args]);
++    let id = ++inc;
++    print("QUEUE:START", id, args);
++    this._messages.push([fn, ...args, id]);
 +    if (!this._processing) {
 +      this._process();
 +    }
@@ -306,12 +322,15 @@ index 0000000..02db593
 +  this._processing = true;
 +
 +  let [fn, ...args] = this._messages.shift();
++  let printables = args.map(a => a.actorID ? a.actorID : a);
++  print("QUEUE:PROCESSING",null , args);
 +  let result = fn.apply(null, args);
 +  if (result && result.then) {
 +    // Store the current process if its async, so we
 +    // can wait for it to finish if we clear.
 +    this._currentProcess = result.then(this._asyncHandler, this._asyncHandler);
 +  } else {
++  print("QUEUE:SYNC_DONE");
 +    this._process();
 +  }
 +};
@@ -320,6 +339,7 @@ index 0000000..02db593
 + * Used to wrap up an async message completion.
 + */
 +Queue.prototype._asyncHandler = function () {
++  console.log("QUEUE:ASYNC_DONE");
 +  this._currentProcess = null;
 +  this._process();
 +};
@@ -337,6 +357,7 @@ index 0000000..02db593
 + * the message completion.
 + */
 +Queue.prototype.clear = function () {
++  console.log("clearing QUEUE");
 +  this._messages.length = 0;
 +  this._processing = false;
 +
@@ -421,7 +442,7 @@ index d803cc9..d2f0be3 100644
 +[browser_queue-02.js]
 diff --git a/browser/devtools/webaudioeditor/test/browser_queue-01.js b/browser/devtools/webaudioeditor/test/browser_queue-01.js
 new file mode 100644
-index 0000000..d17d3cc
+index 0000000..25710f9
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/test/browser_queue-01.js
 @@ -0,0 +1,83 @@
@@ -434,7 +455,7 @@ index 0000000..d17d3cc
 +
 +add_task(function*() {
 +  let { promise, resolve } = Promise.defer();
-+  let { Queue } = devtools.require("devtools/webaudioeditor/queue");
++  let { Queue } = require("devtools/webaudioeditor/queue");
 +
 +  let q = new Queue();
 +  let messages = [];
@@ -510,7 +531,7 @@ index 0000000..d17d3cc
 +});
 diff --git a/browser/devtools/webaudioeditor/test/browser_queue-02.js b/browser/devtools/webaudioeditor/test/browser_queue-02.js
 new file mode 100644
-index 0000000..479c93b
+index 0000000..d86603b
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/test/browser_queue-02.js
 @@ -0,0 +1,50 @@
@@ -523,7 +544,7 @@ index 0000000..479c93b
 +
 +add_task(function*() {
 +  let { promise, resolve } = Promise.defer();
-+  let { Queue } = devtools.require("devtools/webaudioeditor/queue");
++  let { Queue } = require("devtools/webaudioeditor/queue");
 +
 +  let q = new Queue();
 +  let messages = [];
@@ -692,7 +713,7 @@ index 0000000..87c1210
 +
 +</html>
 diff --git a/browser/devtools/webaudioeditor/views/context.js b/browser/devtools/webaudioeditor/views/context.js
-index f2160ac..46b0ab5 100644
+index 88204bb..ac51c3b 100644
 --- a/browser/devtools/webaudioeditor/views/context.js
 +++ b/browser/devtools/webaudioeditor/views/context.js
 @@ -1,14 +1,18 @@
@@ -754,6 +775,59 @@ index f2160ac..46b0ab5 100644
    },
  
    /**
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index dd32ade..97dfd1d 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -750,28 +750,30 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+ 
+   /**
+    * Called when one audio node is connected to another.
+    */
+   _onConnectNode: function (source, dest) {
+     let sourceActor = this._getActorByNativeID(source.id);
+     let destActor = this._getActorByNativeID(dest.id);
+ 
++    console.log("WEBAUDIOACTOR:connect-node", sourceActor.actorID, destActor.actorID);
+     emit(this, "connect-node", {
+       source: sourceActor,
+       dest: destActor
+     });
+   },
+ 
+   /**
+    * Called when an audio node is connected to an audio param.
+    */
+   _onConnectParam: function (source, param) {
+     let sourceActor = this._getActorByNativeID(source.id);
+     let destActor = this._getActorByNativeID(param._parentID);
++    console.log("WEBAUDIOACTOR:connect-param", sourceActor.actorID, destActor.actorID, param._paramName);
+     emit(this, "connect-param", {
+       source: sourceActor,
+       dest: destActor,
+       param: param._paramName
+     });
+   },
+ 
+   /**
+@@ -794,16 +796,17 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     });
+   },
+ 
+   /**
+    * Called on node creation.
+    */
+   _onCreateNode: function (node) {
+     let actor = this._constructAudioNode(node);
++    console.log("WEBAUDIOACTOR:create-node", actor.actorID);
+     emit(this, "create-node", actor);
+   },
+ 
+   /** Called when `webaudio-node-demise` is triggered,
+    * and emits the associated actor to the front if found.
+    */
+   _onDestroyNode: function ({data}) {
+     // Cast to integer.
 -- 
 2.2.1
 
