@@ -3,10 +3,10 @@ Date: Thu, 20 Aug 2015 13:10:47 -0700
 Subject: Bug 1153477 - Add a button to GC markers when allocations are on to snap to all objects allocated from this button to the previous one in the allocations call tree. r=vp,fitzgen
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
-index 363cea9..915db43 100644
+index f68bc20..903ed5a 100644
 --- a/browser/app/profile/firefox.js
 +++ b/browser/app/profile/firefox.js
-@@ -1442,16 +1442,18 @@ pref("devtools.performance.ui.invert-call-tree", true);
+@@ -1440,16 +1440,18 @@ pref("devtools.performance.ui.invert-call-tree", true);
  pref("devtools.performance.ui.invert-flame-graph", false);
  pref("devtools.performance.ui.flatten-tree-recursion", true);
  pref("devtools.performance.ui.show-platform-data", false);
@@ -18,15 +18,15 @@ index 363cea9..915db43 100644
 +pref("devtools.performance.ui.show-triggers-for-gc-types",
 +  "TOO_MUCH_MALLOC ALLOC_TRIGGER LAST_DITCH EAGER_ALLOC_TRIGGER");
  
+ // Temporary pref disabling memory flame views
+ // TODO remove once we have flame charts via bug 1148663
+ pref("devtools.performance.ui.enable-memory-flame", false);
+ 
  // Enable experimental options in the UI only in Nightly
  #if defined(NIGHTLY_BUILD)
  pref("devtools.performance.ui.experimental", true);
- #else
- pref("devtools.performance.ui.experimental", false);
- #endif
- 
 diff --git a/browser/devtools/performance/modules/global.js b/browser/devtools/performance/modules/global.js
-index 1da0b76..8a5e37b 100644
+index ccc1f02..805956f 100644
 --- a/browser/devtools/performance/modules/global.js
 +++ b/browser/devtools/performance/modules/global.js
 @@ -13,16 +13,17 @@ const L10N = new ViewHelpers.MultiL10N([
@@ -45,8 +45,8 @@ index 1da0b76..8a5e37b 100644
    "memory-max-log-length": ["Int", "memory.max-log-length"],
    "profiler-buffer-size": ["Int", "profiler.buffer-size"],
    "profiler-sample-frequency": ["Int", "profiler.sample-frequency-khz"],
- }, {
-   monitorChanges: true
+   // TODO re-enable once we flame charts via bug 1148663
+   "enable-memory-flame": ["Bool", "ui.enable-memory-flame"],
 diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
 index 8bb7c45..bbd05bf 100644
 --- a/browser/devtools/performance/modules/logic/marker-utils.js
@@ -208,10 +208,10 @@ diff --git a/browser/devtools/performance/test/browser_perf-details-waterfall-gc
 similarity index 17%
 rename from browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js
 rename to browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
-index 88c7feb..9e1d420 100644
+index 88c7feb..8072777 100644
 --- a/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js
 +++ b/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
-@@ -1,40 +1,125 @@
+@@ -1,40 +1,128 @@
  /* Any copyright is dedicated to the Public Domain.
     http://creativecommons.org/publicdomain/zero/1.0/ */
  
@@ -261,7 +261,9 @@ index 88c7feb..9e1d420 100644
 +   */
 +
 +  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[0]);
-+  let showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']");
++  let showAllocsButton;
++  // On slower machines this can not be found immediately?
++  yield waitUntil(() => showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']"));
 +  ok(showAllocsButton, "GC buttons when allocations are enabled");
 +
 +  rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
@@ -283,7 +285,8 @@ index 88c7feb..9e1d420 100644
 +
 +  bars = $$(".waterfall-marker-bar");
 +  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[1]);
-+  showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']");
++  // On slower machines this can not be found immediately?
++  yield waitUntil(() => showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']"));
 +  ok(showAllocsButton, "GC buttons when allocations are enabled");
 +
 +  rendered = once(MemoryCallTreeView, EVENTS.MEMORY_CALL_TREE_RENDERED);
@@ -344,7 +347,7 @@ index 88c7feb..9e1d420 100644
    };
  }
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
-index 353e226..9adcfbf 100644
+index 34844cd..f0af7c5 100644
 --- a/browser/devtools/performance/test/head.js
 +++ b/browser/devtools/performance/test/head.js
 @@ -51,16 +51,17 @@ const EXPERIMENTAL_PREF = "devtools.performance.ui.experimental";
@@ -365,14 +368,14 @@ index 353e226..9adcfbf 100644
    "devtools.performance.ui.enable-jit-optimizations",
    "devtools.performance.memory.sample-probability",
    "devtools.performance.memory.max-log-length",
-@@ -536,8 +537,12 @@ function synthesizeProfileForTest(samples) {
-   });
- 
-   let uniqueStacks = new RecordingUtils.UniqueStacks();
-   return RecordingUtils.deflateThread({
+@@ -544,8 +545,12 @@ function synthesizeProfileForTest(samples) {
      samples: samples,
      markers: []
    }, uniqueStacks);
+ }
+ 
+ function isVisible (element) {
+   return !element.classList.contains("hidden") && !element.hidden;
  }
 +
 +function within (actual, expected, fuzz, desc) {
@@ -573,10 +576,10 @@ index a09b091..fe22de6 100644
    },
    observe: function (subject, topic, prefName) {
 diff --git a/browser/themes/shared/devtools/performance.css b/browser/themes/shared/devtools/performance.css
-index 8eafa36..06155e8 100644
+index b08414e..7a831e0 100644
 --- a/browser/themes/shared/devtools/performance.css
 +++ b/browser/themes/shared/devtools/performance.css
-@@ -513,16 +513,21 @@
+@@ -523,16 +523,21 @@
    font-size: 1.2em;
    font-weight: bold;
  }

@@ -1,0 +1,167 @@
+From e1deb4695f9b02e297306ca7312285a2c7bc1aa7 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 24 Aug 2015 18:38:29 -0700
+Subject: Bug 1197636 - Correctly parse square bracket notation function names from the profiler. r=shu
+
+diff --git a/browser/devtools/performance/modules/logic/frame-utils.js b/browser/devtools/performance/modules/logic/frame-utils.js
+index ef130839..527f3ab 100644
+--- a/browser/devtools/performance/modules/logic/frame-utils.js
++++ b/browser/devtools/performance/modules/logic/frame-utils.js
+@@ -23,17 +23,21 @@ const CHAR_CODE_O = "o".charCodeAt(0);
+ const CHAR_CODE_P = "p".charCodeAt(0);
+ const CHAR_CODE_R = "r".charCodeAt(0);
+ const CHAR_CODE_S = "s".charCodeAt(0);
+ const CHAR_CODE_T = "t".charCodeAt(0);
+ const CHAR_CODE_U = "u".charCodeAt(0);
+ const CHAR_CODE_0 = "0".charCodeAt(0);
+ const CHAR_CODE_9 = "9".charCodeAt(0);
+ 
++const CHAR_CODE_QUOTE = "\"".charCodeAt(0);
+ const CHAR_CODE_LPAREN = "(".charCodeAt(0);
++const CHAR_CODE_ESCAPE = "\\".charCodeAt(0);
++const CHAR_CODE_LBRACKET = "[".charCodeAt(0);
++const CHAR_CODE_RBRACKET = "]".charCodeAt(0);
+ const CHAR_CODE_COLON = ":".charCodeAt(0);
+ const CHAR_CODE_SLASH = "/".charCodeAt(0);
+ 
+ // The cache used in the `nsIURL` function.
+ const gNSURLStore = new Map();
+ 
+ // The cache used to store inflated frames.
+ const gInflatedFrameStore = new WeakMap();
+@@ -68,22 +72,44 @@ function parseLocation(location, fallbackLine, fallbackColumn) {
+   // For an example without parentheses, take "bar.js:2".
+   //                                          ^      ^
+   //                                          |      |
+   // firstParenIndex will point to -----------+      |
+   //                                                 |
+   // lineAndColumIndex will point to ----------------+
+   let firstParenIndex = -1;
+   let lineAndColumnIndex = -1;
++  let inBrackets = false;
+ 
+   // Compute firstParenIndex and lineAndColumnIndex. If lineAndColumnIndex is
+   // found, also extract the line and column.
+   for (let i = 0; i < location.length; i++) {
+     let c = location.charCodeAt(i);
+ 
++    // If we run into a bracket, it's probably a function name via
++    // bracket notation, like:
++    // "Native[\"java/lang/System.arraycopy.(stuff)\"] http://localhost:8888:1"
++    //
++    // So if we run into an unescaped square bracket, loop until the bracket
++    // closes.
++    if (inBrackets && c === CHAR_CODE_RBRACKET &&
++        location.charCodeAt(i - 1) === CHAR_CODE_QUOTE &&
++        location.charCodeAt(i - 2) !== CHAR_CODE_ESCAPE) {
++      inBrackets = false;
++      continue;
++    }
++    if (inBrackets) {
++      continue;
++    }
++    if (c === CHAR_CODE_LBRACKET && !inBrackets &&
++        location.charCodeAt(i + 1) === CHAR_CODE_QUOTE) {
++      inBrackets = true;
++      continue;
++    }
++
+     // The url and line information might be inside parentheses.
+     if (c === CHAR_CODE_LPAREN) {
+       if (firstParenIndex < 0) {
+         firstParenIndex = i;
+       }
+       continue;
+     }
+ 
+@@ -176,18 +202,37 @@ function computeIsContentAndCategory(frame) {
+   }
+ 
+   let location = frame.location;
+ 
+   // Locations in frames with function names look like:
+   //   "functionName (foo://bar)".
+   // Look for the starting left parenthesis, then try to match a
+   // scheme name.
++  let inBrackets = false;
+   for (let i = 0; i < location.length; i++) {
+-    if (location.charCodeAt(i) === CHAR_CODE_LPAREN) {
++    let c = location.charCodeAt(i);
++    // Same as `parseLocation`, skip over any square bracket notation
++    // we run into in the function name.
++    if (inBrackets && c === CHAR_CODE_RBRACKET &&
++        location.charCodeAt(i - 1) === CHAR_CODE_QUOTE &&
++        location.charCodeAt(i - 2) !== CHAR_CODE_ESCAPE) {
++      inBrackets = false;
++      continue;
++    }
++    if (inBrackets) {
++      continue;
++    }
++    if (c === CHAR_CODE_LBRACKET && !inBrackets &&
++        location.charCodeAt(i + 1) === CHAR_CODE_QUOTE) {
++      inBrackets = true;
++      continue;
++    }
++
++    if (c === CHAR_CODE_LPAREN) {
+       if (isContentScheme(location, i + 1)) {
+         frame.isContent = true;
+         return;
+       }
+ 
+       for (let j = i + 1; j < location.length; j++) {
+         if (location.charCodeAt(j) === CHAR_CODE_R &&
+             isChromeScheme(location, j) &&
+diff --git a/browser/devtools/performance/test/unit/test_frame-utils-01.js b/browser/devtools/performance/test/unit/test_frame-utils-01.js
+index 8815bd9..9877ce1 100644
+--- a/browser/devtools/performance/test/unit/test_frame-utils-01.js
++++ b/browser/devtools/performance/test/unit/test_frame-utils-01.js
+@@ -17,18 +17,23 @@ const CONTENT_LOCATIONS = [
+   "hello/<.world (app://myfxosapp/file.js:100:1)",
+ 
+   // Test scripts with port numbers (bug 1164131)
+   "hello/<.world (http://localhost:8888/file.js:100:1)",
+   "hello/<.world (http://localhost:8888/file.js:100)",
+ 
+   // Occurs when executing an inline script on a root html page with port
+   // (I've never seen it with a column number but check anyway) bug 1164131
+-  "hello/<.world (http://localhost:8888/:1",
+-  "hello/<.world (http://localhost:8888/:100:50",
++  "hello/<.world (http://localhost:8888/:1)",
++  "hello/<.world (http://localhost:8888/:100:50)",
++
++  // bug 1197636
++  "Native[\"arraycopy(blah)\"] (http://localhost:8888/profiler.html:4)",
++  "Native[\"java/[lang](blah)\"] (http://localhost:8888/:1)",
++
+ ].map(argify);
+ 
+ const CHROME_LOCATIONS = [
+   { location: "Startup::XRE_InitChildProcess", line: 456, column: 123 },
+   { location: "chrome://browser/content/content.js", line: 456, column: 123 },
+   "setTimeout_timer (resource://gre/foo.js:123:434)",
+   "hello/<.world (jar:file://Users/mcurie/Dev/jetpacks.js)",
+   "hello/<.world (resource://foo.js -> http://bar/baz.js:123:987)",
+@@ -65,16 +70,18 @@ add_task(function () {
+     ["hello/<.world", "bar.js", "foo", "http://foo/bar.js?myquery=params&search=1", 123, 987, "foo", null],
+     ["hello/<.world", "/", "foo", "http://foo/#bar", 123, 987, "foo", null],
+     ["hello/<.world", "/", "foo", "http://foo/", 123, 987, "foo", null],
+     ["hello/<.world", "file.js", "myfxosapp", "app://myfxosapp/file.js", 100, 1, "myfxosapp", null],
+     ["hello/<.world", "file.js", "localhost", "http://localhost:8888/file.js", 100, 1, "localhost:8888", 8888],
+     ["hello/<.world", "file.js", "localhost", "http://localhost:8888/file.js", 100, null, "localhost:8888", 8888],
+     ["hello/<.world", "/", "localhost", "http://localhost:8888/", 1, null, "localhost:8888", 8888],
+     ["hello/<.world", "/", "localhost", "http://localhost:8888/", 100, 50, "localhost:8888", 8888],
++    ["Native[\"arraycopy(blah)\"]", "profiler.html", "localhost", "http://localhost:8888/profiler.html", 4, null, "localhost:8888", 8888],
++    ["Native[\"java/[lang](blah)\"]", "/", "localhost", "http://localhost:8888/", 1, null, "localhost:8888", 8888],
+   ];
+ 
+   for (let i = 0; i < PARSED_CONTENT.length; i++) {
+     let parsed = parseLocation.apply(null, CONTENT_LOCATIONS[i]);
+     for (let j = 0; j < FIELDS.length; j++) {
+       equal(parsed[FIELDS[j]], PARSED_CONTENT[i][j], `${CONTENT_LOCATIONS[i]} was parsed to correct ${FIELDS[j]}`);
+     }
+   }
+-- 
+2.2.1
+
