@@ -1,6 +1,6 @@
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Thu, 20 Aug 2015 13:10:47 -0700
-Subject: Bug 1153477 - Add a button to GC markers when allocations are on to snap to all objects allocated from this button to the previous one in the allocations call tree. r=vp,fitzgen
+Subject: Bug 1153477 - Add a button to GC markers when allocations are on to snapto all objects allocated from this button to the previous one in theallocations call tree. r=vp,fitzgen
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
 index f68bc20..903ed5a 100644
@@ -183,10 +183,10 @@ index 01b74c3..5784826 100644
      this.emit("resize");
    }
 diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
-index 684cad2..c1ee105 100644
+index 684cad2..2870844 100644
 --- a/browser/devtools/performance/test/browser.ini
 +++ b/browser/devtools/performance/test/browser.ini
-@@ -26,16 +26,17 @@ support-files =
+@@ -26,16 +26,18 @@ support-files =
  [browser_perf-console-record-06.js]
  [browser_perf-console-record-07.js]
  [browser_perf-console-record-08.js]
@@ -196,6 +196,7 @@ index 684cad2..c1ee105 100644
  [browser_perf-details-memory-calltree-render.js]
  [browser_perf-details-memory-flamegraph-render.js]
 +[browser_perf-details-waterfall-gc-snap.js]
++skip-if = true # Bug 1161817
  [browser_perf-details-waterfall-render.js]
  [browser_perf-details-01.js]
  [browser_perf-details-02.js]
@@ -205,13 +206,13 @@ index 684cad2..c1ee105 100644
  [browser_perf-details-06.js]
  [browser_perf-details-07.js]
 diff --git a/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js b/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
-similarity index 17%
+similarity index 15%
 rename from browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js
 rename to browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
-index 88c7feb..8072777 100644
+index 88c7feb..428eac3 100644
 --- a/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap-01.js
 +++ b/browser/devtools/performance/test/browser_perf-details-waterfall-gc-snap.js
-@@ -1,40 +1,128 @@
+@@ -1,40 +1,138 @@
  /* Any copyright is dedicated to the Public Domain.
     http://creativecommons.org/publicdomain/zero/1.0/ */
  
@@ -252,14 +253,22 @@ index 88c7feb..8072777 100644
  
 +  let bars = $$(".waterfall-marker-bar");
 +  let markers = PerformanceController.getCurrentRecording().getMarkers();
-+  let gcMarkers = markers.filter(m => m.name === "GarbageCollection");
++  let gcMarkers = markers.filter(isForceGCMarker);
 +
++  ok(gcMarkers.length >= 2, "should have atleast 2 GC markers");
 +  ok(bars.length >= 2, "should have atleast 2 GC markers rendered");
++
++  info("Received markers:");
++  for (let marker of gcMarkers) {
++    info(`${marker.causeName} ${marker.start}:${marker.end}`);
++  }
 +
 +  /**
 +   * Check when it's the first GC marker
 +   */
 +
++  info(`Will show allocation trigger button for ${Services.prefs.getCharPref("devtools.performance.ui.show-triggers-for-gc-types")}`);
++  info(`Clicking GC Marker of type ${gcMarkers[0].causeName} ${gcMarkers[0].start}:${gcMarkers[0].end}`);
 +  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[0]);
 +  let showAllocsButton;
 +  // On slower machines this can not be found immediately?
@@ -284,6 +293,7 @@ index 88c7feb..8072777 100644
 +   */
 +
 +  bars = $$(".waterfall-marker-bar");
++  info(`Clicking GC Marker of type ${gcMarkers[1].causeName} ${gcMarkers[1].start}:${gcMarkers[1].end}`);
 +  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[1]);
 +  // On slower machines this can not be found immediately?
 +  yield waitUntil(() => showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']"));
@@ -325,7 +335,7 @@ index 88c7feb..8072777 100644
 +
 +  bars = $$(".waterfall-marker-bar");
 +  markers = PerformanceController.getCurrentRecording().getMarkers();
-+  gcMarkers = markers.filter(m => m.name === "GarbageCollection");
++  gcMarkers = markers.filter(isForceGCMarker);
 +
 +  EventUtils.sendMouseEvent({ type: "mousedown" }, bars[0]);
 +  showAllocsButton = $("#waterfall-details .custom-button[type='show-allocations']");
@@ -336,14 +346,15 @@ index 88c7feb..8072777 100644
    finish();
  }
  
++function isForceGCMarker (m) {
++  return m.name === "GarbageCollection" && m.causeName === "COMPONENT_UTILS" && m.start >= 0;
++}
++
  function hasGCMarkers (controller) {
    return function () {
 -    controller.getCurrentRecording().getMarkers().filter(m => m.name === "GarbageCollection").length >== 2;
 +    Cu.forceGC();
-+    return controller.getCurrentRecording().getMarkers().filter(m => {
-+      // Ensure we have atleast 2 GC markers via Cu.forceGC()
-+      return m.name === "GarbageCollection" && m.causeName === "COMPONENT_UTILS";
-+    }).length >= 2;
++    return controller.getCurrentRecording().getMarkers().filter(isForceGCMarker).length >= 2;
    };
  }
 diff --git a/browser/devtools/performance/test/head.js b/browser/devtools/performance/test/head.js
