@@ -1,0 +1,35 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 26 Aug 2015 10:43:49 -0700
+Subject: Bug 1198582 - Buffer percentage should never be a negative value. r=vp
+
+diff --git a/toolkit/devtools/server/actors/performance.js b/toolkit/devtools/server/actors/performance.js
+index 520c647..b9a88c1 100644
+--- a/toolkit/devtools/server/actors/performance.js
++++ b/toolkit/devtools/server/actors/performance.js
+@@ -206,17 +206,22 @@ const PerformanceFront = exports.PerformanceFront = protocol.FrontClass(Performa
+     if (!recording.isRecording()) {
+       return void 0;
+     }
+     let { position: currentPosition, totalSize, generation: currentGeneration } = this._currentBufferStatus;
+     let { position: origPosition, generation: origGeneration } = recording.getStartingBufferStatus();
+ 
+     let normalizedCurrent = (totalSize * (currentGeneration - origGeneration)) + currentPosition;
+     let percent = (normalizedCurrent - origPosition) / totalSize;
+-    return percent > 1 ? 1 : percent;
++
++    // Clamp between 0 and 1; can get negative percentage values when a new
++    // recording starts and the currentBufferStatus has not yet been updated. Rather
++    // than fetching another status update, just clamp to 0, and this will be updated
++    // on the next profiler-status event.
++    return percent > 1 ? 1 : percent < 0 ? 0 : percent;
+   },
+ 
+   /**
+    * Loads a recording from a file.
+    *
+    * @param {nsILocalFile} file
+    *        The file to import the data from.
+    * @return {Promise<PerformanceRecordingFront>}
+-- 
+2.2.1
+
