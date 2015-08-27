@@ -1,0 +1,1021 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 26 Aug 2015 14:27:04 -0700
+Subject: Bug 1171488 - Attach host and client system data to recording profiles. r=vp
+
+diff --git a/toolkit/devtools/performance/io.js b/toolkit/devtools/performance/io.js
+index 10c41c3..92c271b 100644
+--- a/toolkit/devtools/performance/io.js
++++ b/toolkit/devtools/performance/io.js
+@@ -148,17 +148,19 @@ function convertLegacyData (legacyData) {
+     profile: profilerData.profile,
+     // Fake a configuration object here if there's tick data,
+     // so that it can be rendered
+     configuration: {
+       withTicks: !!ticksData.length,
+       withMarkers: false,
+       withMemory: false,
+       withAllocations: false
+-    }
++    },
++    systemHost: {},
++    systemClient: {},
+   };
+ 
+   return data;
+ }
+ 
+ exports.getUnicodeConverter = getUnicodeConverter;
+ exports.saveRecordingToFile = saveRecordingToFile;
+ exports.loadRecordingFromFile = loadRecordingFromFile;
+diff --git a/toolkit/devtools/performance/legacy/front.js b/toolkit/devtools/performance/legacy/front.js
+index 8ad964d..115d103 100644
+--- a/toolkit/devtools/performance/legacy/front.js
++++ b/toolkit/devtools/performance/legacy/front.js
+@@ -16,16 +16,20 @@ loader.lazyRequireGetter(this, "Actors",
+ loader.lazyRequireGetter(this, "LegacyPerformanceRecording",
+   "devtools/toolkit/performance/legacy/recording", true);
+ loader.lazyRequireGetter(this, "importRecording",
+   "devtools/toolkit/performance/legacy/recording", true);
+ loader.lazyRequireGetter(this, "normalizePerformanceFeatures",
+   "devtools/toolkit/performance/utils", true);
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
++loader.lazyRequireGetter(this, "getDeviceFront",
++  "devtools/toolkit/server/actors/device", true);
++loader.lazyRequireGetter(this, "getSystemInfo",
++  "devtools/toolkit/shared/system", true);
+ loader.lazyRequireGetter(this, "events",
+   "sdk/event/core");
+ loader.lazyRequireGetter(this, "EventTarget",
+   "sdk/event/target", true);
+ loader.lazyRequireGetter(this, "Class",
+   "sdk/core/heritage", true);
+ 
+ /**
+@@ -328,39 +332,48 @@ const LegacyPerformanceFront = Class({
+     // from the LegacyPerformanceFront or via `console-profile-stop` event) and then
+     // remove it from the internal store.
+     //
+     // In the case where a console.profile is generated via the console (so the tools are
+     // open), we initialize the Performance tool so it can listen to those events.
+     this._recordings.splice(this._recordings.indexOf(model), 1);
+ 
+     let config = model.getConfiguration();
+-    let startTime = model.getProfilerStartTime();
++    let startTime = model._getProfilerStartTime();
+     let profilerData = yield this._profiler.getProfile({ startTime });
+     let timelineEndTime = Date.now();
+ 
+     // Only if there are no more sessions recording do we stop
+     // the underlying timeline actors. If we're still recording,
+     // juse use Date.now() for the timeline end times, as those
+     // are only used in tests.
+     if (!this.isRecording()) {
+       // This doesn't stop the profiler, just turns off polling for
+       // events, and also turns off events on timeline actors.
+       yield this._profiler.stop();
+       timelineEndTime = yield this._timeline.stop(config);
+     }
+ 
++    let systemDeferred = promise.defer();
++    this._client.listTabs(form => {
++      systemDeferred.resolve(getDeviceFront(this._client, form).getDescription());
++    });
++    let systemHost = yield systemDeferred.promise;
++    let systemClient = yield getSystemInfo();
++
+     // Set the results on the LegacyPerformanceRecording itself.
+     model._onStopRecording({
+       // Data available only at the end of a recording.
+       profile: profilerData.profile,
+ 
+       // End times for all the actors.
+       profilerEndTime: profilerData.currentTime,
+-      timelineEndTime: timelineEndTime
++      timelineEndTime: timelineEndTime,
++      systemHost,
++      systemClient,
+     });
+ 
+     events.emit(this, "recording-stopped", model);
+     return model;
+   }),
+ 
+   /**
+    * Creates a recording object when given a nsILocalFile.
+diff --git a/toolkit/devtools/performance/legacy/recording.js b/toolkit/devtools/performance/legacy/recording.js
+index 8680a04..0080d17 100644
+--- a/toolkit/devtools/performance/legacy/recording.js
++++ b/toolkit/devtools/performance/legacy/recording.js
+@@ -5,16 +5,19 @@
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ 
+ loader.lazyRequireGetter(this, "PerformanceIO",
+   "devtools/toolkit/performance/io");
+ loader.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/toolkit/performance/utils");
++loader.lazyRequireGetter(this, "PerformanceRecordingCommon",
++  "devtools/toolkit/performance/recording-common", true);
++loader.lazyRequireGetter(this, "merge", "sdk/util/object", true);
+ 
+ /**
+  * Model for a wholistic profile, containing the duration, profiling data,
+  * frames data, timeline (marker, tick, memory) data, and methods to mark
+  * a recording as 'in progress' or 'finished'.
+  */
+ const LegacyPerformanceRecording = function (options={}) {
+   this._label = options.label || "";
+@@ -28,59 +31,20 @@ const LegacyPerformanceRecording = function (options={}) {
+     withJITOptimizations: options.withJITOptimizations || false,
+     allocationsSampleProbability: options.allocationsSampleProbability || 0,
+     allocationsMaxLogLength: options.allocationsMaxLogLength || 0,
+     bufferSize: options.bufferSize || 0,
+     sampleFrequency: options.sampleFrequency || 1
+   };
+ };
+ 
+-LegacyPerformanceRecording.prototype = {
+-  // Private fields, only needed when a recording is started or stopped.
+-  _console: false,
+-  _imported: false,
+-  _recording: false,
+-  _completed: false,
++LegacyPerformanceRecording.prototype = merge({
+   _profilerStartTime: 0,
+   _timelineStartTime: 0,
+   _memoryStartTime: 0,
+-  _configuration: {},
+-  _startingBufferStatus: null,
+-  _bufferPercent: null,
+-
+-  // Serializable fields, necessary and sufficient for import and export.
+-  _label: "",
+-  _duration: 0,
+-  _markers: null,
+-  _frames: null,
+-  _memory: null,
+-  _ticks: null,
+-  _allocations: null,
+-  _profile: null,
+-
+-  /**
+-   * Loads a recording from a file.
+-   *
+-   * @param nsILocalFile file
+-   *        The file to import the data form.
+-   */
+-  importRecording: Task.async(function *(file) {
+-    let recordingData = yield PerformanceIO.loadRecordingFromFile(file);
+-
+-    this._imported = true;
+-    this._label = recordingData.label || "";
+-    this._duration = recordingData.duration;
+-    this._markers = recordingData.markers;
+-    this._frames = recordingData.frames;
+-    this._memory = recordingData.memory;
+-    this._ticks = recordingData.ticks;
+-    this._allocations = recordingData.allocations;
+-    this._profile = recordingData.profile;
+-    this._configuration = recordingData.configuration || {};
+-  }),
+ 
+   /**
+    * Saves the current recording to a file.
+    *
+    * @param nsILocalFile file
+    *        The file to stream the data into.
+    */
+   exportRecording: Task.async(function *(file) {
+@@ -102,21 +66,21 @@ LegacyPerformanceRecording.prototype = {
+     this._profilerStartTime = info.profilerStartTime;
+     this._timelineStartTime = info.timelineStartTime;
+     this._memoryStartTime = info.memoryStartTime;
+     this._startingBufferStatus = {
+       position: info.position,
+       totalSize: info.totalSize,
+       generation: info.generation
+     };
+-    // initialize the _bufferPercent if the server supports it.
+-    this._bufferPercent = info.position !== void 0 ? 0 : null;
+ 
+     this._recording = true;
+ 
++    this._systemHost = {};
++    this._systemClient = {};
+     this._markers = [];
+     this._frames = [];
+     this._memory = [];
+     this._ticks = [];
+     this._allocations = { sites: [], timestamps: [], frames: [], sizes: [] };
+   },
+ 
+   /**
+@@ -129,191 +93,46 @@ LegacyPerformanceRecording.prototype = {
+     this._duration = endTime - this._localStartTime;
+     this._recording = false;
+   },
+ 
+   /**
+    * Sets results available from stopping a recording from PerformanceFront.
+    * Should only be called by PerformanceFront.
+    */
+-  _onStopRecording: Task.async(function *({ profilerEndTime, profile }) {
++  _onStopRecording: Task.async(function *({ profilerEndTime, profile, systemClient, systemHost }) {
+     // Update the duration with the accurate profilerEndTime, so we don't have
+     // samples outside of the approximate duration set in `_onStoppingRecording`.
+     this._duration = profilerEndTime - this._profilerStartTime;
+     this._profile = profile;
+     this._completed = true;
+ 
+     // We filter out all samples that fall out of current profile's range
+     // since the profiler is continuously running. Because of this, sample
+     // times are not guaranteed to have a zero epoch, so offset the
+     // timestamps.
+     RecordingUtils.offsetSampleTimes(this._profile, this._profilerStartTime);
+ 
+     // Markers need to be sorted ascending by time, to be properly displayed
+     // in a waterfall view.
+     this._markers = this._markers.sort((a, b) => (a.start > b.start));
++
++    this._systemHost = systemHost;
++    this._systemClient = systemClient;
+   }),
+ 
+   /**
+    * Gets the profile's start time.
+    * @return number
+    */
+-  getProfilerStartTime: function () {
++  _getProfilerStartTime: function () {
+     return this._profilerStartTime;
+   },
+ 
+   /**
+-   * Gets the profile's label, from `console.profile(LABEL)`.
+-   * @return string
+-   */
+-  getLabel: function () {
+-    return this._label;
+-  },
+-
+-  /**
+-   * Gets duration of this recording, in milliseconds.
+-   * @return number
+-   */
+-  getDuration: function () {
+-    // Compute an approximate ending time for the current recording if it is
+-    // still in progress. This is needed to ensure that the view updates even
+-    // when new data is not being generated.
+-    if (this._recording) {
+-      return Date.now() - this._localStartTime;
+-    } else {
+-      return this._duration;
+-    }
+-  },
+-
+-  /**
+-   * Returns configuration object of specifying whether the recording
+-   * was started withTicks, withMemory and withAllocations, and other configurations.
+-   * @return object
+-   */
+-  getConfiguration: function () {
+-    return this._configuration;
+-  },
+-
+-  /**
+-   * Gets the accumulated markers in the current recording.
+-   * @return array
+-   */
+-  getMarkers: function() {
+-    return this._markers;
+-  },
+-
+-  /**
+-   * Gets the accumulated stack frames in the current recording.
+-   * @return array
+-   */
+-  getFrames: function() {
+-    return this._frames;
+-  },
+-
+-  /**
+-   * Gets the accumulated memory measurements in this recording.
+-   * @return array
+-   */
+-  getMemory: function() {
+-    return this._memory;
+-  },
+-
+-  /**
+-   * Gets the accumulated refresh driver ticks in this recording.
+-   * @return array
+-   */
+-  getTicks: function() {
+-    return this._ticks;
+-  },
+-
+-  /**
+-   * Gets the memory allocations data in this recording.
+-   * @return array
+-   */
+-  getAllocations: function() {
+-    return this._allocations;
+-  },
+-
+-  /**
+-   * Gets the profiler data in this recording.
+-   * @return array
+-   */
+-  getProfile: function() {
+-    return this._profile;
+-  },
+-
+-  /**
+-   * Gets all the data in this recording.
+-   */
+-  getAllData: function() {
+-    let label = this.getLabel();
+-    let duration = this.getDuration();
+-    let markers = this.getMarkers();
+-    let frames = this.getFrames();
+-    let memory = this.getMemory();
+-    let ticks = this.getTicks();
+-    let allocations = this.getAllocations();
+-    let profile = this.getProfile();
+-    let configuration = this.getConfiguration();
+-    return { label, duration, markers, frames, memory, ticks, allocations, profile, configuration };
+-  },
+-
+-  /**
+-   * Returns a boolean indicating whether or not this recording model
+-   * was imported via file.
+-   */
+-  isImported: function () {
+-    return this._imported;
+-  },
+-
+-  /**
+-   * Returns a boolean indicating whether or not this recording model
+-   * was started via a `console.profile` call.
+-   */
+-  isConsole: function () {
+-    return this._console;
+-  },
+-
+-  /**
+-   * Returns a boolean indicating whether or not this recording model
+-   * has finished recording.
+-   * There is some delay in fetching data between when the recording stops, and
+-   * when the recording is considered completed once it has all the profiler and timeline data.
+-   */
+-  isCompleted: function () {
+-    return this._completed || this.isImported();
+-  },
+-
+-  /**
+-   * Returns a boolean indicating whether or not this recording model
+-   * is recording.
+-   * A model may no longer be recording, yet still not have the profiler data. In that
+-   * case, use `isCompleted()`.
+-   */
+-  isRecording: function () {
+-    return this._recording;
+-  },
+-
+-  /**
+-   * Returns a boolean indicating if this recording is no longer recording, but
+-   * not yet completed.
+-   */
+-  isFinalizing: function () {
+-    return !this.isRecording() && !this.isCompleted();
+-  },
+-
+-  /**
+-   * Returns the position, generation and totalSize of the profiler
+-   * when this recording was started.
+-   */
+-  getStartingBufferStatus: function () {
+-    return this._startingBufferStatus;
+-  },
+-
+-  /**
+    * Fired whenever the PerformanceFront emits markers, memory or ticks.
+    */
+   _addTimelineData: function (eventName, ...data) {
+     // If this model isn't currently recording,
+     // ignore the timeline data.
+     if (!this.isRecording()) {
+       return;
+     }
+@@ -343,11 +162,11 @@ LegacyPerformanceRecording.prototype = {
+         let [, timestamps] = data;
+         this._ticks = timestamps;
+         break;
+       }
+     }
+   },
+ 
+   toString: () => "[object LegacyPerformanceRecording]"
+-};
++}, PerformanceRecordingCommon);
+ 
+ exports.LegacyPerformanceRecording = LegacyPerformanceRecording;
+diff --git a/toolkit/devtools/performance/moz.build b/toolkit/devtools/performance/moz.build
+index d711163..9537acf 100644
+--- a/toolkit/devtools/performance/moz.build
++++ b/toolkit/devtools/performance/moz.build
+@@ -5,16 +5,17 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ XPCSHELL_TESTS_MANIFESTS += ['test/xpcshell.ini']
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
+   'io.js',
+   'process-communication.js',
+   'recorder.js',
++  'recording-common.js',
+   'utils.js',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.performance.legacy += [
+   'legacy/actors.js',
+   'legacy/compatibility.js',
+   'legacy/front.js',
+   'legacy/recording.js',
+diff --git a/toolkit/devtools/performance/recorder.js b/toolkit/devtools/performance/recorder.js
+index 5caa1cb..04d25e1 100644
+--- a/toolkit/devtools/performance/recorder.js
++++ b/toolkit/devtools/performance/recorder.js
+@@ -20,23 +20,24 @@ loader.lazyRequireGetter(this, "events",
+ loader.lazyRequireGetter(this, "Memory",
+   "devtools/toolkit/shared/memory", true);
+ loader.lazyRequireGetter(this, "Timeline",
+   "devtools/toolkit/shared/timeline", true);
+ loader.lazyRequireGetter(this, "Profiler",
+   "devtools/toolkit/shared/profiler", true);
+ loader.lazyRequireGetter(this, "PerformanceRecordingActor",
+   "devtools/server/actors/performance-recording", true);
+-
+ loader.lazyRequireGetter(this, "PerformanceRecordingFront",
+   "devtools/server/actors/performance-recording", true);
+ loader.lazyRequireGetter(this, "mapRecordingOptions",
+   "devtools/toolkit/performance/utils", true);
+ loader.lazyRequireGetter(this, "DevToolsUtils",
+   "devtools/toolkit/DevToolsUtils");
++loader.lazyRequireGetter(this, "getSystemInfo",
++  "devtools/toolkit/shared/system", true);
+ 
+ const PROFILER_EVENTS = [
+   "console-api-profiler",
+   "profiler-started",
+   "profiler-stopped",
+   "profiler-status"
+ ];
+ 
+@@ -64,31 +65,36 @@ const PerformanceRecorder = exports.PerformanceRecorder = Class({
+     this._onTimelineData = this._onTimelineData.bind(this);
+     this._onProfilerEvent = this._onProfilerEvent.bind(this);
+   },
+ 
+   /**
+    * Initializes a connection to the profiler and other miscellaneous actors.
+    * If in the process of opening, or already open, nothing happens.
+    *
++   * @param {Object} options.systemClient
++   *        Metadata about the client's system to attach to the recording models.
++   *
+    * @return object
+    *         A promise that is resolved once the connection is established.
+    */
+-  connect: function () {
++  connect: function (options) {
+     if (this._connected) {
+       return;
+     }
+ 
+     // Sets `this._profiler`, `this._timeline` and `this._memory`.
+     // Only initialize the timeline and memory fronts if the respective actors
+     // are available. Older Gecko versions don't have existing implementations,
+     // in which case all the methods we need can be easily mocked.
+     this._connectComponents();
+     this._registerListeners();
+ 
++    this._systemClient = options.systemClient;
++
+     this._connected = true;
+   },
+ 
+   /**
+    * Destroys this connection.
+    */
+   destroy: function () {
+     this._unregisterListeners();
+@@ -336,16 +342,19 @@ const PerformanceRecorder = exports.PerformanceRecorder = Class({
+     // Filter out start times that are not actually used (0 or undefined), and
+     // find the earliest time since all sources use same epoch.
+     let startTimes = [profilerStartData.currentTime, memoryStartData, timelineStartData].filter(Boolean);
+     data.startTime = Math.min(...startTimes);
+     data.position = profilerStartData.position;
+     data.generation = profilerStartData.generation;
+     data.totalSize = profilerStartData.totalSize;
+ 
++    data.systemClient = this._systemClient;
++    data.systemHost = yield getSystemInfo();
++
+     let model = new PerformanceRecordingActor(this.conn, options, data);
+     this._recordings.push(model);
+ 
+     events.emit(this, "recording-started", model);
+     return model;
+   }),
+ 
+   /**
+diff --git a/toolkit/devtools/performance/recording-common.js b/toolkit/devtools/performance/recording-common.js
+new file mode 100644
+index 0000000..676b8a5
+--- /dev/null
++++ b/toolkit/devtools/performance/recording-common.js
+@@ -0,0 +1,97 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++/**
++ * A mixin to be used for PerformanceRecordingActor, PerformanceRecordingFront,
++ * and LegacyPerformanceRecording for helper methods to access data.
++ */
++
++const PerformanceRecordingCommon = exports.PerformanceRecordingCommon = {
++  // Private fields, only needed when a recording is started or stopped.
++  _console: false,
++  _imported: false,
++  _recording: false,
++  _completed: false,
++  _configuration: {},
++  _startingBufferStatus: null,
++  _localStartTime: 0,
++
++  // Serializable fields, necessary and sufficient for import and export.
++  _label: "",
++  _duration: 0,
++  _markers: null,
++  _frames: null,
++  _memory: null,
++  _ticks: null,
++  _allocations: null,
++  _profile: null,
++  _systemHost: null,
++  _systemClient: null,
++
++  /**
++   * Helper methods for returning the status of the recording.
++   * These methods should be consistent on both the front and actor.
++   */
++  isRecording: function () { return this._recording; },
++  isCompleted: function () { return this._completed || this.isImported(); },
++  isFinalizing: function () { return !this.isRecording() && !this.isCompleted(); },
++  isConsole: function () { return this._console; },
++  isImported: function () { return this._imported; },
++
++  /**
++   * Helper methods for returning configuration for the recording.
++   * These methods should be consistent on both the front and actor.
++   */
++  getConfiguration: function () { return this._configuration; },
++  getLabel: function () { return this._label; },
++
++  /**
++   * Gets duration of this recording, in milliseconds.
++   * @return number
++   */
++  getDuration: function () {
++    // Compute an approximate ending time for the current recording if it is
++    // still in progress. This is needed to ensure that the view updates even
++    // when new data is not being generated. If recording is completed, use
++    // the duration from the profiler; if between recording and being finalized,
++    // use the last estimated duration.
++    if (this.isRecording()) {
++      return this._estimatedDuration = Date.now() - this._localStartTime;
++    } else {
++      return this._duration || this._estimatedDuration || 0;
++    }
++  },
++
++  /**
++   * Helper methods for returning recording data.
++   * These methods should be consistent on both the front and actor.
++   */
++  getMarkers: function() { return this._markers; },
++  getFrames: function() { return this._frames; },
++  getMemory: function() { return this._memory; },
++  getTicks: function() { return this._ticks; },
++  getAllocations: function() { return this._allocations; },
++  getProfile: function() { return this._profile; },
++  getHostSystemInfo: function() { return this._systemHost; },
++  getClientSystemInfo: function() { return this._systemClient; },
++  getStartingBufferStatus: function() { return this._startingBufferStatus; },
++
++  getAllData: function () {
++    let label = this.getLabel();
++    let duration = this.getDuration();
++    let markers = this.getMarkers();
++    let frames = this.getFrames();
++    let memory = this.getMemory();
++    let ticks = this.getTicks();
++    let allocations = this.getAllocations();
++    let profile = this.getProfile();
++    let configuration = this.getConfiguration();
++    let systemHost = this.getHostSystemInfo();
++    let systemClient = this.getClientSystemInfo();
++
++    return { label, duration, markers, frames, memory, ticks, allocations, profile, configuration, systemHost, systemClient };
++  },
++};
+diff --git a/toolkit/devtools/server/actors/performance-recording.js b/toolkit/devtools/server/actors/performance-recording.js
+index fea465d..54175dc 100644
+--- a/toolkit/devtools/server/actors/performance-recording.js
++++ b/toolkit/devtools/server/actors/performance-recording.js
+@@ -10,82 +10,18 @@ const { custom, method, RetVal, Arg, Option, types, preEvent } = protocol;
+ const { actorBridge } = require("devtools/server/actors/common");
+ 
+ loader.lazyRequireGetter(this, "events", "sdk/event/core");
+ loader.lazyRequireGetter(this, "merge", "sdk/util/object", true);
+ loader.lazyRequireGetter(this, "PerformanceIO",
+   "devtools/toolkit/performance/io");
+ loader.lazyRequireGetter(this, "RecordingUtils",
+   "devtools/toolkit/performance/utils");
+-
+-/**
+- * A set of functions used by both the front and actor to access
+- * internal properties.
+- */
+-const PerformanceRecordingCommon = {
+-  // Private fields, only needed when a recording is started or stopped.
+-  _console: false,
+-  _imported: false,
+-  _recording: false,
+-  _completed: false,
+-  _configuration: {},
+-  _startingBufferStatus: null,
+-  _localStartTime: null,
+-
+-  // Serializable fields, necessary and sufficient for import and export.
+-  _label: "",
+-  _duration: 0,
+-  _markers: null,
+-  _frames: null,
+-  _memory: null,
+-  _ticks: null,
+-  _allocations: null,
+-  _profile: null,
+-
+-  /**
+-   * Helper methods for returning the status of the recording.
+-   * These methods should be consistent on both the front and actor.
+-   */
+-  isRecording: function () { return this._recording; },
+-  isCompleted: function () { return this._completed || this.isImported(); },
+-  isFinalizing: function () { return !this.isRecording() && !this.isCompleted(); },
+-  isConsole: function () { return this._console; },
+-  isImported: function () { return this._imported; },
+-
+-  /**
+-   * Helper methods for returning configuration for the recording.
+-   * These methods should be consistent on both the front and actor.
+-   */
+-  getConfiguration: function () { return this._configuration; },
+-  getLabel: function () { return this._label; },
+-
+-  /**
+-   * Helper methods for returning recording data.
+-   * These methods should be consistent on both the front and actor.
+-   */
+-  getMarkers: function() { return this._markers; },
+-  getFrames: function() { return this._frames; },
+-  getMemory: function() { return this._memory; },
+-  getTicks: function() { return this._ticks; },
+-  getAllocations: function() { return this._allocations; },
+-  getProfile: function() { return this._profile; },
+-
+-  getAllData: function () {
+-    let label = this.getLabel();
+-    let duration = this.getDuration();
+-    let markers = this.getMarkers();
+-    let frames = this.getFrames();
+-    let memory = this.getMemory();
+-    let ticks = this.getTicks();
+-    let allocations = this.getAllocations();
+-    let profile = this.getProfile();
+-    let configuration = this.getConfiguration();
+-    return { label, duration, markers, frames, memory, ticks, allocations, profile, configuration };
+-  },
+-};
++loader.lazyRequireGetter(this, "PerformanceRecordingCommon",
++  "devtools/toolkit/performance/recording-common", true);
+ 
+ /**
+  * This actor wraps the Performance module at toolkit/devtools/shared/performance.js
+  * and provides RDP definitions.
+  *
+  * @see toolkit/devtools/shared/performance.js for documentation.
+  */
+ let PerformanceRecordingActor = exports.PerformanceRecordingActor = protocol.ActorClass(merge({
+@@ -106,19 +42,22 @@ let PerformanceRecordingActor = exports.PerformanceRecordingActor = protocol.Act
+       localStartTime: this._localStartTime,
+       recording: this._recording,
+       completed: this._completed,
+       duration: this._duration,
+     };
+ 
+     // Only send profiler data once it exists and it has
+     // not yet been sent
+-    if (this._profile && !this._sentProfilerData) {
+-      form.profile = this._profile;
+-      this._sentProfilerData = true;
++    if (this._profile && !this._sentFinalizedData) {
++      form.finalizedData = true;
++      form.profile = this.getProfile();
++      form.systemHost = this.getHostSystemInfo();
++      form.systemClient = this.getClientSystemInfo();
++      this._sentFinalizedData = true;
+     }
+ 
+     return form;
+   },
+ 
+   /**
+    * @param {object} conn
+    * @param {object} options
+@@ -159,16 +98,19 @@ let PerformanceRecordingActor = exports.PerformanceRecordingActor = protocol.Act
+       };
+ 
+       this._recording = true;
+       this._markers = [];
+       this._frames = [];
+       this._memory = [];
+       this._ticks = [];
+       this._allocations = { sites: [], timestamps: [], frames: [], sizes: [] };
++
++      this._systemHost = meta.systemHost || {};
++      this._systemClient = meta.systemClient || {};
+     }
+   },
+ 
+   destroy: function() {
+     protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+   /**
+@@ -228,18 +170,20 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+     this._console = form.console;
+     this._label = form.label;
+     this._startTime = form.startTime;
+     this._localStartTime = form.localStartTime;
+     this._recording = form.recording;
+     this._completed = form.completed;
+     this._duration = form.duration;
+ 
+-    if (form.profile) {
++    if (form.finalizedData) {
+       this._profile = form.profile;
++      this._systemHost = form.systemHost;
++      this._systemClient = form.systemClient;
+     }
+ 
+     // Sort again on the client side if we're using realtime markers and the recording
+     // just finished. This is because GC/Compositing markers can come into the array out of order with
+     // the other markers, leading to strange collapsing in waterfall view.
+     if (this._completed && !this._markersSorted) {
+       this._markers = this._markers.sort((a, b) => (a.start > b.start));
+       this._markersSorted = true;
+@@ -266,43 +210,16 @@ let PerformanceRecordingFront = exports.PerformanceRecordingFront = protocol.Fro
+    *        The file to stream the data into.
+    */
+   exportRecording: function (file) {
+     let recordingData = this.getAllData();
+     return PerformanceIO.saveRecordingToFile(recordingData, file);
+   },
+ 
+   /**
+-   * Returns the position, generation, and totalSize of the profiler
+-   * when this recording was started.
+-   *
+-   * @return {object}
+-   */
+-  getStartingBufferStatus: function () {
+-    return this._form.startingBufferStatus;
+-  },
+-
+-  /**
+-   * Gets duration of this recording, in milliseconds.
+-   * @return number
+-   */
+-  getDuration: function () {
+-    // Compute an approximate ending time for the current recording if it is
+-    // still in progress. This is needed to ensure that the view updates even
+-    // when new data is not being generated. If recording is completed, use
+-    // the duration from the profiler; if between recording and being finalized,
+-    // use the last estimated duration.
+-    if (this.isRecording()) {
+-      return this._estimatedDuration = Date.now() - this._localStartTime;
+-    } else {
+-      return this._duration || this._estimatedDuration || 0;
+-    }
+-  },
+-
+-  /**
+    * Fired whenever the PerformanceFront emits markers, memory or ticks.
+    */
+   _addTimelineData: function (eventName, data) {
+     let config = this.getConfiguration();
+ 
+     switch (eventName) {
+       // Accumulate timeline markers into an array. Furthermore, the timestamps
+       // do not have a zero epoch, so offset all of them by the start time.
+diff --git a/toolkit/devtools/server/actors/performance.js b/toolkit/devtools/server/actors/performance.js
+index 520c647..d97abba 100644
+--- a/toolkit/devtools/server/actors/performance.js
++++ b/toolkit/devtools/server/actors/performance.js
+@@ -17,16 +17,18 @@ loader.lazyRequireGetter(this, "extend", "sdk/util/object", true);
+ loader.lazyRequireGetter(this, "PerformanceRecorder",
+   "devtools/toolkit/performance/recorder", true);
+ loader.lazyRequireGetter(this, "PerformanceIO",
+   "devtools/toolkit/performance/io");
+ loader.lazyRequireGetter(this, "normalizePerformanceFeatures",
+   "devtools/toolkit/performance/utils", true);
+ loader.lazyRequireGetter(this, "LegacyPerformanceFront",
+   "devtools/toolkit/performance/legacy/front", true);
++loader.lazyRequireGetter(this, "getSystemInfo",
++  "devtools/toolkit/shared/system", true);
+ 
+ const PIPE_TO_FRONT_EVENTS = new Set([
+   "recording-started", "recording-stopping", "recording-stopped",
+   "profiler-status", "timeline-data", "console-profile-start"
+ ]);
+ 
+ const RECORDING_STATE_CHANGE_EVENTS = new Set([
+   "recording-started", "recording-stopping", "recording-stopped"
+@@ -92,20 +94,23 @@ let PerformanceActor = exports.PerformanceActor = protocol.ActorClass({
+   },
+ 
+   destroy: function () {
+     events.off(this.bridge, "*", this._onRecorderEvent);
+     this.bridge.destroy();
+     protocol.Actor.prototype.destroy.call(this);
+   },
+ 
+-  connect: method(function () {
+-    this.bridge.connect();
+-    return this.traits;
+-  }, { response: RetVal("json") }),
++  connect: method(function (config) {
++    this.bridge.connect({ systemClient: config.systemClient });
++    return { traits: this.traits };
++  }, {
++    request: { options: Arg(0, "nullable:json") },
++    response: RetVal("json")
++  }),
+ 
+   startRecording: method(Task.async(function *(options={}) {
+     let normalizedOptions = normalizePerformanceFeatures(options, this.traits.features);
+     let recording = yield this.bridge.startRecording(normalizedOptions);
+ 
+     this.manage(recording);
+ 
+     return recording;
+@@ -177,19 +182,27 @@ const PerformanceFront = exports.PerformanceFront = protocol.FrontClass(Performa
+     this.actorID = form.performanceActor;
+     this.manage(this);
+   },
+ 
+   destroy: function () {
+     protocol.Front.prototype.destroy.call(this);
+   },
+ 
+-  connect: custom(function () {
+-    return this._connect().then(traits => this._traits = traits);
+-  }, {
++  /**
++   * Conenct to the server, and handle once-off tasks like storing traits
++   * or system info.
++   */
++  connect: custom(Task.async(function *() {
++    let systemClient = yield getSystemInfo();
++    let { traits } = yield this._connect({ systemClient });
++    this._traits = traits;
++
++    return this._traits;
++  }), {
+     impl: "_connect"
+   }),
+ 
+   get traits() {
+     if (!this._traits) {
+       Cu.reportError("Cannot access traits of PerformanceFront before calling `connect()`.");
+     }
+     return this._traits;
+@@ -229,16 +242,18 @@ const PerformanceFront = exports.PerformanceFront = protocol.FrontClass(Performa
+       model._duration = recordingData.duration;
+       model._markers = recordingData.markers;
+       model._frames = recordingData.frames;
+       model._memory = recordingData.memory;
+       model._ticks = recordingData.ticks;
+       model._allocations = recordingData.allocations;
+       model._profile = recordingData.profile;
+       model._configuration = recordingData.configuration || {};
++      model._systemHost = recordingData.systemHost;
++      model._systemClient = recordingData.systemClient;
+       return model;
+     });
+   },
+ 
+   /**
+    * Store profiler status when the position has been update so we can
+    * calculate recording's buffer percentage usage after emitting the event.
+    */
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js b/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js
+index f66c1a8..9a56096 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-legacy-front-01.js
+@@ -48,16 +48,18 @@ add_task(function*() {
+   ok(recording.getDuration() >= 0, "duration is a positive number");
+   isEmptyArray(recording.getMarkers(), "markers");
+   isEmptyArray(recording.getTicks(), "ticks");
+   isEmptyArray(recording.getMemory(), "memory");
+   isEmptyArray(recording.getAllocations().sites, "allocations.sites");
+   isEmptyArray(recording.getAllocations().timestamps, "allocations.timestamps");
+   isEmptyArray(recording.getAllocations().frames, "allocations.frames");
+   ok(recording.getProfile().threads[0].samples.data.length, "profile data has some samples");
++  checkSystemInfo(recording, "Host");
++  checkSystemInfo(recording, "Client");
+ 
+   yield front.destroy();
+   yield closeDebuggerClient(target.client);
+   gBrowser.removeCurrentTab();
+ });
+ 
+ function isEmptyArray (array, name) {
+   ok(Array.isArray(array), `${name} is an array`);
+@@ -71,8 +73,15 @@ function getTab (url) {
+   content.location = url;
+   return loaded.then(() => {
+     return new Promise(resolve => {
+       let isBlank = url == "about:blank";
+       waitForFocus(() => resolve(tab), content, isBlank);
+     });
+   });
+ }
++
++function checkSystemInfo (recording, type) {
++  let data = recording[`get${type}SystemInfo`]();
++  for (let field of ["appid", "apptype", "vendor", "name", "version"]) {
++    ok(data[field], `get${type}SystemInfo() has ${field} property`);
++  }
++}
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
+index 32fb069..a88f5108 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
+@@ -44,22 +44,35 @@ add_task(function*() {
+     ok(!rec.isCompleted(), "recording is not yet completed on 'recording-stopping'");
+     ok(rec.isFinalizing(), "recording is considered finalizing between 'recording-stopping' and 'recording-stopped'");
+   }
+ 
+   yield stopped;
+   ok(!rec.isRecording(), "on 'recording-stopped', model is still no longer recording");
+   ok(rec.isCompleted(), "on 'recording-stopped', model is considered 'complete'");
+ 
++  checkSystemInfo(rec, "Host");
++  checkSystemInfo(rec, "Client");
++
+   // Export and import a rec, and ensure it has the correct state.
+   let file = FileUtils.getFile("TmpD", ["tmpprofile.json"]);
+   file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("666", 8));
+   yield rec.exportRecording(file);
+ 
+   let importedModel = yield front.importRecording(file);
+ 
+   ok(importedModel.isCompleted(), "All imported recordings should be completed");
+   ok(!importedModel.isRecording(), "All imported recordings should not be recording");
+   ok(importedModel.isImported(), "All imported recordings should be considerd imported");
+ 
++  checkSystemInfo(importedModel, "Host");
++  checkSystemInfo(importedModel, "Client");
++
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ });
++
++function checkSystemInfo (recording, type) {
++  let data = recording[`get${type}SystemInfo`]();
++  for (let field of ["appid", "apptype", "vendor", "name", "version"]) {
++    ok(data[field], `get${type}SystemInfo() has ${field} property`);
++  }
++}
+-- 
+2.2.1
+
