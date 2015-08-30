@@ -1,0 +1,192 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 27 Aug 2015 16:55:54 -0700
+Subject: Bug 1199257 - Destroy front before tearing down tests, intermittent fix. r=fitzgen
+
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-allocation-data.js b/toolkit/devtools/server/tests/browser/browser_perf-allocation-data.js
+index 13a3996..e6b0489 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-allocation-data.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-allocation-data.js
+@@ -26,11 +26,12 @@ add_task(function*() {
+   yield front.stopRecording(rec);
+ 
+   let { frames, timestamps, sizes, sites } = rec.getAllocations();
+ 
+   is(timestamps.length, sizes.length, "we have the same amount of timestamps and sizes");
+   ok(timestamps.every(time => time > 0 && typeof time === "number"), "all timestamps have numeric values");
+   ok(sizes.every(n => n > 0 && typeof n === "number"), "all sizes are positive numbers");
+ 
++  yield front.destroy();
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js b/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js
+index bdf9ac6..2d34601 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-profiler-01.js
+@@ -29,15 +29,16 @@ add_task(function*() {
+   ok((yield PMM_isProfilerActive()),
+     "The built-in profiler module should still be active (1).");
+ 
+   rec = yield front.startRecording();
+   yield front.stopRecording(rec);
+   ok((yield PMM_isProfilerActive()),
+     "The built-in profiler module should still be active (2).");
+ 
++  yield front.destroy();
+   yield closeDebuggerClient(client);
+ 
+   ok(!(yield PMM_isProfilerActive()),
+     "The built-in profiler module should no longer be active.");
+ 
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js b/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js
+index ee039e5..4a5c461 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-profiler-02.js
+@@ -26,19 +26,21 @@ add_task(function*() {
+   let form2 = yield connectDebuggerClient(client2);
+   let secondFront = PerformanceFront(client2, form2);
+   yield secondFront.connect();
+   PMM_loadFrameScripts(gBrowser);
+ 
+   yield secondFront.startRecording();
+ 
+   // Manually teardown the tabs so we can check profiler status
++  yield secondFront.destroy();
+   yield closeDebuggerClient(client2);
+   ok((yield PMM_isProfilerActive()),
+     "The built-in profiler module should still be active.");
+ 
++  yield firstFront.destroy();
+   yield closeDebuggerClient(client);
+   ok(!(yield PMM_isProfilerActive()),
+     "The built-in profiler module should no longer be active.");
+ 
+   gBrowser.removeCurrentTab();
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js b/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js
+index 0c4c243..baffd32 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-profiler-03.js
+@@ -32,19 +32,21 @@ add_task(function*() {
+   let recording = yield firstFront.startRecording();
+ 
+   yield addTab(MAIN_DOMAIN + "doc_perf.html");
+   let client2 = new DebuggerClient(DebuggerServer.connectPipe());
+   let form2 = yield connectDebuggerClient(client2);
+   let secondFront = PerformanceFront(client2, form2);
+   yield secondFront.connect();
+ 
++  yield secondFront.destroy();
+   yield closeDebuggerClient(client2);
+   ok((yield PMM_isProfilerActive()),
+     "The built-in profiler module should still be active.");
+ 
++  yield firstFront.destroy();
+   yield closeDebuggerClient(client);
+   ok(!(yield PMM_isProfilerActive()),
+     "The built-in profiler module should have been automatically stopped.");
+ 
+   gBrowser.removeCurrentTab();
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js b/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js
+index accdc0d..455bbae 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-realtime-markers.js
+@@ -37,16 +37,17 @@ add_task(function*() {
+   yield Promise.all(Object.keys(deferreds).map(type => deferreds[type].promise));
+   yield front.stopRecording(rec);
+   front.off("timeline-data", handler);
+ 
+   is(counters.markers.length, 1, "one marker event fired.");
+   is(counters.memory.length, 3, "three memory events fired.");
+   is(counters.ticks.length, 3, "three ticks events fired.");
+ 
++  yield front.destroy();
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ 
+   function handler (name, data) {
+     if (name === "markers") {
+       if (counters.markers.length >= 1) { return; }
+       ok(data.markers[0].start, "received atleast one marker with `start`");
+       ok(data.markers[0].end, "received atleast one marker with `end`");
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
+index 32fb069..c238fe6 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
+@@ -55,11 +55,12 @@ add_task(function*() {
+   yield rec.exportRecording(file);
+ 
+   let importedModel = yield front.importRecording(file);
+ 
+   ok(importedModel.isCompleted(), "All imported recordings should be completed");
+   ok(!importedModel.isRecording(), "All imported recordings should not be recording");
+   ok(importedModel.isImported(), "All imported recordings should be considerd imported");
+ 
++  yield front.destroy();
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-02.js b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-02.js
+index d1b0ae9..84dcb7c 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-02.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-02.js
+@@ -42,11 +42,12 @@ add_task(function*() {
+   }
+ 
+   ok(checkCount >= 1, "atleast 1 event were fired until the buffer was filled");
+   is(lastBufferStatus, 1, "buffer usage cannot surpass 100%");
+   yield front.stopRecording(model);
+ 
+   is(front.getBufferUsageForRecording(model), null, "buffer usage should be null when no longer recording.");
+ 
++  yield front.destroy();
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-samples-01.js b/toolkit/devtools/server/tests/browser/browser_perf-samples-01.js
+index d90ba16..b1687cc 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-samples-01.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-samples-01.js
+@@ -51,11 +51,12 @@ add_task(function*() {
+   ok(secondRecordingSamples[0][TIME_SLOT] < secondRecordingStartTime,
+     "The second recorded sample times were normalized.");
+   ok(secondRecordingSamples[0][TIME_SLOT] > 0,
+     "The second recorded sample times were normalized correctly.");
+   ok(!secondRecordingSamples.find(e => e[TIME_SLOT] + secondRecordingStartTime <= firstRecording.getDuration()),
+     "There should be no samples from the first recording in the second one, " +
+     "even though the total number of frames did not overflow.");
+ 
++  yield front.destroy();
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ });
+diff --git a/toolkit/devtools/server/tests/browser/browser_perf-samples-02.js b/toolkit/devtools/server/tests/browser/browser_perf-samples-02.js
+index bc0c76e..8bd6efd 100644
+--- a/toolkit/devtools/server/tests/browser/browser_perf-samples-02.js
++++ b/toolkit/devtools/server/tests/browser/browser_perf-samples-02.js
+@@ -38,16 +38,17 @@ add_task(function*() {
+         ok(false, "The sample " + stack.toSource() + " doesn't have a root node.");
+       }
+     }
+   }
+ 
+   ok(sampleCount > 0,
+     "At least some samples have been iterated over, checking for root nodes.");
+ 
++  yield front.destroy();
+   yield closeDebuggerClient(client);
+   gBrowser.removeCurrentTab();
+ });
+ 
+ /**
+  * Inflate a particular sample's stack and return an array of strings.
+  */
+ function getInflatedStackLocations(thread, sample) {
+-- 
+2.2.1
+

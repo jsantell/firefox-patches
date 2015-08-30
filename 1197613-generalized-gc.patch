@@ -1,0 +1,106 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 27 Aug 2015 21:06:06 -0700
+Subject: Bug 1197613 - Generalize GC marker names in filter list. r=fitzgen
+
+diff --git a/browser/devtools/performance/modules/logic/marker-utils.js b/browser/devtools/performance/modules/logic/marker-utils.js
+index bbd05bf..b78ed01 100644
+--- a/browser/devtools/performance/modules/logic/marker-utils.js
++++ b/browser/devtools/performance/modules/logic/marker-utils.js
+@@ -349,23 +349,26 @@ const Formatters = {
+   /**
+    * Uses the marker name as the label for markers that do not have
+    * a blueprint entry. Uses "Other" in the marker filter menu.
+    */
+   UnknownLabel: function (marker={}) {
+     return marker.name || L10N.getStr("marker.label.unknown");
+   },
+ 
+-  GCLabel: function (marker={}) {
++  GCLabel: function (marker) {
++    if (!marker) {
++      return L10N.getStr("marker.label.garbageCollection2");
++    }
+     // Only if a `nonincrementalReason` exists, do we want to label
+     // this as a non incremental GC event.
+     if ("nonincrementalReason" in marker) {
+       return L10N.getStr("marker.label.garbageCollection.nonIncremental");
+     }
+-    return L10N.getStr("marker.label.garbageCollection");
++    return L10N.getStr("marker.label.garbageCollection.incremental");
+   },
+ 
+   JSLabel: function (marker={}) {
+     let generic = L10N.getStr("marker.label.javascript");
+     if ("causeName" in marker) {
+       return JS_MARKER_MAP[marker.causeName] || generic;
+     }
+     return generic;
+diff --git a/browser/devtools/performance/test/unit/test_marker-utils.js b/browser/devtools/performance/test/unit/test_marker-utils.js
+index 7dc0a00..7dea380 100644
+--- a/browser/devtools/performance/test/unit/test_marker-utils.js
++++ b/browser/devtools/performance/test/unit/test_marker-utils.js
+@@ -14,16 +14,18 @@ add_task(function () {
+   let Utils = require("devtools/performance/marker-utils");
+ 
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
+ 
+   equal(Utils.getMarkerLabel({ name: "DOMEvent" }), "DOM Event",
+     "getMarkerLabel() returns a simple label");
+   equal(Utils.getMarkerLabel({ name: "Javascript", causeName: "setTimeout handler" }), "setTimeout",
+     "getMarkerLabel() returns a label defined via function");
++  equal(Utils.getMarkerLabel({ name: "GarbageCollection", causeName: "ALLOC_TRIGGER" }), "Incremental GC",
++    "getMarkerLabel() returns a label for a function that is generalizable");
+ 
+   ok(Utils.getMarkerFields({ name: "Paint" }).length === 0,
+     "getMarkerFields() returns an empty array when no fields defined");
+ 
+   let fields = Utils.getMarkerFields({ name: "ConsoleTime", causeName: "snowstorm" });
+   equal(fields[0].label, "Timer Name:", "getMarkerFields() returns an array with proper label");
+   equal(fields[0].value, "snowstorm", "getMarkerFields() returns an array with proper value");
+ 
+@@ -48,17 +50,17 @@ add_task(function () {
+   equal(Utils.getMarkerFields({ name: "Javascript", causeName: "Some Platform Field" })[0].value, "(Gecko)",
+     "Correctly obfuscates JS markers when platform data is off.");
+   Services.prefs.setBoolPref(PLATFORM_DATA_PREF, true);
+   equal(Utils.getMarkerFields({ name: "Javascript", causeName: "Some Platform Field" })[0].value, "Some Platform Field",
+     "Correctly deobfuscates JS markers when platform data is on.");
+ 
+   equal(Utils.getMarkerClassName("Javascript"), "Function Call",
+     "getMarkerClassName() returns correct string when defined via function");
+-  equal(Utils.getMarkerClassName("GarbageCollection"), "Incremental GC",
++  equal(Utils.getMarkerClassName("GarbageCollection"), "Garbage Collection",
+     "getMarkerClassName() returns correct string when defined via function");
+   equal(Utils.getMarkerClassName("Reflow"), "Layout",
+     "getMarkerClassName() returns correct string when defined via string");
+ 
+   TIMELINE_BLUEPRINT["fakemarker"] = { group: 0 };
+   try {
+     Utils.getMarkerClassName("fakemarker");
+     ok(false, "getMarkerClassName() should throw when no label on blueprint.");
+diff --git a/browser/locales/en-US/chrome/browser/devtools/markers.properties b/browser/locales/en-US/chrome/browser/devtools/markers.properties
+index d84ceb5..8d6994e 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/markers.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/markers.properties
+@@ -18,17 +18,18 @@ marker.label.styles=Recalculate Style
+ marker.label.reflow=Layout
+ marker.label.paint=Paint
+ marker.label.composite=Composite Layers
+ marker.label.javascript=Function Call
+ marker.label.parseHTML=Parse HTML
+ marker.label.parseXML=Parse XML
+ marker.label.domevent=DOM Event
+ marker.label.consoleTime=Console
+-marker.label.garbageCollection=Incremental GC
++marker.label.garbageCollection2=Garbage Collection
++marker.label.garbageCollection.incremental=Incremental GC
+ marker.label.garbageCollection.nonIncremental=Non-incremental GC
+ marker.label.cycleCollection=Cycle Collection
+ marker.label.cycleCollection.forgetSkippable=CC Graph Reduction
+ marker.label.timestamp=Timestamp
+ marker.label.unknown=Unknown
+ 
+ # LOCALIZATION NOTE (marker.label.javascript.*):
+ # These strings are displayed as JavaScript markers that have special
+-- 
+2.2.1
+

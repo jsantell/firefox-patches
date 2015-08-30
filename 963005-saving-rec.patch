@@ -1,0 +1,142 @@
+From: anjaly <anjalymehla51@gmail.com>
+Date: Sat, 29 Aug 2015 12:11:44 -0700
+Subject: Bug 963005 - Saving a profile in performance tools should update the displayed name of the recording. r=jsantell
+
+diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
+index da60fa2..3757beb 100644
+--- a/browser/devtools/performance/performance-controller.js
++++ b/browser/devtools/performance/performance-controller.js
+@@ -333,17 +333,17 @@ let PerformanceController = {
+    *
+    * @param PerformanceRecording recording
+    *        The model that holds the recording data.
+    * @param nsILocalFile file
+    *        The file to stream the data into.
+    */
+   exportRecording: Task.async(function*(_, recording, file) {
+     yield recording.exportRecording(file);
+-    this.emit(EVENTS.RECORDING_EXPORTED, recording);
++    this.emit(EVENTS.RECORDING_EXPORTED, recording, file);
+   }),
+ 
+   /**
+    * Clears all recordings from the list as well as the current recording.
+    * Emits `EVENTS.RECORDINGS_CLEARED` when complete so other components can clean up.
+    */
+   clearRecordings: Task.async(function* () {
+     let latest = this.getLatestManualRecording();
+diff --git a/browser/devtools/performance/test/browser_perf_recordings-io-01.js b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+index 3de78a1..3c9e5d1 100644
+--- a/browser/devtools/performance/test/browser_perf_recordings-io-01.js
++++ b/browser/devtools/performance/test/browser_perf_recordings-io-01.js
+@@ -2,17 +2,17 @@
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests if the performance tool is able to save and load recordings.
+  */
+ 
+ let test = Task.async(function*() {
+   var { target, panel, toolbox } = yield initPerformance(SIMPLE_URL);
+-  var { EVENTS, PerformanceController, PerformanceView, DetailsView, DetailsSubview } = panel.panelWin;
++  var { $, EVENTS, PerformanceController, PerformanceView, DetailsView, DetailsSubview } = panel.panelWin;
+ 
+   // Enable allocations to test the memory-calltree and memory-flamegraph.
+   Services.prefs.setBoolPref(ALLOCATIONS_PREF, true);
+   Services.prefs.setBoolPref(MEMORY_PREF, true);
+   Services.prefs.setBoolPref(FRAMERATE_PREF, true);
+ 
+   // Need to allow widgets to be updated while hidden, otherwise we can't use
+   // `waitForWidgetsRendered`.
+@@ -40,16 +40,23 @@ let test = Task.async(function*() {
+   file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("666", 8));
+ 
+   let exported = once(PerformanceController, EVENTS.RECORDING_EXPORTED);
+   yield PerformanceController.exportRecording("", PerformanceController.getCurrentRecording(), file);
+ 
+   yield exported;
+   ok(true, "The recording data appears to have been successfully saved.");
+ 
++ //  Check if the imported file name has tmpprofile in it as the file
++ //  names also has different suffix to avoid conflict
++
++  let displayedName = $(".recording-item-title").getAttribute("value");
++  ok(/^tmpprofile/.test(displayedName), "File has expected display name after import");
++  ok(!/\.json$/.test(displayedName), "Display name does not have .json in it");
++
+   // Import recording.
+ 
+   let rerendered = waitForWidgetsRendered(panel);
+   let imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
+   PerformanceView.emit(EVENTS.UI_IMPORT_RECORDING, file);
+ 
+   yield imported;
+   ok(true, "The recording data appears to have been successfully imported.");
+diff --git a/browser/devtools/performance/views/recordings.js b/browser/devtools/performance/views/recordings.js
+index 2575202..84376bf 100644
+--- a/browser/devtools/performance/views/recordings.js
++++ b/browser/devtools/performance/views/recordings.js
+@@ -13,32 +13,35 @@ let RecordingsView = Heritage.extend(WidgetMethods, {
+   initialize: function() {
+     this.widget = new SideMenuWidget($("#recordings-list"));
+ 
+     this._onSelect = this._onSelect.bind(this);
+     this._onRecordingStateChange = this._onRecordingStateChange.bind(this);
+     this._onNewRecording = this._onNewRecording.bind(this);
+     this._onSaveButtonClick = this._onSaveButtonClick.bind(this);
+     this._onRecordingsCleared = this._onRecordingsCleared.bind(this);
++    this._onRecordingExported = this._onRecordingExported.bind(this);
+ 
+     this.emptyText = L10N.getStr("noRecordingsText");
+ 
+     PerformanceController.on(EVENTS.RECORDING_STATE_CHANGE, this._onRecordingStateChange);
+     PerformanceController.on(EVENTS.NEW_RECORDING, this._onNewRecording);
+     PerformanceController.on(EVENTS.RECORDINGS_CLEARED, this._onRecordingsCleared);
++    PerformanceController.on(EVENTS.RECORDING_EXPORTED, this._onRecordingExported);
+     this.widget.addEventListener("select", this._onSelect, false);
+   },
+ 
+   /**
+    * Destruction function, called when the tool is closed.
+    */
+   destroy: function() {
+     PerformanceController.off(EVENTS.RECORDING_STATE_CHANGE, this._onRecordingStateChange);
+     PerformanceController.off(EVENTS.NEW_RECORDING, this._onNewRecording);
+     PerformanceController.off(EVENTS.RECORDINGS_CLEARED, this._onRecordingsCleared);
++    PerformanceController.off(EVENTS.RECORDING_EXPORTED, this._onRecordingExported);
+     this.widget.removeEventListener("select", this._onSelect, false);
+   },
+ 
+   /**
+    * Adds an empty recording to this container.
+    *
+    * @param RecordingModel recording
+    *        A model for the new recording item created.
+@@ -192,15 +195,24 @@ let RecordingsView = Heritage.extend(WidgetMethods, {
+       if (result == Ci.nsIFilePicker.returnCancel) {
+         return;
+       }
+       let recordingItem = this.getItemForElement(e.target);
+       this.emit(EVENTS.UI_EXPORT_RECORDING, recordingItem.attachment, fp.file);
+     }});
+   },
+ 
++  _onRecordingExported: function (_, recording, file) {
++    if (recording.isConsole()) {
++      return;
++    }
++    let recordingItem = this.getItemForPredicate(e => e.attachment === recording);
++    let titleNode = $(".recording-item-title", recordingItem.target);
++    titleNode.setAttribute("value", file.leafName.replace(/\..+$/, ""));
++  },
++
+   toString: () => "[object RecordingsView]"
+ });
+ 
+ /**
+  * Convenient way of emitting events from the RecordingsView.
+  */
+ EventEmitter.decorate(RecordingsView);
+-- 
+2.2.1
+
