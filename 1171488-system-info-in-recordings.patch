@@ -1,7 +1,53 @@
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Wed, 26 Aug 2015 14:27:04 -0700
-Subject: Bug 1171488 - Attach host and client system data to recording profiles. r=vp"
+Subject: Bug 1171488 - Attach host and client system data to recording profiles r=vp,mossop
 
+diff --git a/addon-sdk/source/lib/node/os.js b/addon-sdk/source/lib/node/os.js
+index 52733da..8c60933 100644
+--- a/addon-sdk/source/lib/node/os.js
++++ b/addon-sdk/source/lib/node/os.js
+@@ -6,23 +6,37 @@
+ 
+ module.metadata = {
+   "stability": "unstable"
+ };
+ 
+ const { Cc, Ci } = require('chrome');
+ const system = require('../sdk/system');
+ const runtime = require('../sdk/system/runtime');
+-const oscpu = Cc["@mozilla.org/network/protocol;1?name=http"]
+-                 .getService(Ci.nsIHttpProtocolHandler).oscpu;
+-const hostname = Cc["@mozilla.org/network/dns-service;1"]
+-                 .getService(Ci.nsIDNSService).myHostName;
++const { XPCOMUtils } = require("resource://gre/modules/XPCOMUtils.jsm");
+ const isWindows = system.platform === 'win32';
+ const endianness = ((new Uint32Array((new Uint8Array([1,2,3,4])).buffer))[0] === 0x04030201) ? 'LE' : 'BE';
+ 
++XPCOMUtils.defineLazyGetter(this, "oscpu", () => {
++  try {
++    return Cc["@mozilla.org/network/protocol;1?name=http"].getService(Ci.nsIHttpProtocolHandler).oscpu;
++  } catch (e) {
++    return null;
++  }
++});
++
++XPCOMUtils.defineLazyGetter(this, "hostname", () => {
++  try {
++    // On some platforms (Linux according to try), this service does not exist and fails.
++    return Cc["@mozilla.org/network/dns-service;1"].getService(Ci.nsIDNSService).myHostName;
++  } catch (e) {
++    return null;
++  }
++});
++
+ /**
+  * Returns a path to a temp directory
+  */
+ exports.tmpdir = () => system.pathFor('TmpD');
+ 
+ /**
+  * Returns the endianness of the architecture: either 'LE' or 'BE'
+  */
 diff --git a/toolkit/devtools/performance/io.js b/toolkit/devtools/performance/io.js
 index 10c41c3..92c271b 100644
 --- a/toolkit/devtools/performance/io.js
@@ -837,7 +883,7 @@ index fea465d..54175dc 100644
        // Accumulate timeline markers into an array. Furthermore, the timestamps
        // do not have a zero epoch, so offset all of them by the start time.
 diff --git a/toolkit/devtools/server/actors/performance.js b/toolkit/devtools/server/actors/performance.js
-index 520c647..d97abba 100644
+index b9a88c1..05cd52d 100644
 --- a/toolkit/devtools/server/actors/performance.js
 +++ b/toolkit/devtools/server/actors/performance.js
 @@ -17,16 +17,18 @@ loader.lazyRequireGetter(this, "extend", "sdk/util/object", true);
@@ -918,7 +964,7 @@ index 520c647..d97abba 100644
        Cu.reportError("Cannot access traits of PerformanceFront before calling `connect()`.");
      }
      return this._traits;
-@@ -229,16 +242,18 @@ const PerformanceFront = exports.PerformanceFront = protocol.FrontClass(Performa
+@@ -234,16 +247,18 @@ const PerformanceFront = exports.PerformanceFront = protocol.FrontClass(Performa
        model._duration = recordingData.duration;
        model._markers = recordingData.markers;
        model._frames = recordingData.frames;
