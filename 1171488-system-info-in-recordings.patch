@@ -1,9 +1,9 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Wed, 26 Aug 2015 14:27:04 -0700
+Date: Tue, 8 Sep 2015 15:24:03 -0700
 Subject: Bug 1171488 - Attach host and client system data to recording profiles r=vp,mossop
 
 diff --git a/addon-sdk/source/lib/node/os.js b/addon-sdk/source/lib/node/os.js
-index 52733da..8c60933 100644
+index 52733da..1c41a92 100644
 --- a/addon-sdk/source/lib/node/os.js
 +++ b/addon-sdk/source/lib/node/os.js
 @@ -6,23 +6,37 @@
@@ -27,7 +27,7 @@ index 52733da..8c60933 100644
 +  try {
 +    return Cc["@mozilla.org/network/protocol;1?name=http"].getService(Ci.nsIHttpProtocolHandler).oscpu;
 +  } catch (e) {
-+    return null;
++    return "";
 +  }
 +});
 +
@@ -36,7 +36,7 @@ index 52733da..8c60933 100644
 +    // On some platforms (Linux according to try), this service does not exist and fails.
 +    return Cc["@mozilla.org/network/dns-service;1"].getService(Ci.nsIDNSService).myHostName;
 +  } catch (e) {
-+    return null;
++    return "";
 +  }
 +});
 +
@@ -1023,10 +1023,10 @@ index f66c1a8..9a56096 100644
 +  }
 +}
 diff --git a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
-index 32fb069..a88f5108 100644
+index c238fe6..f42fdf9 100644
 --- a/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
 +++ b/toolkit/devtools/server/tests/browser/browser_perf-recording-actor-01.js
-@@ -44,22 +44,35 @@ add_task(function*() {
+@@ -44,23 +44,36 @@ add_task(function*() {
      ok(!rec.isCompleted(), "recording is not yet completed on 'recording-stopping'");
      ok(rec.isFinalizing(), "recording is considered finalizing between 'recording-stopping' and 'recording-stopped'");
    }
@@ -1052,6 +1052,7 @@ index 32fb069..a88f5108 100644
 +  checkSystemInfo(importedModel, "Host");
 +  checkSystemInfo(importedModel, "Client");
 +
+   yield front.destroy();
    yield closeDebuggerClient(client);
    gBrowser.removeCurrentTab();
  });
@@ -1063,7 +1064,7 @@ index 32fb069..a88f5108 100644
 +  }
 +}
 diff --git a/toolkit/devtools/shared/system.js b/toolkit/devtools/shared/system.js
-index 9b56086..bd2ea40 100644
+index 9b56086..1f069dd 100644
 --- a/toolkit/devtools/shared/system.js
 +++ b/toolkit/devtools/shared/system.js
 @@ -3,17 +3,17 @@
@@ -1085,6 +1086,50 @@ index 9b56086..bd2ea40 100644
  });
  loader.lazyGetter(this, "oscpu", () => {
    return Cc["@mozilla.org/network/protocol;1?name=http"]
+@@ -159,28 +159,33 @@ function *getSystemInfo() {
+     height,
+     brandName,
+   };
+ 
+   CACHED_INFO = info;
+   return info;
+ }
+ 
+-function getProfileLocation() {
+-  let profd = Services.dirsvc.get("ProfD", Ci.nsILocalFile);
+-  let profservice = Cc["@mozilla.org/toolkit/profile-service;1"].getService(Ci.nsIToolkitProfileService);
+-  var profiles = profservice.profiles;
+-  while (profiles.hasMoreElements()) {
+-    let profile = profiles.getNext().QueryInterface(Ci.nsIToolkitProfile);
+-    if (profile.rootDir.path == profd.path) {
+-      return profile = profile.name;
++function getProfileLocation () {
++  // In child processes, we cannot access the profile location.
++  try {
++    let profd = Services.dirsvc.get("ProfD", Ci.nsILocalFile);
++    let profservice = Cc["@mozilla.org/toolkit/profile-service;1"].getService(Ci.nsIToolkitProfileService);
++    var profiles = profservice.profiles;
++    while (profiles.hasMoreElements()) {
++      let profile = profiles.getNext().QueryInterface(Ci.nsIToolkitProfile);
++      if (profile.rootDir.path == profd.path) {
++        return profile = profile.name;
++      }
+     }
+-  }
+ 
+-  return profd.leafName;
++    return profd.leafName;
++  } catch (e) {
++    return "";
++  }
+ }
+ 
+ function getAppIniString(section, key) {
+   let inifile = Services.dirsvc.get("GreD", Ci.nsIFile);
+   inifile.append("application.ini");
+ 
+   if (!inifile.exists()) {
+     inifile = Services.dirsvc.get("CurProcD", Ci.nsIFile);
 -- 
 2.2.1
 

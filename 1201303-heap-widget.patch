@@ -1,0 +1,463 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 3 Sep 2015 13:19:51 -0700
+Subject: Bug 1201303 - Create a widget for rendering the heap. r=fitzgen
+
+diff --git a/browser/devtools/memory/modules/census-view.js b/browser/devtools/memory/modules/census-view.js
+new file mode 100644
+index 0000000..9db4470
+--- /dev/null
++++ b/browser/devtools/memory/modules/census-view.js
+@@ -0,0 +1,126 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * This file contains the tree view, displaying all the samples and frames
++ * received from the proviler in a tree-like structure.
++ */
++
++const { Cc, Ci, Cu, Cr } = require("chrome");
++const { L10N } = require("devtools/performance/global");
++const { Heritage } = require("resource:///modules/devtools/ViewHelpers.jsm");
++const { AbstractTreeItem } = require("resource:///modules/devtools/AbstractTreeItem.jsm");
++
++const INDENTATION = exports.INDENTATION = 16; // px
++const DEFAULT_AUTO_EXPAND_DEPTH = 2;
++const COURSE_TYPES = ["objects", "scripts", "strings", "other"];
++
++/**
++ * Every instance of a `CensusView` represents a row in the census tree. The same
++ * parent node is used for all rows.
++ *
++ * @param CensusView parent
++ *        The CensusView considered the parent row. Should be null
++ *        for root node.
++ * @param {CensusTreeNode} censusTreeNode
++ *        Data from `takeCensus` transformed via `CensusTreeNode`.
++ *        @see browser/toolkit/heapsnapshot/census-tree-node.js
++ * @param number level [optional]
++ *        The indentation level in the call tree. The root node is at level 0.
++ * @param boolean hidden [optional]
++ *        Whether this node should be hidden and not contribute to depth/level
++ *        calculations. Defaults to false.
++ * @param number autoExpandDepth [optional]
++ *        The depth to which the tree should automatically expand. Defaults to
++ *        the caller's `autoExpandDepth` if a caller exists, otherwise defaults
++ *        to DEFAULT_AUTO_EXPAND_DEPTH.
++ */
++function CensusView ({ caller, censusTreeNode, level, hidden, autoExpandDepth }) {
++  AbstractTreeItem.call(this, { parent: caller, level: level|0 - (hidden ? 1 : 0) });
++
++  this.autoExpandDepth = autoExpandDepth != null
++    ? autoExpandDepth
++    : caller ? caller.autoExpandDepth
++             : DEFAULT_AUTO_EXPAND_DEPTH;
++
++  this.caller = caller;
++  this.censusTreeNode = censusTreeNode;
++  this.hidden = hidden;
++};
++
++CensusView.prototype = Heritage.extend(AbstractTreeItem.prototype, {
++  /**
++   * Creates the view for this tree node.
++   * @param nsIDOMNode document
++   * @param nsIDOMNode arrowNode
++   * @return nsIDOMNode
++   */
++  _displaySelf: function (document, arrowNode) {
++    let data = this.censusTreeNode;
++
++    let cells = [];
++
++    // Only use an arrow if there are children
++    if (data.children && data.children.length) {
++      cells.push(arrowNode);
++    }
++
++    cells.push(this._createCell(document, data.name, "name"));
++
++    if (data.bytes != null) {
++      cells.push(this._createCell(document, data.bytes, "bytes"));
++    }
++    if (data.count != null) {
++      cells.push(this._createCell(document, data.count, "count"));
++    }
++
++    let targetNode = document.createElement("li");
++    targetNode.className = "heap-tree-item";
++    targetNode.style.MozMarginStart = `${this.level * INDENTATION}px`;
++    if (this.hidden) {
++      targetNode.style.display = "none";
++    }
++
++    for (let i = 0; i < cells.length; i++) {
++      targetNode.appendChild(cells[i]);
++    }
++
++    return targetNode;
++  },
++
++  /**
++   * Populates this node in the call tree with the corresponding "callees".
++   * These are defined in the `frame` data source for this call view.
++   * @param array:AbstractTreeItem children
++   */
++  _populateSelf: function (children) {
++    let newLevel = this.level + 1;
++    let data = this.censusTreeNode;
++
++    if (data.children) {
++      for (let node of data.children) {
++        children.push(new CensusView({
++          caller: this,
++          level: newLevel,
++          censusTreeNode: node,
++        }));
++      }
++    }
++  },
++
++  /**
++   * Functions creating each cell in this call view.
++   * Invoked by `_displaySelf`.
++   */
++  _createCell: function (doc, value, type) {
++    let cell = doc.createElement("span");
++    cell.className = "plain heap-tree-cell";
++    cell.setAttribute("type", type);
++    cell.innerHTML = value;
++    return cell;
++  },
++});
++
++exports.CensusView = CensusView;
+diff --git a/browser/devtools/memory/moz.build b/browser/devtools/memory/moz.build
+index 7a6f9a20..fe5d620 100644
+--- a/browser/devtools/memory/moz.build
++++ b/browser/devtools/memory/moz.build
+@@ -1,10 +1,12 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.memory += [
++    'modules/census-view.js',
+     'modules/census.js',
+ ]
+ 
+ XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
++MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+diff --git a/browser/devtools/memory/test/mochitest/chrome.ini b/browser/devtools/memory/test/mochitest/chrome.ini
+new file mode 100644
+index 0000000..ef92cfc
+--- /dev/null
++++ b/browser/devtools/memory/test/mochitest/chrome.ini
+@@ -0,0 +1,7 @@
++[DEFAULT]
++tags = devtools
++skip-if = buildapp == 'b2g' || os == 'android'
++support-files =
++  head.js
++
++[test_census-view-01.html]
+diff --git a/browser/devtools/memory/test/mochitest/head.js b/browser/devtools/memory/test/mochitest/head.js
+new file mode 100644
+index 0000000..7fa26b9
+--- /dev/null
++++ b/browser/devtools/memory/test/mochitest/head.js
+@@ -0,0 +1,12 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++"use strict";
++
++const Cc = Components.classes;
++const Ci = Components.interfaces;
++const Cu = Components.utils;
++const Cr = Components.results;
++const CC = Components.Constructor;
++
++const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+diff --git a/browser/devtools/memory/test/mochitest/test_census-view-01.html b/browser/devtools/memory/test/mochitest/test_census-view-01.html
+new file mode 100644
+index 0000000..1f9a919
+--- /dev/null
++++ b/browser/devtools/memory/test/mochitest/test_census-view-01.html
+@@ -0,0 +1,100 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Bug 1067491 - Test taking a census over the RDP.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Census Tree 01</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link href="chrome://browser/content/devtools/widgets.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/light-theme.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/common.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/widgets.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/memory.css" type="text/css" />
++</head>
++<body>
++<ul id="container" style="width:100%;height:300px;"></ul>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script>
++window.onload = function() {
++  var { CensusTreeNode } = require("devtools/memory/census");
++  var { INDENTATION, CensusView } = require("devtools/memory/census-view");
++  SimpleTest.waitForExplicitFinish();
++  const countBreakdown = { by: "count", count: true, bytes: true };
++
++  const BREAKDOWN = {
++    by: "coarseType",
++    objects: { by: "objectClass", then: countBreakdown },
++    strings: countBreakdown,
++    other: { by: "internalType", then: countBreakdown },
++  };
++
++  const REPORT = {
++    "objects": {
++      "Function": { bytes: 10, count: 1 },
++      "Array": { bytes: 20, count: 2 },
++    },
++    "strings": { bytes: 10, count: 1 },
++    "other": {
++      "js::Shape": { bytes: 30, count: 3 },
++      "js::Shape2": { bytes: 40, count: 4 }
++    },
++  };
++
++  const EXPECTED_ROWS = [
++    { level: 0, name: "strings", bytes: 10, count: 1, },
++    { level: 0, name: "objects" },
++        { level: 1, name: "Array", bytes: 20, count: 2, },
++        { level: 1, name: "Function", bytes: 10, count: 1, },
++    { level: 0, name: "other" },
++        { level: 1, name: "js::Shape2", bytes: 40, count: 4, },
++        { level: 1, name: "js::Shape", bytes: 30, count: 3, },
++  ];
++  var censusTreeNode = new CensusTreeNode(BREAKDOWN, REPORT);
++
++  var view = new CensusView({
++    censusTreeNode: censusTreeNode,
++    hidden: true
++  });
++
++  view.attachTo(document.querySelector("#container"));
++
++  var ul = document.querySelector("#container");
++  var children = Array.from(ul.children).filter(n => n.style.display !== "none");
++
++  for (var i = 0; i < children.length; i++) {
++    var el = children[i];
++    var expected = EXPECTED_ROWS[i];
++    var nameEl = el.querySelector(".heap-tree-cell[type='name']");
++    var bytesEl = el.querySelector(".heap-tree-cell[type='bytes']");
++    var countEl = el.querySelector(".heap-tree-cell[type='count']");
++
++    is(nameEl.innerHTML, expected.name,
++      `correct name "${expected.name}" in heap tree`);
++
++    is(el.style.MozMarginStart, (INDENTATION * expected.level) + "px",
++      `correct indentation for ${expected.name}`);
++
++    if ("bytes" in expected) {
++      is(bytesEl.innerHTML, String(expected.bytes),
++        `correct bytes "${expected.bytes}" in heap tree`);
++    } else {
++      ok(!bytesEl, "no bytes correctly displayed for ${expected.name}");
++    }
++
++    if ("count" in expected) {
++      is(countEl.innerHTML, String(expected.count),
++        `correct count "${expected.count}" in heap tree`);
++    } else {
++      ok(!countEl, "no count correctly displayed for ${expected.name}");
++    }
++  }
++
++  SimpleTest.finish();
++};
++</script>
++</pre>
++</body>
++</html>
+diff --git a/browser/devtools/memory/test/unit/head.js b/browser/devtools/memory/test/unit/head.js
+index 87051ca..9e3f68e 100644
+--- a/browser/devtools/memory/test/unit/head.js
++++ b/browser/devtools/memory/test/unit/head.js
+@@ -134,12 +134,10 @@ function saveHeapSnapshotAndTakeCensus(dbg=null, censusOptions=undefined,
+   ok(snapshot instanceof HeapSnapshot, "snapshot should be an instance of HeapSnapshot");
+ 
+   equal(typeof snapshot.takeCensus, "function", "snapshot should have a takeCensus method");
+   return snapshot.takeCensus(censusOptions);
+ }
+ 
+ function compareCensusViewData (breakdown, report, expected, assertion) {
+   let data = new CensusTreeNode(breakdown, report);
+-  console.log(data);
+-  console.log(expected);
+   equal(JSON.stringify(data), JSON.stringify(expected), assertion);
+ }
+diff --git a/browser/themes/linux/jar.mn b/browser/themes/linux/jar.mn
+index 2f17571..11d089c 100644
+--- a/browser/themes/linux/jar.mn
++++ b/browser/themes/linux/jar.mn
+@@ -344,16 +344,17 @@ browser.jar:
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton.png    (../shared/devtools/images/breadcrumbs-scrollbutton.png)
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton@2x.png (../shared/devtools/images/breadcrumbs-scrollbutton@2x.png)
+   skin/classic/browser/devtools/animationinspector.css          (../shared/devtools/animationinspector.css)
+ * skin/classic/browser/devtools/canvasdebugger.css    (../shared/devtools/canvasdebugger.css)
+   skin/classic/browser/devtools/debugger.css          (../shared/devtools/debugger.css)
+   skin/classic/browser/devtools/eyedropper.css        (../shared/devtools/eyedropper.css)
+ * skin/classic/browser/devtools/netmonitor.css        (../shared/devtools/netmonitor.css)
+   skin/classic/browser/devtools/performance.css       (../shared/devtools/performance.css)
++  skin/classic/browser/devtools/memory.css            (../shared/devtools/memory.css)
+   skin/classic/browser/devtools/promisedebugger.css   (../shared/devtools/promisedebugger.css)
+   skin/classic/browser/devtools/timeline-filter.svg   (../shared/devtools/images/timeline-filter.svg)
+ * skin/classic/browser/devtools/scratchpad.css        (../shared/devtools/scratchpad.css)
+   skin/classic/browser/devtools/shadereditor.css      (../shared/devtools/shadereditor.css)
+ * skin/classic/browser/devtools/splitview.css         (../shared/devtools/splitview.css)
+   skin/classic/browser/devtools/styleeditor.css       (../shared/devtools/styleeditor.css)
+   skin/classic/browser/devtools/storage.css           (../shared/devtools/storage.css)
+   skin/classic/browser/devtools/webaudioeditor.css    (../shared/devtools/webaudioeditor.css)
+diff --git a/browser/themes/osx/jar.mn b/browser/themes/osx/jar.mn
+index 31d8c4f..6267ba5 100644
+--- a/browser/themes/osx/jar.mn
++++ b/browser/themes/osx/jar.mn
+@@ -444,16 +444,17 @@ browser.jar:
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton.png    (../shared/devtools/images/breadcrumbs-scrollbutton.png)
+   skin/classic/browser/devtools/breadcrumbs-scrollbutton@2x.png (../shared/devtools/images/breadcrumbs-scrollbutton@2x.png)
+   skin/classic/browser/devtools/animationinspector.css          (../shared/devtools/animationinspector.css)
+ * skin/classic/browser/devtools/canvasdebugger.css          (../shared/devtools/canvasdebugger.css)
+   skin/classic/browser/devtools/debugger.css                (../shared/devtools/debugger.css)
+   skin/classic/browser/devtools/eyedropper.css              (../shared/devtools/eyedropper.css)
+ * skin/classic/browser/devtools/netmonitor.css              (../shared/devtools/netmonitor.css)
+   skin/classic/browser/devtools/performance.css             (../shared/devtools/performance.css)
++  skin/classic/browser/devtools/memory.css                  (../shared/devtools/memory.css)
+   skin/classic/browser/devtools/promisedebugger.css         (../shared/devtools/promisedebugger.css)
+   skin/classic/browser/devtools/timeline-filter.svg         (../shared/devtools/images/timeline-filter.svg)
+ * skin/classic/browser/devtools/scratchpad.css              (../shared/devtools/scratchpad.css)
+   skin/classic/browser/devtools/shadereditor.css            (../shared/devtools/shadereditor.css)
+ * skin/classic/browser/devtools/splitview.css               (../shared/devtools/splitview.css)
+   skin/classic/browser/devtools/styleeditor.css             (../shared/devtools/styleeditor.css)
+   skin/classic/browser/devtools/storage.css                 (../shared/devtools/storage.css)
+   skin/classic/browser/devtools/webaudioeditor.css          (../shared/devtools/webaudioeditor.css)
+diff --git a/browser/themes/shared/devtools/memory.css b/browser/themes/shared/devtools/memory.css
+new file mode 100644
+index 0000000..78f8f1f
+--- /dev/null
++++ b/browser/themes/shared/devtools/memory.css
+@@ -0,0 +1,81 @@
++/* vim:set ts=2 sw=2 sts=2 et: */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* CSS Variables specific to this panel that aren't defined by the themes */
++.theme-dark {
++  --cell-border-color: rgba(255,255,255,0.15);
++  --cell-border-color-light: rgba(255,255,255,0.1);
++  --focus-cell-border-color: rgba(255,255,255,0.5);
++  --row-alt-background-color: rgba(29,79,115,0.15);
++  --row-hover-background-color: rgba(29,79,115,0.25);
++}
++
++.theme-light {
++  --cell-border-color: rgba(0,0,0,0.15);
++  --cell-border-color-light: rgba(0,0,0,0.1);
++  --focus-cell-border-color: rgba(0,0,0,0.3);
++  --row-alt-background-color: rgba(76,158,217,0.1);
++  --row-hover-background-color: rgba(76,158,217,0.2);
++}
++
++.heap-view {
++  position: relative;
++}
++
++.heap-view .theme-twisty {
++  text-align: end;
++}
++
++.heap-tree-item {
++  list-style-type: none;
++  /* display: none; */
++}
++
++.heap-tree-item[expanded] {
++  display: block;
++}
++
++.heap-tree-item:nth-child(2n) {
++  background-color: var(--row-alt-background-color);
++}
++
++.heap-tree-item:hover {
++  background-color: var(--row-hover-background-color);
++}
++
++.heap-tree-item:focus {
++  background-color: var(--theme-selection-background);
++}
++
++.heap-tree-item:focus description {
++  color: var(--theme-selection-color) !important;
++}
++
++.heap-tree-item:focus .call-tree-cell {
++  -moz-border-end-color: var(--focus-cell-border-color);
++}
++
++
++.heap-tree-cell[type="bytes"], .heap-tree-cell[type="count"] {
++  position: absolute;
++  text-align: right;
++  width: 40px;
++}
++
++.heap-tree-cell[type="name"] {
++  width: 150px;
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  display: block;
++}
++
++.heap-tree-cell[type="count"] {
++  left: 300px;
++}
++
++.heap-tree-cell[type="bytes"] {
++  left: 250px;
++}
+diff --git a/browser/themes/windows/jar.mn b/browser/themes/windows/jar.mn
+index 013c0a2..b48dd59 100644
+--- a/browser/themes/windows/jar.mn
++++ b/browser/themes/windows/jar.mn
+@@ -467,16 +467,17 @@ browser.jar:
+         skin/classic/browser/devtools/breadcrumbs-scrollbutton.png  (../shared/devtools/images/breadcrumbs-scrollbutton.png)
+         skin/classic/browser/devtools/breadcrumbs-scrollbutton@2x.png (../shared/devtools/images/breadcrumbs-scrollbutton@2x.png)
+         skin/classic/browser/devtools/animationinspector.css        (../shared/devtools/animationinspector.css)
+         skin/classic/browser/devtools/eyedropper.css                (../shared/devtools/eyedropper.css)
+ *       skin/classic/browser/devtools/canvasdebugger.css            (../shared/devtools/canvasdebugger.css)
+         skin/classic/browser/devtools/debugger.css                  (../shared/devtools/debugger.css)
+ *       skin/classic/browser/devtools/netmonitor.css                (../shared/devtools/netmonitor.css)
+         skin/classic/browser/devtools/performance.css               (../shared/devtools/performance.css)
++        skin/classic/browser/devtools/memory.css                    (../shared/devtools/memory.css)
+         skin/classic/browser/devtools/promisedebugger.css           (../shared/devtools/promisedebugger.css)
+         skin/classic/browser/devtools/timeline-filter.svg           (../shared/devtools/images/timeline-filter.svg)
+ *       skin/classic/browser/devtools/scratchpad.css                (../shared/devtools/scratchpad.css)
+         skin/classic/browser/devtools/shadereditor.css              (../shared/devtools/shadereditor.css)
+         skin/classic/browser/devtools/storage.css                   (../shared/devtools/storage.css)
+ *       skin/classic/browser/devtools/splitview.css                 (../shared/devtools/splitview.css)
+         skin/classic/browser/devtools/styleeditor.css               (../shared/devtools/styleeditor.css)
+         skin/classic/browser/devtools/webaudioeditor.css            (../shared/devtools/webaudioeditor.css)
+-- 
+2.2.1
+

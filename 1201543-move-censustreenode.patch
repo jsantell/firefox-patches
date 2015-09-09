@@ -1,0 +1,306 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 4 Sep 2015 10:04:02 -0700
+Subject: Bug 1201543 - Move CensusTreeNode to toolkit/devtools/heapsnapshot/*. r=fitzgen
+
+diff --git a/browser/devtools/memory/moz.build b/browser/devtools/memory/moz.build
+index 77fdb7a..17b5f3b 100644
+--- a/browser/devtools/memory/moz.build
++++ b/browser/devtools/memory/moz.build
+@@ -1,13 +1,11 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.memory += [
+     'modules/census-view.js',
+-    'modules/census.js',
+     'panel.js',
+ ]
+ 
+-XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
+ MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+diff --git a/browser/devtools/memory/test/mochitest/test_census-view-01.html b/browser/devtools/memory/test/mochitest/test_census-view-01.html
+index 1f9a919..63c7c8a 100644
+--- a/browser/devtools/memory/test/mochitest/test_census-view-01.html
++++ b/browser/devtools/memory/test/mochitest/test_census-view-01.html
+@@ -14,17 +14,17 @@ Bug 1067491 - Test taking a census over the RDP.
+   <link href="chrome://browser/skin/devtools/memory.css" type="text/css" />
+ </head>
+ <body>
+ <ul id="container" style="width:100%;height:300px;"></ul>
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script>
+ window.onload = function() {
+-  var { CensusTreeNode } = require("devtools/memory/census");
++  var { CensusTreeNode } = require("devtools/toolkit/heapsnapshot/census-tree-node");
+   var { INDENTATION, CensusView } = require("devtools/memory/census-view");
+   SimpleTest.waitForExplicitFinish();
+   const countBreakdown = { by: "count", count: true, bytes: true };
+ 
+   const BREAKDOWN = {
+     by: "coarseType",
+     objects: { by: "objectClass", then: countBreakdown },
+     strings: countBreakdown,
+diff --git a/browser/devtools/memory/test/unit/head.js b/browser/devtools/memory/test/unit/head.js
+deleted file mode 100644
+index 9e3f68e..0000000
+--- a/browser/devtools/memory/test/unit/head.js
++++ /dev/null
+@@ -1,143 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-"use strict";
+-
+-const Cc = Components.classes;
+-const Ci = Components.interfaces;
+-const Cu = Components.utils;
+-const Cr = Components.results;
+-const CC = Components.Constructor;
+-
+-const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+-const { addDebuggerToGlobal } = Cu.import("resource://gre/modules/jsdebugger.jsm", {});
+-const { console } = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+-const { CensusTreeNode } = require("devtools/memory/census");
+-const Services = require("Services");
+-
+-// Always log packets when running tests. runxpcshelltests.py will throw
+-// the output away anyway, unless you give it the --verbose flag.
+-Services.prefs.setBoolPref("devtools.debugger.log", true);
+-
+-const SYSTEM_PRINCIPAL = Cc["@mozilla.org/systemprincipal;1"]
+-  .createInstance(Ci.nsIPrincipal);
+-
+-function dumpn(msg) {
+-  dump("HEAPSNAPSHOT-TEST: " + msg + "\n");
+-}
+-
+-function addTestingFunctionsToGlobal(global) {
+-  global.eval(
+-    `
+-    const testingFunctions = Components.utils.getJSTestingFunctions();
+-    for (let k in testingFunctions) {
+-      this[k] = testingFunctions[k];
+-    }
+-    `
+-  );
+-  if (!global.print) {
+-    global.print = do_print;
+-  }
+-  if (!global.newGlobal) {
+-    global.newGlobal = newGlobal;
+-  }
+-  if (!global.Debugger) {
+-    addDebuggerToGlobal(global);
+-  }
+-}
+-
+-addTestingFunctionsToGlobal(this);
+-
+-/**
+- * Create a new global, with all the JS shell testing functions. Similar to the
+- * newGlobal function exposed to JS shells, and useful for porting JS shell
+- * tests to xpcshell tests.
+- */
+-function newGlobal() {
+-  const global = new Cu.Sandbox(SYSTEM_PRINCIPAL, { freshZone: true });
+-  addTestingFunctionsToGlobal(global);
+-  return global;
+-}
+-
+-function assertThrowsValue(f, val, msg) {
+-  var fullmsg;
+-  try {
+-    f();
+-  } catch (exc) {
+-    if ((exc === val) === (val === val) && (val !== 0 || 1 / exc === 1 / val))
+-      return;
+-    fullmsg = "Assertion failed: expected exception " + val + ", got " + exc;
+-  }
+-  if (fullmsg === undefined)
+-    fullmsg = "Assertion failed: expected exception " + val + ", no exception thrown";
+-  if (msg !== undefined)
+-    fullmsg += " - " + msg;
+-  throw new Error(fullmsg);
+-}
+-
+-/**
+- * Returns the full path of the file with the specified name in a
+- * platform-independent and URL-like form.
+- */
+-function getFilePath(aName, aAllowMissing=false, aUsePlatformPathSeparator=false)
+-{
+-  let file = do_get_file(aName, aAllowMissing);
+-  let path = Services.io.newFileURI(file).spec;
+-  let filePrePath = "file://";
+-  if ("nsILocalFileWin" in Ci &&
+-      file instanceof Ci.nsILocalFileWin) {
+-    filePrePath += "/";
+-  }
+-
+-  path = path.slice(filePrePath.length);
+-
+-  if (aUsePlatformPathSeparator && path.match(/^\w:/)) {
+-    path = path.replace(/\//g, "\\");
+-  }
+-
+-  return path;
+-}
+-
+-/**
+- * Save a heap snapshot to the file with the given name in the current
+- * directory, read it back as a HeapSnapshot instance, and then take a census of
+- * the heap snapshot's serialized heap graph with the provided census options.
+- *
+- * @param {Object|undefined} censusOptions
+- *        Options that should be passed through to the takeCensus method. See
+- *        js/src/doc/Debugger/Debugger.Memory.md for details.
+- *
+- * @param {Debugger|null} dbg
+- *        If a Debugger object is given, only serialize the subgraph covered by
+- *        the Debugger's debuggees. If null, serialize the whole heap graph.
+- *
+- * @param {String} fileName
+- *        The file name to save the heap snapshot's core dump file to, within
+- *        the current directory.
+- *
+- * @returns Census
+- */
+-function saveHeapSnapshotAndTakeCensus(dbg=null, censusOptions=undefined,
+-                                       // Add the Math.random() so that parallel
+-                                       // tests are less likely to mess with
+-                                       // each other.
+-                                       fileName="core-dump-" + (Math.random()) + ".tmp") {
+-  const filePath = getFilePath(fileName, true, true);
+-  ok(filePath, "Should get a file path to save the core dump to.");
+-
+-  const snapshotOptions = dbg ? { debugger: dbg } : { runtime: true };
+-  ChromeUtils.saveHeapSnapshot(filePath, snapshotOptions);
+-  ok(true, "Should have saved a heap snapshot to " + filePath);
+-
+-  const snapshot = ChromeUtils.readHeapSnapshot(filePath);
+-  ok(snapshot, "Should have read a heap snapshot back from " + filePath);
+-  ok(snapshot instanceof HeapSnapshot, "snapshot should be an instance of HeapSnapshot");
+-
+-  equal(typeof snapshot.takeCensus, "function", "snapshot should have a takeCensus method");
+-  return snapshot.takeCensus(censusOptions);
+-}
+-
+-function compareCensusViewData (breakdown, report, expected, assertion) {
+-  let data = new CensusTreeNode(breakdown, report);
+-  equal(JSON.stringify(data), JSON.stringify(expected), assertion);
+-}
+diff --git a/browser/devtools/memory/test/unit/xpcshell.ini b/browser/devtools/memory/test/unit/xpcshell.ini
+deleted file mode 100644
+index 8444a47..0000000
+--- a/browser/devtools/memory/test/unit/xpcshell.ini
++++ /dev/null
+@@ -1,10 +0,0 @@
+-[DEFAULT]
+-tags = devtools
+-head = head.js
+-tail =
+-firefox-appdir = browser
+-skip-if = toolkit == 'android' || toolkit == 'gonk'
+-
+-[test_census-01.js]
+-[test_census-02.js]
+-[test_census-03.js]
+diff --git a/browser/devtools/memory/modules/census.js b/toolkit/devtools/heapsnapshot/census-tree-node.js
+similarity index 100%
+rename from browser/devtools/memory/modules/census.js
+rename to toolkit/devtools/heapsnapshot/census-tree-node.js
+diff --git a/toolkit/devtools/heapsnapshot/moz.build b/toolkit/devtools/heapsnapshot/moz.build
+index eeaeedb..2106a88 100644
+--- a/toolkit/devtools/heapsnapshot/moz.build
++++ b/toolkit/devtools/heapsnapshot/moz.build
+@@ -27,11 +27,12 @@ SOURCES += [
+ ]
+ 
+ # Disable RTTI in google protocol buffer
+ DEFINES['GOOGLE_PROTOBUF_NO_RTTI'] = True
+ 
+ FINAL_LIBRARY = 'xul'
+ 
+ EXTRA_JS_MODULES.devtools.heapsnapshot += [
++    'census-tree-node.js',
+     'HeapAnalysesClient.js',
+     'HeapAnalysesWorker.js',
+ ]
+diff --git a/toolkit/devtools/heapsnapshot/tests/unit/head_heapsnapshot.js b/toolkit/devtools/heapsnapshot/tests/unit/head_heapsnapshot.js
+index d89f16d..77bc4e4 100644
+--- a/toolkit/devtools/heapsnapshot/tests/unit/head_heapsnapshot.js
++++ b/toolkit/devtools/heapsnapshot/tests/unit/head_heapsnapshot.js
+@@ -15,16 +15,17 @@ const { Census } = Cu.import("resource://test/Census.jsm", {});
+ const { addDebuggerToGlobal } =
+   Cu.import("resource://gre/modules/jsdebugger.jsm", {});
+ const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ 
+ const DevToolsUtils = require("devtools/toolkit/DevToolsUtils");
+ const HeapAnalysesClient =
+   require("devtools/toolkit/heapsnapshot/HeapAnalysesClient");
+ const Services = require("Services");
++const { CensusTreeNode } = require("devtools/toolkit/heapsnapshot/census-tree-node");
+ 
+ // Always log packets when running tests. runxpcshelltests.py will throw
+ // the output away anyway, unless you give it the --verbose flag.
+ Services.prefs.setBoolPref("devtools.debugger.log", true);
+ DevToolsUtils.dumpn.wantLogging = true;
+ 
+ const SYSTEM_PRINCIPAL = Cc["@mozilla.org/systemprincipal;1"]
+   .createInstance(Ci.nsIPrincipal);
+@@ -148,8 +149,13 @@ function saveHeapSnapshotAndTakeCensus(dbg=null, censusOptions=undefined,
+ 
+   const snapshot = ChromeUtils.readHeapSnapshot(filePath);
+   ok(snapshot, "Should have read a heap snapshot back from " + filePath);
+   ok(snapshot instanceof HeapSnapshot, "snapshot should be an instance of HeapSnapshot");
+ 
+   equal(typeof snapshot.takeCensus, "function", "snapshot should have a takeCensus method");
+   return snapshot.takeCensus(censusOptions);
+ }
++
++function compareCensusViewData (breakdown, report, expected, assertion) {
++  let data = new CensusTreeNode(breakdown, report);
++  equal(JSON.stringify(data), JSON.stringify(expected), assertion);
++}
+diff --git a/browser/devtools/memory/test/unit/test_census-01.js b/toolkit/devtools/heapsnapshot/tests/unit/test_census-tree-node-01.js
+similarity index 100%
+rename from browser/devtools/memory/test/unit/test_census-01.js
+rename to toolkit/devtools/heapsnapshot/tests/unit/test_census-tree-node-01.js
+diff --git a/browser/devtools/memory/test/unit/test_census-02.js b/toolkit/devtools/heapsnapshot/tests/unit/test_census-tree-node-02.js
+similarity index 100%
+rename from browser/devtools/memory/test/unit/test_census-02.js
+rename to toolkit/devtools/heapsnapshot/tests/unit/test_census-tree-node-02.js
+diff --git a/browser/devtools/memory/test/unit/test_census-03.js b/toolkit/devtools/heapsnapshot/tests/unit/test_census-tree-node-03.js
+similarity index 100%
+rename from browser/devtools/memory/test/unit/test_census-03.js
+rename to toolkit/devtools/heapsnapshot/tests/unit/test_census-tree-node-03.js
+diff --git a/toolkit/devtools/heapsnapshot/tests/unit/xpcshell.ini b/toolkit/devtools/heapsnapshot/tests/unit/xpcshell.ini
+index 366e79e..a5fc179 100644
+--- a/toolkit/devtools/heapsnapshot/tests/unit/xpcshell.ini
++++ b/toolkit/devtools/heapsnapshot/tests/unit/xpcshell.ini
+@@ -4,16 +4,19 @@ head = head_heapsnapshot.js
+ tail =
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
+ support-files =
+   Census.jsm
+   heap-snapshot-worker.js
+   Match.jsm
+ 
++[test_census-tree-node-01.js]
++[test_census-tree-node-02.js]
++[test_census-tree-node-03.js]
+ [test_HeapAnalyses_readHeapSnapshot_01.js]
+ [test_HeapAnalyses_takeCensus_01.js]
+ [test_HeapAnalyses_takeCensus_02.js]
+ [test_HeapAnalyses_takeCensus_03.js]
+ [test_HeapSnapshot_takeCensus_01.js]
+ [test_HeapSnapshot_takeCensus_02.js]
+ [test_HeapSnapshot_takeCensus_03.js]
+ [test_HeapSnapshot_takeCensus_04.js]
+-- 
+2.2.1
+
