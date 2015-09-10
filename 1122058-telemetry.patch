@@ -1,13 +1,125 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Sat, 8 Aug 2015 14:08:51 -0700
-Subject: Bug 1122058 - Add telemetry to the performance tool. r=mratcliffe,vp
+Date: Wed, 9 Sep 2015 15:20:12 -0700
+Subject: Bug 1122058 - Add telemetry hooks to various performance tools actions. r=vp,mratcliffe
 
+diff --git a/browser/devtools/performance/events.js b/browser/devtools/performance/events.js
+new file mode 100644
+index 0000000..07cca43
+--- /dev/null
++++ b/browser/devtools/performance/events.js
+@@ -0,0 +1,106 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++module.exports = {
++  // Fired by the PerformanceController and OptionsView when a pref changes.
++  PREF_CHANGED: "Performance:PrefChanged",
++
++  // Fired by the PerformanceController when the devtools theme changes.
++  THEME_CHANGED: "Performance:ThemeChanged",
++
++  // Emitted by the PerformanceView when the state (display mode) changes,
++  // for example when switching between "empty", "recording" or "recorded".
++  // This causes certain panels to be hidden or visible.
++  UI_STATE_CHANGED: "Performance:UI:StateChanged",
++
++  // Emitted by the PerformanceView on clear button click
++  UI_CLEAR_RECORDINGS: "Performance:UI:ClearRecordings",
++
++  // Emitted by the PerformanceView on record button click
++  UI_START_RECORDING: "Performance:UI:StartRecording",
++  UI_STOP_RECORDING: "Performance:UI:StopRecording",
++
++  // Emitted by the PerformanceView on import button click
++  UI_IMPORT_RECORDING: "Performance:UI:ImportRecording",
++  // Emitted by the RecordingsView on export button click
++  UI_EXPORT_RECORDING: "Performance:UI:ExportRecording",
++
++  // When a new recording is being tracked in the panel.
++  NEW_RECORDING: "Performance:NewRecording",
++
++  // When a recording is started or stopped or stopping via the PerformanceController
++  RECORDING_STATE_CHANGE: "Performance:RecordingStateChange",
++
++  // Emitted by the PerformanceController or RecordingView
++  // when a recording model is selected
++  RECORDING_SELECTED: "Performance:RecordingSelected",
++
++  // When recordings have been cleared out
++  RECORDINGS_CLEARED: "Performance:RecordingsCleared",
++
++  // When a recording is exported via the PerformanceController
++  RECORDING_EXPORTED: "Performance:RecordingExported",
++
++  // Emitted by the PerformanceController when a recording is imported.
++  // Unless you're interested in specifically imported recordings, like in tests
++  // or telemetry, you should probably use the normal RECORDING_STATE_CHANGE in the UI.
++  RECORDING_IMPORTED: "Performance:RecordingImported",
++
++  // When the front has updated information on the profiler's circular buffer
++  PROFILER_STATUS_UPDATED: "Performance:BufferUpdated",
++
++  // When the PerformanceView updates the display of the buffer status
++  UI_BUFFER_STATUS_UPDATED: "Performance:UI:BufferUpdated",
++
++  // Emitted by the OptimizationsListView when it renders new optimization
++  // data and clears the optimization data
++  OPTIMIZATIONS_RESET: "Performance:UI:OptimizationsReset",
++  OPTIMIZATIONS_RENDERED: "Performance:UI:OptimizationsRendered",
++
++  // Emitted by the OverviewView when more data has been rendered
++  OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
++  FRAMERATE_GRAPH_RENDERED: "Performance:UI:OverviewFramerateRendered",
++  MARKERS_GRAPH_RENDERED: "Performance:UI:OverviewMarkersRendered",
++  MEMORY_GRAPH_RENDERED: "Performance:UI:OverviewMemoryRendered",
++
++  // Emitted by the OverviewView when a range has been selected in the graphs
++  OVERVIEW_RANGE_SELECTED: "Performance:UI:OverviewRangeSelected",
++
++  // Emitted by the DetailsView when a subview is selected
++  DETAILS_VIEW_SELECTED: "Performance:UI:DetailsViewSelected",
++
++  // Emitted by the WaterfallView when it has been rendered
++  WATERFALL_RENDERED: "Performance:UI:WaterfallRendered",
++
++  // Emitted by the JsCallTreeView when a call tree has been rendered
++  JS_CALL_TREE_RENDERED: "Performance:UI:JsCallTreeRendered",
++
++  // Emitted by the JsFlameGraphView when it has been rendered
++  JS_FLAMEGRAPH_RENDERED: "Performance:UI:JsFlameGraphRendered",
++
++  // Emitted by the MemoryCallTreeView when a call tree has been rendered
++  MEMORY_CALL_TREE_RENDERED: "Performance:UI:MemoryCallTreeRendered",
++
++  // Emitted by the MemoryFlameGraphView when it has been rendered
++  MEMORY_FLAMEGRAPH_RENDERED: "Performance:UI:MemoryFlameGraphRendered",
++
++  // When a source is shown in the JavaScript Debugger at a specific location.
++  SOURCE_SHOWN_IN_JS_DEBUGGER: "Performance:UI:SourceShownInJsDebugger",
++  SOURCE_NOT_FOUND_IN_JS_DEBUGGER: "Performance:UI:SourceNotFoundInJsDebugger",
++
++  // These are short hands for the RECORDING_STATE_CHANGE event to make refactoring
++  // tests easier and in rare cases (telemetry). UI components should use
++  // RECORDING_STATE_CHANGE in almost all cases,
++  RECORDING_STARTED: "Performance:RecordingStarted",
++  RECORDING_WILL_STOP: "Performance:RecordingWillStop",
++  RECORDING_STOPPED: "Performance:RecordingStopped",
++
++  // Fired by the PerformanceController when `populateWithRecordings` is finished.
++  RECORDINGS_SEEDED: "Performance:RecordingsSeeded",
++
++  // Emitted by the PerformanceController when `PerformanceController.stopRecording()`
++  // is completed; used in tests, to know when a manual UI click is finished.
++  CONTROLLER_STOPPED_RECORDING: "Performance:Controller:StoppedRecording",
++};
 diff --git a/browser/devtools/performance/modules/logic/telemetry.js b/browser/devtools/performance/modules/logic/telemetry.js
 new file mode 100644
-index 0000000..f9670ea
+index 0000000..7ee10c55
 --- /dev/null
 +++ b/browser/devtools/performance/modules/logic/telemetry.js
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,122 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,10 +127,16 @@ index 0000000..f9670ea
 +
 +loader.lazyRequireGetter(this, "Telemetry",
 +  "devtools/shared/telemetry");
++loader.lazyRequireGetter(this, "Services",
++  "resource://gre/modules/Services.jsm", true);
++loader.lazyRequireGetter(this, "DevToolsUtils",
++  "devtools/toolkit/DevToolsUtils");
++loader.lazyRequireGetter(this, "EVENTS",
++  "devtools/performance/events");
 +
 +const EVENT_MAP_FLAGS = new Map([
-+  ["Performance:RecordingImported", "DEVTOOLS_PERFTOOLS_RECORDING_IMPORT_FLAG"],
-+  ["Performance:RecordingExported", "DEVTOOLS_PERFTOOLS_RECORDING_EXPORT_FLAG"],
++  [EVENTS.RECORDING_IMPORTED, "DEVTOOLS_PERFTOOLS_RECORDING_IMPORT_FLAG"],
++  [EVENTS.RECORDING_EXPORTED, "DEVTOOLS_PERFTOOLS_RECORDING_EXPORT_FLAG"],
 +]);
 +
 +const RECORDING_FEATURES = [
@@ -38,8 +156,12 @@ index 0000000..f9670ea
 +    this._emitter.on(event, this.onFlagEvent);
 +  }
 +
-+  this._emitter.on("Performance:RecordingStopped", this.onRecordingStopped);
-+  this._emitter.on("Performance:UI:DetailsViewSelected", this.onViewSelected);
++  this._emitter.on(EVENTS.RECORDING_STOPPED, this.onRecordingStopped);
++  this._emitter.on(EVENTS.DETAILS_VIEW_SELECTED, this.onViewSelected);
++
++  if (DevToolsUtils.testing) {
++    this.recordLogs();
++  }
 +}
 +
 +PerformanceTelemetry.prototype.destroy = function () {
@@ -51,8 +173,8 @@ index 0000000..f9670ea
 +  for (let [event] of EVENT_MAP_FLAGS) {
 +    this._emitter.off(event, this.onFlagEvent);
 +  }
-+  this._emitter.off("Performance:RecordingStopped", this.onRecordingStopped);
-+  this._emitter.off("Performance:UI:DetailsViewSelected", this.onViewSelected);
++  this._emitter.off(EVENTS.RECORDING_STOPPED, this.onRecordingStopped);
++  this._emitter.off(EVENTS.DETAILS_VIEW_SELECTED, this.onViewSelected);
 +  this._emitter = null;
 +};
 +
@@ -85,20 +207,57 @@ index 0000000..f9670ea
 +  this._telemetry.startTimer(SELECTED_VIEW_HISTOGRAM_NAME);
 +};
 +
++/**
++ * Utility to record histogram calls to this instance.
++ * Should only be used in testing mode; throws otherwise.
++ */
++PerformanceTelemetry.prototype.recordLogs = function () {
++  if (!DevToolsUtils.testing) {
++    throw new Error("Can only record telemetry logs in tests.");
++  }
++
++  let originalLog = this._telemetry.log;
++  let originalLogKeyed = this._telemetry.logKeyed;
++  this._log = {};
++
++  this._telemetry.log = (function (histo, data) {
++    let results = this._log[histo] = this._log[histo] || [];
++    results.push(data);
++    originalLog(histo, data);
++  }).bind(this);
++
++  this._telemetry.logKeyed = (function (histo, key, data) {
++    let results = this._log[histo] = this._log[histo] || [];
++    results.push([key, data]);
++    originalLogKeyed(histo, key, data);
++  }).bind(this);
++};
++
++PerformanceTelemetry.prototype.getLogs = function () {
++  if (!DevToolsUtils.testing) {
++    throw new Error("Can only get telemetry logs in tests.");
++  }
++
++  return this._log;
++};
++
 +exports.PerformanceTelemetry = PerformanceTelemetry;
 diff --git a/browser/devtools/performance/moz.build b/browser/devtools/performance/moz.build
-index bffb374..fd1b7cb 100644
+index a76e276..8b9741d 100644
 --- a/browser/devtools/performance/moz.build
 +++ b/browser/devtools/performance/moz.build
-@@ -9,16 +9,17 @@ EXTRA_JS_MODULES.devtools.performance += [
-     'modules/logic/compatibility.js',
+@@ -1,18 +1,20 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXTRA_JS_MODULES.devtools.performance += [
++    'events.js',
+     'modules/global.js',
      'modules/logic/frame-utils.js',
-     'modules/logic/front.js',
-     'modules/logic/io.js',
      'modules/logic/jit.js',
      'modules/logic/marker-utils.js',
-     'modules/logic/recording-model.js',
-     'modules/logic/recording-utils.js',
 +    'modules/logic/telemetry.js',
      'modules/logic/tree-model.js',
      'modules/logic/waterfall-utils.js',
@@ -109,10 +268,26 @@ index bffb374..fd1b7cb 100644
      'modules/widgets/markers-overview.js',
      'modules/widgets/tree-view.js',
 diff --git a/browser/devtools/performance/performance-controller.js b/browser/devtools/performance/performance-controller.js
-index c35f6ae..a8057f7 100644
+index 85a9fd2..c47932e 100644
 --- a/browser/devtools/performance/performance-controller.js
 +++ b/browser/devtools/performance/performance-controller.js
-@@ -17,16 +17,18 @@ loader.lazyRequireGetter(this, "DevToolsUtils",
+@@ -4,29 +4,34 @@
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ const { loader, require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+ 
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { Heritage, ViewHelpers, WidgetMethods } = require("resource:///modules/devtools/ViewHelpers.jsm");
+ 
++// Events emitted by various objects in the panel.
++const EVENTS = require("devtools/performance/events");
++
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "promise");
+ loader.lazyRequireGetter(this, "EventEmitter",
+   "devtools/toolkit/event-emitter");
+ loader.lazyRequireGetter(this, "DevToolsUtils",
    "devtools/toolkit/DevToolsUtils");
  loader.lazyRequireGetter(this, "system",
    "devtools/toolkit/shared/system");
@@ -126,31 +301,131 @@ index c35f6ae..a8057f7 100644
  loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
    "devtools/performance/markers", true);
  loader.lazyRequireGetter(this, "RecordingUtils",
-   "devtools/performance/recording-utils");
- loader.lazyRequireGetter(this, "RecordingModel",
-   "devtools/performance/recording-model", true);
+   "devtools/toolkit/performance/utils");
  loader.lazyRequireGetter(this, "GraphsController",
    "devtools/performance/graphs", true);
-@@ -148,17 +150,17 @@ const EVENTS = {
-   // Emitted by the MemoryCallTreeView when a call tree has been rendered
-   MEMORY_CALL_TREE_RENDERED: "Performance:UI:MemoryCallTreeRendered",
+ loader.lazyRequireGetter(this, "WaterfallHeader",
+   "devtools/performance/waterfall-ticks", true);
+@@ -64,118 +69,16 @@ loader.lazyImporter(this, "setNamedTimeout",
+   "resource:///modules/devtools/ViewHelpers.jsm");
+ loader.lazyImporter(this, "clearNamedTimeout",
+   "resource:///modules/devtools/ViewHelpers.jsm");
+ loader.lazyImporter(this, "PluralForm",
+   "resource://gre/modules/PluralForm.jsm");
  
-   // Emitted by the MemoryFlameGraphView when it has been rendered
-   MEMORY_FLAMEGRAPH_RENDERED: "Performance:UI:MemoryFlameGraphRendered",
+ const BRANCH_NAME = "devtools.performance.ui.";
  
-   // When a source is shown in the JavaScript Debugger at a specific location.
-   SOURCE_SHOWN_IN_JS_DEBUGGER: "Performance:UI:SourceShownInJsDebugger",
--  SOURCE_NOT_FOUND_IN_JS_DEBUGGER: "Performance:UI:SourceNotFoundInJsDebugger"
-+  SOURCE_NOT_FOUND_IN_JS_DEBUGGER: "Performance:UI:SourceNotFoundInJsDebugger",
- };
- 
+-// Events emitted by various objects in the panel.
+-const EVENTS = {
+-  // Fired by the PerformanceController and OptionsView when a pref changes.
+-  PREF_CHANGED: "Performance:PrefChanged",
+-
+-  // Fired by the PerformanceController when the devtools theme changes.
+-  THEME_CHANGED: "Performance:ThemeChanged",
+-
+-  // Emitted by the PerformanceView when the state (display mode) changes,
+-  // for example when switching between "empty", "recording" or "recorded".
+-  // This causes certain panels to be hidden or visible.
+-  UI_STATE_CHANGED: "Performance:UI:StateChanged",
+-
+-  // Emitted by the PerformanceView on clear button click
+-  UI_CLEAR_RECORDINGS: "Performance:UI:ClearRecordings",
+-
+-  // Emitted by the PerformanceView on record button click
+-  UI_START_RECORDING: "Performance:UI:StartRecording",
+-  UI_STOP_RECORDING: "Performance:UI:StopRecording",
+-
+-  // Emitted by the PerformanceView on import button click
+-  UI_IMPORT_RECORDING: "Performance:UI:ImportRecording",
+-  // Emitted by the RecordingsView on export button click
+-  UI_EXPORT_RECORDING: "Performance:UI:ExportRecording",
+-
+-  // When a new recording is being tracked in the panel.
+-  NEW_RECORDING: "Performance:NewRecording",
+-
+-  // When a recording is started or stopped or stopping via the PerformanceController
+-  RECORDING_STATE_CHANGE: "Performance:RecordingStateChange",
+-
+-  // Emitted by the PerformanceController or RecordingView
+-  // when a recording model is selected
+-  RECORDING_SELECTED: "Performance:RecordingSelected",
+-
+-  // When recordings have been cleared out
+-  RECORDINGS_CLEARED: "Performance:RecordingsCleared",
+-
+-  // When a recording is exported via the PerformanceController
+-  RECORDING_EXPORTED: "Performance:RecordingExported",
+-
+-  // When the front has updated information on the profiler's circular buffer
+-  PROFILER_STATUS_UPDATED: "Performance:BufferUpdated",
+-
+-  // When the PerformanceView updates the display of the buffer status
+-  UI_BUFFER_STATUS_UPDATED: "Performance:UI:BufferUpdated",
+-
+-  // Emitted by the OptimizationsListView when it renders new optimization
+-  // data and clears the optimization data
+-  OPTIMIZATIONS_RESET: "Performance:UI:OptimizationsReset",
+-  OPTIMIZATIONS_RENDERED: "Performance:UI:OptimizationsRendered",
+-
+-  // Emitted by the OverviewView when more data has been rendered
+-  OVERVIEW_RENDERED: "Performance:UI:OverviewRendered",
+-  FRAMERATE_GRAPH_RENDERED: "Performance:UI:OverviewFramerateRendered",
+-  MARKERS_GRAPH_RENDERED: "Performance:UI:OverviewMarkersRendered",
+-  MEMORY_GRAPH_RENDERED: "Performance:UI:OverviewMemoryRendered",
+-
+-  // Emitted by the OverviewView when a range has been selected in the graphs
+-  OVERVIEW_RANGE_SELECTED: "Performance:UI:OverviewRangeSelected",
+-
+-  // Emitted by the DetailsView when a subview is selected
+-  DETAILS_VIEW_SELECTED: "Performance:UI:DetailsViewSelected",
+-
+-  // Emitted by the WaterfallView when it has been rendered
+-  WATERFALL_RENDERED: "Performance:UI:WaterfallRendered",
+-
+-  // Emitted by the JsCallTreeView when a call tree has been rendered
+-  JS_CALL_TREE_RENDERED: "Performance:UI:JsCallTreeRendered",
+-
+-  // Emitted by the JsFlameGraphView when it has been rendered
+-  JS_FLAMEGRAPH_RENDERED: "Performance:UI:JsFlameGraphRendered",
+-
+-  // Emitted by the MemoryCallTreeView when a call tree has been rendered
+-  MEMORY_CALL_TREE_RENDERED: "Performance:UI:MemoryCallTreeRendered",
+-
+-  // Emitted by the MemoryFlameGraphView when it has been rendered
+-  MEMORY_FLAMEGRAPH_RENDERED: "Performance:UI:MemoryFlameGraphRendered",
+-
+-  // When a source is shown in the JavaScript Debugger at a specific location.
+-  SOURCE_SHOWN_IN_JS_DEBUGGER: "Performance:UI:SourceShownInJsDebugger",
+-  SOURCE_NOT_FOUND_IN_JS_DEBUGGER: "Performance:UI:SourceNotFoundInJsDebugger",
+-
+-  // These are short hands for the RECORDING_STATE_CHANGE event to make refactoring
+-  // tests easier. UI components should use RECORDING_STATE_CHANGE, and these are
+-  // deprecated for test usage only.
+-  RECORDING_STARTED: "Performance:RecordingStarted",
+-  RECORDING_WILL_STOP: "Performance:RecordingWillStop",
+-  RECORDING_STOPPED: "Performance:RecordingStopped",
+-
+-  // Fired by the PerformanceController when `populateWithRecordings` is finished.
+-  RECORDINGS_SEEDED: "Performance:RecordingsSeeded",
+-
+-  // Emitted by the PerformanceController when `PerformanceController.stopRecording()`
+-  // is completed; used in tests, to know when a manual UI click is finished.
+-  CONTROLLER_STOPPED_RECORDING: "Performance:Controller:StoppedRecording",
+-
+-  // Emitted by the PerformanceController when a recording is imported. Used
+-  // only in tests. Should use the normal RECORDING_STATE_CHANGE in the UI.
+-  RECORDING_IMPORTED: "Performance:ImportedRecording",
+-};
+-
  /**
   * The current target, toolbox and PerformanceFront, set by this tool's host.
   */
  let gToolbox, gTarget, gFront;
  
  /**
-@@ -189,26 +191,28 @@ let PerformanceController = {
+  * Initializes the profiler controller and views.
+  */
+@@ -200,59 +103,64 @@ let PerformanceController = {
    _recordings: [],
    _currentRecording: null,
  
@@ -168,8 +443,7 @@ index c35f6ae..a8057f7 100644
      this._onRecordingSelectFromView = this._onRecordingSelectFromView.bind(this);
      this._onPrefChanged = this._onPrefChanged.bind(this);
      this._onThemeChanged = this._onThemeChanged.bind(this);
-     this._onRecordingStateChange = this._onRecordingStateChange.bind(this);
-     this._onProfilerStatusUpdated = this._onProfilerStatusUpdated.bind(this);
+     this._onFrontEvent = this._onFrontEvent.bind(this);
 +    this._pipe = this._pipe.bind(this);
  
      // Store data regarding if e10s is enabled.
@@ -179,8 +453,7 @@ index c35f6ae..a8057f7 100644
      this._prefs = require("devtools/performance/global").PREFS;
      this._prefs.on("pref-changed", this._onPrefChanged);
  
-@@ -219,38 +223,41 @@ let PerformanceController = {
-     gFront.on("profiler-status", this._onProfilerStatusUpdated);
+     gFront.on("*", this._onFrontEvent);
      ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
      PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
      PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
@@ -200,11 +473,7 @@ index c35f6ae..a8057f7 100644
 +    this._telemetry.destroy();
      this._prefs.off("pref-changed", this._onPrefChanged);
  
-     gFront.off("recording-starting", this._onRecordingStateChange);
-     gFront.off("recording-started", this._onRecordingStateChange);
-     gFront.off("recording-stopping", this._onRecordingStateChange);
-     gFront.off("recording-stopped", this._onRecordingStateChange);
-     gFront.off("profiler-status", this._onProfilerStatusUpdated);
+     gFront.off("*", this._onFrontEvent);
      ToolbarView.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
      PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
      PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
@@ -221,71 +490,76 @@ index c35f6ae..a8057f7 100644
     * Returns the current devtools theme.
     */
    getTheme: function () {
-@@ -330,16 +337,31 @@ let PerformanceController = {
-    *        The file to stream the data into.
+@@ -367,22 +275,17 @@ let PerformanceController = {
+    *
+    * @param nsILocalFile file
+    *        The file to import the data from.
     */
-   exportRecording: Task.async(function*(_, recording, file) {
-     yield recording.exportRecording(file);
-     this.emit(EVENTS.RECORDING_EXPORTED, recording);
-   }),
+   importRecording: Task.async(function*(_, file) {
+     let recording = yield gFront.importRecording(file);
+     this._addNewRecording(recording);
  
-   /**
-+   * Loads a recording from a file, adding it to the recordings list. Emits
-+   * `EVENTS.RECORDING_IMPORTED` when the file was loaded.
-+   *
-+   * @param nsILocalFile file
-+   *        The file to import the data from.
-+   */
-+  importRecording: Task.async(function*(_, file) {
-+    let recording = new RecordingModel();
-+    this._recordings.push(recording);
-+    yield recording.importRecording(file);
-+
+-    // Only emit in tests for legacy purposes for shorthand --
+-    // other things in UI should handle the generic NEW_RECORDING
+-    // event to handle lazy recordings.
+-    if (DevToolsUtils.testing) {
+-      this.emit(EVENTS.RECORDING_IMPORTED, recording);
+-    }
 +    this.emit(EVENTS.RECORDING_IMPORTED, recording);
-+  }),
-+
-+  /**
-    * Clears all recordings from the list as well as the current recording.
-    * Emits `EVENTS.RECORDINGS_CLEARED` when complete so other components can clean up.
-    */
-   clearRecordings: Task.async(function* () {
-     let latest = this.getLatestManualRecording();
-     if (latest && latest.isRecording()) {
-       yield this.stopRecording();
-     }
-@@ -350,31 +372,16 @@ let PerformanceController = {
-     }
- 
-     this._recordings.length = 0;
-     this.setCurrentRecording(null);
-     this.emit(EVENTS.RECORDINGS_CLEARED);
    }),
  
    /**
--   * Loads a recording from a file, adding it to the recordings list. Emits
--   * `EVENTS.RECORDING_IMPORTED` when the file was loaded.
--   *
--   * @param nsILocalFile file
--   *        The file to import the data from.
--   */
--  importRecording: Task.async(function*(_, file) {
--    let recording = new RecordingModel();
--    this._recordings.push(recording);
--    yield recording.importRecording(file);
--
--    this.emit(EVENTS.RECORDING_IMPORTED, recording);
--  }),
--
--  /**
-    * Sets the currently active RecordingModel. Should rarely be called directly,
+    * Sets the currently active PerformanceRecording. Should rarely be called directly,
     * as RecordingsView handles this when manually selected a recording item. Exceptions
     * are when clearing the view.
-    * @param RecordingModel recording
+    * @param PerformanceRecording recording
     */
-   setCurrentRecording: function (recording) {
-     if (this._currentRecording !== recording) {
-       this._currentRecording = recording;
-@@ -541,16 +548,23 @@ let PerformanceController = {
+@@ -486,31 +389,29 @@ let PerformanceController = {
+    */
+   _onRecordingStateChange: function (state, model) {
+     this._addNewRecording(model);
+ 
+     this.emit(EVENTS.RECORDING_STATE_CHANGE, state, model);
+ 
+     // Emit the state specific events for tests that I'm too
+     // lazy and frusterated to change right now. These events
+-    // should only be used in tests, as the rest of the UI should
+-    // react to general RECORDING_STATE_CHANGE events and NEW_RECORDING
+-    // events to handle lazy recordings.
+-    if (DevToolsUtils.testing) {
+-      switch (state) {
+-        case "recording-started":
+-          this.emit(EVENTS.RECORDING_STARTED, model);
+-          break;
+-        case "recording-stopping":
+-          this.emit(EVENTS.RECORDING_WILL_STOP, model);
+-          break;
+-        case "recording-stopped":
+-          this.emit(EVENTS.RECORDING_STOPPED, model);
+-          break;
+-      }
++    // should only be used in tests and specific rare cases (telemetry),
++    // as the rest of the UI should react to general RECORDING_STATE_CHANGE
++    // events and NEW_RECORDING events to handle lazy recordings.
++    switch (state) {
++      case "recording-started":
++        this.emit(EVENTS.RECORDING_STARTED, model);
++        break;
++      case "recording-stopping":
++        this.emit(EVENTS.RECORDING_WILL_STOP, model);
++        break;
++      case "recording-stopped":
++        this.emit(EVENTS.RECORDING_STOPPED, model);
++        break;
+     }
+   },
+ 
+   /**
+    * Takes a recording and returns a value between 0 and 1 indicating how much
+    * of the buffer is used.
+    */
+   getBufferUsageForRecording: function (recording) {
+@@ -630,16 +531,23 @@ let PerformanceController = {
        $("#performance-view").setAttribute("e10s", "disabled");
      }
      // Could be a chance where the directive goes away yet e10s is still on
@@ -309,11 +583,124 @@ index c35f6ae..a8057f7 100644
   */
  EventEmitter.decorate(PerformanceController);
  
+diff --git a/browser/devtools/performance/test/browser.ini b/browser/devtools/performance/test/browser.ini
+index b07fe62..32ae9f7 100644
+--- a/browser/devtools/performance/test/browser.ini
++++ b/browser/devtools/performance/test/browser.ini
+@@ -112,16 +112,17 @@ skip-if = os == 'linux' # bug 1186322
+ [browser_perf-recording-selected-01.js]
+ skip-if = os == 'linux' # bug 1186322
+ [browser_perf-recording-selected-02.js]
+ skip-if = os == 'linux' # bug 1186322
+ [browser_perf-recording-selected-03.js]
+ skip-if = os == 'linux' # bug 1186322
+ [browser_perf-recording-selected-04.js]
+ skip-if = os == 'linux' # bug 1186322
++[browser_perf-telemetry.js]
+ [browser_perf-theme-toggle-01.js]
+ [browser_profiler_tree-abstract-01.js]
+ [browser_profiler_tree-abstract-02.js]
+ [browser_profiler_tree-abstract-03.js]
+ [browser_profiler_tree-abstract-04.js]
+ [browser_profiler_tree-view-01.js]
+ [browser_profiler_tree-view-02.js]
+ [browser_profiler_tree-view-03.js]
+diff --git a/browser/devtools/performance/test/browser_perf-telemetry.js b/browser/devtools/performance/test/browser_perf-telemetry.js
+new file mode 100644
+index 0000000..ba0a66c
+--- /dev/null
++++ b/browser/devtools/performance/test/browser_perf-telemetry.js
+@@ -0,0 +1,85 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the performance telemetry module records events at appropriate times.
++ */
++
++function* spawnTest() {
++  PMM_loadFrameScripts(gBrowser);
++  let { panel } = yield initPerformance(SIMPLE_URL);
++  let { EVENTS, PerformanceController, OverviewView, DetailsView, WaterfallView, JsCallTreeView, JsFlameGraphView } = panel.panelWin;
++
++  Services.prefs.setBoolPref(MEMORY_PREF, false);
++  let DURATION = "DEVTOOLS_PERFTOOLS_RECORDING_DURATION_MS";
++  let COUNT = "DEVTOOLS_PERFTOOLS_RECORDING_COUNT";
++  let CONSOLE_COUNT = "DEVTOOLS_PERFTOOLS_CONSOLE_RECORDING_COUNT";
++  let FEATURES = "DEVTOOLS_PERFTOOLS_RECORDING_FEATURES_USED";
++  let VIEWS = "DEVTOOLS_PERFTOOLS_SELECTED_VIEW_MS";
++  let EXPORTED = "DEVTOOLS_PERFTOOLS_RECORDING_EXPORT_FLAG";
++  let IMPORTED = "DEVTOOLS_PERFTOOLS_RECORDING_IMPORT_FLAG";
++
++  let telemetry = PerformanceController._telemetry;
++  let logs = telemetry.getLogs();
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  Services.prefs.setBoolPref(MEMORY_PREF, true);
++
++  yield startRecording(panel);
++  yield stopRecording(panel);
++
++  is(logs[DURATION].length, 2, `two entry for ${DURATION}`);
++  ok(logs[DURATION].every(d => typeof d === "number"), `every ${DURATION} entry is a number`);
++  is(logs[COUNT].length, 2, `two entry for ${COUNT}`);
++  is(logs[CONSOLE_COUNT], void 0, `no entries for ${CONSOLE_COUNT}`);
++  is(logs[FEATURES].length, 10, `two recordings worth of entries for ${FEATURES}`);
++
++  ok(logs[FEATURES].find(r => r[0] === "withMemory" && r[1] === true), "one feature entry for memory enabled");
++  ok(logs[FEATURES].find(r => r[0] === "withMemory" && r[1] === false), "one feature entry for memory disabled");
++
++  let calltreeRendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  let flamegraphRendered = once(JsFlameGraphView, EVENTS.JS_FLAMEGRAPH_RENDERED);
++
++  // Go through some views to check later
++  DetailsView.selectView("js-calltree");
++  yield calltreeRendered;
++  DetailsView.selectView("js-flamegraph");
++  yield flamegraphRendered;
++
++  let file = FileUtils.getFile("TmpD", ["tmpprofile.json"]);
++  file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("666", 8));
++  let exported = once(PerformanceController, EVENTS.RECORDING_EXPORTED);
++  yield PerformanceController.exportRecording("", PerformanceController.getCurrentRecording(), file);
++  yield exported;
++
++  ok(logs[EXPORTED], `a telemetry entry for ${EXPORTED} exists after exporting`);
++
++  let imported = once(PerformanceController, EVENTS.RECORDING_IMPORTED);
++  yield PerformanceController.importRecording(null, file);
++  yield imported;
++
++  ok(logs[IMPORTED], `a telemetry entry for ${IMPORTED} exists after importing`);
++
++  yield consoleProfile(panel.panelWin, "rust");
++  yield consoleProfileEnd(panel.panelWin, "rust");
++
++  info("Performed a console recording.");
++
++  is(logs[DURATION].length, 3, `three entry for ${DURATION}`);
++  ok(logs[DURATION].every(d => typeof d === "number"), `every ${DURATION} entry is a number`);
++  is(logs[COUNT].length, 2, `two entry for ${COUNT}`);
++  is(logs[CONSOLE_COUNT].length, 1, `one entry for ${CONSOLE_COUNT}`);
++  is(logs[FEATURES].length, 15, `two recordings worth of entries for ${FEATURES}`);
++
++  yield teardown(panel);
++
++  // Check views after destruction to ensure `js-flamegraph` gets called with a time
++  // during destruction
++  ok(logs[VIEWS].find(r => r[0] === "waterfall" && typeof r[1] === "number"), `${VIEWS} for waterfall view and time.`);
++  ok(logs[VIEWS].find(r => r[0] === "js-calltree" && typeof r[1] === "number"), `${VIEWS} for js-calltree view and time.`);
++  ok(logs[VIEWS].find(r => r[0] === "js-flamegraph" && typeof r[1] === "number"), `${VIEWS} for js-flamegraph view and time.`);
++
++  finish();
++};
 diff --git a/browser/devtools/shared/telemetry.js b/browser/devtools/shared/telemetry.js
-index 89bf845..091df41 100644
+index 79bc493..a84a6af 100644
 --- a/browser/devtools/shared/telemetry.js
 +++ b/browser/devtools/shared/telemetry.js
-@@ -245,22 +245,28 @@ Telemetry.prototype = {
+@@ -271,22 +271,28 @@ Telemetry.prototype = {
      this._timers.set(histogramId, new Date());
    },
  
@@ -331,7 +718,7 @@ index 89bf845..091df41 100644
      if (startTime) {
        let time = (new Date() - startTime) / 1000;
 -      this.log(histogramId, time);
-+      if (key) {
++      if (!key) {
 +        this.log(histogramId, time);
 +      } else {
 +        this.logKeyed(histogramId, key, time);
@@ -345,10 +732,10 @@ index 89bf845..091df41 100644
     *
     * @param  {String} histogramId
 diff --git a/toolkit/components/telemetry/Histograms.json b/toolkit/components/telemetry/Histograms.json
-index 69ab92cc..43bfb2b 100644
+index 1731e0e..ae9557b 100644
 --- a/toolkit/components/telemetry/Histograms.json
 +++ b/toolkit/components/telemetry/Histograms.json
-@@ -7183,16 +7183,57 @@
+@@ -7271,16 +7271,57 @@
    },
    "DEVTOOLS_HEAP_SNAPSHOT_EDGE_COUNT": {
      "expires_in_version": "never",
@@ -381,31 +768,31 @@ index 69ab92cc..43bfb2b 100644
 +    "expires_in_version": "never",
 +    "kind": "boolean",
 +    "keyed": true,
-+    "description": "When a user starts a recording with specific recording options, keyed by pref name."
++    "description": "When a user starts a recording with specific recording options, keyed by feature name (withMarkers, withAllocations, etc.)."
 +  },
 +  "DEVTOOLS_PERFTOOLS_RECORDING_DURATION_MS": {
 +    "expires_in_version": "never",
 +    "kind": "exponential",
-+    "high": 600000,
-+    "n_buckets": 1000,
++    "high": "600000",
++    "n_buckets": 20,
 +    "description": "The length of a duration in MS of a performance tool recording."
 +  },
 +  "DEVTOOLS_PERFTOOLS_SELECTED_VIEW_MS": {
 +    "expires_in_version": "never",
 +    "kind": "exponential",
 +    "keyed": true,
-+    "high": 600000,
-+    "n_buckets": 1000,
-+    "description": "The amount of time spent in a specific performance tool view."
++    "high": "600000",
++    "n_buckets": 20,
++    "description": "The amount of time spent in a specific performance tool view, keyed by view name (waterfall, js-calltree, js-flamegraph, etc)."
 +  },
    "BROWSER_IS_USER_DEFAULT": {
      "expires_in_version": "never",
      "kind": "boolean",
+     "releaseChannelCollection": "opt-out",
      "description": "The result of the startup default desktop browser check."
    },
-   "BROWSER_IS_ASSIST_DEFAULT": {
+   "BROWSER_IS_USER_DEFAULT_ERROR": {
      "expires_in_version": "never",
-     "kind": "boolean",
 -- 
 2.2.1
 
