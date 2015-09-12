@@ -1,0 +1,2562 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 11 Sep 2015 18:53:48 -0700
+Subject: Bug 1204173 - Replace fluxify with redux. r=jlongster
+
+diff --git a/browser/devtools/debugger/content/stores/event-listeners.js b/browser/devtools/debugger/content/actions/event-listeners.js
+similarity index 75%
+rename from browser/devtools/debugger/content/stores/event-listeners.js
+rename to browser/devtools/debugger/content/actions/event-listeners.js
+index 271de8f..05b470c 100644
+--- a/browser/devtools/debugger/content/stores/event-listeners.js
++++ b/browser/devtools/debugger/content/actions/event-listeners.js
+@@ -1,50 +1,22 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const constants = require('../constants');
+-const promise = require('promise');
+-const { rdpInvoke, asPaused } = require('../utils');
++const constants = require("../constants");
++const { rdpInvoke, asPaused } = require("../utils");
+ const { reportException } = require("devtools/toolkit/DevToolsUtils");
+ 
+ const FETCH_EVENT_LISTENERS_DELAY = 200; // ms
+ 
+-const initialState = {
+-  activeEventNames: [],
+-  listeners: [],
+-  fetchingListeners: false,
+-};
+-
+-function update(state = initialState, action, emitChange) {
+-  switch(action.type) {
+-  case constants.UPDATE_EVENT_BREAKPOINTS:
+-    state.activeEventNames = action.eventNames;
+-    emitChange('activeEventNames', state.activeEventNames);
+-    break;
+-  case constants.FETCH_EVENT_LISTENERS:
+-    if (action.status === "begin") {
+-      state.fetchingListeners = true;
+-    }
+-    else if (action.status === "done") {
+-      state.fetchingListeners = false;
+-      state.listeners = action.listeners;
+-      emitChange('listeners', state.listeners);
+-    }
+-    break;
+-  }
+-
+-  return state;
+-};
+-
+ function fetchEventListeners() {
+   return (dispatch, getState) => {
+-    // Make sure we're not sending a batch of closely repeated requests.
++    // Make sure we"re not sending a batch of closely repeated requests.
+     // This can easily happen whenever new sources are fetched.
+     setNamedTimeout("event-listeners-fetch", FETCH_EVENT_LISTENERS_DELAY, () => {
+       // In case there is still a request of listeners going on (it
+       // takes several RDP round trips right now), make sure we wait
+       // on a currently running request
+       if (getState().eventListeners.fetchingListeners) {
+         dispatch({
+           type: services.WAIT_UNTIL,
+@@ -76,31 +48,31 @@ function fetchEventListeners() {
+     });
+   };
+ }
+ 
+ const _getListeners = Task.async(function*() {
+   const response = yield rdpInvoke(gThreadClient, gThreadClient.eventListeners);
+ 
+   // Make sure all the listeners are sorted by the event type, since
+-  // they're not guaranteed to be clustered together.
++  // they"re not guaranteed to be clustered together.
+   response.listeners.sort((a, b) => a.type > b.type ? 1 : -1);
+ 
+   // Add all the listeners in the debugger view event linsteners container.
+   let fetchedDefinitions = new Map();
+   let listeners = [];
+   for (let listener of response.listeners) {
+     let definitionSite;
+     if (fetchedDefinitions.has(listener.function.actor)) {
+       definitionSite = fetchedDefinitions.get(listener.function.actor);
+     } else if (listener.function.class == "Function") {
+       definitionSite = yield _getDefinitionSite(listener.function);
+       if (!definitionSite) {
+-        // We don't know where this listener comes from so don't show it in
+-        // the UI as breaking on it doesn't work (bug 942899).
++        // We don"t know where this listener comes from so don"t show it in
++        // the UI as breaking on it doesn"t work (bug 942899).
+         continue;
+       }
+ 
+       fetchedDefinitions.set(listener.function.actor, definitionSite);
+     }
+     listener.function.url = definitionSite;
+     listeners.push(listener);
+   }
+@@ -136,12 +108,9 @@ function updateEventBreakpoints(eventNames) {
+           type: constants.UPDATE_EVENT_BREAKPOINTS,
+           eventNames: eventNames
+         });
+       });
+     });
+   }
+ }
+ 
+-module.exports = {
+-  update: update,
+-  actions: { updateEventBreakpoints, fetchEventListeners }
+-}
++module.exports = { updateEventBreakpoints, fetchEventListeners };
+diff --git a/browser/devtools/shared/fluxify/thunkMiddleware.js b/browser/devtools/debugger/content/middleware.js
+similarity index 26%
+rename from browser/devtools/shared/fluxify/thunkMiddleware.js
+rename to browser/devtools/debugger/content/middleware.js
+index 6a4a369..3161ab3 100644
+--- a/browser/devtools/shared/fluxify/thunkMiddleware.js
++++ b/browser/devtools/debugger/content/middleware.js
+@@ -1,20 +1,26 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-/**
+- * A middleware that allows thunks (functions) to be dispatched.
+- * If it's a thunk, it is called with `dispatch` and `getState`,
+- * allowing the action to create multiple actions (most likely
+- * asynchronously).
+- */
+-function thunkMiddleware({ dispatch, getState }) {
+-  return next => action => {
+-    return typeof action === "function"
+-      ? action(dispatch, getState)
+-      : next(action);
+-  }
++const constants = require("./constants");
++
++function createDebuggerMiddleware (emit) {
++  return ({ dispatch, getState }) => next => action => {
++    let result = next(action);
++
++    switch (action.type) {
++      case constants.UPDATE_EVENT_BREAKPOINTS:
++        emit("@redux:activeEventNames", getState().eventListeners.activeEventNames);
++        break;
++      case constants.FETCH_EVENT_LISTENERS:
++        if (action.status === "done") {
++          emit("@redux:listeners", getState().eventListeners.listeners);
++        }
++        break;
++    }
++    return result;
++  };
+ }
+ 
+-module.exports = thunkMiddleware;
++exports.createDebuggerMiddleware = createDebuggerMiddleware;
+diff --git a/browser/devtools/shared/fluxify/logMiddleware.js b/browser/devtools/debugger/content/reducers/event-listeners.js
+similarity index 25%
+rename from browser/devtools/shared/fluxify/logMiddleware.js
+rename to browser/devtools/debugger/content/reducers/event-listeners.js
+index a544494..36772c6 100644
+--- a/browser/devtools/shared/fluxify/logMiddleware.js
++++ b/browser/devtools/debugger/content/reducers/event-listeners.js
+@@ -1,17 +1,35 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-/**
+- * A middleware that logs all actions coming through the system
+- * to the console.
+- */
+-function logMiddleware({ dispatch, getState }) {
+-  return next => action => {
+-    console.log('[DISPATCH]', JSON.stringify(action));
+-    next(action);
++const constants = require('../constants');
++
++const FETCH_EVENT_LISTENERS_DELAY = 200; // ms
++
++const initialState = {
++  activeEventNames: [],
++  listeners: [],
++  fetchingListeners: false,
++};
++
++function update(state = initialState, action) {
++  switch(action.type) {
++  case constants.UPDATE_EVENT_BREAKPOINTS:
++    state.activeEventNames = action.eventNames;
++    break;
++  case constants.FETCH_EVENT_LISTENERS:
++    if (action.status === "begin") {
++      state.fetchingListeners = true;
++    }
++    else if (action.status === "done") {
++      state.fetchingListeners = false;
++      state.listeners = action.listeners;
++    }
++    break;
+   }
++
++  return state;
+ }
+ 
+-module.exports = logMiddleware;
++module.exports = update;
+diff --git a/browser/devtools/debugger/content/stores/index.js b/browser/devtools/debugger/content/reducers/index.js
+similarity index 70%
+rename from browser/devtools/debugger/content/stores/index.js
+rename to browser/devtools/debugger/content/reducers/index.js
+index 1508eb0..4d33d6e 100644
+--- a/browser/devtools/debugger/content/stores/index.js
++++ b/browser/devtools/debugger/content/reducers/index.js
+@@ -1,8 +1,9 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
++const { combineReducers } = require('devtools/vendor/redux');
+ const eventListeners = require('./event-listeners');
+ 
+-module.exports = { eventListeners };
++module.exports = combineReducers({ eventListeners });
+diff --git a/browser/devtools/debugger/content/views/event-listeners-view.js b/browser/devtools/debugger/content/views/event-listeners-view.js
+index 1c1c5c2..d17e1aa 100644
+--- a/browser/devtools/debugger/content/views/event-listeners-view.js
++++ b/browser/devtools/debugger/content/views/event-listeners-view.js
+@@ -1,33 +1,32 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const actions = require('../stores/event-listeners').actions;
+-const bindActionCreators = require('devtools/shared/fluxify/bindActionCreators');
++const actions = require('../actions/event-listeners');
++const { bindActionCreators } = require('devtools/vendor/redux');
+ 
+ /**
+  * Functions handling the event listeners UI.
+  */
+-function EventListenersView(dispatcher, DebuggerController) {
++function EventListenersView(store, DebuggerController) {
+   dumpn("EventListenersView was instantiated");
+ 
+-  this.actions = bindActionCreators(actions, dispatcher.dispatch);
+-  this.getState = () => dispatcher.getState().eventListeners;
+-
+-  this.Breakpoints = DebuggerController.Breakpoints;
+-
+-  dispatcher.onChange({
+-    "eventListeners": { "listeners": this.renderListeners }
+-  }, this);
++  this.actions = bindActionCreators(actions, store.dispatch);
++  this.getState = () => store.getState().eventListeners;
+ 
+   this._onCheck = this._onCheck.bind(this);
+   this._onClick = this._onClick.bind(this);
++  this._onListeners = this._onListeners.bind(this);
++
++  this.Breakpoints = DebuggerController.Breakpoints;
++  this.controller = DebuggerController;
++  this.controller.on("@redux:listeners", this._onListeners);
+ }
+ 
+ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
+   /**
+    * Initialization function, called when the debugger is started.
+    */
+   initialize: function() {
+     dumpn("Initializing the EventListenersView");
+@@ -48,18 +47,20 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
+   },
+ 
+   /**
+    * Destruction function, called when the debugger is closed.
+    */
+   destroy: function() {
+     dumpn("Destroying the EventListenersView");
+ 
++    this.controller.off("@redux:listeners", this._onListeners);
+     this.widget.removeEventListener("check", this._onCheck, false);
+     this.widget.removeEventListener("click", this._onClick, false);
++    this.controller = this.Breakpoints = null;
+   },
+ 
+   renderListeners: function(listeners) {
+     listeners.forEach(listener => {
+       this.addListener(listener, { staged: true });
+     });
+ 
+     // Flushes all the prepared events into the event listeners container.
+@@ -280,15 +281,22 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
+     // when retrieving the target's item, to ignore the checkbox.
+     let eventItem = this.getItemForElement(target, { noSiblings: true });
+     if (eventItem) {
+       let newState = eventItem.attachment.checkboxState ^= 1;
+       this.callMethod("checkItem", eventItem.target, newState);
+     }
+   },
+ 
++  /**
++   * Called when listeners change.
++   */
++  _onListeners: function(_, listeners) {
++    this.renderListeners(listeners);
++  },
++
+   _eventCheckboxTooltip: "",
+   _onSelectorString: "",
+   _inSourceString: "",
+   _inNativeCodeString: ""
+ });
+ 
+ module.exports = EventListenersView;
+diff --git a/browser/devtools/debugger/debugger-controller.js b/browser/devtools/debugger/debugger-controller.js
+index 4a65aa3..c1f45d1 100644
+--- a/browser/devtools/debugger/debugger-controller.js
++++ b/browser/devtools/debugger/debugger-controller.js
+@@ -1275,17 +1275,17 @@ SourceScripts.prototype = {
+ 
+     // If there are any stored breakpoints for this source, display them again,
+     // both in the editor and the breakpoints pane.
+     DebuggerController.Breakpoints.updatePaneBreakpoints();
+     DebuggerController.Breakpoints.updateEditorBreakpoints();
+ 
+     // Make sure the events listeners are up to date.
+     if (DebuggerView.instrumentsPaneTab == "events-tab") {
+-      dispatcher.dispatch(actions.fetchEventListeners());
++      store.dispatch(actions.fetchEventListeners());
+     }
+ 
+     // Signal that a new source has been added.
+     window.emit(EVENTS.NEW_SOURCE);
+   },
+ 
+   /**
+    * Callback for the debugger's active thread getSources() method.
+@@ -2050,16 +2050,17 @@ let Prefs = new ViewHelpers.Prefs("devtools", {
+   autoBlackBox: ["Bool", "debugger.auto-black-box"],
+   promiseDebuggerEnabled: ["Bool", "debugger.promise"]
+ });
+ 
+ /**
+  * Convenient way of emitting events from the panel window.
+  */
+ EventEmitter.decorate(this);
++EventEmitter.decorate(DebuggerController);
+ 
+ /**
+  * Preliminary setup for the DebuggerController object.
+  */
+ DebuggerController.initialize();
+ DebuggerController.Parser = new Parser();
+ DebuggerController.Workers = new Workers();
+ DebuggerController.ThreadState = new ThreadState();
+diff --git a/browser/devtools/debugger/debugger-view.js b/browser/devtools/debugger/debugger-view.js
+index f5330ef..ca6f9cb 100644
+--- a/browser/devtools/debugger/debugger-view.js
++++ b/browser/devtools/debugger/debugger-view.js
+@@ -30,26 +30,30 @@ const SEARCH_VARIABLE_FLAG = "*";
+ const SEARCH_AUTOFILL = [SEARCH_GLOBAL_FLAG, SEARCH_FUNCTION_FLAG, SEARCH_TOKEN_FLAG];
+ const EDITOR_VARIABLE_HOVER_DELAY = 750; // ms
+ const EDITOR_VARIABLE_POPUP_POSITION = "topcenter bottomleft";
+ const TOOLBAR_ORDER_POPUP_POSITION = "topcenter bottomleft";
+ const RESIZE_REFRESH_RATE = 50; // ms
+ const PROMISE_DEBUGGER_URL =
+   "chrome://browser/content/devtools/promisedebugger/promise-debugger.xhtml";
+ 
+-const createDispatcher = require('devtools/shared/create-dispatcher')();
+-const stores = require('./content/stores/index');
+-const dispatcher = createDispatcher(stores);
+-const waitUntilService = require('devtools/shared/fluxify/waitUntilService');
++const middlewareEmit = DebuggerController.emit.bind(DebuggerController);
++const { createDebuggerMiddleware } = require("./content/middleware");
++const createStore = require("devtools/shared/redux-bootstrap")({
++  middleware: [createDebuggerMiddleware(middlewareEmit)],
++});
++const reducers = require('./content/reducers/index');
++const store = createStore(reducers);
++const waitUntilService = require('devtools/shared/redux-middleware').waitUntilService;
+ const services = {
+   WAIT_UNTIL: waitUntilService.name
+ };
+ 
+ const EventListenersView = require('./content/views/event-listeners-view');
+-const actions = require('./content/stores/event-listeners').actions;
++const actions = require('./content/actions/event-listeners');
+ 
+ /**
+  * Object defining the debugger view components.
+  */
+ let DebuggerView = {
+   /**
+    * Initializes the debugger view.
+    *
+@@ -621,17 +625,17 @@ let DebuggerView = {
+     }, 0);
+   },
+ 
+   /**
+    * Handles a tab selection event on the instruments pane.
+    */
+   _onInstrumentsPaneTabSelect: function() {
+     if (this._instrumentsPane.selectedTab.id == "events-tab") {
+-      dispatcher.dispatch(actions.fetchEventListeners());
++      store.dispatch(actions.fetchEventListeners());
+     }
+   },
+ 
+   /**
+    * Handles a host change event issued by the parent toolbox.
+    *
+    * @param string aType
+    *        The host type, either "bottom", "side" or "window".
+@@ -923,9 +927,9 @@ ResultsPanelContainer.prototype = Heritage.extend(WidgetMethods, {
+ 
+   _anchor: null,
+   _panel: null,
+   position: RESULTS_PANEL_POPUP_POSITION,
+   left: 0,
+   top: 0
+ });
+ 
+-DebuggerView.EventListeners = new EventListenersView(dispatcher, DebuggerController);
++DebuggerView.EventListeners = new EventListenersView(store, DebuggerController);
+diff --git a/browser/devtools/debugger/moz.build b/browser/devtools/debugger/moz.build
+index b79bcc5..02ef776 100644
+--- a/browser/devtools/debugger/moz.build
++++ b/browser/devtools/debugger/moz.build
+@@ -6,21 +6,26 @@
+ EXTRA_JS_MODULES.devtools.debugger += [
+     'debugger-commands.js',
+     'panel.js'
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.debugger.content += [
+     'content/constants.js',
+     'content/globalActions.js',
++    'content/middleware.js',
+     'content/utils.js'
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.debugger.content.views += [
+     'content/views/event-listeners-view.js'
+ ]
+ 
+-EXTRA_JS_MODULES.devtools.debugger.content.stores += [
+-    'content/stores/event-listeners.js',
+-    'content/stores/index.js'
++EXTRA_JS_MODULES.devtools.debugger.content.reducers += [
++    'content/reducers/event-listeners.js',
++    'content/reducers/index.js'
++]
++
++EXTRA_JS_MODULES.devtools.debugger.content.actions += [
++    'content/actions/event-listeners.js',
+ ]
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/mochitest/browser.ini']
+diff --git a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-02.js b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-02.js
+index 1c03560..771affc 100644
+--- a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-02.js
++++ b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-02.js
+@@ -8,30 +8,30 @@
+ 
+ const TAB_URL = EXAMPLE_URL + "doc_event-listeners-02.html";
+ 
+ function test() {
+   initDebugger(TAB_URL).then(([aTab,, aPanel]) => {
+     let gDebugger = aPanel.panelWin;
+     let gView = gDebugger.DebuggerView;
+     let gEvents = gView.EventListeners;
+-    let gDispatcher = gDebugger.dispatcher;
++    let gStore = gDebugger.store;
+     let constants = gDebugger.require('./content/constants');
+ 
+     Task.spawn(function*() {
+       yield waitForSourceShown(aPanel, ".html");
+       yield testFetchOnFocus();
+       yield testFetchOnReloadWhenFocused();
+       yield testFetchOnReloadWhenNotFocused();
+       yield closeDebuggerAndFinish(aPanel);
+     });
+ 
+     function testFetchOnFocus() {
+       return Task.spawn(function*() {
+-        let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++        let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+ 
+         gView.toggleInstrumentsPane({ visible: true, animated: false }, 1);
+         is(gView.instrumentsPaneHidden, false,
+           "The instruments pane should be visible now.");
+         is(gView.instrumentsPaneTab, "events-tab",
+           "The events tab should be selected.");
+ 
+         yield fetched;
+@@ -40,17 +40,17 @@ function test() {
+           "Event listeners were fetched when the events tab was selected");
+         is(gEvents.itemCount, 4,
+           "There should be 4 events displayed in the view.");
+       });
+     }
+ 
+     function testFetchOnReloadWhenFocused() {
+       return Task.spawn(function*() {
+-        let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++        let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+ 
+         let reloading = once(gDebugger.gTarget, "will-navigate");
+         let reloaded = waitForSourcesAfterReload();
+         gDebugger.DebuggerController._target.activeTab.reload();
+ 
+         yield reloading;
+ 
+         is(gEvents.itemCount, 0,
+@@ -71,17 +71,17 @@ function test() {
+           "There should be 4 events displayed in the view after reloading.");
+         ok(true,
+           "Event listeners were added back after the target finished navigating.");
+       });
+     }
+ 
+     function testFetchOnReloadWhenNotFocused() {
+       return Task.spawn(function*() {
+-        gDispatcher.dispatch({
++        gStore.dispatch({
+           type: gDebugger.services.WAIT_UNTIL,
+           predicate: action => {
+             return (action.type === constants.FETCH_EVENT_LISTENERS ||
+                     action.type === constants.UPDATE_EVENT_BREAKPOINTS);
+           },
+           run: (dispatch, getState, action) => {
+             if(action.type === constants.FETCH_EVENT_LISTENERS) {
+               ok(false, "Shouldn't have fetched any event listeners.");
+diff --git a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-03.js b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-03.js
+index 9c78476..f502092 100644
+--- a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-03.js
++++ b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-03.js
+@@ -7,23 +7,23 @@
+ 
+ const TAB_URL = EXAMPLE_URL + "doc_event-listeners-02.html";
+ 
+ function test() {
+   initDebugger(TAB_URL).then(([aTab,, aPanel]) => {
+     let gDebugger = aPanel.panelWin;
+     let gView = gDebugger.DebuggerView;
+     let gEvents = gView.EventListeners;
+-    let gDispatcher = gDebugger.dispatcher;
++    let gStore = gDebugger.store;
+     let constants = gDebugger.require('./content/constants');
+ 
+     Task.spawn(function*() {
+       yield waitForSourceShown(aPanel, ".html");
+ 
+-      let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++      let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+       gView.toggleInstrumentsPane({ visible: true, animated: false }, 1);
+       yield fetched;
+ 
+       is(gEvents.widget._parent.querySelectorAll(".side-menu-widget-group").length, 3,
+         "There should be 3 groups shown in the view.");
+       is(gEvents.widget._parent.querySelectorAll(".side-menu-widget-group-checkbox").length, 3,
+         "There should be a checkbox for each group shown in the view.");
+ 
+diff --git a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-04.js b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-04.js
+index 811ca11..1a681c17 100644
+--- a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-04.js
++++ b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-04.js
+@@ -9,50 +9,50 @@
+ const TAB_URL = EXAMPLE_URL + "doc_event-listeners-02.html";
+ 
+ function test() {
+   initDebugger(TAB_URL).then(([aTab,, aPanel]) => {
+     let gDebugger = aPanel.panelWin;
+     let gView = gDebugger.DebuggerView;
+     let gController = gDebugger.DebuggerController
+     let gEvents = gView.EventListeners;
+-    let gDispatcher = gDebugger.dispatcher;
+-    let getState = gDispatcher.getState;
++    let gStore = gDebugger.store;
++    let getState = gStore.getState;
+     let constants = gDebugger.require('./content/constants');
+ 
+     Task.spawn(function*() {
+       yield waitForSourceShown(aPanel, ".html");
+ 
+-      let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++      let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+       gView.toggleInstrumentsPane({ visible: true, animated: false }, 1);
+       yield fetched;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "");
+ 
+-      let updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      let updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(0), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, true);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "change");
+ 
+-      updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(0), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+diff --git a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-05.js b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-05.js
+index 0cb91e1..58f8e26 100644
+--- a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-05.js
++++ b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-05.js
+@@ -10,76 +10,76 @@
+ const TAB_URL = EXAMPLE_URL + "doc_event-listeners-02.html";
+ 
+ function test() {
+   initDebugger(TAB_URL).then(([aTab,, aPanel]) => {
+     let gDebugger = aPanel.panelWin;
+     let gView = gDebugger.DebuggerView;
+     let gController = gDebugger.DebuggerController
+     let gEvents = gView.EventListeners;
+-    let gDispatcher = gDebugger.dispatcher;
+-    let getState = gDispatcher.getState;
++    let gStore = gDebugger.store;
++    let getState = gStore.getState;
+     let constants = gDebugger.require('./content/constants');
+ 
+     Task.spawn(function*() {
+       yield waitForSourceShown(aPanel, ".html");
+ 
+-      let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++      let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+       gView.toggleInstrumentsPane({ visible: true, animated: false }, 1);
+       yield fetched;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "");
+ 
+-      let updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      let updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getGroupCheckboxNode("interactionEvents"), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, true);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", true);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "change");
+ 
+-      updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getGroupCheckboxNode("interactionEvents"), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "");
+ 
+-      updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getGroupCheckboxNode("keyboardEvents"), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, true);
+       testEventItem(3, true);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", true);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "keydown,keyup");
+ 
+-      updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getGroupCheckboxNode("keyboardEvents"), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+diff --git a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-06.js b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-06.js
+index 1fa38f5..6c5a372 100644
+--- a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-06.js
++++ b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-06.js
+@@ -10,80 +10,80 @@ const TAB_URL = EXAMPLE_URL + "doc_event-listeners-02.html";
+ 
+ function test() {
+   initDebugger(TAB_URL).then(([aTab,, aPanel]) => {
+     let gDebugger = aPanel.panelWin;
+     let gView = gDebugger.DebuggerView;
+     let gController = gDebugger.DebuggerController
+     let gEvents = gView.EventListeners;
+     let gBreakpoints = gController.Breakpoints;
+-    let gDispatcher = gDebugger.dispatcher;
+-    let getState = gDispatcher.getState;
++    let gStore = gDebugger.store;
++    let getState = gStore.getState;
+     let constants = gDebugger.require('./content/constants');
+ 
+     Task.spawn(function*() {
+       yield waitForSourceShown(aPanel, ".html");
+ 
+-      let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++      let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+       gView.toggleInstrumentsPane({ visible: true, animated: false }, 1);
+       yield fetched;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "");
+ 
+-      let updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      let updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(0), gDebugger);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(1), gDebugger);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(2), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, true);
+       testEventItem(1, true);
+       testEventItem(2, true);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "change,click,keydown");
+ 
+       reload(aPanel);
+-      yield afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++      yield afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+ 
+       testEventItem(0, true);
+       testEventItem(1, true);
+       testEventItem(2, true);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "change,click,keydown");
+ 
+-      updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(0), gDebugger);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(1), gDebugger);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(2), gDebugger);
+       yield updated;
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+       testEventArrays("change,click,keydown,keyup", "");
+ 
+       reload(aPanel);
+-      yield afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++      yield afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+ 
+       testEventItem(0, false);
+       testEventItem(1, false);
+       testEventItem(2, false);
+       testEventItem(3, false);
+       testEventGroup("interactionEvents", false);
+       testEventGroup("keyboardEvents", false);
+       testEventGroup("mouseEvents", false);
+diff --git a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-08.js b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-08.js
+index 2b97c549..302d334 100644
+--- a/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-08.js
++++ b/browser/devtools/debugger/test/mochitest/browser_dbg_break-on-dom-08.js
+@@ -8,35 +8,35 @@
+ const TAB_URL = EXAMPLE_URL + "doc_event-listeners-02.html";
+ 
+ function test() {
+   initDebugger(TAB_URL).then(([aTab,, aPanel]) => {
+     let gTab = aTab;
+     let gDebugger = aPanel.panelWin;
+     let gView = gDebugger.DebuggerView;
+     let gEvents = gView.EventListeners;
+-    let gDispatcher = gDebugger.dispatcher;
+-    let getState = gDispatcher.getState;
++    let gStore = gDebugger.store;
++    let getState = gStore.getState;
+     let constants = gDebugger.require('./content/constants');
+ 
+     Task.spawn(function*() {
+       yield waitForSourceShown(aPanel, ".html");
+       yield callInTab(gTab, "addBodyClickEventListener");
+ 
+-      let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++      let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+       gView.toggleInstrumentsPane({ visible: true, animated: false }, 1);
+       yield fetched;
+       yield ensureThreadClientState(aPanel, "attached");
+ 
+       is(gView.instrumentsPaneHidden, false,
+         "The instruments pane should be visible.");
+       is(gView.instrumentsPaneTab, "events-tab",
+         "The events tab should be selected.");
+ 
+-      let updated = afterDispatch(gDispatcher, constants.UPDATE_EVENT_BREAKPOINTS);
++      let updated = afterDispatch(gStore, constants.UPDATE_EVENT_BREAKPOINTS);
+       EventUtils.sendMouseEvent({ type: "click" }, getItemCheckboxNode(1), gDebugger);
+       yield updated;
+       yield ensureThreadClientState(aPanel, "attached");
+ 
+       let paused = waitForCaretAndScopes(aPanel, 48);
+       generateMouseClickInTab(gTab, "content.document.body");
+       yield paused;
+       yield ensureThreadClientState(aPanel, "paused");
+diff --git a/browser/devtools/debugger/test/mochitest/browser_dbg_event-listeners-04.js b/browser/devtools/debugger/test/mochitest/browser_dbg_event-listeners-04.js
+index 169fbf1..0459a8d 100644
+--- a/browser/devtools/debugger/test/mochitest/browser_dbg_event-listeners-04.js
++++ b/browser/devtools/debugger/test/mochitest/browser_dbg_event-listeners-04.js
+@@ -26,21 +26,21 @@ add_task(function* () {
+   info("Attaching an event handler via add-on sdk content scripts.");
+   let worker = sdkTab.attach({
+     contentScript: "document.body.addEventListener('click', e => alert(e))",
+     onError: ok.bind(this, false)
+   });
+ 
+   let [,, panel, win] = yield initDebugger(tab);
+   let gDebugger = panel.panelWin;
+-  let gDispatcher = gDebugger.dispatcher;
++  let gStore = gDebugger.store;
+   let constants = gDebugger.require('./content/constants');
+-  let eventListeners = gDebugger.require('./content/stores/event-listeners');
+-  let fetched = afterDispatch(gDispatcher, constants.FETCH_EVENT_LISTENERS);
++  let actions = gDebugger.require('./content/actions/event-listeners');
++  let fetched = afterDispatch(gStore, constants.FETCH_EVENT_LISTENERS);
+ 
+   info("Scheduling event listener fetch.");
+-  gDispatcher.dispatch(eventListeners.actions.fetchEventListeners());
++  gStore.dispatch(actions.fetchEventListeners());
+ 
+   info("Waiting for updated event listeners to arrive.");
+   yield fetched;
+ 
+   ok(true, "The listener update did not hang.");
+ });
+diff --git a/browser/devtools/debugger/test/mochitest/head.js b/browser/devtools/debugger/test/mochitest/head.js
+index 376e48c..7fb5379 100644
+--- a/browser/devtools/debugger/test/mochitest/head.js
++++ b/browser/devtools/debugger/test/mochitest/head.js
+@@ -1187,20 +1187,20 @@ function setBreakpoint(sourceClient, location) {
+   return rdpInvoke(sourceClient, sourceClient.setBreakpoint, location);
+ }
+ 
+ function source(sourceClient) {
+   info("Getting source.\n");
+   return rdpInvoke(sourceClient, sourceClient.source);
+ }
+ 
+-function afterDispatch(dispatcher, type) {
++function afterDispatch(store, type) {
+   info("Waiting on dispatch: " + type);
+   return new Promise(resolve => {
+-    dispatcher.dispatch({
++    store.dispatch({
+       // Normally we would use `services.WAIT_UNTIL`, but use the
+       // internal name here so tests aren't forced to always pass it
+       // in
+       type: "@@service/waitUntil",
+       predicate: action => (
+         action.type === type &&
+         action.status ? action.status === "done" : true
+       ),
+diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
+index cd4f894..d415647 100644
+--- a/browser/devtools/jar.mn
++++ b/browser/devtools/jar.mn
+@@ -1,13 +1,15 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ browser.jar:
++    content/browser/devtools/d3.js                                     (vendor/d3.js)
++    content/browser/devtools/dagre-d3.js                               (vendor/dagre-d3.js)
+     content/browser/devtools/widgets.css                               (shared/widgets/widgets.css)
+     content/browser/devtools/widgets/VariablesView.xul                 (shared/widgets/VariablesView.xul)
+     content/browser/devtools/markup-view.xhtml                         (markupview/markup-view.xhtml)
+     content/browser/devtools/markup-view.css                           (markupview/markup-view.css)
+     content/browser/devtools/projecteditor.xul                               (projecteditor/chrome/content/projecteditor.xul)
+     content/browser/devtools/readdir.js                                (projecteditor/lib/helpers/readdir.js)
+     content/browser/devtools/projecteditor-loader.xul                        (projecteditor/chrome/content/projecteditor-loader.xul)
+     content/browser/devtools/projecteditor-test.xul                          (projecteditor/chrome/content/projecteditor-test.xul)
+@@ -79,19 +81,17 @@ browser.jar:
+     content/browser/devtools/debugger/filter-view.js                   (debugger/views/filter-view.js)
+     content/browser/devtools/debugger/utils.js                         (debugger/utils.js)
+     content/browser/devtools/shadereditor.xul                          (shadereditor/shadereditor.xul)
+     content/browser/devtools/shadereditor.js                           (shadereditor/shadereditor.js)
+     content/browser/devtools/canvasdebugger.xul                        (canvasdebugger/canvasdebugger.xul)
+     content/browser/devtools/canvasdebugger.js                         (canvasdebugger/canvasdebugger.js)
+     content/browser/devtools/canvasdebugger/snapshotslist.js           (canvasdebugger/snapshotslist.js)
+     content/browser/devtools/canvasdebugger/callslist.js               (canvasdebugger/callslist.js)
+-    content/browser/devtools/d3.js                                     (shared/d3.js)
+     content/browser/devtools/webaudioeditor.xul                        (webaudioeditor/webaudioeditor.xul)
+-    content/browser/devtools/dagre-d3.js                               (webaudioeditor/lib/dagre-d3.js)
+     content/browser/devtools/webaudioeditor/includes.js                (webaudioeditor/includes.js)
+     content/browser/devtools/webaudioeditor/models.js                  (webaudioeditor/models.js)
+     content/browser/devtools/webaudioeditor/controller.js              (webaudioeditor/controller.js)
+     content/browser/devtools/webaudioeditor/views/utils.js             (webaudioeditor/views/utils.js)
+     content/browser/devtools/webaudioeditor/views/context.js           (webaudioeditor/views/context.js)
+     content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
+     content/browser/devtools/webaudioeditor/views/properties.js        (webaudioeditor/views/properties.js)
+     content/browser/devtools/webaudioeditor/views/automation.js        (webaudioeditor/views/automation.js)
+diff --git a/browser/devtools/moz.build b/browser/devtools/moz.build
+index 872e667..380c73a 100644
+--- a/browser/devtools/moz.build
++++ b/browser/devtools/moz.build
+@@ -25,16 +25,17 @@ DIRS += [
+     'scratchpad',
+     'shadereditor',
+     'shared',
+     'sourceeditor',
+     'storage',
+     'styleeditor',
+     'styleinspector',
+     'tilt',
++    'vendor',
+     'webaudioeditor',
+     'webconsole',
+     'webide',
+ ]
+ 
+ EXTRA_COMPONENTS += [
+     'devtools-clhandler.js',
+     'devtools-clhandler.manifest',
+diff --git a/browser/devtools/shared/browser-loader.js b/browser/devtools/shared/browser-loader.js
+index a8ce1a5..761f1fe 100644
+--- a/browser/devtools/shared/browser-loader.js
++++ b/browser/devtools/shared/browser-loader.js
+@@ -50,30 +50,31 @@ catch(e) {
+  *         - require: a function to require modules with
+  */
+ function BrowserLoader(baseURI, window) {
+   const loaderOptions = devtools.require('@loader/options');
+ 
+   let dynamicPaths = {};
+   if (appConstants.DEBUG_JS_MODULES) {
+     // Load in the dev version of React
+-    dynamicPaths["devtools/shared/content/react"] =
+-      "resource:///modules/devtools/shared/content/react-dev.js";
++    dynamicPaths["devtools/shared/vendor/react"] =
++      "resource:///modules/devtools/vendor/react-dev.js";
+   }
+ 
+   const opts = {
+     id: "browser-loader",
+     sharedGlobal: true,
+     sandboxPrototype: window,
+     paths: Object.assign({}, loaderOptions.paths, dynamicPaths),
+     invisibleToDebugger: loaderOptions.invisibleToDebugger,
+     require: (id, require) => {
+       const uri = require.resolve(id);
++
+       if (!uri.startsWith(baseURI) &&
+-          !uri.startsWith("resource:///modules/devtools/shared/content")) {
++          !/react/.test(uri)) {
+         return devtools.require(uri);
+       }
+       return require(uri);
+     }
+   };
+ 
+   // The main.js file does not have to actually exist. It just
+   // represents the base environment, so requires will be relative to
+diff --git a/browser/devtools/shared/fluxify/bindActionCreators.js b/browser/devtools/shared/fluxify/bindActionCreators.js
+deleted file mode 100644
+index c700e91..0000000
+--- a/browser/devtools/shared/fluxify/bindActionCreators.js
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-function bindActionCreator(actionCreator, dispatch) {
+-  return (...args) => dispatch(actionCreator(...args));
+-}
+-
+-/**
+- * Wraps action creator functions into a function that automatically
+- * dispatches the created action with `dispatch`. Normally action
+- * creators simply return actions, but wrapped functions will
+- * automatically dispatch.
+- *
+- * @param {object} actionCreators
+- *        An object of action creator functions (names as keys)
+- * @param {function} dispatch
+- */
+-function bindActionCreators(actionCreators, dispatch) {
+-  let actions = {};
+-  for (let k of Object.keys(actionCreators)) {
+-    actions[k] = bindActionCreator(actionCreators[k], dispatch);
+-  }
+-  return actions;
+-}
+-
+-module.exports = bindActionCreators;
+diff --git a/browser/devtools/shared/fluxify/dispatcher.js b/browser/devtools/shared/fluxify/dispatcher.js
+deleted file mode 100644
+index 07d41c1..0000000
+--- a/browser/devtools/shared/fluxify/dispatcher.js
++++ /dev/null
+@@ -1,247 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-const { entries, compose } = require("devtools/toolkit/DevToolsUtils");
+-
+-/**
+- * A store creator that creates a dispatch function that runs the
+- * provided middlewares before actually dispatching. This allows
+- * simple middleware to augment the kinds of actions that can
+- * be dispatched. This would be used like this:
+- * `createDispatcher = applyMiddleware([fooMiddleware, ...])(createDispatcher)`
+- *
+- * Middlewares are simple functions that are provided `dispatch` and
+- * `getState` functions. They create functions that accept actions and
+- * can re-dispatch them in any way they want. A common scenario is
+- * asynchronously dispatching multiple actions. Here is a full
+- * middleware:
+- *
+- * function thunkMiddleware({ dispatch, getState }) {
+- *  return next => action => {
+- *    return typeof action === 'function' ?
+- *      action(dispatch, getState) :
+- *      next(action);
+- *  }
+- * }
+- *
+- * `next` is essentially a `dispatch` function, but it calls the next
+- * middelware in the chain (or the real `dispatch` function). Using
+- * this middleware, you can return a function that gives you a
+- * dispatch function:
+- *
+- * function actionCreator(timeout) {
+- *   return (dispatch, getState) => {
+- *     dispatch({ type: TIMEOUT, status: "start" });
+- *     setTimeout(() => dispatch({ type: TIMEOUT, status: "end" }),
+- *                timeout);
+- *   }
+- * }
+- *
+- */
+-function applyMiddleware(...middlewares) {
+-  return next => stores => {
+-    const dispatcher = next(stores);
+-    let dispatch = dispatcher.dispatch;
+-
+-    const api = {
+-      getState: dispatcher.getState,
+-      dispatch: action => dispatch(action)
+-    };
+-    const chain = middlewares.map(middleware => middleware(api));
+-    dispatch = compose(...chain)(dispatcher.dispatch);
+-
+-    return Object.assign({}, dispatcher, { dispatch: dispatch });
+-  }
+-}
+-
+-/*
+- * The heart of the system. This creates a dispatcher which is the
+- * interface between views and stores. Views can use a dispatcher
+- * instance to dispatch actions, which know nothing about the stores.
+- * Actions are broadcasted to all registered stores, and stores can
+- * handle the action and update their state. The dispatcher gives
+- * stores an `emitChange` function, which signifies that a piece of
+- * state has changed. The dispatcher will notify all views that are
+- * listening to that piece of state, registered with `onChange`.
+- *
+- * Views generally are stateless, pure components (eventually React
+- * components). They simply take state and render it.
+- *
+- * Stores make up the entire app state, and are all grouped together
+- * into a single app state atom, returned by the dispatcher's
+- * `getState` function. The shape of the app state is determined by
+- * the `stores` object passed in to the dispatcher, so if
+- * `{ foo: fooStore }` was passed to `createDispatcher` the app state
+- * would be `{ foo: fooState }`
+- *
+- * Actions are just JavaScript object with a `type` property and any
+- * other fields pertinent to the action. Action creators should
+- * generally be used to create actions, which are just functions that
+- * return the action object. Additionally, the `bindActionCreators`
+- * module provides a function for automatically binding action
+- * creators to a dispatch function, so calling them automatically
+- * dispatches. For example:
+- *
+- * ```js
+- * // Manually dispatch
+- * dispatcher.dispatch({ type: constants.ADD_ITEM, item: item });
+- * // Using an action creator
+- * dispatcher.dispatch(addItem(item));
+- *
+- * // Using an action creator bound to dispatch
+- * actions = bindActionCreators({ addItem: addItem });
+- * actions.addItem(item);
+- * ```
+- *
+- * Our system expects stores to exist as an `update` function. You
+- * should define an update function in a module, and optionally
+- * any action creators that are useful to go along with it. Here is
+- * an example store file:
+- *
+- * ```js
+- * const initialState = { items: [] };
+- * function update(state = initialState, action, emitChange) {
+- *   if (action.type === constants.ADD_ITEM) {
+- *     state.items.push(action.item);
+- *     emitChange("items", state.items);
+- *   }
+- *
+- *   return state;
+- * }
+- *
+- * function addItem(item) {
+- *   return {
+- *     type: constants.ADD_ITEM,
+- *     item: item
+- *   };
+- * }
+- *
+- * module.exports = {
+- *   update: update,
+- *   actions: { addItem }
+- * }
+- * ```
+- *
+- * Lastly, "constants" are simple strings that specify action names.
+- * Usually the entire set of available action types are specified in
+- * a `constants.js` file, so they are available globally. Use
+- * variables that are the same name as the string, for example
+- * `const ADD_ITEM = "ADD_ITEM"`.
+- *
+- * This entire system was inspired by Redux, which hopefully we will
+- * eventually use once things get cleaned up enough. You should read
+- * its docs, and keep in mind that it calls stores "reducers" and the
+- * dispatcher instance is called a single store.
+- * http://rackt.github.io/redux/
+- */
+-function createDispatcher(stores) {
+-  const state = {};
+-  const listeners = {};
+-  let enqueuedChanges = [];
+-  let isDispatching = false;
+-
+-  // Validate the stores to make sure they have the right shape,
+-  // and accumulate the initial state
+-  entries(stores).forEach(([name, store]) => {
+-    if (!store || typeof store.update !== "function") {
+-      throw new Error("Error creating dispatcher: store \"" + name +
+-                      "\" does not have an `update` function");
+-    }
+-
+-    state[name] = store.update(undefined, {});
+-  });
+-
+-  function getState() {
+-    return state;
+-  }
+-
+-  function emitChange(storeName, dataName, payload) {
+-    enqueuedChanges.push([storeName, dataName, payload]);
+-  }
+-
+-  function onChange(paths, view) {
+-    entries(paths).forEach(([storeName, data]) => {
+-      if (!stores[storeName]) {
+-        throw new Error("Error adding onChange handler to store: store " +
+-                        "\"" + storeName + "\" does not exist");
+-      }
+-
+-      if (!listeners[storeName]) {
+-        listeners[storeName] = [];
+-      }
+-
+-      if (typeof data == 'function') {
+-        listeners[storeName].push(data.bind(view));
+-      }
+-      else {
+-        entries(data).forEach(([watchedName, handler]) => {
+-          listeners[storeName].push((payload, dataName, storeName) => {
+-            if (dataName === watchedName) {
+-              handler.call(view, payload, dataName, storeName);
+-            }
+-          });
+-        });
+-      }
+-    });
+-  }
+-
+-  /**
+-   * Flush any enqueued state changes from the dispatch cycle. Listeners
+-   * are not immediately notified of changes, only after dispatching
+-   * is completed, to ensure that all state is consistent (in the case
+-   * of multiple stores changes at once).
+-   */
+-  function flushChanges() {
+-    enqueuedChanges.forEach(([storeName, dataName, payload]) => {
+-      if (listeners[storeName]) {
+-        listeners[storeName].forEach(listener => {
+-          listener(payload, dataName, storeName);
+-        });
+-      }
+-    });
+-
+-    enqueuedChanges = [];
+-  }
+-
+-  function dispatch(action) {
+-    if (isDispatching) {
+-      throw new Error('Cannot dispatch in the middle of a dispatch');
+-    }
+-    if (!action.type) {
+-      throw new Error(
+-        'action type is null, ' +
+-        'did you make a typo when publishing this action? ' +
+-        JSON.stringify(action, null, 2)
+-      );
+-    }
+-
+-    isDispatching = true;
+-    try {
+-      entries(stores).forEach(([name, store]) => {
+-        state[name] = store.update(
+-          state[name],
+-          action,
+-          emitChange.bind(null, name)
+-        );
+-      });
+-    }
+-    finally {
+-      isDispatching = false;
+-    }
+-
+-    flushChanges();
+-  }
+-
+-  return {
+-    getState,
+-    dispatch,
+-    onChange
+-  };
+-}
+-
+-module.exports = {
+-  createDispatcher: createDispatcher,
+-  applyMiddleware: applyMiddleware
+-};
+diff --git a/browser/devtools/shared/fluxify/test/unit/head.js b/browser/devtools/shared/fluxify/test/unit/head.js
+deleted file mode 100644
+index 4d22af5..0000000
+--- a/browser/devtools/shared/fluxify/test/unit/head.js
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-"use strict";
+-const Cc = Components.classes;
+-const Ci = Components.interfaces;
+-const Cu = Components.utils;
+-const Cr = Components.results;
+-const CC = Components.Constructor;
+-
+-const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+-const createDispatcher = require('devtools/shared/create-dispatcher')({ log: true });
+-const waitUntilService = require('devtools/shared/fluxify/waitUntilService');
+-const services = {
+-  WAIT_UNTIL: waitUntilService.name
+-};
+-
+-const Services = require("Services");
+-const { waitForTick, waitForTime } = require("devtools/toolkit/DevToolsUtils");
+-
+-let loadSubScript = Cc[
+-  '@mozilla.org/moz/jssubscript-loader;1'
+-].getService(Ci.mozIJSSubScriptLoader).loadSubScript;
+-
+-function getFileUrl(name, allowMissing=false) {
+-  let file = do_get_file(name, allowMissing);
+-  return Services.io.newFileURI(file).spec;
+-}
+diff --git a/browser/devtools/shared/fluxify/test/unit/stores-for-testing.js b/browser/devtools/shared/fluxify/test/unit/stores-for-testing.js
+deleted file mode 100644
+index 759cbf1..0000000
+--- a/browser/devtools/shared/fluxify/test/unit/stores-for-testing.js
++++ /dev/null
+@@ -1,48 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-// This file should be loaded with `loadSubScript` because it contains
+-// stateful stores that need a new instance per test.
+-
+-const NumberStore = {
+-  update: (state = 1, action, emitChange) => {
+-    switch(action.type) {
+-    case constants.ADD_NUMBER: {
+-      const newState = state + action.value;
+-      emitChange('number', newState);
+-      return newState;
+-    }
+-    case constants.DOUBLE_NUMBER: {
+-      const newState = state * 2;
+-      emitChange('number', newState);
+-      return newState;
+-    }}
+-
+-    return state;
+-  },
+-
+-  constants: {
+-    ADD_NUMBER: 'ADD_NUMBER',
+-    DOUBLE_NUMBER: 'DOUBLE_NUMBER'
+-  }
+-};
+-
+-const itemsInitialState = {
+-  list: []
+-};
+-const ItemStore = {
+-  update: (state = itemsInitialState, action, emitChange) => {
+-    switch(action.type) {
+-    case constants.ADD_ITEM:
+-      state.list.push(action.item);
+-      emitChange('list', state.list);
+-      return state;
+-    }
+-
+-    return state;
+-  },
+-
+-  constants: {
+-    ADD_ITEM: 'ADD_ITEM'
+-  }
+-}
+diff --git a/browser/devtools/shared/fluxify/test/unit/test_dispatcher.js b/browser/devtools/shared/fluxify/test/unit/test_dispatcher.js
+deleted file mode 100644
+index cdfc4ab..0000000
+--- a/browser/devtools/shared/fluxify/test/unit/test_dispatcher.js
++++ /dev/null
+@@ -1,101 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-loadSubScript(getFileUrl("stores-for-testing.js"));
+-const constants = Object.assign(
+-  {},
+-  NumberStore.constants,
+-  ItemStore.constants
+-);
+-const stores = { number: NumberStore,
+-                 items: ItemStore };
+-
+-function addNumber(num) {
+-  return {
+-    type: constants.ADD_NUMBER,
+-    value: num
+-  }
+-}
+-
+-function addItem(item) {
+-  return {
+-    type: constants.ADD_ITEM,
+-    item: item
+-  };
+-}
+-
+-// Tests
+-
+-function run_test() {
+-  testInitialValue();
+-  testDispatch();
+-  testEmitChange();
+-  run_next_test();
+-}
+-
+-function testInitialValue() {
+-  do_print("Testing initial value");
+-  const dispatcher = createDispatcher(stores);
+-  equal(dispatcher.getState().number, 1);
+-}
+-
+-function testDispatch() {
+-  do_print("Testing dispatch");
+-
+-  const dispatcher = createDispatcher(stores);
+-  dispatcher.dispatch(addNumber(5));
+-  equal(dispatcher.getState().number, 6);
+-
+-  dispatcher.dispatch(addNumber(2));
+-  equal(dispatcher.getState().number, 8);
+-
+-  // It should ignore unknown action types
+-  dispatcher.dispatch({ type: "FOO" });
+-  equal(dispatcher.getState().number, 8);
+-}
+-
+-function testEmitChange() {
+-  do_print("Testing change emittters");
+-  const dispatcher = createDispatcher(stores);
+-  let listenerRan = false;
+-
+-  const numberView = {
+-    x: 3,
+-    renderNumber: function(num) {
+-      ok(this.x, 3, "listener ran in context of view");
+-      ok(num, 10);
+-      listenerRan = true;
+-    }
+-  }
+-
+-  // Views can listen to changes in state by specifying which part of
+-  // the state to listen to and giving a handler function. The
+-  // function will be run with the view as `this`.
+-  dispatcher.onChange({
+-    "number": numberView.renderNumber
+-  }, numberView);
+-
+-  dispatcher.dispatch(addNumber(9));
+-  ok(listenerRan, "number listener actually ran");
+-  listenerRan = false;
+-
+-  const itemsView = {
+-    renderList: function(items) {
+-      ok(items.length, 1);
+-      ok(items[0].name = "james");
+-      listenerRan = true;
+-    }
+-  }
+-
+-  // You can listen to deeper sections of the state by nesting objects
+-  // to specify the path to that state. You can do this 1 level deep;
+-  // you cannot arbitrarily nest state listeners.
+-  dispatcher.onChange({
+-    "items": {
+-      "list": itemsView.renderList
+-    }
+-  }, itemsView);
+-
+-  dispatcher.dispatch(addItem({ name: "james" }));
+-  ok(listenerRan, "items listener actually ran");
+-}
+diff --git a/browser/devtools/shared/fluxify/test/unit/test_middlewares.js b/browser/devtools/shared/fluxify/test/unit/test_middlewares.js
+deleted file mode 100644
+index 0bee491..0000000
+--- a/browser/devtools/shared/fluxify/test/unit/test_middlewares.js
++++ /dev/null
+@@ -1,114 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-loadSubScript(getFileUrl('stores-for-testing.js'));
+-const constants = NumberStore.constants;
+-const stores = { number: NumberStore };
+-
+-function run_test() {
+-  run_next_test();
+-}
+-
+-add_task(function* testThunkDispatch() {
+-  do_print("Testing thunk dispatch");
+-  // The thunk middleware allows you to return a function from an
+-  // action creator which takes `dispatch` and `getState` functions as
+-  // arguments. This allows the action creator to fire multiple
+-  // actions manually with `dispatch`, possibly asynchronously.
+-
+-  function addNumberLater(num) {
+-    return dispatch => {
+-      // Just do it in the next tick, no need to wait too long
+-      waitForTick().then(() => {
+-        dispatch({
+-          type: constants.ADD_NUMBER,
+-          value: num
+-        });
+-      });
+-    };
+-  }
+-
+-  function addNumber(num) {
+-    return (dispatch, getState) => {
+-      dispatch({
+-        type: constants.ADD_NUMBER,
+-        value: getState().number > 10 ? (num * 2) : num
+-      });
+-    };
+-  }
+-
+-  const dispatcher = createDispatcher(stores);
+-  equal(dispatcher.getState().number, 1);
+-  dispatcher.dispatch(addNumberLater(5));
+-  equal(dispatcher.getState().number, 1, "state should not have changed");
+-  yield waitForTick();
+-  equal(dispatcher.getState().number, 6, "state should have changed");
+-
+-  dispatcher.dispatch(addNumber(5));
+-  equal(dispatcher.getState().number, 11);
+-  dispatcher.dispatch(addNumber(2));
+-  // 2 * 2 should have actually been added because the state is
+-  // greater than 10 (the action creator changes the value based on
+-  // the current state)
+-  equal(dispatcher.getState().number, 15);
+-});
+-
+-add_task(function* testWaitUntilService() {
+-  do_print("Testing waitUntil service");
+-  // The waitUntil service allows you to queue functions to be run at a
+-  // later time, depending on a predicate. As actions comes through
+-  // the system, you predicate will be called with each action. Once
+-  // your predicate returns true, the queued function will be run and
+-  // removed from the pending queue.
+-
+-  function addWhenDoubled(num) {
+-    return {
+-      type: services.WAIT_UNTIL,
+-      predicate: action => action.type === constants.DOUBLE_NUMBER,
+-      run: (dispatch, getState, action) => {
+-        ok(action.type, constants.DOUBLE_NUMBER);
+-        ok(getState(), 10);
+-
+-        dispatch({
+-          type: constants.ADD_NUMBER,
+-          value: 2
+-        });
+-      }
+-    };
+-  }
+-
+-  function addWhenGreaterThan(threshold, num) {
+-    return (dispatch, getState) => {
+-      dispatch({
+-        type: services.WAIT_UNTIL,
+-        predicate: () => getState().number > threshold,
+-        run: () => {
+-          dispatch({
+-            type: constants.ADD_NUMBER,
+-            value: num
+-          });
+-        }
+-      });
+-    }
+-  }
+-
+-  const dispatcher = createDispatcher(stores);
+-
+-  // Add a pending action that adds 2 after the number is doubled
+-  equal(dispatcher.getState().number, 1);
+-  dispatcher.dispatch(addWhenDoubled(2));
+-  equal(dispatcher.getState().number, 1);
+-  dispatcher.dispatch({ type: constants.DOUBLE_NUMBER });
+-  // Note how the pending function we added ran synchronously. It
+-  // should have added 2 after doubling 1, so 1 * 2 + 2 = 4
+-  equal(dispatcher.getState().number, 4);
+-
+-  // Add a pending action that adds 5 once the number is greater than 10
+-  dispatcher.dispatch(addWhenGreaterThan(10, 5));
+-  equal(dispatcher.getState().number, 4);
+-  dispatcher.dispatch({ type: constants.ADD_NUMBER, value: 10 });
+-  // Again, the pending function we added ran synchronously. It should
+-  // have added 5 more after 10 was added, since the number was
+-  // greater than 10.
+-  equal(dispatcher.getState().number, 19);
+-});
+diff --git a/browser/devtools/shared/fluxify/test/unit/xpcshell.ini b/browser/devtools/shared/fluxify/test/unit/xpcshell.ini
+deleted file mode 100644
+index 1ed05bd..0000000
+--- a/browser/devtools/shared/fluxify/test/unit/xpcshell.ini
++++ /dev/null
+@@ -1,12 +0,0 @@
+-[DEFAULT]
+-tags = devtools
+-head = head.js
+-tail =
+-firefox-appdir = browser
+-skip-if = toolkit == 'android' || toolkit == 'gonk'
+-
+-support-files =
+-  stores-for-testing.js
+-
+-[test_dispatcher.js]
+-[test_middlewares.js]
+\ No newline at end of file
+diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
+index cc055b1..b6ac7e3 100644
+--- a/browser/devtools/shared/moz.build
++++ b/browser/devtools/shared/moz.build
+@@ -27,52 +27,42 @@ EXTRA_JS_MODULES.devtools += [
+     'widgets/VariablesView.jsm',
+     'widgets/VariablesViewController.jsm',
+     'widgets/ViewHelpers.jsm',
+ ]
+ 
+ EXTRA_JS_MODULES.devtools.shared += [
+     'autocomplete-popup.js',
+     'browser-loader.js',
+-    'create-dispatcher.js',
+     'devices.js',
+     'doorhanger.js',
+     'frame-script-utils.js',
+     'getjson.js',
+     'inplace-editor.js',
+     'node-attribute-parser.js',
+     'observable-object.js',
+     'options-view.js',
+     'poller.js',
++    'redux-bootstrap.js',
++    'redux-middleware.js',
+     'source-utils.js',
+     'telemetry.js',
+     'theme-switching.js',
+     'theme.js',
+     'undo.js'
+ ]
+ 
+-EXTRA_JS_MODULES.devtools.shared.content += [
+-    'content/react.js'
+-]
+-
+-if CONFIG['DEBUG_JS_MODULES']:
+-    EXTRA_JS_MODULES.devtools.shared.content += [
+-        'content/react-dev.js'
+-    ]
+-
+ EXTRA_JS_MODULES.devtools.shared.widgets += [
+     'widgets/BarGraphWidget.js',
+     'widgets/CubicBezierPresets.js',
+     'widgets/CubicBezierWidget.js',
+     'widgets/FastListWidget.js',
+     'widgets/FilterWidget.js',
+     'widgets/FlameGraph.js',
+     'widgets/Graphs.js',
+     'widgets/LineGraphWidget.js',
+     'widgets/MdnDocsWidget.js',
+     'widgets/MountainGraphWidget.js',
+     'widgets/Spectrum.js',
+     'widgets/TableWidget.js',
+     'widgets/Tooltip.js',
+     'widgets/TreeWidget.js',
+ ]
+-
+-DIRS += ['fluxify']
+diff --git a/browser/devtools/shared/create-dispatcher.js b/browser/devtools/shared/redux-bootstrap.js
+similarity index 57%
+rename from browser/devtools/shared/create-dispatcher.js
+rename to browser/devtools/shared/redux-bootstrap.js
+index 0f18f64..e0f7807 100644
+--- a/browser/devtools/shared/create-dispatcher.js
++++ b/browser/devtools/shared/redux-bootstrap.js
+@@ -1,31 +1,33 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const fluxify = require('./fluxify/dispatcher');
+-const thunkMiddleware = require('./fluxify/thunkMiddleware');
+-const logMiddleware = require('./fluxify/logMiddleware');
+-const waitUntilService = require('./fluxify/waitUntilService')
+-const { compose } = require('devtools/toolkit/DevToolsUtils');
++const { createStore, combineReducers, applyMiddleware } = require("devtools/vendor/redux");
++const middlewares = require('./redux-middleware');
+ 
+ /**
+  * This creates a dispatcher with all the standard middleware in place
+  * that all code requires. It can also be optionally configured in
+  * various ways, such as logging and recording.
+  *
+  * @param {object} opts - boolean configuration flags
+  *        - log: log all dispatched actions to console
++ *        - middleware: array of middleware to be included in the redux store
+  */
+ module.exports = (opts={}) => {
+   const middleware = [
+-    thunkMiddleware,
+-    waitUntilService.service
++    middlewares.thunk,
++    middlewares.waitUntilService
+   ];
+ 
+   if (opts.log) {
+-    middleware.push(logMiddleware);
++    middleware.push(middlewares.log);
+   }
+ 
+-  return fluxify.applyMiddleware(...middleware)(fluxify.createDispatcher);
++  if (opts.middleware) {
++    opts.middleware.forEach(fn => middleware.push(fn));
++  }
++
++  return applyMiddleware(...middleware)(createStore);
+ }
+diff --git a/browser/devtools/shared/fluxify/waitUntilService.js b/browser/devtools/shared/redux-middleware.js
+similarity index 68%
+rename from browser/devtools/shared/fluxify/waitUntilService.js
+rename to browser/devtools/shared/redux-middleware.js
+index f097446..f4d25c6 100644
+--- a/browser/devtools/shared/fluxify/waitUntilService.js
++++ b/browser/devtools/shared/redux-middleware.js
+@@ -1,14 +1,37 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const NAME = "@@service/waitUntil";
++/**
++ * A middleware that allows thunks (functions) to be dispatched.
++ * If it's a thunk, it is called with `dispatch` and `getState`,
++ * allowing the action to create multiple actions (most likely
++ * asynchronously).
++ */
++function thunk({ dispatch, getState }) {
++  return next => action => {
++    return typeof action === "function"
++      ? action(dispatch, getState)
++      : next(action);
++  }
++}
++
++/**
++ * A middleware that logs all actions coming through the system
++ * to the console.
++ */
++function log({ dispatch, getState }) {
++  return next => action => {
++    console.log('[DISPATCH]', JSON.stringify(action));
++    next(action);
++  }
++}
+ 
+ /**
+  * A middleware which acts like a service, because it is stateful
+  * and "long-running" in the background. It provides the ability
+  * for actions to install a function to be run once when a specific
+  * condition is met by an action coming through the system. Think of
+  * it as a thunk that blocks until the condition is met. Example:
+  *
+@@ -20,16 +43,18 @@ const NAME = "@@service/waitUntil";
+  *   run: (dispatch, getState, action) => {
+  *     // Do anything here. You only need to accept the arguments
+  *     // if you need them. `action` is the action that satisfied
+  *     // the predicate.
+  *   }
+  * }
+  * ```
+  */
++const WAIT_UNTIL_NAME = "@@service/waitUntil";
++waitUntilService.NAME = WAIT_UNTIL_NAME;
+ function waitUntilService({ dispatch, getState }) {
+   let pending = [];
+ 
+   function checkPending(action) {
+     let readyRequests = [];
+     let stillPending = [];
+ 
+     // Find the pending requests whose predicates are satisfied with
+@@ -48,22 +73,21 @@ function waitUntilService({ dispatch, getState }) {
+ 
+     pending = stillPending;
+     for (let request of readyRequests) {
+       request.run(dispatch, getState, action);
+     }
+   }
+ 
+   return next => action => {
+-    if (action.type === NAME) {
++    if (action.type === WAIT_UNTIL_NAME) {
+       pending.push(action);
+     }
+     else {
+       next(action);
+       checkPending(action);
+     }
+   }
+ }
+ 
+-module.exports = {
+-  service: waitUntilService,
+-  name: NAME
+-};
++exports.thunk = thunk;
++exports.log = log;
++exports.waitUntilService = waitUntilService;
+diff --git a/browser/devtools/shared/D3_LICENSE b/browser/devtools/vendor/D3_LICENSE
+similarity index 100%
+rename from browser/devtools/shared/D3_LICENSE
+rename to browser/devtools/vendor/D3_LICENSE
+diff --git a/browser/devtools/webaudioeditor/lib/DAGRE_D3_LICENSE b/browser/devtools/vendor/DAGRE_D3_LICENSE
+similarity index 100%
+rename from browser/devtools/webaudioeditor/lib/DAGRE_D3_LICENSE
+rename to browser/devtools/vendor/DAGRE_D3_LICENSE
+diff --git a/browser/devtools/vendor/REDUX_LICENSE b/browser/devtools/vendor/REDUX_LICENSE
+new file mode 100644
+index 0000000..af2353d
+--- /dev/null
++++ b/browser/devtools/vendor/REDUX_LICENSE
+@@ -0,0 +1,21 @@
++The MIT License (MIT)
++
++Copyright (c) 2015 Dan Abramov
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/browser/devtools/shared/d3.js b/browser/devtools/vendor/d3.js
+similarity index 100%
+rename from browser/devtools/shared/d3.js
+rename to browser/devtools/vendor/d3.js
+diff --git a/browser/devtools/webaudioeditor/lib/dagre-d3.js b/browser/devtools/vendor/dagre-d3.js
+similarity index 100%
+rename from browser/devtools/webaudioeditor/lib/dagre-d3.js
+rename to browser/devtools/vendor/dagre-d3.js
+diff --git a/browser/devtools/shared/fluxify/moz.build b/browser/devtools/vendor/moz.build
+similarity index 57%
+rename from browser/devtools/shared/fluxify/moz.build
+rename to browser/devtools/vendor/moz.build
+index 061c9c8..1a9ac41 100644
+--- a/browser/devtools/shared/fluxify/moz.build
++++ b/browser/devtools/vendor/moz.build
+@@ -1,15 +1,15 @@
+ # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+-EXTRA_JS_MODULES.devtools.shared.fluxify += [
+-    'bindActionCreators.js',
+-    'dispatcher.js',
+-    'logMiddleware.js',
+-    'thunkMiddleware.js',
+-    'waitUntilService.js'
++EXTRA_JS_MODULES.devtools.vendor += [
++    'react.js',
++    'redux.js',
+ ]
+ 
+-XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
+\ No newline at end of file
++if CONFIG['DEBUG_JS_MODULES']:
++    EXTRA_JS_MODULES.devtools.vendor += [
++        'content/react-dev.js'
++    ]
+diff --git a/browser/devtools/shared/content/react-dev.js b/browser/devtools/vendor/react-dev.js
+similarity index 100%
+rename from browser/devtools/shared/content/react-dev.js
+rename to browser/devtools/vendor/react-dev.js
+diff --git a/browser/devtools/shared/content/react.js b/browser/devtools/vendor/react.js
+similarity index 100%
+rename from browser/devtools/shared/content/react.js
+rename to browser/devtools/vendor/react.js
+diff --git a/browser/devtools/vendor/redux.js b/browser/devtools/vendor/redux.js
+new file mode 100644
+index 0000000..e013f72
+--- /dev/null
++++ b/browser/devtools/vendor/redux.js
+@@ -0,0 +1,610 @@
++(function webpackUniversalModuleDefinition(root, factory) {
++	if(typeof exports === 'object' && typeof module === 'object')
++		module.exports = factory();
++	else if(typeof define === 'function' && define.amd)
++		define([], factory);
++	else if(typeof exports === 'object')
++		exports["Redux"] = factory();
++	else
++		root["Redux"] = factory();
++})(this, function() {
++return /******/ (function(modules) { // webpackBootstrap
++/******/ 	// The module cache
++/******/ 	var installedModules = {};
++
++/******/ 	// The require function
++/******/ 	function __webpack_require__(moduleId) {
++
++/******/ 		// Check if module is in cache
++/******/ 		if(installedModules[moduleId])
++/******/ 			return installedModules[moduleId].exports;
++
++/******/ 		// Create a new module (and put it into the cache)
++/******/ 		var module = installedModules[moduleId] = {
++/******/ 			exports: {},
++/******/ 			id: moduleId,
++/******/ 			loaded: false
++/******/ 		};
++
++/******/ 		// Execute the module function
++/******/ 		modules[moduleId].call(module.exports, module, module.exports, __webpack_require__);
++
++/******/ 		// Flag the module as loaded
++/******/ 		module.loaded = true;
++
++/******/ 		// Return the exports of the module
++/******/ 		return module.exports;
++/******/ 	}
++
++
++/******/ 	// expose the modules object (__webpack_modules__)
++/******/ 	__webpack_require__.m = modules;
++
++/******/ 	// expose the module cache
++/******/ 	__webpack_require__.c = installedModules;
++
++/******/ 	// __webpack_public_path__
++/******/ 	__webpack_require__.p = "";
++
++/******/ 	// Load entry module and return exports
++/******/ 	return __webpack_require__(0);
++/******/ })
++/************************************************************************/
++/******/ ([
++/* 0 */
++/***/ function(module, exports, __webpack_require__) {
++
++	'use strict';
++
++	exports.__esModule = true;
++
++	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
++
++	var _createStore = __webpack_require__(1);
++
++	var _createStore2 = _interopRequireDefault(_createStore);
++
++	var _utilsCombineReducers = __webpack_require__(7);
++
++	var _utilsCombineReducers2 = _interopRequireDefault(_utilsCombineReducers);
++
++	var _utilsBindActionCreators = __webpack_require__(6);
++
++	var _utilsBindActionCreators2 = _interopRequireDefault(_utilsBindActionCreators);
++
++	var _utilsApplyMiddleware = __webpack_require__(5);
++
++	var _utilsApplyMiddleware2 = _interopRequireDefault(_utilsApplyMiddleware);
++
++	var _utilsCompose = __webpack_require__(2);
++
++	var _utilsCompose2 = _interopRequireDefault(_utilsCompose);
++
++	exports.createStore = _createStore2['default'];
++	exports.combineReducers = _utilsCombineReducers2['default'];
++	exports.bindActionCreators = _utilsBindActionCreators2['default'];
++	exports.applyMiddleware = _utilsApplyMiddleware2['default'];
++	exports.compose = _utilsCompose2['default'];
++
++/***/ },
++/* 1 */
++/***/ function(module, exports, __webpack_require__) {
++
++	'use strict';
++
++	exports.__esModule = true;
++	exports['default'] = createStore;
++
++	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
++
++	var _utilsIsPlainObject = __webpack_require__(3);
++
++	var _utilsIsPlainObject2 = _interopRequireDefault(_utilsIsPlainObject);
++
++	/**
++	 * These are private action types reserved by Redux.
++	 * For any unknown actions, you must return the current state.
++	 * If the current state is undefined, you must return the initial state.
++	 * Do not reference these action types directly in your code.
++	 */
++	var ActionTypes = {
++	  INIT: '@@redux/INIT'
++	};
++
++	exports.ActionTypes = ActionTypes;
++	/**
++	 * Creates a Redux store that holds the state tree.
++	 * The only way to change the data in the store is to call `dispatch()` on it.
++	 *
++	 * There should only be a single store in your app. To specify how different
++	 * parts of the state tree respond to actions, you may combine several reducers
++	 * into a single reducer function by using `combineReducers`.
++	 *
++	 * @param {Function} reducer A function that returns the next state tree, given
++	 * the current state tree and the action to handle.
++	 *
++	 * @param {any} [initialState] The initial state. You may optionally specify it
++	 * to hydrate the state from the server in universal apps, or to restore a
++	 * previously serialized user session.
++	 * If you use `combineReducers` to produce the root reducer function, this must be
++	 * an object with the same shape as `combineReducers` keys.
++	 *
++	 * @returns {Store} A Redux store that lets you read the state, dispatch actions
++	 * and subscribe to changes.
++	 */
++
++	function createStore(reducer, initialState) {
++	  if (typeof reducer !== 'function') {
++	    throw new Error('Expected the reducer to be a function.');
++	  }
++
++	  var currentReducer = reducer;
++	  var currentState = initialState;
++	  var listeners = [];
++	  var isDispatching = false;
++
++	  /**
++	   * Reads the state tree managed by the store.
++	   *
++	   * @returns {any} The current state tree of your application.
++	   */
++	  function getState() {
++	    return currentState;
++	  }
++
++	  /**
++	   * Adds a change listener. It will be called any time an action is dispatched,
++	   * and some part of the state tree may potentially have changed. You may then
++	   * call `getState()` to read the current state tree inside the callback.
++	   *
++	   * @param {Function} listener A callback to be invoked on every dispatch.
++	   * @returns {Function} A function to remove this change listener.
++	   */
++	  function subscribe(listener) {
++	    listeners.push(listener);
++
++	    return function unsubscribe() {
++	      var index = listeners.indexOf(listener);
++	      listeners.splice(index, 1);
++	    };
++	  }
++
++	  /**
++	   * Dispatches an action. It is the only way to trigger a state change.
++	   *
++	   * The `reducer` function, used to create the store, will be called with the
++	   * current state tree and the given `action`. Its return value will
++	   * be considered the **next** state of the tree, and the change listeners
++	   * will be notified.
++	   *
++	   * The base implementation only supports plain object actions. If you want to
++	   * dispatch a Promise, an Observable, a thunk, or something else, you need to
++	   * wrap your store creating function into the corresponding middleware. For
++	   * example, see the documentation for the `redux-thunk` package. Even the
++	   * middleware will eventually dispatch plain object actions using this method.
++	   *
++	   * @param {Object} action A plain object representing “what changed”. It is
++	   * a good idea to keep actions serializable so you can record and replay user
++	   * sessions, or use the time travelling `redux-devtools`.
++	   *
++	   * @returns {Object} For convenience, the same action object you dispatched.
++	   *
++	   * Note that, if you use a custom middleware, it may wrap `dispatch()` to
++	   * return something else (for example, a Promise you can await).
++	   */
++	  function dispatch(action) {
++	    if (!_utilsIsPlainObject2['default'](action)) {
++	      throw new Error('Actions must be plain objects. Use custom middleware for async actions.');
++	    }
++
++	    if (isDispatching) {
++	      throw new Error('Reducers may not dispatch actions.');
++	    }
++
++	    try {
++	      isDispatching = true;
++	      currentState = currentReducer(currentState, action);
++	    } finally {
++	      isDispatching = false;
++	    }
++
++	    listeners.slice().forEach(function (listener) {
++	      return listener();
++	    });
++	    return action;
++	  }
++
++	  /**
++	   * Replaces the reducer currently used by the store to calculate the state.
++	   *
++	   * You might need this if your app implements code splitting and you want to
++	   * load some of the reducers dynamically. You might also need this if you
++	   * implement a hot reloading mechanism for Redux.
++	   *
++	   * @param {Function} nextReducer The reducer for the store to use instead.
++	   * @returns {void}
++	   */
++	  function replaceReducer(nextReducer) {
++	    currentReducer = nextReducer;
++	    dispatch({ type: ActionTypes.INIT });
++	  }
++
++	  // When a store is created, an "INIT" action is dispatched so that every
++	  // reducer returns their initial state. This effectively populates
++	  // the initial state tree.
++	  dispatch({ type: ActionTypes.INIT });
++
++	  return {
++	    dispatch: dispatch,
++	    subscribe: subscribe,
++	    getState: getState,
++	    replaceReducer: replaceReducer
++	  };
++	}
++
++/***/ },
++/* 2 */
++/***/ function(module, exports) {
++
++	/**
++	 * Composes single-argument functions from right to left.
++	 *
++	 * @param {...Function} funcs The functions to compose.
++	 * @returns {Function} A function obtained by composing functions from right to
++	 * left. For example, compose(f, g, h) is identical to x => h(g(f(x))).
++	 */
++	"use strict";
++
++	exports.__esModule = true;
++	exports["default"] = compose;
++
++	function compose() {
++	  for (var _len = arguments.length, funcs = Array(_len), _key = 0; _key < _len; _key++) {
++	    funcs[_key] = arguments[_key];
++	  }
++
++	  return function (arg) {
++	    return funcs.reduceRight(function (composed, f) {
++	      return f(composed);
++	    }, arg);
++	  };
++	}
++
++	module.exports = exports["default"];
++
++/***/ },
++/* 3 */
++/***/ function(module, exports) {
++
++	'use strict';
++
++	exports.__esModule = true;
++	exports['default'] = isPlainObject;
++	var fnToString = function fnToString(fn) {
++	  return Function.prototype.toString.call(fn);
++	};
++
++	/**
++	 * @param {any} obj The object to inspect.
++	 * @returns {boolean} True if the argument appears to be a plain object.
++	 */
++
++	function isPlainObject(obj) {
++	  if (!obj || typeof obj !== 'object') {
++	    return false;
++	  }
++
++	  var proto = typeof obj.constructor === 'function' ? Object.getPrototypeOf(obj) : Object.prototype;
++
++	  if (proto === null) {
++	    return true;
++	  }
++
++	  var constructor = proto.constructor;
++
++	  return typeof constructor === 'function' && constructor instanceof constructor && fnToString(constructor) === fnToString(Object);
++	}
++
++	module.exports = exports['default'];
++
++/***/ },
++/* 4 */
++/***/ function(module, exports) {
++
++	/**
++	 * Applies a function to every key-value pair inside an object.
++	 *
++	 * @param {Object} obj The source object.
++	 * @param {Function} fn The mapper function that receives the value and the key.
++	 * @returns {Object} A new object that contains the mapped values for the keys.
++	 */
++	"use strict";
++
++	exports.__esModule = true;
++	exports["default"] = mapValues;
++
++	function mapValues(obj, fn) {
++	  return Object.keys(obj).reduce(function (result, key) {
++	    result[key] = fn(obj[key], key);
++	    return result;
++	  }, {});
++	}
++
++	module.exports = exports["default"];
++
++/***/ },
++/* 5 */
++/***/ function(module, exports, __webpack_require__) {
++
++	'use strict';
++
++	exports.__esModule = true;
++
++	var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
++
++	exports['default'] = applyMiddleware;
++
++	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
++
++	var _compose = __webpack_require__(2);
++
++	var _compose2 = _interopRequireDefault(_compose);
++
++	/**
++	 * Creates a store enhancer that applies middleware to the dispatch method
++	 * of the Redux store. This is handy for a variety of tasks, such as expressing
++	 * asynchronous actions in a concise manner, or logging every action payload.
++	 *
++	 * See `redux-thunk` package as an example of the Redux middleware.
++	 *
++	 * Because middleware is potentially asynchronous, this should be the first
++	 * store enhancer in the composition chain.
++	 *
++	 * Note that each middleware will be given the `dispatch` and `getState` functions
++	 * as named arguments.
++	 *
++	 * @param {...Function} middlewares The middleware chain to be applied.
++	 * @returns {Function} A store enhancer applying the middleware.
++	 */
++
++	function applyMiddleware() {
++	  for (var _len = arguments.length, middlewares = Array(_len), _key = 0; _key < _len; _key++) {
++	    middlewares[_key] = arguments[_key];
++	  }
++
++	  return function (next) {
++	    return function (reducer, initialState) {
++	      var store = next(reducer, initialState);
++	      var _dispatch = store.dispatch;
++	      var chain = [];
++
++	      var middlewareAPI = {
++	        getState: store.getState,
++	        dispatch: function dispatch(action) {
++	          return _dispatch(action);
++	        }
++	      };
++	      chain = middlewares.map(function (middleware) {
++	        return middleware(middlewareAPI);
++	      });
++	      _dispatch = _compose2['default'].apply(undefined, chain)(store.dispatch);
++
++	      return _extends({}, store, {
++	        dispatch: _dispatch
++	      });
++	    };
++	  };
++	}
++
++	module.exports = exports['default'];
++
++/***/ },
++/* 6 */
++/***/ function(module, exports, __webpack_require__) {
++
++	'use strict';
++
++	exports.__esModule = true;
++	exports['default'] = bindActionCreators;
++
++	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
++
++	var _utilsMapValues = __webpack_require__(4);
++
++	var _utilsMapValues2 = _interopRequireDefault(_utilsMapValues);
++
++	function bindActionCreator(actionCreator, dispatch) {
++	  return function () {
++	    return dispatch(actionCreator.apply(undefined, arguments));
++	  };
++	}
++
++	/**
++	 * Turns an object whose values are action creators, into an object with the
++	 * same keys, but with every function wrapped into a `dispatch` call so they
++	 * may be invoked directly. This is just a convenience method, as you can call
++	 * `store.dispatch(MyActionCreators.doSomething())` yourself just fine.
++	 *
++	 * For convenience, you can also pass a single function as the first argument,
++	 * and get a function in return.
++	 *
++	 * @param {Function|Object} actionCreators An object whose values are action
++	 * creator functions. One handy way to obtain it is to use ES6 `import * as`
++	 * syntax. You may also pass a single function.
++	 *
++	 * @param {Function} dispatch The `dispatch` function available on your Redux
++	 * store.
++	 *
++	 * @returns {Function|Object} The object mimicking the original object, but with
++	 * every action creator wrapped into the `dispatch` call. If you passed a
++	 * function as `actionCreators`, the return value will also be a single
++	 * function.
++	 */
++
++	function bindActionCreators(actionCreators, dispatch) {
++	  if (typeof actionCreators === 'function') {
++	    return bindActionCreator(actionCreators, dispatch);
++	  }
++
++	  if (typeof actionCreators !== 'object' || actionCreators == null) {
++	    // eslint-disable-line no-eq-null
++	    throw new Error('bindActionCreators expected an object or a function, instead received ' + typeof actionCreators + '. ' + 'Did you write "import ActionCreators from" instead of "import * as ActionCreators from"?');
++	  }
++
++	  return _utilsMapValues2['default'](actionCreators, function (actionCreator) {
++	    return bindActionCreator(actionCreator, dispatch);
++	  });
++	}
++
++	module.exports = exports['default'];
++
++/***/ },
++/* 7 */
++/***/ function(module, exports, __webpack_require__) {
++
++	'use strict';
++
++	exports.__esModule = true;
++	exports['default'] = combineReducers;
++
++	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
++
++	var _createStore = __webpack_require__(1);
++
++	var _utilsIsPlainObject = __webpack_require__(3);
++
++	var _utilsIsPlainObject2 = _interopRequireDefault(_utilsIsPlainObject);
++
++	var _utilsMapValues = __webpack_require__(4);
++
++	var _utilsMapValues2 = _interopRequireDefault(_utilsMapValues);
++
++	var _utilsPick = __webpack_require__(8);
++
++	var _utilsPick2 = _interopRequireDefault(_utilsPick);
++
++	/* eslint-disable no-console */
++
++	function getErrorMessage(key, action) {
++	  var actionType = action && action.type;
++	  var actionName = actionType && '"' + actionType.toString() + '"' || 'an action';
++
++	  return 'Reducer "' + key + '" returned undefined handling ' + actionName + '. ' + 'To ignore an action, you must explicitly return the previous state.';
++	}
++
++	function verifyStateShape(initialState, currentState) {
++	  var reducerKeys = Object.keys(currentState);
++
++	  if (reducerKeys.length === 0) {
++	    console.error('Store does not have a valid reducer. Make sure the argument passed ' + 'to combineReducers is an object whose values are reducers.');
++	    return;
++	  }
++
++	  if (!_utilsIsPlainObject2['default'](initialState)) {
++	    console.error('initialState has unexpected type of "' + ({}).toString.call(initialState).match(/\s([a-z|A-Z]+)/)[1] + '". Expected initialState to be an object with the following ' + ('keys: "' + reducerKeys.join('", "') + '"'));
++	    return;
++	  }
++
++	  var unexpectedKeys = Object.keys(initialState).filter(function (key) {
++	    return reducerKeys.indexOf(key) < 0;
++	  });
++
++	  if (unexpectedKeys.length > 0) {
++	    console.error('Unexpected ' + (unexpectedKeys.length > 1 ? 'keys' : 'key') + ' ' + ('"' + unexpectedKeys.join('", "') + '" in initialState will be ignored. ') + ('Expected to find one of the known reducer keys instead: "' + reducerKeys.join('", "') + '"'));
++	  }
++	}
++
++	/**
++	 * Turns an object whose values are different reducer functions, into a single
++	 * reducer function. It will call every child reducer, and gather their results
++	 * into a single state object, whose keys correspond to the keys of the passed
++	 * reducer functions.
++	 *
++	 * @param {Object} reducers An object whose values correspond to different
++	 * reducer functions that need to be combined into one. One handy way to obtain
++	 * it is to use ES6 `import * as reducers` syntax. The reducers may never return
++	 * undefined for any action. Instead, they should return their initial state
++	 * if the state passed to them was undefined, and the current state for any
++	 * unrecognized action.
++	 *
++	 * @returns {Function} A reducer function that invokes every reducer inside the
++	 * passed object, and builds a state object with the same shape.
++	 */
++
++	function combineReducers(reducers) {
++	  var finalReducers = _utilsPick2['default'](reducers, function (val) {
++	    return typeof val === 'function';
++	  });
++
++	  Object.keys(finalReducers).forEach(function (key) {
++	    var reducer = finalReducers[key];
++	    if (typeof reducer(undefined, { type: _createStore.ActionTypes.INIT }) === 'undefined') {
++	      throw new Error('Reducer "' + key + '" returned undefined during initialization. ' + 'If the state passed to the reducer is undefined, you must ' + 'explicitly return the initial state. The initial state may ' + 'not be undefined.');
++	    }
++
++	    var type = Math.random().toString(36).substring(7).split('').join('.');
++	    if (typeof reducer(undefined, { type: type }) === 'undefined') {
++	      throw new Error('Reducer "' + key + '" returned undefined when probed with a random type. ' + ('Don\'t try to handle ' + _createStore.ActionTypes.INIT + ' or other actions in "redux/*" ') + 'namespace. They are considered private. Instead, you must return the ' + 'current state for any unknown actions, unless it is undefined, ' + 'in which case you must return the initial state, regardless of the ' + 'action type. The initial state may not be undefined.');
++	    }
++	  });
++
++	  var defaultState = _utilsMapValues2['default'](finalReducers, function () {
++	    return undefined;
++	  });
++	  var stateShapeVerified;
++
++	  return function combination(state, action) {
++	    if (state === undefined) state = defaultState;
++
++	    var finalState = _utilsMapValues2['default'](finalReducers, function (reducer, key) {
++	      var newState = reducer(state[key], action);
++	      if (typeof newState === 'undefined') {
++	        throw new Error(getErrorMessage(key, action));
++	      }
++	      return newState;
++	    });
++
++	    if (true) {
++	      if (!stateShapeVerified) {
++	        verifyStateShape(state, finalState);
++	        stateShapeVerified = true;
++	      }
++	    }
++
++	    return finalState;
++	  };
++	}
++
++	module.exports = exports['default'];
++
++/***/ },
++/* 8 */
++/***/ function(module, exports) {
++
++	/**
++	 * Picks key-value pairs from an object where values satisfy a predicate.
++	 *
++	 * @param {Object} obj The object to pick from.
++	 * @param {Function} fn The predicate the values must satisfy to be copied.
++	 * @returns {Object} The object with the values that satisfied the predicate.
++	 */
++	"use strict";
++
++	exports.__esModule = true;
++	exports["default"] = pick;
++
++	function pick(obj, fn) {
++	  return Object.keys(obj).reduce(function (result, key) {
++	    if (fn(obj[key])) {
++	      result[key] = obj[key];
++	    }
++	    return result;
++	  }, {});
++	}
++
++	module.exports = exports["default"];
++
++/***/ }
++/******/ ])
++});
++;
+\ No newline at end of file
+diff --git a/browser/devtools/webaudioeditor/webaudioeditor.xul b/browser/devtools/webaudioeditor/webaudioeditor.xul
+index e0af48b..fd507f5 100644
+--- a/browser/devtools/webaudioeditor/webaudioeditor.xul
++++ b/browser/devtools/webaudioeditor/webaudioeditor.xul
+@@ -13,17 +13,17 @@
+ ]>
+ 
+ <window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+ 
+   <script type="application/javascript;version=1.8"
+           src="chrome://browser/content/devtools/theme-switching.js"/>
+ 
+   <script type="application/javascript" src="chrome://browser/content/devtools/d3.js"/>
+-  <script type="application/javascript" src="dagre-d3.js"/>
++  <script type="application/javascript" src="chrome://browser/content/devtools/dagre-d3.js"/>
+   <script type="application/javascript" src="webaudioeditor/includes.js"/>
+   <script type="application/javascript" src="webaudioeditor/models.js"/>
+   <script type="application/javascript" src="webaudioeditor/controller.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/utils.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/context.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/inspector.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/properties.js"/>
+   <script type="application/javascript" src="webaudioeditor/views/automation.js"/>
+-- 
+2.2.1
+
