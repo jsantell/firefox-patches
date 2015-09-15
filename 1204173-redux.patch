@@ -112,88 +112,51 @@ index 271de8f..05b470c 100644
 -  actions: { updateEventBreakpoints, fetchEventListeners }
 -}
 +module.exports = { updateEventBreakpoints, fetchEventListeners };
-diff --git a/browser/devtools/shared/fluxify/thunkMiddleware.js b/browser/devtools/debugger/content/middleware.js
-similarity index 26%
-rename from browser/devtools/shared/fluxify/thunkMiddleware.js
-rename to browser/devtools/debugger/content/middleware.js
-index 6a4a369..3161ab3 100644
---- a/browser/devtools/shared/fluxify/thunkMiddleware.js
-+++ b/browser/devtools/debugger/content/middleware.js
-@@ -1,20 +1,26 @@
- /* This Source Code Form is subject to the terms of the Mozilla Public
-  * License, v. 2.0. If a copy of the MPL was not distributed with this
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- "use strict";
- 
--/**
-- * A middleware that allows thunks (functions) to be dispatched.
-- * If it's a thunk, it is called with `dispatch` and `getState`,
-- * allowing the action to create multiple actions (most likely
-- * asynchronously).
-- */
--function thunkMiddleware({ dispatch, getState }) {
--  return next => action => {
--    return typeof action === "function"
--      ? action(dispatch, getState)
--      : next(action);
--  }
-+const constants = require("./constants");
-+
-+function createDebuggerMiddleware (emit) {
-+  return ({ dispatch, getState }) => next => action => {
-+    let result = next(action);
-+
-+    switch (action.type) {
-+      case constants.UPDATE_EVENT_BREAKPOINTS:
-+        emit("@redux:activeEventNames", getState().eventListeners.activeEventNames);
-+        break;
-+      case constants.FETCH_EVENT_LISTENERS:
-+        if (action.status === "done") {
-+          emit("@redux:listeners", getState().eventListeners.listeners);
-+        }
-+        break;
-+    }
-+    return result;
-+  };
- }
- 
--module.exports = thunkMiddleware;
-+exports.createDebuggerMiddleware = createDebuggerMiddleware;
-diff --git a/browser/devtools/shared/fluxify/logMiddleware.js b/browser/devtools/debugger/content/reducers/event-listeners.js
-similarity index 25%
-rename from browser/devtools/shared/fluxify/logMiddleware.js
+diff --git a/browser/devtools/shared/fluxify/bindActionCreators.js b/browser/devtools/debugger/content/reducers/event-listeners.js
+similarity index 22%
+rename from browser/devtools/shared/fluxify/bindActionCreators.js
 rename to browser/devtools/debugger/content/reducers/event-listeners.js
-index a544494..36772c6 100644
---- a/browser/devtools/shared/fluxify/logMiddleware.js
+index c700e91..e218110 100644
+--- a/browser/devtools/shared/fluxify/bindActionCreators.js
 +++ b/browser/devtools/debugger/content/reducers/event-listeners.js
-@@ -1,17 +1,35 @@
+@@ -1,28 +1,37 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
  
--/**
-- * A middleware that logs all actions coming through the system
-- * to the console.
-- */
--function logMiddleware({ dispatch, getState }) {
--  return next => action => {
--    console.log('[DISPATCH]', JSON.stringify(action));
--    next(action);
+-function bindActionCreator(actionCreator, dispatch) {
+-  return (...args) => dispatch(actionCreator(...args));
+-}
 +const constants = require('../constants');
 +
 +const FETCH_EVENT_LISTENERS_DELAY = 200; // ms
-+
+ 
+-/**
+- * Wraps action creator functions into a function that automatically
+- * dispatches the created action with `dispatch`. Normally action
+- * creators simply return actions, but wrapped functions will
+- * automatically dispatch.
+- *
+- * @param {object} actionCreators
+- *        An object of action creator functions (names as keys)
+- * @param {function} dispatch
+- */
+-function bindActionCreators(actionCreators, dispatch) {
+-  let actions = {};
+-  for (let k of Object.keys(actionCreators)) {
+-    actions[k] = bindActionCreator(actionCreators[k], dispatch);
 +const initialState = {
 +  activeEventNames: [],
 +  listeners: [],
 +  fetchingListeners: false,
 +};
 +
-+function update(state = initialState, action) {
++function update(state = initialState, action, emit) {
 +  switch(action.type) {
 +  case constants.UPDATE_EVENT_BREAKPOINTS:
 +    state.activeEventNames = action.eventNames;
++    emit("@redux:activeEventNames", state.activeEventNames);
 +    break;
 +  case constants.FETCH_EVENT_LISTENERS:
 +    if (action.status === "begin") {
@@ -202,23 +165,25 @@ index a544494..36772c6 100644
 +    else if (action.status === "done") {
 +      state.fetchingListeners = false;
 +      state.listeners = action.listeners;
++      emit("@redux:listeners", state.listeners);
 +    }
 +    break;
    }
+-  return actions;
 +
 +  return state;
  }
  
--module.exports = logMiddleware;
+-module.exports = bindActionCreators;
 +module.exports = update;
 diff --git a/browser/devtools/debugger/content/stores/index.js b/browser/devtools/debugger/content/reducers/index.js
-similarity index 70%
+similarity index 21%
 rename from browser/devtools/debugger/content/stores/index.js
 rename to browser/devtools/debugger/content/reducers/index.js
-index 1508eb0..4d33d6e 100644
+index 1508eb0..e261e71 100644
 --- a/browser/devtools/debugger/content/stores/index.js
 +++ b/browser/devtools/debugger/content/reducers/index.js
-@@ -1,8 +1,9 @@
+@@ -1,8 +1,34 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -228,7 +193,32 @@ index 1508eb0..4d33d6e 100644
  const eventListeners = require('./event-listeners');
  
 -module.exports = { eventListeners };
-+module.exports = combineReducers({ eventListeners });
++/**
++ * Function that takes an `emit` function and returns a function
++ * to be used as a reducer for a Redux store. This allows all
++ * reducers defined here to receive a third argument, the `emit` function,
++ * for event-based subscriptions from within reducers.
++ *
++ * @param {Function} emit
++ * @return {Function}
++ */
++module.exports = function (emit) {
++  let reducers = {
++    eventListeners
++  };
++
++  // Wrap each reducer with a wrapper function that calls
++  // the reducer with a third argument, an `emit` function.
++  // Use this rather than a new custom top level reducer that would ultimately
++  // have to replicate redux's `combineReducers` so we only pass in correct state,
++  // the error checking, and other edge cases.
++  function wrapReduce (newReducers, key) {
++    newReducers[key] = (state, action) => reducers[key](state, action, emit);
++    return newReducers;
++  }
++
++  return combineReducers(Object.keys(reducers).reduce(wrapReduce, Object.create(null)));
++}
 diff --git a/browser/devtools/debugger/content/views/event-listeners-view.js b/browser/devtools/debugger/content/views/event-listeners-view.js
 index 1c1c5c2..d17e1aa 100644
 --- a/browser/devtools/debugger/content/views/event-listeners-view.js
@@ -363,10 +353,10 @@ index 4a65aa3..c1f45d1 100644
  DebuggerController.Workers = new Workers();
  DebuggerController.ThreadState = new ThreadState();
 diff --git a/browser/devtools/debugger/debugger-view.js b/browser/devtools/debugger/debugger-view.js
-index f5330ef..ca6f9cb 100644
+index f5330ef..ba1dc29 100644
 --- a/browser/devtools/debugger/debugger-view.js
 +++ b/browser/devtools/debugger/debugger-view.js
-@@ -30,26 +30,30 @@ const SEARCH_VARIABLE_FLAG = "*";
+@@ -30,26 +30,27 @@ const SEARCH_VARIABLE_FLAG = "*";
  const SEARCH_AUTOFILL = [SEARCH_GLOBAL_FLAG, SEARCH_FUNCTION_FLAG, SEARCH_TOKEN_FLAG];
  const EDITOR_VARIABLE_HOVER_DELAY = 750; // ms
  const EDITOR_VARIABLE_POPUP_POSITION = "topcenter bottomleft";
@@ -380,11 +370,8 @@ index f5330ef..ca6f9cb 100644
 -const dispatcher = createDispatcher(stores);
 -const waitUntilService = require('devtools/shared/fluxify/waitUntilService');
 +const middlewareEmit = DebuggerController.emit.bind(DebuggerController);
-+const { createDebuggerMiddleware } = require("./content/middleware");
-+const createStore = require("devtools/shared/redux-bootstrap")({
-+  middleware: [createDebuggerMiddleware(middlewareEmit)],
-+});
-+const reducers = require('./content/reducers/index');
++const createStore = require("devtools/shared/redux-bootstrap")();
++const reducers = require('./content/reducers/index')(middlewareEmit);
 +const store = createStore(reducers);
 +const waitUntilService = require('devtools/shared/redux-middleware').waitUntilService;
  const services = {
@@ -402,7 +389,7 @@ index f5330ef..ca6f9cb 100644
    /**
     * Initializes the debugger view.
     *
-@@ -621,17 +625,17 @@ let DebuggerView = {
+@@ -621,17 +622,17 @@ let DebuggerView = {
      }, 0);
    },
  
@@ -421,7 +408,7 @@ index f5330ef..ca6f9cb 100644
     *
     * @param string aType
     *        The host type, either "bottom", "side" or "window".
-@@ -923,9 +927,9 @@ ResultsPanelContainer.prototype = Heritage.extend(WidgetMethods, {
+@@ -923,9 +924,9 @@ ResultsPanelContainer.prototype = Heritage.extend(WidgetMethods, {
  
    _anchor: null,
    _panel: null,
@@ -433,19 +420,11 @@ index f5330ef..ca6f9cb 100644
 -DebuggerView.EventListeners = new EventListenersView(dispatcher, DebuggerController);
 +DebuggerView.EventListeners = new EventListenersView(store, DebuggerController);
 diff --git a/browser/devtools/debugger/moz.build b/browser/devtools/debugger/moz.build
-index b79bcc5..02ef776 100644
+index b79bcc5..f8729a7 100644
 --- a/browser/devtools/debugger/moz.build
 +++ b/browser/devtools/debugger/moz.build
-@@ -6,21 +6,26 @@
- EXTRA_JS_MODULES.devtools.debugger += [
-     'debugger-commands.js',
-     'panel.js'
- ]
- 
- EXTRA_JS_MODULES.devtools.debugger.content += [
-     'content/constants.js',
+@@ -13,14 +13,18 @@ EXTRA_JS_MODULES.devtools.debugger.content += [
      'content/globalActions.js',
-+    'content/middleware.js',
      'content/utils.js'
  ]
  
@@ -975,10 +954,31 @@ index 872e667..380c73a 100644
      'devtools-clhandler.js',
      'devtools-clhandler.manifest',
 diff --git a/browser/devtools/shared/browser-loader.js b/browser/devtools/shared/browser-loader.js
-index a8ce1a5..761f1fe 100644
+index a8ce1a5..006a70c 100644
 --- a/browser/devtools/shared/browser-loader.js
 +++ b/browser/devtools/shared/browser-loader.js
-@@ -50,30 +50,31 @@ catch(e) {
+@@ -18,16 +18,20 @@ catch(e) {
+   // will be loaded if this is true, and that file doesn't get built
+   // into the release version of Firefox, so this will only work with
+   // dev environments.
+   appConstants = {
+     DEBUG_JS_MODULES: true
+   };
+ }
+ 
++const ALWAYS_LOAD_AS_CONTENT = new Set([
++  "resource:///modules/devtools/vendor/react.js",
++  "resource:///modules/devtools/vendor/react-dev.js",
++]);
+ 
+ /*
+  * Create a loader to be used in a browser environment. This evaluates
+  * modules in their own environment, but sets window (the normal
+  * global object) as the sandbox prototype, so when a variable is not
+  * defined it checks `window` before throwing an error. This makes all
+  * browser APIs available to modules by default, like a normal browser
+  * environment, but modules are still evaluated in their own scope.
+@@ -50,30 +54,30 @@ catch(e) {
   *         - require: a function to require modules with
   */
  function BrowserLoader(baseURI, window) {
@@ -1001,10 +1001,10 @@ index a8ce1a5..761f1fe 100644
      invisibleToDebugger: loaderOptions.invisibleToDebugger,
      require: (id, require) => {
        const uri = require.resolve(id);
-+
-       if (!uri.startsWith(baseURI) &&
+-      if (!uri.startsWith(baseURI) &&
 -          !uri.startsWith("resource:///modules/devtools/shared/content")) {
-+          !/react/.test(uri)) {
++
++      if (!uri.startsWith(baseURI) && !ALWAYS_LOAD_AS_CONTENT.has(uri)) {
          return devtools.require(uri);
        }
        return require(uri);
@@ -1013,40 +1013,6 @@ index a8ce1a5..761f1fe 100644
  
    // The main.js file does not have to actually exist. It just
    // represents the base environment, so requires will be relative to
-diff --git a/browser/devtools/shared/fluxify/bindActionCreators.js b/browser/devtools/shared/fluxify/bindActionCreators.js
-deleted file mode 100644
-index c700e91..0000000
---- a/browser/devtools/shared/fluxify/bindActionCreators.js
-+++ /dev/null
-@@ -1,28 +0,0 @@
--/* This Source Code Form is subject to the terms of the Mozilla Public
-- * License, v. 2.0. If a copy of the MPL was not distributed with this
-- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
--"use strict";
--
--function bindActionCreator(actionCreator, dispatch) {
--  return (...args) => dispatch(actionCreator(...args));
--}
--
--/**
-- * Wraps action creator functions into a function that automatically
-- * dispatches the created action with `dispatch`. Normally action
-- * creators simply return actions, but wrapped functions will
-- * automatically dispatch.
-- *
-- * @param {object} actionCreators
-- *        An object of action creator functions (names as keys)
-- * @param {function} dispatch
-- */
--function bindActionCreators(actionCreators, dispatch) {
--  let actions = {};
--  for (let k of Object.keys(actionCreators)) {
--    actions[k] = bindActionCreator(actionCreators[k], dispatch);
--  }
--  return actions;
--}
--
--module.exports = bindActionCreators;
 diff --git a/browser/devtools/shared/fluxify/dispatcher.js b/browser/devtools/shared/fluxify/dispatcher.js
 deleted file mode 100644
 index 07d41c1..0000000
@@ -1300,6 +1266,29 @@ index 07d41c1..0000000
 -  createDispatcher: createDispatcher,
 -  applyMiddleware: applyMiddleware
 -};
+diff --git a/browser/devtools/shared/fluxify/logMiddleware.js b/browser/devtools/shared/fluxify/logMiddleware.js
+deleted file mode 100644
+index a544494..0000000
+--- a/browser/devtools/shared/fluxify/logMiddleware.js
++++ /dev/null
+@@ -1,17 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-/**
+- * A middleware that logs all actions coming through the system
+- * to the console.
+- */
+-function logMiddleware({ dispatch, getState }) {
+-  return next => action => {
+-    console.log('[DISPATCH]', JSON.stringify(action));
+-    next(action);
+-  }
+-}
+-
+-module.exports = logMiddleware;
 diff --git a/browser/devtools/shared/fluxify/test/unit/head.js b/browser/devtools/shared/fluxify/test/unit/head.js
 deleted file mode 100644
 index 4d22af5..0000000
@@ -1634,6 +1623,32 @@ index 1ed05bd..0000000
 -[test_dispatcher.js]
 -[test_middlewares.js]
 \ No newline at end of file
+diff --git a/browser/devtools/shared/fluxify/thunkMiddleware.js b/browser/devtools/shared/fluxify/thunkMiddleware.js
+deleted file mode 100644
+index 6a4a369..0000000
+--- a/browser/devtools/shared/fluxify/thunkMiddleware.js
++++ /dev/null
+@@ -1,20 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-/**
+- * A middleware that allows thunks (functions) to be dispatched.
+- * If it's a thunk, it is called with `dispatch` and `getState`,
+- * allowing the action to create multiple actions (most likely
+- * asynchronously).
+- */
+-function thunkMiddleware({ dispatch, getState }) {
+-  return next => action => {
+-    return typeof action === "function"
+-      ? action(dispatch, getState)
+-      : next(action);
+-  }
+-}
+-
+-module.exports = thunkMiddleware;
 diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
 index cc055b1..b6ac7e3 100644
 --- a/browser/devtools/shared/moz.build
