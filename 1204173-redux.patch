@@ -1,6 +1,6 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Fri, 11 Sep 2015 18:53:48 -0700
-Subject: Bug 1204173 - Replace fluxify with redux. r=jlongster
+Date: Tue, 15 Sep 2015 15:50:20 -0700
+Subject: Bug 1204173 - Replace Fluxify with Redux. r=jlongster
 
 diff --git a/browser/devtools/debugger/content/stores/event-listeners.js b/browser/devtools/debugger/content/actions/event-listeners.js
 similarity index 75%
@@ -112,40 +112,21 @@ index 271de8f..05b470c 100644
 -  actions: { updateEventBreakpoints, fetchEventListeners }
 -}
 +module.exports = { updateEventBreakpoints, fetchEventListeners };
-diff --git a/browser/devtools/shared/fluxify/bindActionCreators.js b/browser/devtools/debugger/content/reducers/event-listeners.js
-similarity index 22%
-rename from browser/devtools/shared/fluxify/bindActionCreators.js
-rename to browser/devtools/debugger/content/reducers/event-listeners.js
-index c700e91..e218110 100644
---- a/browser/devtools/shared/fluxify/bindActionCreators.js
+diff --git a/browser/devtools/debugger/content/reducers/event-listeners.js b/browser/devtools/debugger/content/reducers/event-listeners.js
+new file mode 100644
+index 0000000..e218110
+--- /dev/null
 +++ b/browser/devtools/debugger/content/reducers/event-listeners.js
-@@ -1,28 +1,37 @@
- /* This Source Code Form is subject to the terms of the Mozilla Public
-  * License, v. 2.0. If a copy of the MPL was not distributed with this
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- "use strict";
- 
--function bindActionCreator(actionCreator, dispatch) {
--  return (...args) => dispatch(actionCreator(...args));
--}
+@@ -0,0 +1,37 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
 +const constants = require('../constants');
 +
 +const FETCH_EVENT_LISTENERS_DELAY = 200; // ms
- 
--/**
-- * Wraps action creator functions into a function that automatically
-- * dispatches the created action with `dispatch`. Normally action
-- * creators simply return actions, but wrapped functions will
-- * automatically dispatch.
-- *
-- * @param {object} actionCreators
-- *        An object of action creator functions (names as keys)
-- * @param {function} dispatch
-- */
--function bindActionCreators(actionCreators, dispatch) {
--  let actions = {};
--  for (let k of Object.keys(actionCreators)) {
--    actions[k] = bindActionCreator(actionCreators[k], dispatch);
++
 +const initialState = {
 +  activeEventNames: [],
 +  listeners: [],
@@ -168,59 +149,31 @@ index c700e91..e218110 100644
 +      emit("@redux:listeners", state.listeners);
 +    }
 +    break;
-   }
--  return actions;
++  }
 +
 +  return state;
- }
- 
--module.exports = bindActionCreators;
++}
++
 +module.exports = update;
 diff --git a/browser/devtools/debugger/content/stores/index.js b/browser/devtools/debugger/content/reducers/index.js
-similarity index 21%
+similarity index 86%
 rename from browser/devtools/debugger/content/stores/index.js
 rename to browser/devtools/debugger/content/reducers/index.js
-index 1508eb0..e261e71 100644
+index 1508eb0..31fe08e 100644
 --- a/browser/devtools/debugger/content/stores/index.js
 +++ b/browser/devtools/debugger/content/reducers/index.js
-@@ -1,8 +1,34 @@
+@@ -1,8 +1,8 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
  
-+const { combineReducers } = require('devtools/vendor/redux');
  const eventListeners = require('./event-listeners');
  
 -module.exports = { eventListeners };
-+/**
-+ * Function that takes an `emit` function and returns a function
-+ * to be used as a reducer for a Redux store. This allows all
-+ * reducers defined here to receive a third argument, the `emit` function,
-+ * for event-based subscriptions from within reducers.
-+ *
-+ * @param {Function} emit
-+ * @return {Function}
-+ */
-+module.exports = function (emit) {
-+  let reducers = {
-+    eventListeners
-+  };
-+
-+  // Wrap each reducer with a wrapper function that calls
-+  // the reducer with a third argument, an `emit` function.
-+  // Use this rather than a new custom top level reducer that would ultimately
-+  // have to replicate redux's `combineReducers` so we only pass in correct state,
-+  // the error checking, and other edge cases.
-+  function wrapReduce (newReducers, key) {
-+    newReducers[key] = (state, action) => reducers[key](state, action, emit);
-+    return newReducers;
-+  }
-+
-+  return combineReducers(Object.keys(reducers).reduce(wrapReduce, Object.create(null)));
-+}
++exports.eventListeners = eventListeners;
 diff --git a/browser/devtools/debugger/content/views/event-listeners-view.js b/browser/devtools/debugger/content/views/event-listeners-view.js
-index 1c1c5c2..d17e1aa 100644
+index 1c1c5c2..b55545a 100644
 --- a/browser/devtools/debugger/content/views/event-listeners-view.js
 +++ b/browser/devtools/debugger/content/views/event-listeners-view.js
 @@ -1,33 +1,32 @@
@@ -232,7 +185,7 @@ index 1c1c5c2..d17e1aa 100644
 -const actions = require('../stores/event-listeners').actions;
 -const bindActionCreators = require('devtools/shared/fluxify/bindActionCreators');
 +const actions = require('../actions/event-listeners');
-+const { bindActionCreators } = require('devtools/vendor/redux');
++const { bindActionCreators } = require('devtools/shared/vendor/redux');
  
  /**
   * Functions handling the event listeners UI.
@@ -353,10 +306,10 @@ index 4a65aa3..c1f45d1 100644
  DebuggerController.Workers = new Workers();
  DebuggerController.ThreadState = new ThreadState();
 diff --git a/browser/devtools/debugger/debugger-view.js b/browser/devtools/debugger/debugger-view.js
-index f5330ef..ba1dc29 100644
+index f5330ef..156005b 100644
 --- a/browser/devtools/debugger/debugger-view.js
 +++ b/browser/devtools/debugger/debugger-view.js
-@@ -30,26 +30,27 @@ const SEARCH_VARIABLE_FLAG = "*";
+@@ -30,26 +30,29 @@ const SEARCH_VARIABLE_FLAG = "*";
  const SEARCH_AUTOFILL = [SEARCH_GLOBAL_FLAG, SEARCH_FUNCTION_FLAG, SEARCH_TOKEN_FLAG];
  const EDITOR_VARIABLE_HOVER_DELAY = 750; // ms
  const EDITOR_VARIABLE_POPUP_POSITION = "topcenter bottomleft";
@@ -369,13 +322,16 @@ index f5330ef..ba1dc29 100644
 -const stores = require('./content/stores/index');
 -const dispatcher = createDispatcher(stores);
 -const waitUntilService = require('devtools/shared/fluxify/waitUntilService');
-+const middlewareEmit = DebuggerController.emit.bind(DebuggerController);
-+const createStore = require("devtools/shared/redux-bootstrap")();
-+const reducers = require('./content/reducers/index')(middlewareEmit);
-+const store = createStore(reducers);
-+const waitUntilService = require('devtools/shared/redux-middleware').waitUntilService;
++const debuggerControllerEmit = DebuggerController.emit.bind(DebuggerController);
++const createStore = require("devtools/shared/redux/create-store")();
++const { combineEmittingReducers } = require("devtools/shared/redux/reducers");
++const reducers = require("./content/reducers/index");
++const store = createStore(combineEmittingReducers(reducers, debuggerControllerEmit));
++const { NAME: WAIT_UNTIL_NAME } = require("devtools/shared/redux/middleware/wait-service");
++
  const services = {
-   WAIT_UNTIL: waitUntilService.name
+-  WAIT_UNTIL: waitUntilService.name
++  WAIT_UNTIL: WAIT_UNTIL_NAME
  };
  
  const EventListenersView = require('./content/views/event-listeners-view');
@@ -389,7 +345,7 @@ index f5330ef..ba1dc29 100644
    /**
     * Initializes the debugger view.
     *
-@@ -621,17 +622,17 @@ let DebuggerView = {
+@@ -621,17 +624,17 @@ let DebuggerView = {
      }, 0);
    },
  
@@ -408,7 +364,7 @@ index f5330ef..ba1dc29 100644
     *
     * @param string aType
     *        The host type, either "bottom", "side" or "window".
-@@ -923,9 +924,9 @@ ResultsPanelContainer.prototype = Heritage.extend(WidgetMethods, {
+@@ -923,9 +926,9 @@ ResultsPanelContainer.prototype = Heritage.extend(WidgetMethods, {
  
    _anchor: null,
    _panel: null,
@@ -892,7 +848,7 @@ index 376e48c..7fb5379 100644
          action.status ? action.status === "done" : true
        ),
 diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
-index cd4f894..d415647 100644
+index cd4f894..52ed657 100644
 --- a/browser/devtools/jar.mn
 +++ b/browser/devtools/jar.mn
 @@ -1,13 +1,15 @@
@@ -901,8 +857,8 @@ index cd4f894..d415647 100644
  # file, You can obtain one at http://mozilla.org/MPL/2.0/.
  
  browser.jar:
-+    content/browser/devtools/d3.js                                     (vendor/d3.js)
-+    content/browser/devtools/dagre-d3.js                               (vendor/dagre-d3.js)
++    content/browser/devtools/d3.js                                     (shared/vendor/d3.js)
++    content/browser/devtools/dagre-d3.js                               (shared/vendor/dagre-d3.js)
      content/browser/devtools/widgets.css                               (shared/widgets/widgets.css)
      content/browser/devtools/widgets/VariablesView.xul                 (shared/widgets/VariablesView.xul)
      content/browser/devtools/markup-view.xhtml                         (markupview/markup-view.xhtml)
@@ -931,33 +887,11 @@ index cd4f894..d415647 100644
      content/browser/devtools/webaudioeditor/views/inspector.js         (webaudioeditor/views/inspector.js)
      content/browser/devtools/webaudioeditor/views/properties.js        (webaudioeditor/views/properties.js)
      content/browser/devtools/webaudioeditor/views/automation.js        (webaudioeditor/views/automation.js)
-diff --git a/browser/devtools/moz.build b/browser/devtools/moz.build
-index 872e667..380c73a 100644
---- a/browser/devtools/moz.build
-+++ b/browser/devtools/moz.build
-@@ -25,16 +25,17 @@ DIRS += [
-     'scratchpad',
-     'shadereditor',
-     'shared',
-     'sourceeditor',
-     'storage',
-     'styleeditor',
-     'styleinspector',
-     'tilt',
-+    'vendor',
-     'webaudioeditor',
-     'webconsole',
-     'webide',
- ]
- 
- EXTRA_COMPONENTS += [
-     'devtools-clhandler.js',
-     'devtools-clhandler.manifest',
 diff --git a/browser/devtools/shared/browser-loader.js b/browser/devtools/shared/browser-loader.js
-index a8ce1a5..006a70c 100644
+index a8ce1a5..9a49352 100644
 --- a/browser/devtools/shared/browser-loader.js
 +++ b/browser/devtools/shared/browser-loader.js
-@@ -18,16 +18,20 @@ catch(e) {
+@@ -18,16 +18,17 @@ catch(e) {
    // will be loaded if this is true, and that file doesn't get built
    // into the release version of Firefox, so this will only work with
    // dev environments.
@@ -966,10 +900,7 @@ index a8ce1a5..006a70c 100644
    };
  }
  
-+const ALWAYS_LOAD_AS_CONTENT = new Set([
-+  "resource:///modules/devtools/vendor/react.js",
-+  "resource:///modules/devtools/vendor/react-dev.js",
-+]);
++const VENDOR_CONTENT_URL = "resource:///modules/devtools/shared/vendor";
  
  /*
   * Create a loader to be used in a browser environment. This evaluates
@@ -978,7 +909,7 @@ index a8ce1a5..006a70c 100644
   * defined it checks `window` before throwing an error. This makes all
   * browser APIs available to modules by default, like a normal browser
   * environment, but modules are still evaluated in their own scope.
-@@ -50,30 +54,30 @@ catch(e) {
+@@ -50,30 +51,31 @@ catch(e) {
   *         - require: a function to require modules with
   */
  function BrowserLoader(baseURI, window) {
@@ -1001,10 +932,10 @@ index a8ce1a5..006a70c 100644
      invisibleToDebugger: loaderOptions.invisibleToDebugger,
      require: (id, require) => {
        const uri = require.resolve(id);
--      if (!uri.startsWith(baseURI) &&
--          !uri.startsWith("resource:///modules/devtools/shared/content")) {
 +
-+      if (!uri.startsWith(baseURI) && !ALWAYS_LOAD_AS_CONTENT.has(uri)) {
+       if (!uri.startsWith(baseURI) &&
+-          !uri.startsWith("resource:///modules/devtools/shared/content")) {
++          !uri.startsWith(VENDOR_CONTENT_URL)) {
          return devtools.require(uri);
        }
        return require(uri);
@@ -1013,6 +944,40 @@ index a8ce1a5..006a70c 100644
  
    // The main.js file does not have to actually exist. It just
    // represents the base environment, so requires will be relative to
+diff --git a/browser/devtools/shared/fluxify/bindActionCreators.js b/browser/devtools/shared/fluxify/bindActionCreators.js
+deleted file mode 100644
+index c700e91..0000000
+--- a/browser/devtools/shared/fluxify/bindActionCreators.js
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-function bindActionCreator(actionCreator, dispatch) {
+-  return (...args) => dispatch(actionCreator(...args));
+-}
+-
+-/**
+- * Wraps action creator functions into a function that automatically
+- * dispatches the created action with `dispatch`. Normally action
+- * creators simply return actions, but wrapped functions will
+- * automatically dispatch.
+- *
+- * @param {object} actionCreators
+- *        An object of action creator functions (names as keys)
+- * @param {function} dispatch
+- */
+-function bindActionCreators(actionCreators, dispatch) {
+-  let actions = {};
+-  for (let k of Object.keys(actionCreators)) {
+-    actions[k] = bindActionCreator(actionCreators[k], dispatch);
+-  }
+-  return actions;
+-}
+-
+-module.exports = bindActionCreators;
 diff --git a/browser/devtools/shared/fluxify/dispatcher.js b/browser/devtools/shared/fluxify/dispatcher.js
 deleted file mode 100644
 index 07d41c1..0000000
@@ -1266,29 +1231,6 @@ index 07d41c1..0000000
 -  createDispatcher: createDispatcher,
 -  applyMiddleware: applyMiddleware
 -};
-diff --git a/browser/devtools/shared/fluxify/logMiddleware.js b/browser/devtools/shared/fluxify/logMiddleware.js
-deleted file mode 100644
-index a544494..0000000
---- a/browser/devtools/shared/fluxify/logMiddleware.js
-+++ /dev/null
-@@ -1,17 +0,0 @@
--/* This Source Code Form is subject to the terms of the Mozilla Public
-- * License, v. 2.0. If a copy of the MPL was not distributed with this
-- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
--"use strict";
--
--/**
-- * A middleware that logs all actions coming through the system
-- * to the console.
-- */
--function logMiddleware({ dispatch, getState }) {
--  return next => action => {
--    console.log('[DISPATCH]', JSON.stringify(action));
--    next(action);
--  }
--}
--
--module.exports = logMiddleware;
 diff --git a/browser/devtools/shared/fluxify/test/unit/head.js b/browser/devtools/shared/fluxify/test/unit/head.js
 deleted file mode 100644
 index 4d22af5..0000000
@@ -1623,37 +1565,33 @@ index 1ed05bd..0000000
 -[test_dispatcher.js]
 -[test_middlewares.js]
 \ No newline at end of file
-diff --git a/browser/devtools/shared/fluxify/thunkMiddleware.js b/browser/devtools/shared/fluxify/thunkMiddleware.js
-deleted file mode 100644
-index 6a4a369..0000000
---- a/browser/devtools/shared/fluxify/thunkMiddleware.js
-+++ /dev/null
-@@ -1,20 +0,0 @@
--/* This Source Code Form is subject to the terms of the Mozilla Public
-- * License, v. 2.0. If a copy of the MPL was not distributed with this
-- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
--"use strict";
--
--/**
-- * A middleware that allows thunks (functions) to be dispatched.
-- * If it's a thunk, it is called with `dispatch` and `getState`,
-- * allowing the action to create multiple actions (most likely
-- * asynchronously).
-- */
--function thunkMiddleware({ dispatch, getState }) {
--  return next => action => {
--    return typeof action === "function"
--      ? action(dispatch, getState)
--      : next(action);
--  }
--}
--
--module.exports = thunkMiddleware;
 diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
-index cc055b1..b6ac7e3 100644
+index cc055b1..4ea0b77 100644
 --- a/browser/devtools/shared/moz.build
 +++ b/browser/devtools/shared/moz.build
-@@ -27,52 +27,42 @@ EXTRA_JS_MODULES.devtools += [
+@@ -2,16 +2,21 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+ XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
+ 
++DIRS += [
++    'redux',
++    'vendor',
++]
++
+ EXTRA_JS_MODULES.devtools += [
+     'AppCacheUtils.jsm',
+     'Curl.jsm',
+     'DeveloperToolbar.jsm',
+     'DOMHelpers.jsm',
+     'Jsbeautify.jsm',
+     'Parser.jsm',
+     'SplitView.jsm',
+@@ -27,52 +32,40 @@ EXTRA_JS_MODULES.devtools += [
      'widgets/VariablesView.jsm',
      'widgets/VariablesViewController.jsm',
      'widgets/ViewHelpers.jsm',
@@ -1672,8 +1610,6 @@ index cc055b1..b6ac7e3 100644
      'observable-object.js',
      'options-view.js',
      'poller.js',
-+    'redux-bootstrap.js',
-+    'redux-middleware.js',
      'source-utils.js',
      'telemetry.js',
      'theme-switching.js',
@@ -1708,14 +1644,14 @@ index cc055b1..b6ac7e3 100644
  ]
 -
 -DIRS += ['fluxify']
-diff --git a/browser/devtools/shared/create-dispatcher.js b/browser/devtools/shared/redux-bootstrap.js
-similarity index 57%
+diff --git a/browser/devtools/shared/create-dispatcher.js b/browser/devtools/shared/redux/create-store.js
+similarity index 54%
 rename from browser/devtools/shared/create-dispatcher.js
-rename to browser/devtools/shared/redux-bootstrap.js
-index 0f18f64..e0f7807 100644
+rename to browser/devtools/shared/redux/create-store.js
+index 0f18f64..d8e827b 100644
 --- a/browser/devtools/shared/create-dispatcher.js
-+++ b/browser/devtools/shared/redux-bootstrap.js
-@@ -1,31 +1,33 @@
++++ b/browser/devtools/shared/redux/create-store.js
+@@ -1,31 +1,35 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1726,8 +1662,10 @@ index 0f18f64..e0f7807 100644
 -const logMiddleware = require('./fluxify/logMiddleware');
 -const waitUntilService = require('./fluxify/waitUntilService')
 -const { compose } = require('devtools/toolkit/DevToolsUtils');
-+const { createStore, combineReducers, applyMiddleware } = require("devtools/vendor/redux");
-+const middlewares = require('./redux-middleware');
++const { createStore, applyMiddleware } = require("devtools/shared/vendor/redux");
++const { thunk } = require("./middleware/thunk");
++const { waitUntilService } = require("./middleware/wait-service");
++const { log } = require("./middleware/log");
  
  /**
   * This creates a dispatcher with all the standard middleware in place
@@ -1742,13 +1680,13 @@ index 0f18f64..e0f7807 100644
    const middleware = [
 -    thunkMiddleware,
 -    waitUntilService.service
-+    middlewares.thunk,
-+    middlewares.waitUntilService
++    thunk,
++    waitUntilService
    ];
  
    if (opts.log) {
 -    middleware.push(logMiddleware);
-+    middleware.push(middlewares.log);
++    middleware.push(log);
    }
  
 -  return fluxify.applyMiddleware(...middleware)(fluxify.createDispatcher);
@@ -1758,45 +1696,75 @@ index 0f18f64..e0f7807 100644
 +
 +  return applyMiddleware(...middleware)(createStore);
  }
-diff --git a/browser/devtools/shared/fluxify/waitUntilService.js b/browser/devtools/shared/redux-middleware.js
-similarity index 68%
+diff --git a/browser/devtools/shared/fluxify/logMiddleware.js b/browser/devtools/shared/redux/middleware/log.js
+similarity index 72%
+rename from browser/devtools/shared/fluxify/logMiddleware.js
+rename to browser/devtools/shared/redux/middleware/log.js
+index a544494..9b41306 100644
+--- a/browser/devtools/shared/fluxify/logMiddleware.js
++++ b/browser/devtools/shared/redux/middleware/log.js
+@@ -2,16 +2,16 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * A middleware that logs all actions coming through the system
+  * to the console.
+  */
+-function logMiddleware({ dispatch, getState }) {
++function log({ dispatch, getState }) {
+   return next => action => {
+-    console.log('[DISPATCH]', JSON.stringify(action));
++    console.log("[DISPATCH]", JSON.stringify(action));
+     next(action);
+   }
+ }
+ 
+-module.exports = logMiddleware;
++exports.log = log;
+diff --git a/browser/devtools/shared/fluxify/thunkMiddleware.js b/browser/devtools/shared/redux/middleware/thunk.js
+similarity index 86%
+rename from browser/devtools/shared/fluxify/thunkMiddleware.js
+rename to browser/devtools/shared/redux/middleware/thunk.js
+index 6a4a369..bd29ca9 100644
+--- a/browser/devtools/shared/fluxify/thunkMiddleware.js
++++ b/browser/devtools/shared/redux/middleware/thunk.js
+@@ -4,17 +4,16 @@
+ "use strict";
+ 
+ /**
+  * A middleware that allows thunks (functions) to be dispatched.
+  * If it's a thunk, it is called with `dispatch` and `getState`,
+  * allowing the action to create multiple actions (most likely
+  * asynchronously).
+  */
+-function thunkMiddleware({ dispatch, getState }) {
++function thunk({ dispatch, getState }) {
+   return next => action => {
+     return typeof action === "function"
+       ? action(dispatch, getState)
+       : next(action);
+   }
+ }
+-
+-module.exports = thunkMiddleware;
++exports.thunk = thunk;
+diff --git a/browser/devtools/shared/fluxify/waitUntilService.js b/browser/devtools/shared/redux/middleware/wait-service.js
+similarity index 91%
 rename from browser/devtools/shared/fluxify/waitUntilService.js
-rename to browser/devtools/shared/redux-middleware.js
-index f097446..f4d25c6 100644
+rename to browser/devtools/shared/redux/middleware/wait-service.js
+index f097446..0d428db 100644
 --- a/browser/devtools/shared/fluxify/waitUntilService.js
-+++ b/browser/devtools/shared/redux-middleware.js
-@@ -1,14 +1,37 @@
++++ b/browser/devtools/shared/redux/middleware/wait-service.js
+@@ -1,35 +1,35 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
  
 -const NAME = "@@service/waitUntil";
-+/**
-+ * A middleware that allows thunks (functions) to be dispatched.
-+ * If it's a thunk, it is called with `dispatch` and `getState`,
-+ * allowing the action to create multiple actions (most likely
-+ * asynchronously).
-+ */
-+function thunk({ dispatch, getState }) {
-+  return next => action => {
-+    return typeof action === "function"
-+      ? action(dispatch, getState)
-+      : next(action);
-+  }
-+}
-+
-+/**
-+ * A middleware that logs all actions coming through the system
-+ * to the console.
-+ */
-+function log({ dispatch, getState }) {
-+  return next => action => {
-+    console.log('[DISPATCH]', JSON.stringify(action));
-+    next(action);
-+  }
-+}
- 
+-
  /**
   * A middleware which acts like a service, because it is stateful
   * and "long-running" in the background. It provides the ability
@@ -1804,7 +1772,12 @@ index f097446..f4d25c6 100644
   * condition is met by an action coming through the system. Think of
   * it as a thunk that blocks until the condition is met. Example:
   *
-@@ -20,16 +43,18 @@ const NAME = "@@service/waitUntil";
+  * ```js
+- * const services = { WAIT_UNTIL: require('waitUntilService').name };
++ * const services = { WAIT_UNTIL: require('wait-service').NAME };
+  *
+  * { type: services.WAIT_UNTIL,
+  *   predicate: action => action.type === constants.ADD_ITEM,
   *   run: (dispatch, getState, action) => {
   *     // Do anything here. You only need to accept the arguments
   *     // if you need them. `action` is the action that satisfied
@@ -1813,8 +1786,8 @@ index f097446..f4d25c6 100644
   * }
   * ```
   */
-+const WAIT_UNTIL_NAME = "@@service/waitUntil";
-+waitUntilService.NAME = WAIT_UNTIL_NAME;
++const NAME = exports.NAME = "@@service/waitUntil";
++
  function waitUntilService({ dispatch, getState }) {
    let pending = [];
  
@@ -1823,17 +1796,7 @@ index f097446..f4d25c6 100644
      let stillPending = [];
  
      // Find the pending requests whose predicates are satisfied with
-@@ -48,22 +73,21 @@ function waitUntilService({ dispatch, getState }) {
- 
-     pending = stillPending;
-     for (let request of readyRequests) {
-       request.run(dispatch, getState, action);
-     }
-   }
- 
-   return next => action => {
--    if (action.type === NAME) {
-+    if (action.type === WAIT_UNTIL_NAME) {
+@@ -57,13 +57,9 @@ function waitUntilService({ dispatch, getState }) {
        pending.push(action);
      }
      else {
@@ -1842,27 +1805,86 @@ index f097446..f4d25c6 100644
      }
    }
  }
- 
+-
 -module.exports = {
 -  service: waitUntilService,
 -  name: NAME
 -};
-+exports.thunk = thunk;
-+exports.log = log;
 +exports.waitUntilService = waitUntilService;
-diff --git a/browser/devtools/shared/D3_LICENSE b/browser/devtools/vendor/D3_LICENSE
+diff --git a/browser/devtools/shared/redux/moz.build b/browser/devtools/shared/redux/moz.build
+new file mode 100644
+index 0000000..ac57eba
+--- /dev/null
++++ b/browser/devtools/shared/redux/moz.build
+@@ -0,0 +1,16 @@
++# -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++EXTRA_JS_MODULES.devtools.shared.redux += [
++    'create-store.js',
++    'reducers.js',
++]
++
++EXTRA_JS_MODULES.devtools.shared.redux.middleware += [
++    'middleware/log.js',
++    'middleware/thunk.js',
++    'middleware/wait-service.js',
++]
+diff --git a/browser/devtools/shared/redux/reducers.js b/browser/devtools/shared/redux/reducers.js
+new file mode 100644
+index 0000000..73d2ee5
+--- /dev/null
++++ b/browser/devtools/shared/redux/reducers.js
+@@ -0,0 +1,33 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { combineReducers } = require("devtools/shared/vendor/redux");
++
++/**
++ * Function that takes a hash of reducers, like `combineReducers`,
++ * and an `emit` function and returns a function to be used as a reducer
++ * for a Redux store. This allows all reducers defined here to receive
++ * a third argument, the `emit` function, for event-based subscriptions
++ * from within reducers.
++ *
++ * @param {Object} reducers
++ * @param {Function} emit
++ * @return {Function}
++ */
++function combineEmittingReducers (reducers, emit) {
++  // Wrap each reducer with a wrapper function that calls
++  // the reducer with a third argument, an `emit` function.
++  // Use this rather than a new custom top level reducer that would ultimately
++  // have to replicate redux's `combineReducers` so we only pass in correct state,
++  // the error checking, and other edge cases.
++  function wrapReduce (newReducers, key) {
++    newReducers[key] = (state, action) => reducers[key](state, action, emit);
++    return newReducers;
++  }
++
++  return combineReducers(Object.keys(reducers).reduce(wrapReduce, Object.create(null)));
++}
++
++exports.combineEmittingReducers = combineEmittingReducers;
+diff --git a/browser/devtools/shared/D3_LICENSE b/browser/devtools/shared/vendor/D3_LICENSE
 similarity index 100%
 rename from browser/devtools/shared/D3_LICENSE
-rename to browser/devtools/vendor/D3_LICENSE
-diff --git a/browser/devtools/webaudioeditor/lib/DAGRE_D3_LICENSE b/browser/devtools/vendor/DAGRE_D3_LICENSE
+rename to browser/devtools/shared/vendor/D3_LICENSE
+diff --git a/browser/devtools/webaudioeditor/lib/DAGRE_D3_LICENSE b/browser/devtools/shared/vendor/DAGRE_D3_LICENSE
 similarity index 100%
 rename from browser/devtools/webaudioeditor/lib/DAGRE_D3_LICENSE
-rename to browser/devtools/vendor/DAGRE_D3_LICENSE
-diff --git a/browser/devtools/vendor/REDUX_LICENSE b/browser/devtools/vendor/REDUX_LICENSE
+rename to browser/devtools/shared/vendor/DAGRE_D3_LICENSE
+diff --git a/browser/devtools/shared/vendor/REDUX_LICENSE b/browser/devtools/shared/vendor/REDUX_LICENSE
 new file mode 100644
 index 0000000..af2353d
 --- /dev/null
-+++ b/browser/devtools/vendor/REDUX_LICENSE
++++ b/browser/devtools/shared/vendor/REDUX_LICENSE
 @@ -0,0 +1,21 @@
 +The MIT License (MIT)
 +
@@ -1885,21 +1907,21 @@ index 0000000..af2353d
 +LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 +OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 +SOFTWARE.
-diff --git a/browser/devtools/shared/d3.js b/browser/devtools/vendor/d3.js
+diff --git a/browser/devtools/shared/d3.js b/browser/devtools/shared/vendor/d3.js
 similarity index 100%
 rename from browser/devtools/shared/d3.js
-rename to browser/devtools/vendor/d3.js
-diff --git a/browser/devtools/webaudioeditor/lib/dagre-d3.js b/browser/devtools/vendor/dagre-d3.js
+rename to browser/devtools/shared/vendor/d3.js
+diff --git a/browser/devtools/webaudioeditor/lib/dagre-d3.js b/browser/devtools/shared/vendor/dagre-d3.js
 similarity index 100%
 rename from browser/devtools/webaudioeditor/lib/dagre-d3.js
-rename to browser/devtools/vendor/dagre-d3.js
-diff --git a/browser/devtools/shared/fluxify/moz.build b/browser/devtools/vendor/moz.build
+rename to browser/devtools/shared/vendor/dagre-d3.js
+diff --git a/browser/devtools/shared/fluxify/moz.build b/browser/devtools/shared/vendor/moz.build
 similarity index 57%
 rename from browser/devtools/shared/fluxify/moz.build
-rename to browser/devtools/vendor/moz.build
-index 061c9c8..1a9ac41 100644
+rename to browser/devtools/shared/vendor/moz.build
+index 061c9c8..375a7a9 100644
 --- a/browser/devtools/shared/fluxify/moz.build
-+++ b/browser/devtools/vendor/moz.build
++++ b/browser/devtools/shared/vendor/moz.build
 @@ -1,15 +1,15 @@
  # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
  # vim: set filetype=python:
@@ -1913,7 +1935,7 @@ index 061c9c8..1a9ac41 100644
 -    'logMiddleware.js',
 -    'thunkMiddleware.js',
 -    'waitUntilService.js'
-+EXTRA_JS_MODULES.devtools.vendor += [
++EXTRA_JS_MODULES.devtools.shared.vendor += [
 +    'react.js',
 +    'redux.js',
  ]
@@ -1921,22 +1943,22 @@ index 061c9c8..1a9ac41 100644
 -XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
 \ No newline at end of file
 +if CONFIG['DEBUG_JS_MODULES']:
-+    EXTRA_JS_MODULES.devtools.vendor += [
++    EXTRA_JS_MODULES.devtools.shared.vendor += [
 +        'content/react-dev.js'
 +    ]
-diff --git a/browser/devtools/shared/content/react-dev.js b/browser/devtools/vendor/react-dev.js
+diff --git a/browser/devtools/shared/content/react-dev.js b/browser/devtools/shared/vendor/react-dev.js
 similarity index 100%
 rename from browser/devtools/shared/content/react-dev.js
-rename to browser/devtools/vendor/react-dev.js
-diff --git a/browser/devtools/shared/content/react.js b/browser/devtools/vendor/react.js
+rename to browser/devtools/shared/vendor/react-dev.js
+diff --git a/browser/devtools/shared/content/react.js b/browser/devtools/shared/vendor/react.js
 similarity index 100%
 rename from browser/devtools/shared/content/react.js
-rename to browser/devtools/vendor/react.js
-diff --git a/browser/devtools/vendor/redux.js b/browser/devtools/vendor/redux.js
+rename to browser/devtools/shared/vendor/react.js
+diff --git a/browser/devtools/shared/vendor/redux.js b/browser/devtools/shared/vendor/redux.js
 new file mode 100644
 index 0000000..e013f72
 --- /dev/null
-+++ b/browser/devtools/vendor/redux.js
++++ b/browser/devtools/shared/vendor/redux.js
 @@ -0,0 +1,610 @@
 +(function webpackUniversalModuleDefinition(root, factory) {
 +	if(typeof exports === 'object' && typeof module === 'object')

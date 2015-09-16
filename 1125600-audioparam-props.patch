@@ -1,0 +1,103 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 16 Sep 2015 09:18:43 -0700
+Subject: Bug 1125600 - Use parentNodeId and name ChromeOnly properties of AudioParam in the web audio tool, rather than depend on ephemeral expando properties set manually. r=vp
+
+diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
+index 84c5eec..972c4c1 100644
+--- a/toolkit/devtools/server/actors/webaudio.js
++++ b/toolkit/devtools/server/actors/webaudio.js
+@@ -633,22 +633,22 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     let { caller, name, args } = functionCall.details;
+     let wrappedParam = new XPCNativeWrapper(caller);
+ 
+     // Sanitize arguments, as these should all be numbers,
+     // with the exception of a TypedArray, which needs
+     // casted to an Array
+     args = sanitizeAutomationArgs(args);
+ 
+-    let nodeActor = this._getActorByNativeID(wrappedParam._parentID);
+-    nodeActor._recordAutomationEvent(wrappedParam._paramName, name, args);
++    let nodeActor = this._getActorByNativeID(wrappedParam.parentNodeId);
++    nodeActor._recordAutomationEvent(wrappedParam.name, name, args);
+ 
+     this._onAutomationEvent({
+       node: nodeActor,
+-      paramName: wrappedParam._paramName,
++      paramName: wrappedParam.name,
+       eventName: name,
+       args: args
+     });
+   },
+ 
+   /**
+    * Stops listening for document global changes and puts this actor
+    * to hibernation. This method is called automatically just before the
+@@ -721,41 +721,23 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+    * Helper for constructing an AudioNodeActor, assigning to
+    * internal weak map, and tracking via `manage` so it is assigned
+    * an `actorID`.
+    */
+   _constructAudioNode: function (node) {
+     // Ensure AudioNode is wrapped.
+     node = new XPCNativeWrapper(node);
+ 
+-    this._instrumentParams(node);
+-
+     let actor = new AudioNodeActor(this.conn, node);
+     this.manage(actor);
+     this._nativeToActorID.set(node.id, actor.actorID);
+     return actor;
+   },
+ 
+   /**
+-   * Takes an XrayWrapper node, and attaches the node's `nativeID`
+-   * to the AudioParams as `_parentID`, as well as the the type of param
+-   * as a string on `_paramName`.
+-   */
+-  _instrumentParams: function (node) {
+-    let type = getConstructorName(node);
+-    Object.keys(AUDIO_NODE_DEFINITION[type].properties || {})
+-      .filter(isAudioParam.bind(null, node))
+-      .forEach(paramName => {
+-        let param = node[paramName];
+-        param._parentID = node.id;
+-        param._paramName = paramName;
+-      });
+-  },
+-
+-  /**
+    * Takes an AudioNode and returns the stored actor for it.
+    * In some cases, we won't have an actor stored (for example,
+    * connecting to an AudioDestinationNode, since it's implicitly
+    * created), so make a new actor and store that.
+    */
+   _getActorByNativeID: function (nativeID) {
+     // Ensure we have a Number, rather than a string
+     // return via notification.
+@@ -787,21 +769,21 @@ let WebAudioActor = exports.WebAudioActor = protocol.ActorClass({
+     });
+   },
+ 
+   /**
+    * Called when an audio node is connected to an audio param.
+    */
+   _onConnectParam: function (source, param) {
+     let sourceActor = this._getActorByNativeID(source.id);
+-    let destActor = this._getActorByNativeID(param._parentID);
++    let destActor = this._getActorByNativeID(param.parentNodeId);
+     emit(this, "connect-param", {
+       source: sourceActor,
+       dest: destActor,
+-      param: param._paramName
++      param: param.name
+     });
+   },
+ 
+   /**
+    * Called when an audio node is disconnected.
+    */
+   _onDisconnectNode: function (node) {
+     let actor = this._getActorByNativeID(node.id);
+-- 
+2.2.1
+

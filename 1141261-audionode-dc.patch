@@ -1,0 +1,178 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 15 Sep 2015 17:02:16 -0700
+Subject: Bug 1141261 - Immediately disconnecting an audio node is now reflected properly in the web audio graph due to bug 1204595; tests for that scenario. r=vp
+
+diff --git a/browser/devtools/webaudioeditor/test/browser.ini b/browser/devtools/webaudioeditor/test/browser.ini
+index 41be48d..073f378 100644
+--- a/browser/devtools/webaudioeditor/test/browser.ini
++++ b/browser/devtools/webaudioeditor/test/browser.ini
+@@ -7,19 +7,20 @@ support-files =
+   doc_simple-node-creation.html
+   doc_buffer-and-array.html
+   doc_media-node-creation.html
+   doc_destroy-nodes.html
+   doc_connect-param.html
+   doc_connect-multi-param.html
+   doc_iframe-context.html
+   doc_automation.html
++  doc_bug_1112378.html
+   doc_bug_1125817.html
+   doc_bug_1130901.html
+-  doc_bug_1112378.html
++  doc_bug_1141261.html
+   440hz_sine.ogg
+   head.js
+ 
+ [browser_audionode-actor-get-param-flags.js]
+ [browser_audionode-actor-get-params-01.js]
+ [browser_audionode-actor-get-params-02.js]
+ [browser_audionode-actor-get-set-param.js]
+ [browser_audionode-actor-type.js]
+@@ -48,16 +49,17 @@ skip-if = true # bug 1092571
+ [browser_wa_graph-click.js]
+ [browser_wa_graph-markers.js]
+ [browser_wa_graph-render-01.js]
+ [browser_wa_graph-render-02.js]
+ [browser_wa_graph-render-03.js]
+ [browser_wa_graph-render-04.js]
+ [browser_wa_graph-render-05.js]
+ skip-if = true # bug 1092571
++[browser_wa_graph-render-06.js]
+ [browser_wa_graph-selected.js]
+ [browser_wa_graph-zoom.js]
+ [browser_wa_inspector.js]
+ [browser_wa_inspector-toggle.js]
+ [browser_wa_inspector-width.js]
+ [browser_wa_inspector-bypass-01.js]
+ [browser_wa_navigate.js]
+ [browser_wa_properties-view.js]
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js b/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
+index 3fb70b1..01394b0 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_controller-01.js
+@@ -13,15 +13,16 @@ add_task(function*() {
+   let { target, panel } = yield initWebAudioEditor(BUG_1125817_URL);
+   let { panelWin } = panel;
+   let { gFront, $, $$, EVENTS, gAudioNodes } = panelWin;
+ 
+   reload(target);
+ 
+   let [actors] = yield Promise.all([
+     once(gAudioNodes, "add", 2),
+-    once(gAudioNodes, "disconnect")
++    once(gAudioNodes, "disconnect"),
++    waitForGraphRendered(panelWin, 2, 0)
+   ]);
+ 
+   ok(true, "Successfully disconnected a just-created node.");
+ 
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_graph-render-06.js b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-06.js
+new file mode 100644
+index 0000000..e152f69
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/browser_wa_graph-render-06.js
+@@ -0,0 +1,25 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests to ensure that param connections trigger graph redraws
++ */
++
++const BUG_1141261_URL = EXAMPLE_URL + "doc_bug_1141261.html";
++
++add_task(function*() {
++  let { target, panel } = yield initWebAudioEditor(BUG_1141261_URL);
++  let { panelWin } = panel;
++  let { gFront, $, $$, EVENTS } = panelWin;
++
++  reload(target);
++
++  let [actors] = yield Promise.all([
++    getN(gFront, "create-node", 3),
++    waitForGraphRendered(panelWin, 3, 1, 0)
++  ]);
++
++  ok(true, "Graph correctly shows gain node as disconnected");
++
++  yield teardown(target);
++});
+diff --git a/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js b/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
+index 3208227..d93a58f 100644
+--- a/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
++++ b/browser/devtools/webaudioeditor/test/browser_wa_reset-01.js
+@@ -1,15 +1,15 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ ///////////////////
+ //
+ // Whitelisting this test.
+-// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
++// As part of bug 1077403, the leaking uncaught rejection should be fixed.
+ //
+ thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Connection closed");
+ 
+ /**
+  * Tests that reloading a tab will properly listen for the `start-context`
+  * event and reshow the tools after reloading.
+  */
+ 
+@@ -48,18 +48,21 @@ add_task(function*() {
+     "The tool's content should not be hidden anymore.");
+ 
+   navigating = once(target, "will-navigate");
+   started = once(gFront, "start-context");
+ 
+   reload(target);
+ 
+   yield Promise.all([navigating, started]);
++  let rendered = waitForGraphRendered(panel.panelWin, 3, 2);
+ 
+   is($("#reload-notice").hidden, true,
+     "The 'reload this page' notice should be hidden after context found after reload.");
+   is($("#waiting-notice").hidden, true,
+     "The 'waiting for an audio context' notice should be hidden after context found after reload.");
+   is($("#content").hidden, false,
+     "The tool's content should reappear without closing and reopening the toolbox.");
+ 
++  yield rendered;
++
+   yield teardown(target);
+ });
+diff --git a/browser/devtools/webaudioeditor/test/doc_bug_1141261.html b/browser/devtools/webaudioeditor/test/doc_bug_1141261.html
+new file mode 100644
+index 0000000..87c1210
+--- /dev/null
++++ b/browser/devtools/webaudioeditor/test/doc_bug_1141261.html
+@@ -0,0 +1,25 @@
++<!-- Any copyright is dedicated to the Public Domain.
++     http://creativecommons.org/publicdomain/zero/1.0/ -->
++<!doctype html>
++
++<html>
++  <head>
++    <meta charset="utf-8"/>
++    <title>Web Audio Editor test page</title>
++  </head>
++
++  <body>
++
++    <script type="text/javascript;version=1.8">
++      "use strict";
++
++      let ctx = new AudioContext();
++      let osc = ctx.createOscillator();
++      let gain = ctx.createGain();
++      osc.connect(gain);
++      gain.connect(ctx.destination);
++      gain.disconnect();
++    </script>
++  </body>
++
++</html>
+-- 
+2.2.1
+

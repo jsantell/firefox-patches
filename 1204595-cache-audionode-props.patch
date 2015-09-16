@@ -1,7 +1,6 @@
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Mon, 14 Sep 2015 16:04:54 -0700
-Subject: Bug 1204595 - Store audionode properties once via server
- rather than async fetching the unchanging properties in the tool. r=jryans
+Subject: Bug 1204595 - Store audionode properties once via server rather than async fetching the unchanging properties in the tool. r=jryans
 
 diff --git a/browser/devtools/webaudioeditor/controller.js b/browser/devtools/webaudioeditor/controller.js
 index 544650a..6844c8b 100644
@@ -211,7 +210,7 @@ index d803cc9..41be48d 100644
  [browser_callwatcher-01.js]
 diff --git a/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypassable.js b/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypassable.js
 new file mode 100644
-index 0000000..817ab9d
+index 0000000..615080f
 --- /dev/null
 +++ b/browser/devtools/webaudioeditor/test/browser_audionode-actor-bypassable.js
 @@ -0,0 +1,38 @@
@@ -234,15 +233,15 @@ index 0000000..817ab9d
 +    false, // AudioDestinationNode
 +    true, // AudioBufferSourceNode
 +    true, // ScriptProcessorNode
-+    true, // AnalyserNode 
++    true, // AnalyserNode
 +    true, // GainNode
 +    true, // DelayNode
-+    true, // BiquadFilterNode 
++    true, // BiquadFilterNode
 +    true, // WaveShaperNode
 +    true, // PannerNode
 +    true, // ConvolverNode
 +    false, // ChannelSplitterNode
-+    false, // ChannelMergerNode 
++    false, // ChannelMergerNode
 +    true, // DynamicsCompressNode
 +    true, // OscillatorNode
 +  ];
@@ -554,7 +553,7 @@ index 7f36e02..12cc6c3 100644
    "StereoPannerNode": {
      "properties": {
 diff --git a/toolkit/devtools/server/actors/webaudio.js b/toolkit/devtools/server/actors/webaudio.js
-index dd32ade..d1756e3 100644
+index dd32ade..84c5eec 100644
 --- a/toolkit/devtools/server/actors/webaudio.js
 +++ b/toolkit/devtools/server/actors/webaudio.js
 @@ -3,23 +3,24 @@
@@ -737,7 +736,7 @@ index dd32ade..d1756e3 100644
 +  },
 +
 +  /**
-+   * If connecting to older geckos, where audio node actor's do not
++   * If connecting to older geckos (<Fx43), where audio node actor's do not
 +   * contain `type`, `source` and `bypassable` properties, fetch
 +   * them manually here.
 +   */
@@ -758,6 +757,33 @@ index dd32ade..d1756e3 100644
  
  /**
   * Determines whether or not property is an AudioParam.
+diff --git a/toolkit/devtools/server/docs/protocol.js.md b/toolkit/devtools/server/docs/protocol.js.md
+index 7cfc4bb..e4ed5b0 100644
+--- a/toolkit/devtools/server/docs/protocol.js.md
++++ b/toolkit/devtools/server/docs/protocol.js.md
+@@ -418,16 +418,22 @@ And now you can listen to events on a front:
+     front.giveGoodNews().then(() => { console.log("request returned.") });
+ 
+ You might want to update your front's state when an event is fired, before emitting it against the front.  You can use `preEvent` in the front definition for that:
+ 
+     countGoodNews: protocol.preEvent("good-news", function(news) {
+         this.amountOfGoodNews++;
+     });
+ 
++You can have events wait until an asynchronous action completes before firing by returning a promise. If you have multiple preEvents defined for a specific event, and atleast one fires asynchronously, then all preEvents most resolve before all events are fired.
++
++    countGoodNews: protocol.preEvent("good-news", function(news) {
++        return this.updateGoodNews().then(() => this.amountOfGoodNews++);
++    });
++
+ On a somewhat related note, not every method needs to be request/response.  Just like an actor can emit a one-way event, a method can be marked as a one-way request.  Maybe we don't care about giveGoodNews returning anything:
+ 
+     giveGoodNews: method(function(news) {
+         emit(this, "good-news", news);
+     }, {
+         request: { news: Arg(0, "string") },
+         oneway: true
+     });
 diff --git a/toolkit/devtools/server/protocol.js b/toolkit/devtools/server/protocol.js
 index e0453b7..72720d8 100644
 --- a/toolkit/devtools/server/protocol.js
