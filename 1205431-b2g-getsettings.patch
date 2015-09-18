@@ -1,0 +1,82 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 17 Sep 2015 11:59:35 -0700
+Subject: Bug 1205431 - b2g should not throw when attempting to get hardware and version information in recording a profile. r=jryans
+
+diff --git a/toolkit/devtools/shared/system.js b/toolkit/devtools/shared/system.js
+index 1f069dd..b170977 100644
+--- a/toolkit/devtools/shared/system.js
++++ b/toolkit/devtools/shared/system.js
+@@ -35,32 +35,38 @@ let CACHED_INFO = null;
+ function *getSystemInfo() {
+   if (CACHED_INFO) {
+     return CACHED_INFO;
+   }
+ 
+   let appInfo = Services.appinfo;
+   let win = Services.wm.getMostRecentWindow(DebuggerServer.chromeWindowType);
+   let [processor, compiler] = appInfo.XPCOMABI.split("-");
+-  let dpi, useragent, width, height, os, hardware, version, brandName;
++  let dpi, useragent, width, height, os, brandName;
+   let appid = appInfo.ID;
+   let apptype = APP_MAP[appid];
+   let geckoVersion = appInfo.platformVersion;
++  let hardware = "unknown";
++  let version = "unknown";
+ 
+   // B2G specific
+   if (apptype === "b2g") {
+     os = "B2G";
+-    hardware = yield exports.getSetting("deviceinfo.hardware");
+-    version = yield exports.getSetting("deviceinfo.os");
++    // `getSetting` does not work in child processes on b2g.
++    // TODO bug 1205797, make this work in child processes.
++    try {
++      hardware = yield exports.getSetting("deviceinfo.hardware");
++      version = yield exports.getSetting("deviceinfo.os");
++    } catch (e) {
++    }
+   }
+   // Not B2G
+   else {
+     os = appInfo.OS;
+     version = appInfo.version;
+-    hardware = "unknown";
+   }
+ 
+   let bundle = Services.strings.createBundle("chrome://branding/locale/brand.properties");
+   if (bundle) {
+     brandName = bundle.GetStringFromName("brandFullName");
+   } else {
+     brandName = null;
+   }
+@@ -286,17 +292,26 @@ function getOSCPU() {
+   // Other OS.
+   return 12;
+ }
+ 
+ function getSetting(name) {
+   let deferred = promise.defer();
+ 
+   if ("@mozilla.org/settingsService;1" in Cc) {
+-    let settingsService = Cc["@mozilla.org/settingsService;1"].getService(Ci.nsISettingsService);
++    let settingsService;
++
++    // settingsService fails in b2g child processes
++    // TODO bug 1205797, make this work in child processes.
++    try {
++      settingsService = Cc["@mozilla.org/settingsService;1"].getService(Ci.nsISettingsService);
++    } catch (e) {
++      return promise.reject(e);
++    }
++
+     let req = settingsService.createLock().get(name, {
+       handle: (name, value) => deferred.resolve(value),
+       handleError: (error) => deferred.reject(error),
+     });
+   } else {
+     deferred.reject(new Error("No settings service"));
+   }
+   return deferred.promise;
+-- 
+2.2.1
+
