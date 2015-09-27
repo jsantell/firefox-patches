@@ -1,148 +1,132 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Fri, 4 Sep 2015 15:23:47 -0700
-Subject: Bug 1201949 - Initial redux-style controllers for front end memory tool heap snapshot. r=jryans
+Date: Fri, 25 Sep 2015 20:09:58 -0700
+Subject: Bug 1201949 - Initial redux-style controllers for front end memory tool heap snapshot. r=jlongster
 
-diff --git a/browser/devtools/jar.mn b/browser/devtools/jar.mn
-index 97baa1a..c40405f 100644
---- a/browser/devtools/jar.mn
-+++ b/browser/devtools/jar.mn
-@@ -106,17 +106,17 @@ browser.jar:
-     content/browser/devtools/performance/views/details-waterfall.js    (performance/views/details-waterfall.js)
-     content/browser/devtools/performance/views/details-js-call-tree.js      (performance/views/details-js-call-tree.js)
-     content/browser/devtools/performance/views/details-js-flamegraph.js     (performance/views/details-js-flamegraph.js)
-     content/browser/devtools/performance/views/details-memory-call-tree.js  (performance/views/details-memory-call-tree.js)
-     content/browser/devtools/performance/views/details-memory-flamegraph.js (performance/views/details-memory-flamegraph.js)
-     content/browser/devtools/performance/views/optimizations-list.js        (performance/views/optimizations-list.js)
-     content/browser/devtools/performance/views/recordings.js           (performance/views/recordings.js)
-     content/browser/devtools/memory.xhtml                              (memory/memory.xhtml)
--    content/browser/devtools/memory/controller.js                      (memory/controller.js)
-+    content/browser/devtools/memory/initializer.js                     (memory/initializer.js)
-     content/browser/devtools/promisedebugger/promise-controller.js     (promisedebugger/promise-controller.js)
-     content/browser/devtools/promisedebugger/promise-panel.js          (promisedebugger/promise-panel.js)
-     content/browser/devtools/promisedebugger/promise-debugger.xhtml    (promisedebugger/promise-debugger.xhtml)
-     content/browser/devtools/commandline.css                           (commandline/commandline.css)
-     content/browser/devtools/commandlineoutput.xhtml                   (commandline/commandlineoutput.xhtml)
-     content/browser/devtools/commandlinetooltip.xhtml                  (commandline/commandlinetooltip.xhtml)
- *   content/browser/devtools/framework/toolbox-window.xul              (framework/toolbox-window.xul)
-     content/browser/devtools/framework/toolbox-options.xul             (framework/toolbox-options.xul)
-diff --git a/browser/devtools/memory/actions/snapshot.js b/browser/devtools/memory/actions/snapshot.js
+diff --git a/devtools/client/jar.mn b/devtools/client/jar.mn
+index c82897f..3c85d7c 100644
+--- a/devtools/client/jar.mn
++++ b/devtools/client/jar.mn
+@@ -106,17 +106,17 @@ devtools.jar:
+     content/performance/views/details-waterfall.js (performance/views/details-waterfall.js)
+     content/performance/views/details-js-call-tree.js (performance/views/details-js-call-tree.js)
+     content/performance/views/details-js-flamegraph.js (performance/views/details-js-flamegraph.js)
+     content/performance/views/details-memory-call-tree.js (performance/views/details-memory-call-tree.js)
+     content/performance/views/details-memory-flamegraph.js (performance/views/details-memory-flamegraph.js)
+     content/performance/views/optimizations-list.js (performance/views/optimizations-list.js)
+     content/performance/views/recordings.js (performance/views/recordings.js)
+     content/memory/memory.xhtml (memory/memory.xhtml)
+-    content/memory/controller.js (memory/controller.js)
++    content/memory/initializer.js (memory/initializer.js)
+     content/promisedebugger/promise-controller.js (promisedebugger/promise-controller.js)
+     content/promisedebugger/promise-panel.js (promisedebugger/promise-panel.js)
+     content/promisedebugger/promise-debugger.xhtml (promisedebugger/promise-debugger.xhtml)
+     content/commandline/commandline.css (commandline/commandline.css)
+     content/commandline/commandlineoutput.xhtml (commandline/commandlineoutput.xhtml)
+     content/commandline/commandlinetooltip.xhtml (commandline/commandlinetooltip.xhtml)
+ *   content/framework/toolbox-window.xul (framework/toolbox-window.xul)
+     content/framework/toolbox-options.xul (framework/toolbox-options.xul)
+diff --git a/devtools/client/memory/actions/moz.build b/devtools/client/memory/actions/moz.build
 new file mode 100644
-index 0000000..363db12
+index 0000000..3ffb5eb
 --- /dev/null
-+++ b/browser/devtools/memory/actions/snapshot.js
-@@ -0,0 +1,30 @@
++++ b/devtools/client/memory/actions/moz.build
+@@ -0,0 +1,8 @@
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++DevToolsModules(
++    'snapshot.js',
++)
+diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
+new file mode 100644
+index 0000000..d387e11
+--- /dev/null
++++ b/devtools/client/memory/actions/snapshot.js
+@@ -0,0 +1,14 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
 +"use strict";
 +
-+const { ACTIONS } = require("../constants");
++const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
++const { actions } = require("../constants");
 +
-+let SNAPSHOT_ID_INC = 0;
-+const takeSnapshot = exports.takeSnapshot = function takeSnapshot () {
++const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
 +  return {
-+    type: ACTIONS.TAKE_SNAPSHOT,
-+    id: SNAPSHOT_ID_INC++
++    type: actions.TAKE_SNAPSHOT,
++    [PROMISE]: front.saveHeapSnapshot()
 +  };
 +};
-+
-+const receiveSnapshot = exports.receiveSnapshot = function receiveSnapshot (data) {
-+  return {
-+    type: ACTIONS.RECEIVE_SNAPSHOT,
-+    platformID: data.platformID,
-+    id: data.id
-+  };
-+};
-+
-+const receiveSnapshotError = exports.receiveSnapshotError = function receiveSnapshotError (data) {
-+  return {
-+    type: ACTIONS.RECEIVE_SNAPSHOT_ERROR,
-+    error: data.error,
-+    id: data.id
-+  };
-+};
-diff --git a/browser/devtools/memory/constants.js b/browser/devtools/memory/constants.js
+diff --git a/devtools/client/memory/constants.js b/devtools/client/memory/constants.js
 new file mode 100644
-index 0000000..1b9a2cc
+index 0000000..f9fc109
 --- /dev/null
-+++ b/browser/devtools/memory/constants.js
-@@ -0,0 +1,21 @@
++++ b/devtools/client/memory/constants.js
+@@ -0,0 +1,9 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
 +"use strict";
 +
-+exports.SNAPSHOT_STATES = {
-+  INITIATED: "initiated",
-+  READY: "ready",
-+  FAILED: "failed",
-+}
-+
-+const ACTIONS = exports.ACTIONS = {};
++const actions = exports.actions = {};
 +
 +// Fired by UI to request a snapshot from the actor.
-+ACTIONS.TAKE_SNAPSHOT = "take-snapshot";
-+
-+// Fired by Front when returning a snapshot.
-+ACTIONS.RECEIVE_SNAPSHOT = "receive-snapshot";
-+
-+// Fired by Front when returning a snapshot if it fails.
-+ACTIONS.RECEIVE_SNAPSHOT_ERROR = "receive-snapshot-error";
-diff --git a/browser/devtools/memory/controller.js b/browser/devtools/memory/controller.js
-index 363091e..adcf09f 100644
---- a/browser/devtools/memory/controller.js
-+++ b/browser/devtools/memory/controller.js
-@@ -1,28 +1,27 @@
++actions.TAKE_SNAPSHOT = "take-snapshot";
+diff --git a/devtools/client/memory/controller.js b/devtools/client/memory/controller.js
+index 8d672b9..00b26ff 100644
+--- a/devtools/client/memory/controller.js
++++ b/devtools/client/memory/controller.js
+@@ -1,28 +1,28 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this file,
   * You can obtain one at http://mozilla.org/MPL/2.0/. */
  "use strict";
  
 -const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
--const { loader, require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+-const { loader, require } = Cu.import("resource://gre/modules/devtools/shared/Loader.jsm", {});
 -
  const { Task } = require("resource://gre/modules/Task.jsm");
--const { Heritage, ViewHelpers, WidgetMethods } = require("resource:///modules/devtools/ViewHelpers.jsm");
--
--/**
-- * The current target, toolbox and MemoryFront, set by this tool's host.
-- */
--let gToolbox, gTarget, gFront;
-+const { Front } = require("devtools/memory/subscribers/front");
-+const Store = require("devtools/memory/store");
+-const { Heritage, ViewHelpers, WidgetMethods } = require("resource:///modules/devtools/client/shared/widgets/ViewHelpers.jsm");
++const Store = require("./store");
+ 
+ /**
+  * The current target, toolbox and MemoryFront, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront;
  
 -/**
 - * Initializes the profiler controller and views.
 - */
 -const MemoryController = {
 -  initialize: Task.async(function *() {
-+const FLUXIFY_METHODS_TO_PIPE = ["dispatch", "subscribe", "getState"];
- 
+-    yield gFront.attach();
 -  }),
++const REDUX_METHODS_TO_PIPE = ["dispatch", "subscribe", "getState"];
++
 +const MemoryController = exports.MemoryController = function ({ toolbox, target, front }) {
-+  this.__internalFront = front;
 +  this.store = Store();
-+  this.front = new Front(this.store, this.__internalFront);
 +  this.toolbox = toolbox;
 +  this.target = target;
-+  this.front.initialize();
++  this.front = front;
 +};
- 
--  destroy: Task.async(function *() {
-+FLUXIFY_METHODS_TO_PIPE.map(m =>
++
++REDUX_METHODS_TO_PIPE.map(m =>
 +  MemoryController.prototype[m] = function (...args) { return this.store[m](...args); });
  
+-  destroy: Task.async(function *() {
+-    yield gFront.detach();
 -  })
 +MemoryController.prototype.destroy = function () {
-+  this.front.destroy();
-+  this.store = this.toolbox = this.target = this.front = this.__internalFront = null;
++  this.store = this.toolbox = this.target = this.front = null;
  };
-diff --git a/browser/devtools/memory/initializer.js b/browser/devtools/memory/initializer.js
+diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
 new file mode 100644
-index 0000000..b829bf3
+index 0000000..6c829df
 --- /dev/null
-+++ b/browser/devtools/memory/initializer.js
-@@ -0,0 +1,32 @@
++++ b/devtools/client/memory/initializer.js
+@@ -0,0 +1,30 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -151,7 +135,7 @@ index 0000000..b829bf3
 +const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
 +const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
 +const { Task } = require("resource://gre/modules/Task.jsm");
-+const { MemoryController } = require("devtools/memory/controller");
++const { MemoryController } = require("devtools/client/memory/controller");
 +
 +/**
 + * The current target, toolbox and MemoryFront, set by this tool's host.
@@ -161,652 +145,46 @@ index 0000000..b829bf3
 +/**
 + * Initializes the profiler controller and views.
 + */
-+let controller = null;
++var controller = null;
 +function initialize () {
 +  return Task.spawn(function *() {
-+    yield gFront.attach();
 +    controller = new MemoryController({ toolbox: gToolbox, target: gTarget, front: gFront });
 +  });
 +}
 +
 +function destroy () {
 +  return Task.spawn(function *() {
-+    yield gFront.detach();
 +    controller.destroy();
 +  });
 +}
-diff --git a/browser/devtools/memory/lib/redux.js b/browser/devtools/memory/lib/redux.js
-new file mode 100644
-index 0000000..e013f72
---- /dev/null
-+++ b/browser/devtools/memory/lib/redux.js
-@@ -0,0 +1,610 @@
-+(function webpackUniversalModuleDefinition(root, factory) {
-+	if(typeof exports === 'object' && typeof module === 'object')
-+		module.exports = factory();
-+	else if(typeof define === 'function' && define.amd)
-+		define([], factory);
-+	else if(typeof exports === 'object')
-+		exports["Redux"] = factory();
-+	else
-+		root["Redux"] = factory();
-+})(this, function() {
-+return /******/ (function(modules) { // webpackBootstrap
-+/******/ 	// The module cache
-+/******/ 	var installedModules = {};
-+
-+/******/ 	// The require function
-+/******/ 	function __webpack_require__(moduleId) {
-+
-+/******/ 		// Check if module is in cache
-+/******/ 		if(installedModules[moduleId])
-+/******/ 			return installedModules[moduleId].exports;
-+
-+/******/ 		// Create a new module (and put it into the cache)
-+/******/ 		var module = installedModules[moduleId] = {
-+/******/ 			exports: {},
-+/******/ 			id: moduleId,
-+/******/ 			loaded: false
-+/******/ 		};
-+
-+/******/ 		// Execute the module function
-+/******/ 		modules[moduleId].call(module.exports, module, module.exports, __webpack_require__);
-+
-+/******/ 		// Flag the module as loaded
-+/******/ 		module.loaded = true;
-+
-+/******/ 		// Return the exports of the module
-+/******/ 		return module.exports;
-+/******/ 	}
-+
-+
-+/******/ 	// expose the modules object (__webpack_modules__)
-+/******/ 	__webpack_require__.m = modules;
-+
-+/******/ 	// expose the module cache
-+/******/ 	__webpack_require__.c = installedModules;
-+
-+/******/ 	// __webpack_public_path__
-+/******/ 	__webpack_require__.p = "";
-+
-+/******/ 	// Load entry module and return exports
-+/******/ 	return __webpack_require__(0);
-+/******/ })
-+/************************************************************************/
-+/******/ ([
-+/* 0 */
-+/***/ function(module, exports, __webpack_require__) {
-+
-+	'use strict';
-+
-+	exports.__esModule = true;
-+
-+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-+
-+	var _createStore = __webpack_require__(1);
-+
-+	var _createStore2 = _interopRequireDefault(_createStore);
-+
-+	var _utilsCombineReducers = __webpack_require__(7);
-+
-+	var _utilsCombineReducers2 = _interopRequireDefault(_utilsCombineReducers);
-+
-+	var _utilsBindActionCreators = __webpack_require__(6);
-+
-+	var _utilsBindActionCreators2 = _interopRequireDefault(_utilsBindActionCreators);
-+
-+	var _utilsApplyMiddleware = __webpack_require__(5);
-+
-+	var _utilsApplyMiddleware2 = _interopRequireDefault(_utilsApplyMiddleware);
-+
-+	var _utilsCompose = __webpack_require__(2);
-+
-+	var _utilsCompose2 = _interopRequireDefault(_utilsCompose);
-+
-+	exports.createStore = _createStore2['default'];
-+	exports.combineReducers = _utilsCombineReducers2['default'];
-+	exports.bindActionCreators = _utilsBindActionCreators2['default'];
-+	exports.applyMiddleware = _utilsApplyMiddleware2['default'];
-+	exports.compose = _utilsCompose2['default'];
-+
-+/***/ },
-+/* 1 */
-+/***/ function(module, exports, __webpack_require__) {
-+
-+	'use strict';
-+
-+	exports.__esModule = true;
-+	exports['default'] = createStore;
-+
-+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-+
-+	var _utilsIsPlainObject = __webpack_require__(3);
-+
-+	var _utilsIsPlainObject2 = _interopRequireDefault(_utilsIsPlainObject);
-+
-+	/**
-+	 * These are private action types reserved by Redux.
-+	 * For any unknown actions, you must return the current state.
-+	 * If the current state is undefined, you must return the initial state.
-+	 * Do not reference these action types directly in your code.
-+	 */
-+	var ActionTypes = {
-+	  INIT: '@@redux/INIT'
-+	};
-+
-+	exports.ActionTypes = ActionTypes;
-+	/**
-+	 * Creates a Redux store that holds the state tree.
-+	 * The only way to change the data in the store is to call `dispatch()` on it.
-+	 *
-+	 * There should only be a single store in your app. To specify how different
-+	 * parts of the state tree respond to actions, you may combine several reducers
-+	 * into a single reducer function by using `combineReducers`.
-+	 *
-+	 * @param {Function} reducer A function that returns the next state tree, given
-+	 * the current state tree and the action to handle.
-+	 *
-+	 * @param {any} [initialState] The initial state. You may optionally specify it
-+	 * to hydrate the state from the server in universal apps, or to restore a
-+	 * previously serialized user session.
-+	 * If you use `combineReducers` to produce the root reducer function, this must be
-+	 * an object with the same shape as `combineReducers` keys.
-+	 *
-+	 * @returns {Store} A Redux store that lets you read the state, dispatch actions
-+	 * and subscribe to changes.
-+	 */
-+
-+	function createStore(reducer, initialState) {
-+	  if (typeof reducer !== 'function') {
-+	    throw new Error('Expected the reducer to be a function.');
-+	  }
-+
-+	  var currentReducer = reducer;
-+	  var currentState = initialState;
-+	  var listeners = [];
-+	  var isDispatching = false;
-+
-+	  /**
-+	   * Reads the state tree managed by the store.
-+	   *
-+	   * @returns {any} The current state tree of your application.
-+	   */
-+	  function getState() {
-+	    return currentState;
-+	  }
-+
-+	  /**
-+	   * Adds a change listener. It will be called any time an action is dispatched,
-+	   * and some part of the state tree may potentially have changed. You may then
-+	   * call `getState()` to read the current state tree inside the callback.
-+	   *
-+	   * @param {Function} listener A callback to be invoked on every dispatch.
-+	   * @returns {Function} A function to remove this change listener.
-+	   */
-+	  function subscribe(listener) {
-+	    listeners.push(listener);
-+
-+	    return function unsubscribe() {
-+	      var index = listeners.indexOf(listener);
-+	      listeners.splice(index, 1);
-+	    };
-+	  }
-+
-+	  /**
-+	   * Dispatches an action. It is the only way to trigger a state change.
-+	   *
-+	   * The `reducer` function, used to create the store, will be called with the
-+	   * current state tree and the given `action`. Its return value will
-+	   * be considered the **next** state of the tree, and the change listeners
-+	   * will be notified.
-+	   *
-+	   * The base implementation only supports plain object actions. If you want to
-+	   * dispatch a Promise, an Observable, a thunk, or something else, you need to
-+	   * wrap your store creating function into the corresponding middleware. For
-+	   * example, see the documentation for the `redux-thunk` package. Even the
-+	   * middleware will eventually dispatch plain object actions using this method.
-+	   *
-+	   * @param {Object} action A plain object representing “what changed”. It is
-+	   * a good idea to keep actions serializable so you can record and replay user
-+	   * sessions, or use the time travelling `redux-devtools`.
-+	   *
-+	   * @returns {Object} For convenience, the same action object you dispatched.
-+	   *
-+	   * Note that, if you use a custom middleware, it may wrap `dispatch()` to
-+	   * return something else (for example, a Promise you can await).
-+	   */
-+	  function dispatch(action) {
-+	    if (!_utilsIsPlainObject2['default'](action)) {
-+	      throw new Error('Actions must be plain objects. Use custom middleware for async actions.');
-+	    }
-+
-+	    if (isDispatching) {
-+	      throw new Error('Reducers may not dispatch actions.');
-+	    }
-+
-+	    try {
-+	      isDispatching = true;
-+	      currentState = currentReducer(currentState, action);
-+	    } finally {
-+	      isDispatching = false;
-+	    }
-+
-+	    listeners.slice().forEach(function (listener) {
-+	      return listener();
-+	    });
-+	    return action;
-+	  }
-+
-+	  /**
-+	   * Replaces the reducer currently used by the store to calculate the state.
-+	   *
-+	   * You might need this if your app implements code splitting and you want to
-+	   * load some of the reducers dynamically. You might also need this if you
-+	   * implement a hot reloading mechanism for Redux.
-+	   *
-+	   * @param {Function} nextReducer The reducer for the store to use instead.
-+	   * @returns {void}
-+	   */
-+	  function replaceReducer(nextReducer) {
-+	    currentReducer = nextReducer;
-+	    dispatch({ type: ActionTypes.INIT });
-+	  }
-+
-+	  // When a store is created, an "INIT" action is dispatched so that every
-+	  // reducer returns their initial state. This effectively populates
-+	  // the initial state tree.
-+	  dispatch({ type: ActionTypes.INIT });
-+
-+	  return {
-+	    dispatch: dispatch,
-+	    subscribe: subscribe,
-+	    getState: getState,
-+	    replaceReducer: replaceReducer
-+	  };
-+	}
-+
-+/***/ },
-+/* 2 */
-+/***/ function(module, exports) {
-+
-+	/**
-+	 * Composes single-argument functions from right to left.
-+	 *
-+	 * @param {...Function} funcs The functions to compose.
-+	 * @returns {Function} A function obtained by composing functions from right to
-+	 * left. For example, compose(f, g, h) is identical to x => h(g(f(x))).
-+	 */
-+	"use strict";
-+
-+	exports.__esModule = true;
-+	exports["default"] = compose;
-+
-+	function compose() {
-+	  for (var _len = arguments.length, funcs = Array(_len), _key = 0; _key < _len; _key++) {
-+	    funcs[_key] = arguments[_key];
-+	  }
-+
-+	  return function (arg) {
-+	    return funcs.reduceRight(function (composed, f) {
-+	      return f(composed);
-+	    }, arg);
-+	  };
-+	}
-+
-+	module.exports = exports["default"];
-+
-+/***/ },
-+/* 3 */
-+/***/ function(module, exports) {
-+
-+	'use strict';
-+
-+	exports.__esModule = true;
-+	exports['default'] = isPlainObject;
-+	var fnToString = function fnToString(fn) {
-+	  return Function.prototype.toString.call(fn);
-+	};
-+
-+	/**
-+	 * @param {any} obj The object to inspect.
-+	 * @returns {boolean} True if the argument appears to be a plain object.
-+	 */
-+
-+	function isPlainObject(obj) {
-+	  if (!obj || typeof obj !== 'object') {
-+	    return false;
-+	  }
-+
-+	  var proto = typeof obj.constructor === 'function' ? Object.getPrototypeOf(obj) : Object.prototype;
-+
-+	  if (proto === null) {
-+	    return true;
-+	  }
-+
-+	  var constructor = proto.constructor;
-+
-+	  return typeof constructor === 'function' && constructor instanceof constructor && fnToString(constructor) === fnToString(Object);
-+	}
-+
-+	module.exports = exports['default'];
-+
-+/***/ },
-+/* 4 */
-+/***/ function(module, exports) {
-+
-+	/**
-+	 * Applies a function to every key-value pair inside an object.
-+	 *
-+	 * @param {Object} obj The source object.
-+	 * @param {Function} fn The mapper function that receives the value and the key.
-+	 * @returns {Object} A new object that contains the mapped values for the keys.
-+	 */
-+	"use strict";
-+
-+	exports.__esModule = true;
-+	exports["default"] = mapValues;
-+
-+	function mapValues(obj, fn) {
-+	  return Object.keys(obj).reduce(function (result, key) {
-+	    result[key] = fn(obj[key], key);
-+	    return result;
-+	  }, {});
-+	}
-+
-+	module.exports = exports["default"];
-+
-+/***/ },
-+/* 5 */
-+/***/ function(module, exports, __webpack_require__) {
-+
-+	'use strict';
-+
-+	exports.__esModule = true;
-+
-+	var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
-+
-+	exports['default'] = applyMiddleware;
-+
-+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-+
-+	var _compose = __webpack_require__(2);
-+
-+	var _compose2 = _interopRequireDefault(_compose);
-+
-+	/**
-+	 * Creates a store enhancer that applies middleware to the dispatch method
-+	 * of the Redux store. This is handy for a variety of tasks, such as expressing
-+	 * asynchronous actions in a concise manner, or logging every action payload.
-+	 *
-+	 * See `redux-thunk` package as an example of the Redux middleware.
-+	 *
-+	 * Because middleware is potentially asynchronous, this should be the first
-+	 * store enhancer in the composition chain.
-+	 *
-+	 * Note that each middleware will be given the `dispatch` and `getState` functions
-+	 * as named arguments.
-+	 *
-+	 * @param {...Function} middlewares The middleware chain to be applied.
-+	 * @returns {Function} A store enhancer applying the middleware.
-+	 */
-+
-+	function applyMiddleware() {
-+	  for (var _len = arguments.length, middlewares = Array(_len), _key = 0; _key < _len; _key++) {
-+	    middlewares[_key] = arguments[_key];
-+	  }
-+
-+	  return function (next) {
-+	    return function (reducer, initialState) {
-+	      var store = next(reducer, initialState);
-+	      var _dispatch = store.dispatch;
-+	      var chain = [];
-+
-+	      var middlewareAPI = {
-+	        getState: store.getState,
-+	        dispatch: function dispatch(action) {
-+	          return _dispatch(action);
-+	        }
-+	      };
-+	      chain = middlewares.map(function (middleware) {
-+	        return middleware(middlewareAPI);
-+	      });
-+	      _dispatch = _compose2['default'].apply(undefined, chain)(store.dispatch);
-+
-+	      return _extends({}, store, {
-+	        dispatch: _dispatch
-+	      });
-+	    };
-+	  };
-+	}
-+
-+	module.exports = exports['default'];
-+
-+/***/ },
-+/* 6 */
-+/***/ function(module, exports, __webpack_require__) {
-+
-+	'use strict';
-+
-+	exports.__esModule = true;
-+	exports['default'] = bindActionCreators;
-+
-+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-+
-+	var _utilsMapValues = __webpack_require__(4);
-+
-+	var _utilsMapValues2 = _interopRequireDefault(_utilsMapValues);
-+
-+	function bindActionCreator(actionCreator, dispatch) {
-+	  return function () {
-+	    return dispatch(actionCreator.apply(undefined, arguments));
-+	  };
-+	}
-+
-+	/**
-+	 * Turns an object whose values are action creators, into an object with the
-+	 * same keys, but with every function wrapped into a `dispatch` call so they
-+	 * may be invoked directly. This is just a convenience method, as you can call
-+	 * `store.dispatch(MyActionCreators.doSomething())` yourself just fine.
-+	 *
-+	 * For convenience, you can also pass a single function as the first argument,
-+	 * and get a function in return.
-+	 *
-+	 * @param {Function|Object} actionCreators An object whose values are action
-+	 * creator functions. One handy way to obtain it is to use ES6 `import * as`
-+	 * syntax. You may also pass a single function.
-+	 *
-+	 * @param {Function} dispatch The `dispatch` function available on your Redux
-+	 * store.
-+	 *
-+	 * @returns {Function|Object} The object mimicking the original object, but with
-+	 * every action creator wrapped into the `dispatch` call. If you passed a
-+	 * function as `actionCreators`, the return value will also be a single
-+	 * function.
-+	 */
-+
-+	function bindActionCreators(actionCreators, dispatch) {
-+	  if (typeof actionCreators === 'function') {
-+	    return bindActionCreator(actionCreators, dispatch);
-+	  }
-+
-+	  if (typeof actionCreators !== 'object' || actionCreators == null) {
-+	    // eslint-disable-line no-eq-null
-+	    throw new Error('bindActionCreators expected an object or a function, instead received ' + typeof actionCreators + '. ' + 'Did you write "import ActionCreators from" instead of "import * as ActionCreators from"?');
-+	  }
-+
-+	  return _utilsMapValues2['default'](actionCreators, function (actionCreator) {
-+	    return bindActionCreator(actionCreator, dispatch);
-+	  });
-+	}
-+
-+	module.exports = exports['default'];
-+
-+/***/ },
-+/* 7 */
-+/***/ function(module, exports, __webpack_require__) {
-+
-+	'use strict';
-+
-+	exports.__esModule = true;
-+	exports['default'] = combineReducers;
-+
-+	function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-+
-+	var _createStore = __webpack_require__(1);
-+
-+	var _utilsIsPlainObject = __webpack_require__(3);
-+
-+	var _utilsIsPlainObject2 = _interopRequireDefault(_utilsIsPlainObject);
-+
-+	var _utilsMapValues = __webpack_require__(4);
-+
-+	var _utilsMapValues2 = _interopRequireDefault(_utilsMapValues);
-+
-+	var _utilsPick = __webpack_require__(8);
-+
-+	var _utilsPick2 = _interopRequireDefault(_utilsPick);
-+
-+	/* eslint-disable no-console */
-+
-+	function getErrorMessage(key, action) {
-+	  var actionType = action && action.type;
-+	  var actionName = actionType && '"' + actionType.toString() + '"' || 'an action';
-+
-+	  return 'Reducer "' + key + '" returned undefined handling ' + actionName + '. ' + 'To ignore an action, you must explicitly return the previous state.';
-+	}
-+
-+	function verifyStateShape(initialState, currentState) {
-+	  var reducerKeys = Object.keys(currentState);
-+
-+	  if (reducerKeys.length === 0) {
-+	    console.error('Store does not have a valid reducer. Make sure the argument passed ' + 'to combineReducers is an object whose values are reducers.');
-+	    return;
-+	  }
-+
-+	  if (!_utilsIsPlainObject2['default'](initialState)) {
-+	    console.error('initialState has unexpected type of "' + ({}).toString.call(initialState).match(/\s([a-z|A-Z]+)/)[1] + '". Expected initialState to be an object with the following ' + ('keys: "' + reducerKeys.join('", "') + '"'));
-+	    return;
-+	  }
-+
-+	  var unexpectedKeys = Object.keys(initialState).filter(function (key) {
-+	    return reducerKeys.indexOf(key) < 0;
-+	  });
-+
-+	  if (unexpectedKeys.length > 0) {
-+	    console.error('Unexpected ' + (unexpectedKeys.length > 1 ? 'keys' : 'key') + ' ' + ('"' + unexpectedKeys.join('", "') + '" in initialState will be ignored. ') + ('Expected to find one of the known reducer keys instead: "' + reducerKeys.join('", "') + '"'));
-+	  }
-+	}
-+
-+	/**
-+	 * Turns an object whose values are different reducer functions, into a single
-+	 * reducer function. It will call every child reducer, and gather their results
-+	 * into a single state object, whose keys correspond to the keys of the passed
-+	 * reducer functions.
-+	 *
-+	 * @param {Object} reducers An object whose values correspond to different
-+	 * reducer functions that need to be combined into one. One handy way to obtain
-+	 * it is to use ES6 `import * as reducers` syntax. The reducers may never return
-+	 * undefined for any action. Instead, they should return their initial state
-+	 * if the state passed to them was undefined, and the current state for any
-+	 * unrecognized action.
-+	 *
-+	 * @returns {Function} A reducer function that invokes every reducer inside the
-+	 * passed object, and builds a state object with the same shape.
-+	 */
-+
-+	function combineReducers(reducers) {
-+	  var finalReducers = _utilsPick2['default'](reducers, function (val) {
-+	    return typeof val === 'function';
-+	  });
-+
-+	  Object.keys(finalReducers).forEach(function (key) {
-+	    var reducer = finalReducers[key];
-+	    if (typeof reducer(undefined, { type: _createStore.ActionTypes.INIT }) === 'undefined') {
-+	      throw new Error('Reducer "' + key + '" returned undefined during initialization. ' + 'If the state passed to the reducer is undefined, you must ' + 'explicitly return the initial state. The initial state may ' + 'not be undefined.');
-+	    }
-+
-+	    var type = Math.random().toString(36).substring(7).split('').join('.');
-+	    if (typeof reducer(undefined, { type: type }) === 'undefined') {
-+	      throw new Error('Reducer "' + key + '" returned undefined when probed with a random type. ' + ('Don\'t try to handle ' + _createStore.ActionTypes.INIT + ' or other actions in "redux/*" ') + 'namespace. They are considered private. Instead, you must return the ' + 'current state for any unknown actions, unless it is undefined, ' + 'in which case you must return the initial state, regardless of the ' + 'action type. The initial state may not be undefined.');
-+	    }
-+	  });
-+
-+	  var defaultState = _utilsMapValues2['default'](finalReducers, function () {
-+	    return undefined;
-+	  });
-+	  var stateShapeVerified;
-+
-+	  return function combination(state, action) {
-+	    if (state === undefined) state = defaultState;
-+
-+	    var finalState = _utilsMapValues2['default'](finalReducers, function (reducer, key) {
-+	      var newState = reducer(state[key], action);
-+	      if (typeof newState === 'undefined') {
-+	        throw new Error(getErrorMessage(key, action));
-+	      }
-+	      return newState;
-+	    });
-+
-+	    if (true) {
-+	      if (!stateShapeVerified) {
-+	        verifyStateShape(state, finalState);
-+	        stateShapeVerified = true;
-+	      }
-+	    }
-+
-+	    return finalState;
-+	  };
-+	}
-+
-+	module.exports = exports['default'];
-+
-+/***/ },
-+/* 8 */
-+/***/ function(module, exports) {
-+
-+	/**
-+	 * Picks key-value pairs from an object where values satisfy a predicate.
-+	 *
-+	 * @param {Object} obj The object to pick from.
-+	 * @param {Function} fn The predicate the values must satisfy to be copied.
-+	 * @returns {Object} The object with the values that satisfied the predicate.
-+	 */
-+	"use strict";
-+
-+	exports.__esModule = true;
-+	exports["default"] = pick;
-+
-+	function pick(obj, fn) {
-+	  return Object.keys(obj).reduce(function (result, key) {
-+	    if (fn(obj[key])) {
-+	      result[key] = obj[key];
-+	    }
-+	    return result;
-+	  }, {});
-+	}
-+
-+	module.exports = exports["default"];
-+
-+/***/ }
-+/******/ ])
-+});
-+;
-\ No newline at end of file
-diff --git a/browser/devtools/memory/memory.xhtml b/browser/devtools/memory/memory.xhtml
-index fdcb69c..6147d08 100644
---- a/browser/devtools/memory/memory.xhtml
-+++ b/browser/devtools/memory/memory.xhtml
-@@ -15,25 +15,23 @@
-     <link rel="stylesheet" href="chrome://browser/content/devtools/widgets.css" type="text/css"/>
-     <link rel="stylesheet" href="chrome://browser/skin/devtools/common.css" type="text/css"/>
-     <link rel="stylesheet" href="chrome://browser/skin/devtools/widgets.css" type="text/css"/>
-     <link rel="stylesheet" href="chrome://browser/skin/devtools/memory.css" type="text/css"/>
+diff --git a/devtools/client/memory/memory.xhtml b/devtools/client/memory/memory.xhtml
+index 6c5175f..9734a98 100644
+--- a/devtools/client/memory/memory.xhtml
++++ b/devtools/client/memory/memory.xhtml
+@@ -7,33 +7,31 @@
+ ]>
+ 
+ <!-- This Source Code Form is subject to the terms of the Mozilla Public
+    - License, v. 2.0. If a copy of the MPL was not distributed with this
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ <html xmlns="http://www.w3.org/1999/xhtml">
+   <head>
+     <link rel="stylesheet" href="chrome://browser/skin/" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://devtools/content/shared/widgets/widgets.css" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://devtools/skin/themes/common.css" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://devtools/skin/themes/widgets.css" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://devtools/skin/themes/memory.css" type="text/css"/>
++    <link rel="stylesheet" href="chrome://browser/content/devtools/widgets.css" type="text/css"/>
++    <link rel="stylesheet" href="chrome://browser/skin/devtools/common.css" type="text/css"/>
++    <link rel="stylesheet" href="chrome://browser/skin/devtools/widgets.css" type="text/css"/>
++    <link rel="stylesheet" href="chrome://browser/skin/devtools/memory.css" type="text/css"/>
  
      <script type="application/javascript;version=1.8"
-             src="chrome://browser/content/devtools/theme-switching.js"></script>
+-            src="chrome://devtools/content/shared/theme-switching.js"></script>
++            src="chrome://devtools/content/shared/theme-switching.js"/>
      <script type="application/javascript;version=1.8"
--            src="memory/controller.js"></script>
-+            src="memory/initializer.js"></script>
+-            src="controller.js"></script>
++            src="initializer.js"></script>
    </head>
    <body class="theme-body">
 -    <toolbar class="devtools-toolbar">
@@ -827,61 +205,78 @@ index fdcb69c..6147d08 100644
        </toolbar>
        <hbox flex="1">
        </hbox>
-diff --git a/browser/devtools/memory/moz.build b/browser/devtools/memory/moz.build
-index 17b5f3b..5cd8b90 100644
---- a/browser/devtools/memory/moz.build
-+++ b/browser/devtools/memory/moz.build
-@@ -1,11 +1,29 @@
+diff --git a/devtools/client/memory/modules/census-view.js b/devtools/client/memory/modules/census-view.js
+index c11e804..b017c03 100644
+--- a/devtools/client/memory/modules/census-view.js
++++ b/devtools/client/memory/modules/census-view.js
+@@ -4,17 +4,16 @@
+ "use strict";
+ 
+ /**
+  * This file contains the tree view, displaying all the samples and frames
+  * received from the proviler in a tree-like structure.
+  */
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+-const { L10N } = require("devtools/client/performance/modules/global");
+ const { Heritage } = require("resource:///modules/devtools/client/shared/widgets/ViewHelpers.jsm");
+ const { AbstractTreeItem } = require("resource:///modules/devtools/client/shared/widgets/AbstractTreeItem.jsm");
+ 
+ const INDENTATION = exports.INDENTATION = 16; // px
+ const DEFAULT_AUTO_EXPAND_DEPTH = 2;
+ const COURSE_TYPES = ["objects", "scripts", "strings", "other"];
+ 
+ /**
+diff --git a/devtools/client/memory/moz.build b/devtools/client/memory/moz.build
+index 5b2981f..a4241a1 100644
+--- a/devtools/client/memory/moz.build
++++ b/devtools/client/memory/moz.build
+@@ -1,15 +1,22 @@
  # vim: set filetype=python:
  # This Source Code Form is subject to the terms of the Mozilla Public
  # License, v. 2.0. If a copy of the MPL was not distributed with this
  # file, You can obtain one at http://mozilla.org/MPL/2.0/.
  
- EXTRA_JS_MODULES.devtools.memory += [
+ DIRS += [
++    'actions',
+     'modules',
++    'reducers',
+ ]
+ 
+ DevToolsModules(
 +    'constants.js',
 +    'controller.js',
-+    'lib/redux.js',
-     'modules/census-view.js',
++    'initializer.js',
      'panel.js',
 +    'reducers.js',
 +    'store.js',
-+]
-+
-+EXTRA_JS_MODULES.devtools.memory.subscribers += [
-+    'subscribers/front.js',
-+]
-+
-+EXTRA_JS_MODULES.devtools.memory.actions += [
-+    'actions/snapshot.js',
-+]
-+
-+EXTRA_JS_MODULES.devtools.memory.reducers += [
-+    'reducers/snapshot.js',
- ]
+ )
  
  MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+-BROWSER_CHROME_MANIFESTS += ['test/browser/browser.ini']
 +XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
-diff --git a/browser/devtools/memory/panel.js b/browser/devtools/memory/panel.js
-index e1428e6..41a0e69 100644
---- a/browser/devtools/memory/panel.js
-+++ b/browser/devtools/memory/panel.js
-@@ -23,38 +23,39 @@ MemoryPanel.prototype = {
-     if (this._opening) {
-       return this._opening;
-     }
- 
+diff --git a/devtools/client/memory/panel.js b/devtools/client/memory/panel.js
+index 9f4ed8c..05503dd 100644
+--- a/devtools/client/memory/panel.js
++++ b/devtools/client/memory/panel.js
+@@ -27,41 +27,50 @@ MemoryPanel.prototype = {
      this.panelWin.gToolbox = this._toolbox;
      this.panelWin.gTarget = this.target;
-     this.panelWin.gFront = new MemoryFront(this.target.client, this.target.form);
+ 
+     const rootForm = yield this.target.root;
+     this.panelWin.gFront = new MemoryFront(this.target.client,
+                                            this.target.form,
+                                            rootForm);
  
 -    console.log(this.panelWin, this.panelWin.MemoryController);
--    return this._opening = this.panelWin.MemoryController.initialize().then(() => {
+-    this._opening = this.panelWin.MemoryController.initialize().then(() => {
 +    yield this.panelWin.gFront.attach();
 +    return this._opening = this.panelWin.initialize().then(() => {
        this.isReady = true;
        this.emit("ready");
        return this;
      });
+     return this._opening;
    }),
  
    // DevToolPanel API
@@ -897,143 +292,182 @@ index e1428e6..41a0e69 100644
        return this._destroyer;
      }
  
--    return this._destroyer = this.panelWin.MemoryController.destroy().then(() => {
++<<<<<<< HEAD
+     this._destroyer = this.panelWin.MemoryController.destroy().then(() => {
++=======
 +    yield this.panelWin.gFront.detach();
 +    return this._destroyer = this.panelWin.destroy().then(() => {
++>>>>>>> Bug 1201949 - Initial redux-style controllers for front end memory tool heap snapshot. r=jlongster
        // Destroy front to ensure packet handler is removed from client
        this.panelWin.gFront.destroy();
+       this.panelWin = null;
        this.emit("destroyed");
        return this;
      });
--  }
++<<<<<<< HEAD
+     return this._destroyer;
+   }
++=======
 +  })
++>>>>>>> Bug 1201949 - Initial redux-style controllers for front end memory tool heap snapshot. r=jlongster
  };
  
  exports.MemoryPanel = MemoryPanel;
-diff --git a/browser/devtools/memory/reducers.js b/browser/devtools/memory/reducers.js
+diff --git a/devtools/client/memory/reducers.js b/devtools/client/memory/reducers.js
 new file mode 100644
 index 0000000..ef7d248
 --- /dev/null
-+++ b/browser/devtools/memory/reducers.js
++++ b/devtools/client/memory/reducers.js
 @@ -0,0 +1 @@
 +exports.snapshots = require("./reducers/snapshot");
-diff --git a/browser/devtools/memory/reducers/snapshot.js b/browser/devtools/memory/reducers/snapshot.js
+diff --git a/devtools/client/memory/reducers/moz.build b/devtools/client/memory/reducers/moz.build
 new file mode 100644
-index 0000000..6b37ea5
+index 0000000..3ffb5eb
 --- /dev/null
-+++ b/browser/devtools/memory/reducers/snapshot.js
-@@ -0,0 +1,29 @@
-+const { ACTIONS, SNAPSHOT_STATES } = require("../constants");
++++ b/devtools/client/memory/reducers/moz.build
+@@ -0,0 +1,8 @@
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++DevToolsModules(
++    'snapshot.js',
++)
+diff --git a/devtools/client/memory/reducers/snapshot.js b/devtools/client/memory/reducers/snapshot.js
+new file mode 100644
+index 0000000..b967133
+--- /dev/null
++++ b/devtools/client/memory/reducers/snapshot.js
+@@ -0,0 +1,37 @@
++const { actions } = require("../constants");
++const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
++const DevToolsUtils = require("devtools/shared/DevToolsUtils");
++
++function handleTakeSnapshot (state, action) {
++  switch (action.status) {
++
++    case "start":
++      return [...state, {
++        id: action.seqId,
++        status: action.status
++      }];
++
++    case "done":
++      let snapshot = state.find(s => s.id === action.seqId);
++      if (!snapshot) {
++        DevToolsUtils.reportException(`No snapshot with id "${action.seqId}" for TAKE_SNAPSHOT`);
++        break;
++      }
++      snapshot.status = "done";
++      snapshot.snapshotId = action.value;
++      return [...state];
++
++    case "error":
++      DevToolsUtils.reportException(`No async state found for ${action.type}`);
++  }
++  return [...state];
++}
 +
 +module.exports = function (state=[], action) {
 +  switch (action.type) {
-+    case ACTIONS.TAKE_SNAPSHOT:
-+      return [...state, {
-+        id: action.id,
-+        status: SNAPSHOT_STATES.INITIATED
-+      }]
-+      break;
-+
-+    case ACTIONS.RECEIVE_SNAPSHOT:
-+      let snapshot = state.find(s => s.id === action.id);
-+      if (!snapshot) {
-+        console.error(`No snapshot with id ${id} in response to ${RECEIVE_SNAPSHOT}`);
-+        break;
-+      }
-+
-+      snapshot.platformID = action.platformID;
-+      snapshot.status = SNAPSHOT_STATES.READY;
-+      return state;
-+      break;
-+
-+    case ACTIONS.RECEIVE_SNAPSHOT_ERROR:
-+      console.error(action);
-+      break;
++    case actions.TAKE_SNAPSHOT:
++      return handleTakeSnapshot(state, action);
 +  }
++
 +  return state;
 +};
-diff --git a/browser/devtools/memory/state.js b/browser/devtools/memory/state.js
+diff --git a/devtools/client/memory/store.js b/devtools/client/memory/store.js
 new file mode 100644
-index 0000000..e69de29
-diff --git a/browser/devtools/memory/store.js b/browser/devtools/memory/store.js
-new file mode 100644
-index 0000000..2ea5013
+index 0000000..c9eef1f
 --- /dev/null
-+++ b/browser/devtools/memory/store.js
-@@ -0,0 +1,6 @@
-+const { createStore, combineReducers } = require("devtools/memory/redux");
-+const reducers = require("devtools/memory/reducers");
++++ b/devtools/client/memory/store.js
+@@ -0,0 +1,8 @@
++const { combineReducers } = require("../shared/vendor/redux");
++const createStore = require("../shared/redux/create-store");
++const reducers = require("./reducers");
++const DevToolsUtils = require("devtools/shared/DevToolsUtils");
 +
 +module.exports = function () {
-+  return createStore(combineReducers(reducers), {});
++  return createStore({ log: DevToolsUtils.testing })(combineReducers(reducers), {});
 +};
-diff --git a/browser/devtools/memory/subscribers/front.js b/browser/devtools/memory/subscribers/front.js
+diff --git a/devtools/client/memory/test/mochitest/head.js b/devtools/client/memory/test/mochitest/head.js
+index 2bf959a..7fa26b9 100644
+--- a/devtools/client/memory/test/mochitest/head.js
++++ b/devtools/client/memory/test/mochitest/head.js
+@@ -4,9 +4,9 @@
+ "use strict";
+ 
+ const Cc = Components.classes;
+ const Ci = Components.interfaces;
+ const Cu = Components.utils;
+ const Cr = Components.results;
+ const CC = Components.Constructor;
+ 
+-const { require } = Cu.import("resource://gre/modules/devtools/shared/Loader.jsm", {});
++const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+diff --git a/devtools/client/memory/test/mochitest/test_census-view-01.html b/devtools/client/memory/test/mochitest/test_census-view-01.html
+index 7d5e604..1883dfb 100644
+--- a/devtools/client/memory/test/mochitest/test_census-view-01.html
++++ b/devtools/client/memory/test/mochitest/test_census-view-01.html
+@@ -2,21 +2,21 @@
+ <html>
+ <!--
+ Bug 1067491 - Test taking a census over the RDP.
+ -->
+ <head>
+   <meta charset="utf-8">
+   <title>Census Tree 01</title>
+   <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
+-  <link href="chrome://devtools/content/shared/widgets/widgets.css" type="text/css" />
+-  <link href="chrome://devtools/skin/themes/light-theme.css" type="text/css" />
+-  <link href="chrome://devtools/skin/themes/common.css" type="text/css" />
+-  <link href="chrome://devtools/skin/themes/widgets.css" type="text/css" />
+-  <link href="chrome://devtools/skin/themes/memory.css" type="text/css" />
++  <link href="chrome://browser/content/devtools/widgets.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/light-theme.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/common.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/widgets.css" type="text/css" />
++  <link href="chrome://browser/skin/devtools/memory.css" type="text/css" />
+ </head>
+ <body>
+ <ul id="container" style="width:100%;height:300px;"></ul>
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script>
+ window.onload = function() {
+   var { CensusTreeNode } = require("devtools/shared/heapsnapshot/census-tree-node");
+diff --git a/devtools/client/memory/test/unit/head.js b/devtools/client/memory/test/unit/head.js
 new file mode 100644
-index 0000000..728621e
+index 0000000..3e3761d2
 --- /dev/null
-+++ b/browser/devtools/memory/subscribers/front.js
-@@ -0,0 +1,33 @@
-+const { SNAPSHOT_STATES } = require("devtools/memory/constants");
-+const { receiveSnapshot, receiveSnapshotError } = require("devtools/memory/actions/snapshot");
-+
-+const Front = exports.Front = function Front (store, front) {
-+  this.store = store;
-+  this.front = front;
-+};
-+
-+Front.prototype.initialize = function () {
-+  this._unsubscribe = this.store.subscribe(this._listener.bind(this));
-+};
-+
-+Front.prototype.destroy = function () {
-+  this._unsubscribe();
-+  this.store = this.front = null;
-+};
-+
-+Front.prototype._listener = function () {
-+  let state = this.store.getState();
-+  let initiatedSnapshots = state.snapshots.filter(s => s.status === SNAPSHOT_STATES.INITIATED);
-+
-+  if (!initiatedSnapshots.length) {
-+    return;
-+  }
-+
-+  initiatedSnapshots.forEach(snapshot => {
-+    this.front.saveHeapSnapshot().then(platformID => {
-+      this.store.dispatch(receiveSnapshot({ platformID, id: snapshot.id }));
-+    }, error => {
-+      this.store.dispatch(receiveSnapshotError({ error, id: snapshot.id }));
-+    });
-+  });
-+}
-diff --git a/browser/devtools/memory/test/unit/head.js b/browser/devtools/memory/test/unit/head.js
-new file mode 100644
-index 0000000..e9ef417
---- /dev/null
-+++ b/browser/devtools/memory/test/unit/head.js
-@@ -0,0 +1,55 @@
++++ b/devtools/client/memory/test/unit/head.js
+@@ -0,0 +1,56 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
 +"use strict";
 +
-+const Cc = Components.classes;
-+const Ci = Components.interfaces;
-+const Cu = Components.utils;
-+const Cr = Components.results;
-+const CC = Components.Constructor;
++var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++var { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
++var { gDevTools } = Cu.import("resource:///modules/devtools/client/framework/gDevTools.jsm", {});
++var { console } = Cu.import("resource://gre/modules/devtools/shared/Console.jsm", {});
++var { require } = Cu.import("resource://gre/modules/devtools/shared/Loader.jsm", {});
++var { TargetFactory } = require("devtools/client/framework/target");
++var DevToolsUtils = require("devtools/shared/DevToolsUtils");
++var promise = require("promise");
++var { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
++var { MemoryController } = require("devtools/client/memory/controller");
++var { expectState } = require("devtools/server/actors/common");
++var HeapSnapshotFileUtils = require("devtools/shared/heapsnapshot/HeapSnapshotFileUtils");
++var { addDebuggerToGlobal } = require("resource://gre/modules/jsdebugger.jsm");
++var SYSTEM_PRINCIPAL = Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal);
++var { setTimeout } = require("sdk/timers");
 +
-+const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
-+const { Task } = require("resource://gre/modules/Task.jsm");
-+const { MemoryController } = require("devtools/memory/controller");
-+const { expectState } = require("devtools/toolkit/server/actors/common");
-+const HeapSnapshotFileUtils = require("devtools/toolkit/heapsnapshot/HeapSnapshotFileUtils");
-+const { addDebuggerToGlobal } = require("resource://gre/modules/jsdebugger.jsm");
-+const SYSTEM_PRINCIPAL = Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal);
-+const promise = require("promise");
++DevToolsUtils.testing = true;
 +
 +function initDebugger () {
-+  const global = new Cu.Sandbox(SYSTEM_PRINCIPAL, { freshZone: true });
++  let global = new Cu.Sandbox(SYSTEM_PRINCIPAL, { freshZone: true });
 +  addDebuggerToGlobal(global);
 +  return new global.Debugger();
 +}
@@ -1051,38 +485,34 @@ index 0000000..e9ef417
 +});
 +
 +StubbedMemoryFront.prototype.saveHeapSnapshot = expectState("attached", Task.async(function *() {
-+  const path = HeapSnapshotFileUtils.getNewUniqueHeapSnapshotTempFilePath();
-+  ThreadSafeChromeUtils.saveHeapSnapshot(path, { debugger: this.dbg });
++  let path = ThreadSafeChromeUtils.saveHeapSnapshot({ debugger: this.dbg });
 +  return HeapSnapshotFileUtils.getSnapshotIdFromPath(path);
 +}), "saveHeapSnapshot");
 +
-+function waitForState (store, predicate) {
++function waitUntilState (store, predicate) {
 +  let deferred = promise.defer();
-+  store.subscribe(function () {
-+    let state = store.getState();
-+    if (predicate(state)) {
-+      deferred.resolve(state);
++  let unsubscribe = store.subscribe(() => {
++    if (predicate(store.getState())) {
++      unsubscribe();
++      deferred.resolve()
 +    }
 +  });
-+
 +  return deferred.promise;
 +}
-diff --git a/browser/devtools/memory/test/unit/test_take-snapshot.js b/browser/devtools/memory/test/unit/test_take-snapshot.js
+diff --git a/devtools/client/memory/test/unit/test_action-take-snapshot.js b/devtools/client/memory/test/unit/test_action-take-snapshot.js
 new file mode 100644
-index 0000000..c1e8c68
+index 0000000..ca81e16
 --- /dev/null
-+++ b/browser/devtools/memory/test/unit/test_take-snapshot.js
-@@ -0,0 +1,33 @@
++++ b/devtools/client/memory/test/unit/test_action-take-snapshot.js
+@@ -0,0 +1,45 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
 +/**
-+ * Tests that frame-utils isContent and parseLocation work as intended
-+ * when parsing over frames from the profiler.
++ * Tests the async action creator `takeSnapshot(front)`
 + */
 +
-+let actions = require("devtools/memory/actions/snapshot");
-+let { SNAPSHOT_STATES } = require("devtools/memory/constants");
++let actions = require("devtools/client/memory/actions/snapshot");
 +
 +function run_test() {
 +  run_next_test();
@@ -1093,24 +523,38 @@ index 0000000..c1e8c68
 +  yield front.attach();
 +  let controller = new MemoryController({ toolbox: {}, target: {}, front });
 +
-+  let valid = waitForState(controller, function (state) {
-+    state.snapshots = state.snapshots || [];
-+    return state.snapshots.length === 1 && state.snapshots[0].status === SNAPSHOT_STATES.READY;
-+  });
++  let unsubscribe = controller.subscribe(checkState);
 +
-+  controller.dispatch(actions.takeSnapshot());
-+  yield valid;
++  let foundPendingState = false;
++  let foundDoneState = false;
 +
-+  let state = controller.getState();
-+  ok(state.snapshots.length === 1, "state contains one snapshot");
-+  ok(state.snapshots[0].status === SNAPSHOT_STATES.READY, "snapshot has correct state");
-+  ok(state.snapshots[0].platformID, "snapshot has a platform id");
++  function checkState () {
++    let state = controller.getState();
++    if (state.snapshots.length === 1 && state.snapshots[0].status === "start") {
++      foundPendingState = true;
++      ok(foundPendingState, "Got state change for pending heap snapshot request");
++      ok(!(state.snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
++    }
++    if (state.snapshots.length === 1 && state.snapshots[0].status === "done") {
++      foundDoneState = true;
++      ok(foundDoneState, "Got state change for completed heap snapshot request");
++      ok(state.snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
++    }
++    if (state.snapshots.lenght === 1 && state.snapshots[0].status === "error") {
++      ok(false, "takeSnapshot's promise returned with an error");
++    }
++  }
++
++  controller.dispatch(actions.takeSnapshot(front));
++  yield waitUntilState(controller, () => foundPendingState && foundDoneState);
++
++  unsubscribe();
 +});
-diff --git a/browser/devtools/memory/test/unit/xpcshell.ini b/browser/devtools/memory/test/unit/xpcshell.ini
+diff --git a/devtools/client/memory/test/unit/xpcshell.ini b/devtools/client/memory/test/unit/xpcshell.ini
 new file mode 100644
-index 0000000..38b4e73
+index 0000000..555d31e
 --- /dev/null
-+++ b/browser/devtools/memory/test/unit/xpcshell.ini
++++ b/devtools/client/memory/test/unit/xpcshell.ini
 @@ -0,0 +1,8 @@
 +[DEFAULT]
 +tags = devtools
@@ -1119,32 +563,190 @@ index 0000000..38b4e73
 +firefox-appdir = browser
 +skip-if = toolkit == 'android' || toolkit == 'gonk'
 +
-+[test_take-snapshot.js]
-diff --git a/browser/themes/shared/devtools/memory.css b/browser/themes/shared/devtools/memory.css
-index 78f8f1f..052e611 100644
---- a/browser/themes/shared/devtools/memory.css
-+++ b/browser/themes/shared/devtools/memory.css
-@@ -15,16 +15,20 @@
- .theme-light {
-   --cell-border-color: rgba(0,0,0,0.15);
-   --cell-border-color-light: rgba(0,0,0,0.1);
-   --focus-cell-border-color: rgba(0,0,0,0.3);
-   --row-alt-background-color: rgba(76,158,217,0.1);
-   --row-hover-background-color: rgba(76,158,217,0.2);
- }
++[test_action-take-snapshot.js]
+diff --git a/devtools/client/shared/redux/create-store.js b/devtools/client/shared/redux/create-store.js
+index fa804a3..9eeabf7e 100644
+--- a/devtools/client/shared/redux/create-store.js
++++ b/devtools/client/shared/redux/create-store.js
+@@ -2,30 +2,32 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
  
-+#snapshot-button {
-+  background-image: url("chrome://browser/skin/devtools/command-screenshot.png");
+ const { createStore, applyMiddleware } = require("devtools/client/shared/vendor/redux");
+ const { thunk } = require("./middleware/thunk");
+ const { waitUntilService } = require("./middleware/wait-service");
+ const { log } = require("./middleware/log");
++const { promise } = require("./middleware/promise");
+ 
+ /**
+  * This creates a dispatcher with all the standard middleware in place
+  * that all code requires. It can also be optionally configured in
+  * various ways, such as logging and recording.
+  *
+  * @param {object} opts - boolean configuration flags
+  *        - log: log all dispatched actions to console
+  *        - middleware: array of middleware to be included in the redux store
+  */
+ module.exports = (opts={}) => {
+   const middleware = [
+     thunk,
+-    waitUntilService
++    waitUntilService,
++    promise,
+   ];
+ 
+   if (opts.log) {
+     middleware.push(log);
+   }
+ 
+   if (opts.middleware) {
+     opts.middleware.forEach(fn => middleware.push(fn));
+diff --git a/devtools/client/shared/redux/middleware/moz.build b/devtools/client/shared/redux/middleware/moz.build
+index 224b021..e8290a1 100644
+--- a/devtools/client/shared/redux/middleware/moz.build
++++ b/devtools/client/shared/redux/middleware/moz.build
+@@ -1,11 +1,12 @@
+ # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+     'log.js',
++    'promise.js',
+     'thunk.js',
+     'wait-service.js',
+ )
+diff --git a/devtools/client/shared/redux/middleware/promise.js b/devtools/client/shared/redux/middleware/promise.js
+new file mode 100644
+index 0000000..f869816
+--- /dev/null
++++ b/devtools/client/shared/redux/middleware/promise.js
+@@ -0,0 +1,52 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const uuidgen = require("sdk/util/uuid").uuid;
++const {
++  entries, toObject, reportException, executeSoon
++} = require("devtools/shared/DevToolsUtils");
++const PROMISE = exports.PROMISE = "@@dispatch/promise";
++
++function promiseMiddleware ({ dispatch, getState }) {
++  return next => action => {
++    if (!(PROMISE in action)) {
++      return next(action);
++    }
++
++    const promise = action[PROMISE];
++    const seqId = uuidgen().toString();
++
++    // Create a new action that doesn't have the promise field and has
++    // the `seqId` field that represents the sequence id
++    action = Object.assign(
++      toObject(entries(action).filter(pair => pair[0] !== PROMISE)), { seqId }
++    );
++
++    dispatch(Object.assign({}, action, { status: "start" }));
++
++    promise.then(value => {
++      executeSoon(() => {
++        dispatch(Object.assign({}, action, {
++          status: "done",
++          value: value
++        }));
++      });
++    }).catch(error => {
++      executeSoon(() => {
++        dispatch(Object.assign({}, action, {
++          status: "error",
++          error
++        }));
++      });
++      reportException(`@@redux/middleware/promise#${action.type}`, error);
++    });
++
++    // Return the promise so action creators can still compose if they
++    // want to.
++    return promise;
++  };
 +}
 +
- .heap-view {
-   position: relative;
++exports.promise = promiseMiddleware;
+diff --git a/devtools/shared/DevToolsUtils.js b/devtools/shared/DevToolsUtils.js
+index cc8500f..08e224b 100644
+--- a/devtools/shared/DevToolsUtils.js
++++ b/devtools/shared/DevToolsUtils.js
+@@ -7,16 +7,17 @@
+ /* General utilities used throughout devtools. */
+ 
+ var { Ci, Cu, Cc, components } = require("chrome");
+ var Services = require("Services");
+ var promise = require("promise");
+ 
+ loader.lazyRequireGetter(this, "FileUtils",
+                          "resource://gre/modules/FileUtils.jsm", true);
++loader.lazyRequireGetter(this, "setTimeout", "Timer", true);
+ 
+ /**
+  * Turn the error |aError| into a string, without fail.
+  */
+ exports.safeErrorString = function safeErrorString(aError) {
+   try {
+     let errorString = aError.toString();
+     if (typeof errorString == "string") {
+@@ -128,16 +129,28 @@ exports.zip = function zip(a, b) {
+  * @param object obj
+  * @returns array
+  */
+ exports.entries = function entries(obj) {
+   return Object.keys(obj).map(k => [k, obj[k]]);
  }
  
- .heap-view .theme-twisty {
-   text-align: end;
- }
+ /**
++ * Takes an array of 2-element arrays as key/values pairs and
++ * constructs an object using them.
++ */
++exports.toObject = function(arr) {
++  const obj = {};
++  for(let pair of arr) {
++    obj[pair[0]] = pair[1];
++  }
++  return obj;
++}
++
++/**
+  * Composes the given functions into a single function, which will
+  * apply the results of each function right-to-left, starting with
+  * applying the given arguments to the right-most function.
+  * `compose(foo, bar, baz)` === `args => foo(bar(baz(args)`
+  *
+  * @param ...function funcs
+  * @returns function
+  */
+@@ -181,17 +194,17 @@ exports.waitForTick = function waitForTick() {
+  *
+  * @param number aDelay
+  *        The amount of time to wait, in milliseconds.
+  * @return Promise
+  *         A promise that is resolved after the specified amount of time passes.
+  */
+ exports.waitForTime = function waitForTime(aDelay) {
+   let deferred = promise.defer();
+-  require("Timer").setTimeout(deferred.resolve, aDelay);
++  setTimeout(deferred.resolve, aDelay);
+   return deferred.promise;
+ };
  
+ /**
+  * Like Array.prototype.forEach, but doesn't cause jankiness when iterating over
+  * very large arrays by yielding to the browser and continuing execution on the
+  * next tick.
+  *
 -- 
 2.2.1
 
