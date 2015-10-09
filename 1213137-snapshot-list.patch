@@ -1,0 +1,608 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 8 Oct 2015 17:43:31 -0700
+Subject: Bug 1213137 - Initial react app for memory tool with its snapshot list view. r=jlongster
+
+diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
+index d387e11..6066d07 100644
+--- a/devtools/client/memory/actions/snapshot.js
++++ b/devtools/client/memory/actions/snapshot.js
+@@ -7,8 +7,15 @@ const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
+ const { actions } = require("../constants");
+ 
+ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
+   return {
+     type: actions.TAKE_SNAPSHOT,
+     [PROMISE]: front.saveHeapSnapshot()
+   };
+ };
++
++const selectSnapshot = exports.selectSnapshot = function takeSnapshot (snapshot) {
++  return {
++    type: actions.SELECT_SNAPSHOT,
++    snapshot
++  };
++};
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+new file mode 100644
+index 0000000..45612cc
+--- /dev/null
++++ b/devtools/client/memory/app.js
+@@ -0,0 +1,64 @@
++const { DOM, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
++const { connect } = require("devtools/client/shared/vendor/react-redux");
++const { selectSnapshot, takeSnapshot } = require("./actions/snapshot");
++const Toolbar = createFactory(require("./components/toolbar"));
++const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
++const List = createFactory(require("./components/list")(SnapshotListItem));
++
++const App = createClass({
++  displayName: "memory-tool",
++
++  childContextTypes: {
++    front: PropTypes.any,
++  },
++
++  getChildContext() {
++    return {
++      front: this.props.front,
++    }
++  },
++
++  render() {
++    let { dispatch, snapshots } = this.props;
++    return (
++      DOM.div({ className: "memory-tool" }, ...[
++
++        Toolbar({
++          buttons: [{
++            className: "take-snapshot",
++            onClick: () => dispatch(takeSnapshot(this.props.front))
++          }]
++        }),
++
++        List({
++          items: snapshots,
++          onClick: (snapshot) => dispatch(selectSnapshot(snapshot))
++        })
++      ])
++    );
++  },
++});
++
++App.propTypes = {
++  front: PropTypes.any,
++  snapshots: PropTypes.arrayOf(PropTypes.shape({
++    id: PropTypes.number.isRequired,
++    snapshotId: PropTypes.string,
++    selected: PropTypes.bool.isRequired,
++    status: PropTypes.oneOf([
++      "start",
++      "done",
++      "error",
++    ]).isRequired,
++  }))
++};
++
++/**
++ * Passed into react-redux's `connect` method that is called on store change
++ * and passed to components.
++ */
++function mapStateToProps (state) {
++  return { snapshots: state.snapshots };
++}
++
++module.exports = connect(mapStateToProps)(App);
+diff --git a/devtools/client/memory/components/list.js b/devtools/client/memory/components/list.js
+new file mode 100644
+index 0000000..8252265
+--- /dev/null
++++ b/devtools/client/memory/components/list.js
+@@ -0,0 +1,28 @@
++const { DOM, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++
++/**
++ * Factory that takes a component `ListItem` and returns
++ * a List component that populates itself with ListItems.
++ */
++module.exports = (ListItem) => createClass({
++  displayName: "list",
++
++  propTypes: {
++    onClick: PropTypes.func,
++    items: PropTypes.array.isRequired,
++  },
++
++  render() {
++    console.log("lsit", this.props);
++    let items = this.props.items;
++    let onClick = this.props.onClick;
++
++    return (
++      DOM.ul({ className: "list" }, ...items.map((item, index) => {
++        return ListItem({
++          item, index, onClick: () => onClick(item),
++        });
++      }))
++    );
++  }
++});
+diff --git a/devtools/client/memory/components/moz.build b/devtools/client/memory/components/moz.build
+new file mode 100644
+index 0000000..f71d199
+--- /dev/null
++++ b/devtools/client/memory/components/moz.build
+@@ -0,0 +1,10 @@
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++DevToolsModules(
++    'list.js',
++    'snapshot-list-item.js',
++    'toolbar.js',
++)
+diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
+new file mode 100644
+index 0000000..08ef142
+--- /dev/null
++++ b/devtools/client/memory/components/snapshot-list-item.js
+@@ -0,0 +1,24 @@
++const { DOM, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++
++const SnapshotListItem = module.exports = createClass({
++  displayName: "snapshot-list-item",
++
++  propTypes: {
++    onClick: PropTypes.func,
++    item: PropTypes.any.isRequired,
++    index: PropTypes.number.isRequired,
++  },
++
++  render() {
++    let index = this.props.index;
++    let item = this.props.item;
++    let onClick = this.props.onClick;
++    let className = `snapshot-list-item ${item.selected ? " selected" : ""}`; 
++    return (
++      DOM.li({ className, onClick },
++        DOM.span({ className: "snapshot-title" }, `Snapshot #${index}`)
++      )
++    );
++  }
++});
++
+diff --git a/devtools/client/memory/components/toolbar.js b/devtools/client/memory/components/toolbar.js
+new file mode 100644
+index 0000000..ec46722
+--- /dev/null
++++ b/devtools/client/memory/components/toolbar.js
+@@ -0,0 +1,16 @@
++const { DOM, createClass } = require("devtools/client/shared/vendor/react");
++
++const Toolbar = module.exports = createClass({
++  displayName: "toolbar",
++
++  render() {
++    let buttons = this.props.buttons;
++    return (
++      DOM.div({ className: "devtools-toolbar" }, ...buttons.map(spec => {
++        return DOM.button(Object.assign({}, spec, {
++          className: `${spec.className || "" } devtools-toolbarbutton`
++        }));
++      }))
++    );
++  }
++});
+diff --git a/devtools/client/memory/constants.js b/devtools/client/memory/constants.js
+index f9fc109..64501ab 100644
+--- a/devtools/client/memory/constants.js
++++ b/devtools/client/memory/constants.js
+@@ -2,8 +2,11 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const actions = exports.actions = {};
+ 
+ // Fired by UI to request a snapshot from the actor.
+ actions.TAKE_SNAPSHOT = "take-snapshot";
++
++// Fired by UI to select a snapshot to view.
++actions.SELECT_SNAPSHOT = "select-snapshot";
+diff --git a/devtools/client/memory/controller.js b/devtools/client/memory/controller.js
+index 00b26ff..eaa25f3 100644
+--- a/devtools/client/memory/controller.js
++++ b/devtools/client/memory/controller.js
+@@ -1,28 +1,28 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Task } = require("resource://gre/modules/Task.jsm");
++const { createElement, render } = require("devtools/client/shared/vendor/react");
++const { Provider } = require("devtools/client/shared/vendor/react-redux");
++const App = require("./app");
+ const Store = require("./store");
+ 
+ /**
+  * The current target, toolbox and MemoryFront, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront;
+ 
+-const REDUX_METHODS_TO_PIPE = ["dispatch", "subscribe", "getState"];
++function initialize () {
++  let root = document.querySelector("#app");
++  let store = Store();
++  let provider = createElement(Provider, { store },
++    () => createElement(App, { front: gFront }),
++  root);
++  render(provider);
++}
+ 
+-const MemoryController = exports.MemoryController = function ({ toolbox, target, front }) {
+-  this.store = Store();
+-  this.toolbox = toolbox;
+-  this.target = target;
+-  this.front = front;
+-};
++function destroy () {
+ 
+-REDUX_METHODS_TO_PIPE.map(m =>
+-  MemoryController.prototype[m] = function (...args) { return this.store[m](...args); });
+-
+-MemoryController.prototype.destroy = function () {
+-  this.store = this.toolbox = this.target = this.front = null;
+-};
++}
+diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
+index 6c829df..fe57396 100644
+--- a/devtools/client/memory/initializer.js
++++ b/devtools/client/memory/initializer.js
+@@ -1,30 +1,38 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+-const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+-const { Task } = require("resource://gre/modules/Task.jsm");
+-const { MemoryController } = require("devtools/client/memory/controller");
++const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
++const { BrowserLoader } = Cu.import("resource:///modules/devtools/client/shared/browser-loader.js", {});
++const { require } = BrowserLoader("resource:///modules/devtools/client/memory/", this);
++//const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
++const { createFactory, createElement, render } = require("devtools/client/shared/vendor/react");
++const { Provider } = require("devtools/client/shared/vendor/react-redux");
++const App = createFactory(require("devtools/client/memory/app"));
++const Store = require("devtools/client/memory/store");
+ 
+ /**
+  * The current target, toolbox and MemoryFront, set by this tool's host.
+  */
+ let gToolbox, gTarget, gFront;
+ 
+ /**
+- * Initializes the profiler controller and views.
++ * The current target, toolbox and MemoryFront, set by this tool's host.
+  */
+-var controller = null;
++var gToolbox, gTarget, gFront;
++
+ function initialize () {
+-  return Task.spawn(function *() {
+-    controller = new MemoryController({ toolbox: gToolbox, target: gTarget, front: gFront });
++  return Task.spawn(function*() {
++    let root = document.querySelector("#app");
++    let store = Store();
++    let app = createElement(App, { front: gFront });
++    let provider = createElement(Provider, { store }, app);
++    render(provider, root);
+   });
+ }
+ 
+ function destroy () {
+-  return Task.spawn(function *() {
+-    controller.destroy();
+-  });
++  return Task.spawn(function*(){});
+ }
+diff --git a/devtools/client/memory/memory.xhtml b/devtools/client/memory/memory.xhtml
+index 9734a98..c79e9ae 100644
+--- a/devtools/client/memory/memory.xhtml
++++ b/devtools/client/memory/memory.xhtml
+@@ -6,35 +6,22 @@
+   %htmlDTD;
+ ]>
+ 
+ <!-- This Source Code Form is subject to the terms of the Mozilla Public
+    - License, v. 2.0. If a copy of the MPL was not distributed with this
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ <html xmlns="http://www.w3.org/1999/xhtml">
+   <head>
+-    <link rel="stylesheet" href="chrome://browser/skin/" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://browser/content/devtools/widgets.css" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://browser/skin/devtools/common.css" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://browser/skin/devtools/widgets.css" type="text/css"/>
+-    <link rel="stylesheet" href="chrome://browser/skin/devtools/memory.css" type="text/css"/>
++    <link rel="stylesheet" href="chrome://devtools/skin/themes/common.css" type="text/css"/>
++    <link rel="stylesheet" href="chrome://devtools/skin/themes/widgets.css" type="text/css"/>
++    <link rel="stylesheet" href="chrome://devtools/skin/themes/memory.css" type="text/css"/>
+ 
+     <script type="application/javascript;version=1.8"
+             src="chrome://devtools/content/shared/theme-switching.js"/>
+     <script type="application/javascript;version=1.8"
+             src="initializer.js"></script>
+   </head>
+   <body class="theme-body">
+-    <div class="devtools-toolbar">
+-      <div id="snapshot-button" class="devtools-toolbarbutton" />
+-    </div>
+-    <div class="devtools-horizontal-splitter"></div>
+-    <div id="memory-content"
+-         class="devtools-responsive-container"
+-         flex="1">
+-      <toolbar class="devtools-toolbar">
+-        <spacer flex="1"></spacer>
+-      </toolbar>
+-      <hbox flex="1">
+-      </hbox>
++    <div id="app">
+     </div>
+   </body>
+ </html>
+diff --git a/devtools/client/memory/moz.build b/devtools/client/memory/moz.build
+index a4241a1..6fbe6e6 100644
+--- a/devtools/client/memory/moz.build
++++ b/devtools/client/memory/moz.build
+@@ -1,20 +1,22 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DIRS += [
+     'actions',
++    'components',
+     'modules',
+     'reducers',
+ ]
+ 
+ DevToolsModules(
++    'app.js',
+     'constants.js',
+     'controller.js',
+     'initializer.js',
+     'panel.js',
+     'reducers.js',
+     'store.js',
+ )
+ 
+diff --git a/devtools/client/memory/reducers/snapshot.js b/devtools/client/memory/reducers/snapshot.js
+index b967133..cf1d61f 100644
+--- a/devtools/client/memory/reducers/snapshot.js
++++ b/devtools/client/memory/reducers/snapshot.js
+@@ -3,17 +3,19 @@ const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
+ const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ 
+ function handleTakeSnapshot (state, action) {
+   switch (action.status) {
+ 
+     case "start":
+       return [...state, {
+         id: action.seqId,
+-        status: action.status
++        status: action.status,
++        // auto selected if this is the first snapshot
++        selected: state.length === 0
+       }];
+ 
+     case "done":
+       let snapshot = state.find(s => s.id === action.seqId);
+       if (!snapshot) {
+         DevToolsUtils.reportException(`No snapshot with id "${action.seqId}" for TAKE_SNAPSHOT`);
+         break;
+       }
+@@ -22,16 +24,31 @@ function handleTakeSnapshot (state, action) {
+       return [...state];
+ 
+     case "error":
+       DevToolsUtils.reportException(`No async state found for ${action.type}`);
+   }
+   return [...state];
+ }
+ 
++function handleSelectSnapshot (state, action) {
++  let selected = state.find(s => s.id === action.snapshot.id);
++
++  if (!selected) {
++    DevToolsUtils.reportException(`Cannot select non-existant snapshot ${snapshot.id}`);
++  }
++
++  return state.map(s => {
++    s.selected = s === selected;
++    return s;
++  });
++}
++
+ module.exports = function (state=[], action) {
+   switch (action.type) {
+     case actions.TAKE_SNAPSHOT:
+       return handleTakeSnapshot(state, action);
++    case actions.SELECT_SNAPSHOT:
++      return handleSelectSnapshot(state, action);
+   }
+ 
+   return state;
+ };
+diff --git a/devtools/client/memory/store.js b/devtools/client/memory/store.js
+index c9eef1f..7364a66 100644
+--- a/devtools/client/memory/store.js
++++ b/devtools/client/memory/store.js
+@@ -1,8 +1,9 @@
+ const { combineReducers } = require("../shared/vendor/redux");
+ const createStore = require("../shared/redux/create-store");
+ const reducers = require("./reducers");
+ const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ 
+ module.exports = function () {
+-  return createStore({ log: DevToolsUtils.testing })(combineReducers(reducers), {});
++  let shouldLog = DevToolsUtils.testing || true;
++  return createStore({ log: shouldLog })(combineReducers(reducers), {});
+ };
+diff --git a/devtools/client/memory/test/unit/test_action-take-snapshot.js b/devtools/client/memory/test/unit/test_action-take-snapshot.js
+index ca81e16..13357d6 100644
+--- a/devtools/client/memory/test/unit/test_action-take-snapshot.js
++++ b/devtools/client/memory/test/unit/test_action-take-snapshot.js
+@@ -28,17 +28,17 @@ add_task(function *() {
+       ok(foundPendingState, "Got state change for pending heap snapshot request");
+       ok(!(state.snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
+     }
+     if (state.snapshots.length === 1 && state.snapshots[0].status === "done") {
+       foundDoneState = true;
+       ok(foundDoneState, "Got state change for completed heap snapshot request");
+       ok(state.snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
+     }
+-    if (state.snapshots.lenght === 1 && state.snapshots[0].status === "error") {
++    if (state.snapshots.length === 1 && state.snapshots[0].status === "error") {
+       ok(false, "takeSnapshot's promise returned with an error");
+     }
+   }
+ 
+   controller.dispatch(actions.takeSnapshot(front));
+   yield waitUntilState(controller, () => foundPendingState && foundDoneState);
+ 
+   unsubscribe();
+diff --git a/devtools/client/shared/browser-loader.js b/devtools/client/shared/browser-loader.js
+index 96b23ab..196f60c 100644
+--- a/devtools/client/shared/browser-loader.js
++++ b/devtools/client/shared/browser-loader.js
+@@ -18,17 +18,17 @@ catch(e) {
+   // will be loaded if this is true, and that file doesn't get built
+   // into the release version of Firefox, so this will only work with
+   // dev environments.
+   appConstants = {
+     DEBUG_JS_MODULES: true
+   };
+ }
+ 
+-const VENDOR_CONTENT_URL = "resource:///modules/devtools/shared/vendor";
++const VENDOR_CONTENT_URL = "resource:///modules/devtools/client/shared/vendor";
+ 
+ /*
+  * Create a loader to be used in a browser environment. This evaluates
+  * modules in their own environment, but sets window (the normal
+  * global object) as the sandbox prototype, so when a variable is not
+  * defined it checks `window` before throwing an error. This makes all
+  * browser APIs available to modules by default, like a normal browser
+  * environment, but modules are still evaluated in their own scope.
+diff --git a/devtools/client/themes/common.css b/devtools/client/themes/common.css
+index b298d47..da04210 100644
+--- a/devtools/client/themes/common.css
++++ b/devtools/client/themes/common.css
+@@ -10,16 +10,20 @@
+   --monospace-font-family: Menlo, monospace;
+ %elifdef XP_WIN
+   --monospace-font-family: Consolas, monospace;
+ %else
+   --monospace-font-family: monospace;
+ %endif
+ }
+ 
++.theme-body {
++  margin: 0;
++}
++
+ .devtools-monospace {
+   font-family: var(--monospace-font-family);
+ %if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_QT)
+   font-size: 80%;
+ %endif
+ }
+ 
+ /* Bottom-docked toolbox minimize transition */
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index 78f8f1f..59ef9a4 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -15,16 +15,75 @@
+ .theme-light {
+   --cell-border-color: rgba(0,0,0,0.15);
+   --cell-border-color-light: rgba(0,0,0,0.1);
+   --focus-cell-border-color: rgba(0,0,0,0.3);
+   --row-alt-background-color: rgba(76,158,217,0.1);
+   --row-hover-background-color: rgba(76,158,217,0.2);
+ }
+ 
++/**
++ * TODO bug 1213100
++ * should generalize toolbar buttons with images in them
++ * for non-XUL environments
++ */
++.devtools-toolbarbutton.take-snapshot::before {
++  content: "";
++  background-image: url(images/command-screenshot.png);
++  width: 16px;
++  height: 16px;
++  display: block;
++  margin-left: 4px;
++  background-repeat: no-repeat;
++}
++
++/**
++ * TODO bug 1213100
++ * Once we figure out how to store invertable buttons (pseudo element like in this case?)
++ * we should add a .invertable class to handle this generally, rather than the definitions
++ * in toolbars.inc.css.
++ */
++.theme-light .devtools-toolbarbutton.take-snapshot::before {
++  filter: url(images/filters.svg#invert);
++}
++
++/**
++ * TODO bug 1213100
++ * The .list style is for a generalized React list component. It's children (.list > li)
++ * are generally styled here, as the component can take any type of child component.
++ * Memory tool specific styling are handling in (li.snapshot-list-item).
++ */
++
++.list {
++  margin: 0;
++  padding: 0;
++  width: 186px;
++  list-style-type: none;
++  font-size: 12px;
++}
++
++.list > li {
++  height: 40px;
++  color: var(--theme-body-color);
++  border-bottom: 1px solid transparent;
++  border-top: 1px solid rgba(128,128,128,0.15);
++  padding: 8px;
++  cursor: pointer;
++}
++
++.list > li.selected {
++  background-color: var(--theme-selection-background);
++  color: var(--theme-selection-color);
++}
++
++
++/**
++ * Heap View
++ */
++
+ .heap-view {
+   position: relative;
+ }
+ 
+ .heap-view .theme-twisty {
+   text-align: end;
+ }
+ 
+-- 
+2.2.1
+
