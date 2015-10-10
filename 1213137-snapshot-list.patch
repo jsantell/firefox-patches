@@ -1,14 +1,23 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Thu, 8 Oct 2015 17:43:31 -0700
+Date: Fri, 9 Oct 2015 12:41:54 -0700
 Subject: Bug 1213137 - Initial react app for memory tool with its snapshot list view. r=jlongster
 
 diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
-index d387e11..6066d07 100644
+index d387e11..3243e5d 100644
 --- a/devtools/client/memory/actions/snapshot.js
 +++ b/devtools/client/memory/actions/snapshot.js
-@@ -7,8 +7,15 @@ const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
+@@ -1,14 +1,28 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
  const { actions } = require("../constants");
  
++/**
++ * @param {MemoryFront}
++ */
  const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
    return {
      type: actions.TAKE_SNAPSHOT,
@@ -16,6 +25,10 @@ index d387e11..6066d07 100644
    };
  };
 +
++/**
++ * @param {Snapshot}
++ * @see {Snapshot} model defined in devtools/client/memory/app.js
++ */
 +const selectSnapshot = exports.selectSnapshot = function takeSnapshot (snapshot) {
 +  return {
 +    type: actions.SELECT_SNAPSHOT,
@@ -24,53 +37,28 @@ index d387e11..6066d07 100644
 +};
 diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
 new file mode 100644
-index 0000000..45612cc
+index 0000000..e997739
 --- /dev/null
 +++ b/devtools/client/memory/app.js
-@@ -0,0 +1,64 @@
-+const { DOM, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
+@@ -0,0 +1,77 @@
++const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
 +const { connect } = require("devtools/client/shared/vendor/react-redux");
 +const { selectSnapshot, takeSnapshot } = require("./actions/snapshot");
 +const Toolbar = createFactory(require("./components/toolbar"));
++const List = createFactory(require("./components/list"));
 +const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
-+const List = createFactory(require("./components/list")(SnapshotListItem));
 +
-+const App = createClass({
-+  displayName: "memory-tool",
-+
-+  childContextTypes: {
-+    front: PropTypes.any,
-+  },
-+
-+  getChildContext() {
-+    return {
-+      front: this.props.front,
-+    }
-+  },
-+
-+  render() {
-+    let { dispatch, snapshots } = this.props;
-+    return (
-+      DOM.div({ className: "memory-tool" }, ...[
-+
-+        Toolbar({
-+          buttons: [{
-+            className: "take-snapshot",
-+            onClick: () => dispatch(takeSnapshot(this.props.front))
-+          }]
-+        }),
-+
-+        List({
-+          items: snapshots,
-+          onClick: (snapshot) => dispatch(selectSnapshot(snapshot))
-+        })
-+      ])
-+    );
-+  },
-+});
-+
-+App.propTypes = {
++const stateModel = {
++  /**
++   * {MemoryFront}
++   * Used to communicate with the platform.
++   */
 +  front: PropTypes.any,
++
++  /**
++   * {Array<Snapshot>}
++   * List of references to all snapshots taken
++   */
 +  snapshots: PropTypes.arrayOf(PropTypes.shape({
 +    id: PropTypes.number.isRequired,
 +    snapshotId: PropTypes.string,
@@ -83,6 +71,44 @@ index 0000000..45612cc
 +  }))
 +};
 +
++
++const App = createClass({
++  displayName: "memory-tool",
++
++  propTypes: stateModel,
++
++  childContextTypes: {
++    front: PropTypes.any,
++  },
++
++  getChildContext() {
++    return {
++      front: this.props.front,
++    }
++  },
++
++  render() {
++    let { dispatch, snapshots, front } = this.props;
++    return (
++      dom.div({ className: "memory-tool" }, ...[
++
++        Toolbar({
++          buttons: [{
++            className: "take-snapshot",
++            onClick: () => dispatch(takeSnapshot(front))
++          }]
++        }),
++
++        List({
++          itemComponent: SnapshotListItem,
++          items: snapshots,
++          onClick: snapshot => dispatch(selectSnapshot(snapshot))
++        })
++      ])
++    );
++  },
++});
++
 +/**
 + * Passed into react-redux's `connect` method that is called on store change
 + * and passed to components.
@@ -94,32 +120,32 @@ index 0000000..45612cc
 +module.exports = connect(mapStateToProps)(App);
 diff --git a/devtools/client/memory/components/list.js b/devtools/client/memory/components/list.js
 new file mode 100644
-index 0000000..8252265
+index 0000000..38f3911
 --- /dev/null
 +++ b/devtools/client/memory/components/list.js
 @@ -0,0 +1,28 @@
-+const { DOM, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
 +
 +/**
-+ * Factory that takes a component `ListItem` and returns
-+ * a List component that populates itself with ListItems.
++ * Generic list component that takes another react component to represent
++ * the children nodes as `itemComponent`, and a list of items to render
++ * as that component with a click handler.
 + */
-+module.exports = (ListItem) => createClass({
++const List = module.exports = createClass({
 +  displayName: "list",
 +
 +  propTypes: {
++    itemComponent: PropTypes.any.isRequired,
 +    onClick: PropTypes.func,
 +    items: PropTypes.array.isRequired,
 +  },
 +
 +  render() {
-+    console.log("lsit", this.props);
-+    let items = this.props.items;
-+    let onClick = this.props.onClick;
++    let { items, onClick, itemComponent: Item } = this.props;
 +
 +    return (
-+      DOM.ul({ className: "list" }, ...items.map((item, index) => {
-+        return ListItem({
++      dom.ul({ className: "list" }, ...items.map((item, index) => {
++        return Item({
 +          item, index, onClick: () => onClick(item),
 +        });
 +      }))
@@ -144,10 +170,10 @@ index 0000000..f71d199
 +)
 diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
 new file mode 100644
-index 0000000..08ef142
+index 0000000..9716786
 --- /dev/null
 +++ b/devtools/client/memory/components/snapshot-list-item.js
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,22 @@
 +const { DOM, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
 +
 +const SnapshotListItem = module.exports = createClass({
@@ -160,10 +186,8 @@ index 0000000..08ef142
 +  },
 +
 +  render() {
-+    let index = this.props.index;
-+    let item = this.props.item;
-+    let onClick = this.props.onClick;
-+    let className = `snapshot-list-item ${item.selected ? " selected" : ""}`; 
++    let { index, item, onClick } = this.props;
++    let className = `snapshot-list-item ${item.selected ? " selected" : ""}`;
 +    return (
 +      DOM.li({ className, onClick },
 +        DOM.span({ className: "snapshot-title" }, `Snapshot #${index}`)
@@ -211,53 +235,41 @@ index f9fc109..64501ab 100644
 +// Fired by UI to select a snapshot to view.
 +actions.SELECT_SNAPSHOT = "select-snapshot";
 diff --git a/devtools/client/memory/controller.js b/devtools/client/memory/controller.js
-index 00b26ff..eaa25f3 100644
+deleted file mode 100644
+index 00b26ff..0000000
 --- a/devtools/client/memory/controller.js
-+++ b/devtools/client/memory/controller.js
-@@ -1,28 +1,28 @@
- /* This Source Code Form is subject to the terms of the Mozilla Public
-  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
-  * You can obtain one at http://mozilla.org/MPL/2.0/. */
- "use strict";
- 
- const { Task } = require("resource://gre/modules/Task.jsm");
-+const { createElement, render } = require("devtools/client/shared/vendor/react");
-+const { Provider } = require("devtools/client/shared/vendor/react-redux");
-+const App = require("./app");
- const Store = require("./store");
- 
- /**
-  * The current target, toolbox and MemoryFront, set by this tool's host.
-  */
- var gToolbox, gTarget, gFront;
- 
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-"use strict";
+-
+-const { Task } = require("resource://gre/modules/Task.jsm");
+-const Store = require("./store");
+-
+-/**
+- * The current target, toolbox and MemoryFront, set by this tool's host.
+- */
+-var gToolbox, gTarget, gFront;
+-
 -const REDUX_METHODS_TO_PIPE = ["dispatch", "subscribe", "getState"];
-+function initialize () {
-+  let root = document.querySelector("#app");
-+  let store = Store();
-+  let provider = createElement(Provider, { store },
-+    () => createElement(App, { front: gFront }),
-+  root);
-+  render(provider);
-+}
- 
+-
 -const MemoryController = exports.MemoryController = function ({ toolbox, target, front }) {
 -  this.store = Store();
 -  this.toolbox = toolbox;
 -  this.target = target;
 -  this.front = front;
 -};
-+function destroy () {
- 
+-
 -REDUX_METHODS_TO_PIPE.map(m =>
 -  MemoryController.prototype[m] = function (...args) { return this.store[m](...args); });
 -
 -MemoryController.prototype.destroy = function () {
 -  this.store = this.toolbox = this.target = this.front = null;
 -};
-+}
 diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
-index 6c829df..fe57396 100644
+index 6c829df..dd9b9cb 100644
 --- a/devtools/client/memory/initializer.js
 +++ b/devtools/client/memory/initializer.js
 @@ -1,30 +1,38 @@
@@ -268,12 +280,11 @@ index 6c829df..fe57396 100644
  
  const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
 -const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
--const { Task } = require("resource://gre/modules/Task.jsm");
++const BrowserLoaderModule = {};
++Cu.import("resource:///modules/devtools/client/shared/browser-loader.js", BrowserLoaderModule);
++const { require } = BrowserLoaderModule.BrowserLoader("resource:///modules/devtools/client/memory/", this);
+ const { Task } = require("resource://gre/modules/Task.jsm");
 -const { MemoryController } = require("devtools/client/memory/controller");
-+const { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
-+const { BrowserLoader } = Cu.import("resource:///modules/devtools/client/shared/browser-loader.js", {});
-+const { require } = BrowserLoader("resource:///modules/devtools/client/memory/", this);
-+//const { require } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
 +const { createFactory, createElement, render } = require("devtools/client/shared/vendor/react");
 +const { Provider } = require("devtools/client/shared/vendor/react-redux");
 +const App = createFactory(require("devtools/client/memory/app"));
@@ -354,10 +365,10 @@ index 9734a98..c79e9ae 100644
    </body>
  </html>
 diff --git a/devtools/client/memory/moz.build b/devtools/client/memory/moz.build
-index a4241a1..6fbe6e6 100644
+index a4241a1..3c7cba0 100644
 --- a/devtools/client/memory/moz.build
 +++ b/devtools/client/memory/moz.build
-@@ -1,20 +1,22 @@
+@@ -1,22 +1,24 @@
  # vim: set filetype=python:
  # This Source Code Form is subject to the terms of the Mozilla Public
  # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -373,13 +384,16 @@ index a4241a1..6fbe6e6 100644
  DevToolsModules(
 +    'app.js',
      'constants.js',
-     'controller.js',
+-    'controller.js',
      'initializer.js',
      'panel.js',
      'reducers.js',
      'store.js',
  )
  
++BROWSER_CHROME_MANIFESTS += ['test/browser/browser.ini']
+ MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+ XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
 diff --git a/devtools/client/memory/reducers/snapshot.js b/devtools/client/memory/reducers/snapshot.js
 index b967133..cf1d61f 100644
 --- a/devtools/client/memory/reducers/snapshot.js
@@ -438,7 +452,7 @@ index b967133..cf1d61f 100644
    return state;
  };
 diff --git a/devtools/client/memory/store.js b/devtools/client/memory/store.js
-index c9eef1f..7364a66 100644
+index c9eef1f..ea7e1ac 100644
 --- a/devtools/client/memory/store.js
 +++ b/devtools/client/memory/store.js
 @@ -1,8 +1,9 @@
@@ -449,32 +463,199 @@ index c9eef1f..7364a66 100644
  
  module.exports = function () {
 -  return createStore({ log: DevToolsUtils.testing })(combineReducers(reducers), {});
-+  let shouldLog = DevToolsUtils.testing || true;
++  let shouldLog = DevToolsUtils.testing;
 +  return createStore({ log: shouldLog })(combineReducers(reducers), {});
  };
+diff --git a/devtools/client/memory/test/unit/head.js b/devtools/client/memory/test/unit/head.js
+index 3e3761d2..43ffceb 100644
+--- a/devtools/client/memory/test/unit/head.js
++++ b/devtools/client/memory/test/unit/head.js
+@@ -7,22 +7,21 @@ var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ var { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ var { gDevTools } = Cu.import("resource:///modules/devtools/client/framework/gDevTools.jsm", {});
+ var { console } = Cu.import("resource://gre/modules/devtools/shared/Console.jsm", {});
+ var { require } = Cu.import("resource://gre/modules/devtools/shared/Loader.jsm", {});
+ var { TargetFactory } = require("devtools/client/framework/target");
+ var DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ var promise = require("promise");
+ var { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+-var { MemoryController } = require("devtools/client/memory/controller");
+ var { expectState } = require("devtools/server/actors/common");
+ var HeapSnapshotFileUtils = require("devtools/shared/heapsnapshot/HeapSnapshotFileUtils");
+ var { addDebuggerToGlobal } = require("resource://gre/modules/jsdebugger.jsm");
++var Store = require("devtools/client/memory/store");
+ var SYSTEM_PRINCIPAL = Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal);
+-var { setTimeout } = require("sdk/timers");
+ 
+ DevToolsUtils.testing = true;
+ 
+ function initDebugger () {
+   let global = new Cu.Sandbox(SYSTEM_PRINCIPAL, { freshZone: true });
+   addDebuggerToGlobal(global);
+   return new global.Debugger();
+ }
+@@ -41,16 +40,22 @@ StubbedMemoryFront.prototype.detach = Task.async(function *() {
+ 
+ StubbedMemoryFront.prototype.saveHeapSnapshot = expectState("attached", Task.async(function *() {
+   let path = ThreadSafeChromeUtils.saveHeapSnapshot({ debugger: this.dbg });
+   return HeapSnapshotFileUtils.getSnapshotIdFromPath(path);
+ }), "saveHeapSnapshot");
+ 
+ function waitUntilState (store, predicate) {
+   let deferred = promise.defer();
+-  let unsubscribe = store.subscribe(() => {
++  let unsubscribe = store.subscribe(check);
++
++  function check () {
+     if (predicate(store.getState())) {
+       unsubscribe();
+       deferred.resolve()
+     }
+-  });
++  }
++
++  // Fire the check immediately incase the action has already occurred
++  check();
++
+   return deferred.promise;
+ }
+diff --git a/devtools/client/memory/test/unit/test_action-select-snapshot.js b/devtools/client/memory/test/unit/test_action-select-snapshot.js
+new file mode 100644
+index 0000000..c4882f1
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_action-select-snapshot.js
+@@ -0,0 +1,38 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the reducer responding to the action `selectSnapshot(snapshot)`
++ */
++
++let actions = require("devtools/client/memory/actions/snapshot");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let front = new StubbedMemoryFront();
++  yield front.attach();
++  let store = Store();
++
++  for (let i = 0; i < 5; i++) {
++    store.dispatch(actions.takeSnapshot(front));
++  }
++
++  yield waitUntilState(store, ({ snapshots }) => snapshots.length === 5 && snapshots.every(isDone));
++
++  ok(store.getState().snapshots[0].selected, "snapshot[0] selected by default");
++
++  for (let i = 1; i < 5; i++) {
++    do_print(`Selecting snapshot[${i}]`);
++    store.dispatch(actions.selectSnapshot(store.getState().snapshots[i]));
++    yield waitUntilState(store, ({ snapshots }) => snapshots[i].selected);
++
++    let { snapshots } = store.getState();
++    ok(snapshots[i].selected, `snapshot[${i}] selected`);
++    equal(snapshots.filter(s => !s.selected).length, 4, "All other snapshots are unselected");
++  }
++});
++
++function isDone (s) { return s.status === "done"; }
 diff --git a/devtools/client/memory/test/unit/test_action-take-snapshot.js b/devtools/client/memory/test/unit/test_action-take-snapshot.js
-index ca81e16..13357d6 100644
+index ca81e16..2ba2e0d 100644
 --- a/devtools/client/memory/test/unit/test_action-take-snapshot.js
 +++ b/devtools/client/memory/test/unit/test_action-take-snapshot.js
-@@ -28,17 +28,17 @@ add_task(function *() {
+@@ -1,45 +1,63 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+- * Tests the async action creator `takeSnapshot(front)`
++ * Tests the async reducer responding to the action `takeSnapshot(front)`
+  */
+ 
+ let actions = require("devtools/client/memory/actions/snapshot");
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function *() {
+   let front = new StubbedMemoryFront();
+   yield front.attach();
+-  let controller = new MemoryController({ toolbox: {}, target: {}, front });
++  let store = Store();
+ 
+-  let unsubscribe = controller.subscribe(checkState);
++  let unsubscribe = store.subscribe(checkState);
+ 
+   let foundPendingState = false;
+   let foundDoneState = false;
++  let foundAllSnapshots = false;
+ 
+   function checkState () {
+-    let state = controller.getState();
+-    if (state.snapshots.length === 1 && state.snapshots[0].status === "start") {
++    let { snapshots } = store.getState();
++
++    if (snapshots.length === 1 && snapshots[0].status === "start") {
+       foundPendingState = true;
        ok(foundPendingState, "Got state change for pending heap snapshot request");
-       ok(!(state.snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
+-      ok(!(state.snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
++      ok(snapshots[0].selected, "First snapshot is auto-selected");
++      ok(!(snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
      }
-     if (state.snapshots.length === 1 && state.snapshots[0].status === "done") {
+-    if (state.snapshots.length === 1 && state.snapshots[0].status === "done") {
++    if (snapshots.length === 1 && snapshots[0].status === "done") {
        foundDoneState = true;
        ok(foundDoneState, "Got state change for completed heap snapshot request");
-       ok(state.snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
+-      ok(state.snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
++      ok(snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
      }
 -    if (state.snapshots.lenght === 1 && state.snapshots[0].status === "error") {
-+    if (state.snapshots.length === 1 && state.snapshots[0].status === "error") {
++    if (snapshots.length === 1 && snapshots[0].status === "error") {
        ok(false, "takeSnapshot's promise returned with an error");
      }
++
++    if (snapshots.length === 5 && snapshots.every(s => s.status === "done")) {
++      foundAllSnapshots = true;
++      ok(snapshots.every(s => s.status === "done"), "All snapshots have a snapshotId");
++      equal(snapshots.length, 5, "Found 5 snapshots");
++      ok(snapshots.every(s => s.snapshotId), "All snapshots have a snapshotId");
++      ok(snapshots[0].selected, "First snapshot still selected");
++      equal(snapshots.filter(s => !s.selected).length, 4, "All other snapshots are unselected");
++    }
    }
  
-   controller.dispatch(actions.takeSnapshot(front));
-   yield waitUntilState(controller, () => foundPendingState && foundDoneState);
+-  controller.dispatch(actions.takeSnapshot(front));
+-  yield waitUntilState(controller, () => foundPendingState && foundDoneState);
++  store.dispatch(actions.takeSnapshot(front));
++
++  yield waitUntilState(store, () => foundPendingState && foundDoneState);
++
++  for (let i = 0; i < 4; i++) {
++    store.dispatch(actions.takeSnapshot(front));
++  }
  
++  yield waitUntilState(store, () => foundAllSnapshots);
    unsubscribe();
+ });
+diff --git a/devtools/client/memory/test/unit/xpcshell.ini b/devtools/client/memory/test/unit/xpcshell.ini
+index 555d31e..ce47c63 100644
+--- a/devtools/client/memory/test/unit/xpcshell.ini
++++ b/devtools/client/memory/test/unit/xpcshell.ini
+@@ -1,8 +1,9 @@
+ [DEFAULT]
+ tags = devtools
+ head = head.js
+ tail =
+ firefox-appdir = browser
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
++[test_action-select-snapshot.js]
+ [test_action-take-snapshot.js]
 diff --git a/devtools/client/shared/browser-loader.js b/devtools/client/shared/browser-loader.js
 index 96b23ab..196f60c 100644
 --- a/devtools/client/shared/browser-loader.js
