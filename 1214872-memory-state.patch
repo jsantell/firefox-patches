@@ -1,0 +1,579 @@
+From 4e995785256a77c5b852267b72c04383f725aa14 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 14 Oct 2015 23:13:17 -0700
+Subject: [PATCH] Bug 1214872 - Set up state changes in the memory tool.
+ r=fitzgen"
+
+---
+ devtools/client/memory/actions/snapshot.js         | 21 ++++++++
+ devtools/client/memory/app.js                      | 57 ++++++++++++++++++----
+ devtools/client/memory/components/heap.js          | 38 +++++++++++++++
+ devtools/client/memory/components/moz.build        |  1 +
+ .../client/memory/components/snapshot-list-item.js |  4 +-
+ devtools/client/memory/initializer.js              | 11 ++---
+ devtools/client/memory/panel.js                    |  3 ++
+ devtools/client/memory/reducers/snapshot.js        | 48 +++++++++++++++---
+ .../test/unit/test_action-select-snapshot.js       |  2 +-
+ .../memory/test/unit/test_action-take-snapshot.js  | 10 ++--
+ devtools/client/themes/memory.css                  | 27 ++++++++++
+ 11 files changed, 189 insertions(+), 33 deletions(-)
+ create mode 100644 devtools/client/memory/components/heap.js
+
+diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
+index 3243e5d..3c3632f 100644
+--- a/devtools/client/memory/actions/snapshot.js
++++ b/devtools/client/memory/actions/snapshot.js
+@@ -21,8 +21,29 @@ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
+  * @see {Snapshot} model defined in devtools/client/memory/app.js
+  */
+ const selectSnapshot = exports.selectSnapshot = function takeSnapshot (snapshot) {
+   return {
+     type: actions.SELECT_SNAPSHOT,
+     snapshot
+   };
+ };
++
++/**
++ * @param {HeapAnalysesClient} heapWorker
++ * @param {Snapshot} snapshot,
++ * @param {Object} breakdown
++ *
++ * @see {Snapshot} model defined in devtools/client/memory/app.js
++ * @see `devtools/shared/heapsnapshot/HeapAnalysesClient.js`
++ * @see `js/src/doc/Debugger/Debugger.Memory.md` for breakdown details
++ */
++const takeCensus = exports.takeCensus = function takeCensus (heapWorker, snapshot, breakdown) {
++  let takeCensusTask = heapWorker.readHeapSnapshot(snapshot.snapshotId).then(() => {
++    return heapWorker.takeCensus(snapshot.snapshotId, { breakdown }, { asTreeNode: true });
++  });
++
++  return {
++    type: actions.TAKE_CENSUS,
++    snapshot,
++    [PROMISE]: takeCensusTask,
++  };
++};
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+index e048009..94d66f7 100644
+--- a/devtools/client/memory/app.js
++++ b/devtools/client/memory/app.js
+@@ -1,71 +1,108 @@
+ const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { connect } = require("devtools/client/shared/vendor/react-redux");
+-const { selectSnapshot, takeSnapshot } = require("./actions/snapshot");
++const { takeCensus, selectSnapshot, takeSnapshot } = require("./actions/snapshot");
+ const Toolbar = createFactory(require("./components/toolbar"));
+ const List = createFactory(require("./components/list"));
+ const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
++const HeapView = createFactory(require("./components/heap"));
+ 
+ const stateModel = {
+   /**
+    * {MemoryFront}
+    * Used to communicate with the platform.
+    */
+   front: PropTypes.any,
+ 
+   /**
++   * {HeapAnalysesClient}
++   * Used to communicate with the worker that performs analyses on heaps.
++   */
++  heapWorker: PropTypes.any,
++
++  /**
+    * {Array<Snapshot>}
+    * List of references to all snapshots taken
+    */
+   snapshots: PropTypes.arrayOf(PropTypes.shape({
+     id: PropTypes.number.isRequired,
+     snapshotId: PropTypes.string,
+     selected: PropTypes.bool.isRequired,
+-    status: PropTypes.oneOf([
+-      "start",
+-      "done",
++    censusData: PropTypes.any,
++    censusState: PropTypes.oneOf([
++      "empty",
++      "loading",
++      "loaded",
++      "error",
++    ]).isRequired,
++    state: PropTypes.oneOf([
++      "loading",
++      "loaded",
+       "error",
+     ]).isRequired,
+   }))
+ };
+ 
++// Hardcoded breakdown for now
++const BREAKDOWN = {
++  by: "internalType",
++  then: { by: "count", count: true, bytes: true }
++};
+ 
+ const App = createClass({
+   displayName: "memory-tool",
+ 
+   propTypes: stateModel,
+ 
+   childContextTypes: {
+     front: PropTypes.any,
++    heapWorker: PropTypes.any,
+   },
+ 
+   getChildContext() {
+     return {
+       front: this.props.front,
++      heapWorker: this.props.heapWorker,
+     }
+   },
+ 
+   render() {
+-    let { dispatch, snapshots, front } = this.props;
++    let { dispatch, snapshots, front, heapWorker } = this.props;
++    let selectedSnapshot = snapshots.find(s => s.selected);
++
++    console.log("Selected snapshot:", selectedSnapshot);
++    if (selectedSnapshot &&
++        selectedSnapshot.state === "loaded" &&
++        selectedSnapshot.censusState === "empty") {
++      dispatch(takeCensus(heapWorker, selectedSnapshot, BREAKDOWN));
++    }
++
+     return (
+       dom.div({ id: "memory-tool" }, [
+ 
+         Toolbar({
+           buttons: [{
+             className: "take-snapshot",
+             onClick: () => dispatch(takeSnapshot(front))
+           }]
+         }),
+ 
+-        List({
+-          itemComponent: SnapshotListItem,
+-          items: snapshots,
+-          onClick: snapshot => dispatch(selectSnapshot(snapshot))
+-        })
++        dom.div({ id: "memory-tool-container" }, [
++          List({
++            itemComponent: SnapshotListItem,
++            items: snapshots,
++            onClick: snapshot => dispatch(selectSnapshot(snapshot))
++          }),
++
++          HeapView({
++            snapshot: selectedSnapshot,
++            onSnapshotClick: () => dispatch(takeSnapshot(front))
++          }),
++        ])
+       ])
+     );
+   },
+ });
+ 
+ /**
+  * Passed into react-redux's `connect` method that is called on store change
+  * and passed to components.
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+new file mode 100644
+index 0000000..8687d7d
+--- /dev/null
++++ b/devtools/client/memory/components/heap.js
+@@ -0,0 +1,38 @@
++const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const TAKE_SNAPSHOT_TEXT = "Take Snapshot";
++
++/**
++ * Main view for the memory tool -- contains several panels for different states;
++ * an initial state of only a button to take a snapshot, loading states, and the
++ * heap view tree.
++ */
++
++const Heap = module.exports = createClass({
++  displayName: "heap-view",
++
++  propTypes: {
++    onSnapshotClick: PropTypes.func.isRequired,
++    snapshot: PropTypes.any,
++  },
++
++  render() {
++    let { snapshot, onSnapshotClick } = this.props;
++    let censusData = snapshot ? snapshot.censusData : null;
++
++    let activeState = snapshot == null ? "initial" :
++                      snapshot.state === "loading" ? "loading" :
++                      snapshot.censusState === "loading" ? "loading-census" :
++                      "loaded";
++
++    return (
++      dom.div({ id: "heap-view", "data-active": activeState }, [
++        dom.div({ className: "heap-view-panel", "data-state": "initial" },
++          dom.button({ className: "take-snapshot", onClick: onSnapshotClick }, TAKE_SNAPSHOT_TEXT)
++        ),
++        dom.div({ className: "heap-view-panel", "data-state": "loading" }, "Taking snapshot..."),
++        dom.div({ className: "heap-view-panel", "data-state": "loading-census" }, "Taking census..."),
++        dom.div({ className: "heap-view-panel", "data-state": "loaded" }, JSON.stringify(censusData || {}))
++      ])
++    )
++  }
++});
+diff --git a/devtools/client/memory/components/moz.build b/devtools/client/memory/components/moz.build
+index f71d199..4e69146 100644
+--- a/devtools/client/memory/components/moz.build
++++ b/devtools/client/memory/components/moz.build
+@@ -1,10 +1,11 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
++    'heap.js',
+     'list.js',
+     'snapshot-list-item.js',
+     'toolbar.js',
+ )
+diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
+index be4000b..5d7f779 100644
+--- a/devtools/client/memory/components/snapshot-list-item.js
++++ b/devtools/client/memory/components/snapshot-list-item.js
+@@ -9,14 +9,16 @@ const SnapshotListItem = module.exports = createClass({
+     index: PropTypes.number.isRequired,
+   },
+ 
+   render() {
+     let { index, item, onClick } = this.props;
+     let className = `snapshot-list-item ${item.selected ? " selected" : ""}`;
+     return (
+       dom.li({ className, onClick },
+-        dom.span({ className: "snapshot-title" }, `Snapshot #${index}`)
++        dom.span({
++          className: `snapshot-title ${item.state === "loading" ? " devtools-throbber" : ""}`
++        }, `Snapshot #${index}`)
+       )
+     );
+   }
+ });
+ 
+diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
+index 00e8e20..21f02a9 100644
+--- a/devtools/client/memory/initializer.js
++++ b/devtools/client/memory/initializer.js
+@@ -9,30 +9,25 @@ Cu.import("resource:///modules/devtools/client/shared/browser-loader.js", Browse
+ const { require } = BrowserLoaderModule.BrowserLoader("resource:///modules/devtools/client/memory/", this);
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { createFactory, createElement, render } = require("devtools/client/shared/vendor/react");
+ const { Provider } = require("devtools/client/shared/vendor/react-redux");
+ const App = createFactory(require("devtools/client/memory/app"));
+ const Store = require("devtools/client/memory/store");
+ 
+ /**
+- * The current target, toolbox and MemoryFront, set by this tool's host.
++ * The current target, toolbox, MemoryFront, and HeapAnalysesClient, set by this tool's host.
+  */
+-var gToolbox, gTarget, gFront;
+-
+-/**
+- * The current target, toolbox and MemoryFront, set by this tool's host.
+- */
+-var gToolbox, gTarget, gFront;
++var gToolbox, gTarget, gFront, gHeapAnalysesClient;
+ 
+ function initialize () {
+   return Task.spawn(function*() {
+     let root = document.querySelector("#app");
+     let store = Store();
+-    let app = createElement(App, { front: gFront });
++    let app = createElement(App, { front: gFront, heapWorker: gHeapAnalysesClient });
+     let provider = createElement(Provider, { store }, app);
+     render(provider, root);
+   });
+ }
+ 
+ function destroy () {
+   return Task.spawn(function*(){});
+ }
+diff --git a/devtools/client/memory/panel.js b/devtools/client/memory/panel.js
+index 986e44e..2ffce20 100644
+--- a/devtools/client/memory/panel.js
++++ b/devtools/client/memory/panel.js
+@@ -4,16 +4,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const EventEmitter = require("devtools/shared/event-emitter");
+ const { MemoryFront } = require("devtools/server/actors/memory");
++const HeapAnalysesClient = require("devtools/shared/heapsnapshot/HeapAnalysesClient");
+ const promise = require("promise");
+ 
+ function MemoryPanel (iframeWindow, toolbox) {
+   this.panelWin = iframeWindow;
+   this._toolbox = toolbox;
+ 
+   EventEmitter.decorate(this);
+ }
+@@ -26,16 +27,17 @@ MemoryPanel.prototype = {
+ 
+     this.panelWin.gToolbox = this._toolbox;
+     this.panelWin.gTarget = this.target;
+ 
+     const rootForm = yield this.target.root;
+     this.panelWin.gFront = new MemoryFront(this.target.client,
+                                            this.target.form,
+                                            rootForm);
++    this.panelWin.gHeapAnalysesClient = new HeapAnalysesClient();
+ 
+     yield this.panelWin.gFront.attach();
+     return this._opening = this.panelWin.initialize().then(() => {
+       this.isReady = true;
+       this.emit("ready");
+       return this;
+     });
+     return this._opening;
+@@ -52,16 +54,17 @@ MemoryPanel.prototype = {
+     if (this._destroyer) {
+       return this._destroyer;
+     }
+ 
+     yield this.panelWin.gFront.detach();
+     return this._destroyer = this.panelWin.destroy().then(() => {
+       // Destroy front to ensure packet handler is removed from client
+       this.panelWin.gFront.destroy();
++      this.panelWin.gHeapAnalysesClient.destroy();
+       this.panelWin = null;
+       this.emit("destroyed");
+       return this;
+     });
+   })
+ };
+ 
+ exports.MemoryPanel = MemoryPanel;
+diff --git a/devtools/client/memory/reducers/snapshot.js b/devtools/client/memory/reducers/snapshot.js
+index cf1d61f..60bc73c 100644
+--- a/devtools/client/memory/reducers/snapshot.js
++++ b/devtools/client/memory/reducers/snapshot.js
+@@ -1,32 +1,40 @@
+ const { actions } = require("../constants");
+-const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
+ const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ 
+ function handleTakeSnapshot (state, action) {
+   switch (action.status) {
+ 
+     case "start":
+       return [...state, {
+         id: action.seqId,
+-        status: action.status,
++        state: "loading",
+         // auto selected if this is the first snapshot
+-        selected: state.length === 0
++        selected: state.length === 0,
++        censusData: null,
++        censusState: "empty",
+       }];
+ 
+     case "done":
+-      let snapshot = state.find(s => s.id === action.seqId);
+-      if (!snapshot) {
++      // Quick error checking, we'll never have large amounts of snapshots
++      if (!state.find(s => s.id === action.seqId)) {
+         DevToolsUtils.reportException(`No snapshot with id "${action.seqId}" for TAKE_SNAPSHOT`);
+         break;
+       }
+-      snapshot.status = "done";
+-      snapshot.snapshotId = action.value;
+-      return [...state];
++
++      return state.map(snapshot => {
++        if (snapshot.id === action.seqId) {
++          snapshot.state = "loaded";
++          snapshot.snapshotId = action.value;
++        }
++        // Auto select complete snapshots
++        snapshot.selected = snapshot.id === action.seqId;
++        return snapshot;
++      });
+ 
+     case "error":
+       DevToolsUtils.reportException(`No async state found for ${action.type}`);
+   }
+   return [...state];
+ }
+ 
+ function handleSelectSnapshot (state, action) {
+@@ -37,18 +45,42 @@ function handleSelectSnapshot (state, action) {
+   }
+ 
+   return state.map(s => {
+     s.selected = s === selected;
+     return s;
+   });
+ }
+ 
++function handleTakeCensus (state, action) {
++  let snapshot = state.find(s => s.id === action.snapshot.id);
++
++  if (!snapshot) {
++    DevToolsUtils.reportException(`No matching snapshot found for ${action.type}`);
++  }
++  switch (action.status) {
++    case "start":
++      snapshot.censusData = null;
++      snapshot.censusState = "loading";
++      break;
++    case "done":
++      snapshot.censusData = action.value;
++      snapshot.censusState = "loaded";
++      break;
++    case "error":
++      DevToolsUtils.reportException(`Error state returned for ${action.type}`);
++      break;
++  }
++  return [...state];
++}
++
+ module.exports = function (state=[], action) {
+   switch (action.type) {
+     case actions.TAKE_SNAPSHOT:
+       return handleTakeSnapshot(state, action);
+     case actions.SELECT_SNAPSHOT:
+       return handleSelectSnapshot(state, action);
++    case actions.TAKE_CENSUS:
++      return handleTakeCensus(state, action);
+   }
+ 
+   return state;
+ };
+diff --git a/devtools/client/memory/test/unit/test_action-select-snapshot.js b/devtools/client/memory/test/unit/test_action-select-snapshot.js
+index c4882f1..d605c77 100644
+--- a/devtools/client/memory/test/unit/test_action-select-snapshot.js
++++ b/devtools/client/memory/test/unit/test_action-select-snapshot.js
+@@ -30,9 +30,9 @@ add_task(function *() {
+     yield waitUntilState(store, ({ snapshots }) => snapshots[i].selected);
+ 
+     let { snapshots } = store.getState();
+     ok(snapshots[i].selected, `snapshot[${i}] selected`);
+     equal(snapshots.filter(s => !s.selected).length, 4, "All other snapshots are unselected");
+   }
+ });
+ 
+-function isDone (s) { return s.status === "done"; }
++function isDone (s) { return s.state === "loaded"; }
+diff --git a/devtools/client/memory/test/unit/test_action-take-snapshot.js b/devtools/client/memory/test/unit/test_action-take-snapshot.js
+index 6961bd9..e10c7d2 100644
+--- a/devtools/client/memory/test/unit/test_action-take-snapshot.js
++++ b/devtools/client/memory/test/unit/test_action-take-snapshot.js
+@@ -20,34 +20,34 @@ add_task(function *() {
+ 
+   let foundPendingState = false;
+   let foundDoneState = false;
+   let foundAllSnapshots = false;
+ 
+   function checkState () {
+     let { snapshots } = store.getState();
+ 
+-    if (snapshots.length === 1 && snapshots[0].status === "start") {
++    if (snapshots.length === 1 && snapshots[0].state === "loading") {
+       foundPendingState = true;
+       ok(foundPendingState, "Got state change for pending heap snapshot request");
+       ok(snapshots[0].selected, "First snapshot is auto-selected");
+       ok(!(snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
+     }
+-    if (snapshots.length === 1 && snapshots[0].status === "done") {
++    if (snapshots.length === 1 && snapshots[0].state === "loaded") {
+       foundDoneState = true;
+       ok(foundDoneState, "Got state change for completed heap snapshot request");
+       ok(snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
+     }
+-    if (snapshots.length === 1 && snapshots[0].status === "error") {
++    if (snapshots.length === 1 && snapshots[0].state === "error") {
+       ok(false, "takeSnapshot's promise returned with an error");
+     }
+ 
+-    if (snapshots.length === 5 && snapshots.every(s => s.status === "done")) {
++    if (snapshots.length === 5 && snapshots.every(s => s.state === "loaded")) {
+       foundAllSnapshots = true;
+-      ok(snapshots.every(s => s.status === "done"), "All snapshots have a snapshotId");
++      ok(snapshots.every(s => s.state === "loaded"), "All snapshots have a snapshotId");
+       equal(snapshots.length, 5, "Found 5 snapshots");
+       ok(snapshots.every(s => s.snapshotId), "All snapshots have a snapshotId");
+       ok(snapshots[0].selected, "First snapshot still selected");
+       equal(snapshots.filter(s => !s.selected).length, 4, "All other snapshots are unselected");
+     }
+   }
+ 
+   store.dispatch(actions.takeSnapshot(front));
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index 6c15ee8..25757c2 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -15,16 +15,21 @@
+ .theme-light {
+   --cell-border-color: rgba(0,0,0,0.15);
+   --cell-border-color-light: rgba(0,0,0,0.1);
+   --focus-cell-border-color: rgba(0,0,0,0.3);
+   --row-alt-background-color: rgba(76,158,217,0.1);
+   --row-hover-background-color: rgba(76,158,217,0.2);
+ }
+ 
++#memory-tool-container {
++  display: flex;
++  flex-direction: row;
++}
++
+ /**
+  * TODO bug 1213100
+  * should generalize toolbar buttons with images in them
+  * toolbars.inc.css contains definitions for .devtools-button,
+  * I wager that many of the below styles can be rolled into that
+  */
+ .devtools-button.take-snapshot {
+   margin: 2px 1px;
+@@ -98,16 +103,38 @@
+   cursor: pointer;
+ }
+ 
+ .list > li.selected {
+   background-color: var(--theme-selection-background);
+   color: var(--theme-selection-color);
+ }
+ 
++/**
++ * Main panel
++ */
++
++#heap-view {
++  flex: 1 1 auto; 
++}
++
++#heap-view .heap-view-panel {
++  width: 100%;
++  height: 100%;
++  display: none;
++}
++
++#heap-view[data-active="initial"] .heap-view-panel[data-state="initial"] { display: block; }
++#heap-view[data-active="loading"] .heap-view-panel[data-state="loading"] { display: block; }
++#heap-view[data-active="loading-census"] .heap-view-panel[data-state="loading-census"] { display: block; }
++#heap-view[data-active="loaded"] .heap-view-panel[data-state="loaded"] { display: block; }
++
++#heap-view .take-snapshot {
++  
++}
+ 
+ /**
+  * Heap View
+  */
+ 
+ .heap-view {
+   position: relative;
+ }
+-- 
+2.3.1
+
