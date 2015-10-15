@@ -3,7 +3,7 @@ Date: Thu, 15 Oct 2015 13:56:56 -0700
 Subject: Bug 1215251 - Add redux middleware for managing async action creators via generators and promises. r=fitzgen
 
 diff --git a/devtools/client/shared/redux/create-store.js b/devtools/client/shared/redux/create-store.js
-index 9eeabf7..26cdcb4 100644
+index 9eeabf7..22aed29 100644
 --- a/devtools/client/shared/redux/create-store.js
 +++ b/devtools/client/shared/redux/create-store.js
 @@ -1,30 +1,32 @@
@@ -15,7 +15,7 @@ index 9eeabf7..26cdcb4 100644
  const { createStore, applyMiddleware } = require("devtools/client/shared/vendor/redux");
  const { thunk } = require("./middleware/thunk");
  const { waitUntilService } = require("./middleware/wait-service");
-+const { defer } = require("./middleware/defer");
++const { task } = require("./middleware/task");
  const { log } = require("./middleware/log");
  const { promise } = require("./middleware/promise");
  
@@ -30,7 +30,7 @@ index 9eeabf7..26cdcb4 100644
   */
  module.exports = (opts={}) => {
    const middleware = [
-+    defer,
++    task,
      thunk,
      waitUntilService,
      promise,
@@ -39,27 +39,39 @@ index 9eeabf7..26cdcb4 100644
    if (opts.log) {
      middleware.push(log);
    }
-diff --git a/devtools/client/shared/redux/middleware/defer.js b/devtools/client/shared/redux/middleware/defer.js
+diff --git a/devtools/client/shared/redux/middleware/moz.build b/devtools/client/shared/redux/middleware/moz.build
+index e8290a1..d4024da 100644
+--- a/devtools/client/shared/redux/middleware/moz.build
++++ b/devtools/client/shared/redux/middleware/moz.build
+@@ -2,11 +2,14 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+     'log.js',
+     'promise.js',
++    'task.js',
+     'thunk.js',
+     'wait-service.js',
+ )
++
++XPCSHELL_TESTS_MANIFESTS += ['test/xpcshell.ini']
+diff --git a/devtools/client/shared/redux/middleware/task.js b/devtools/client/shared/redux/middleware/task.js
 new file mode 100644
-index 0000000..a2086ea
+index 0000000..d9871d7
 --- /dev/null
-+++ b/devtools/client/shared/redux/middleware/defer.js
-@@ -0,0 +1,45 @@
++++ b/devtools/client/shared/redux/middleware/task.js
+@@ -0,0 +1,44 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +"use strict";
 +
 +const { Task } = require("resource://gre/modules/Task.jsm");
-+const { executeSoon } = require("devtools/shared/DevToolsUtils");
-+
-+function isGenerator (action) {
-+  return typeof action === "function" && action.isGenerator();
-+}
-+
-+function isPromise (action) {
-+  return action && typeof action.then === "function";
-+}
++const { executeSoon, isGenerator, isPromise, reportException } = require("devtools/shared/DevToolsUtils");
++const ERROR_TYPE = exports.ERROR_TYPE = "@@redux/middleware/task#error";
 +
 +/**
 + * A middleware that allows generator thunks (functions) and promise
@@ -71,45 +83,31 @@ index 0000000..a2086ea
 + * If called with a generator, the return value of that generator is also
 + * dispatched if truthy, so it can also be consumed by another generator action.
 + */
-+function defer ({ dispatch, getState }) {
++
++function task ({ dispatch, getState }) {
 +  return next => action => {
 +    if (isGenerator(action)) {
-+      return Task.spawn(function*() {
-+        return yield action(dispatch, getState);
-+      }).then(value => {
++      return Task.spawn(action.bind(null, dispatch, getState)).then(value => {
 +        if (value) {
 +          return dispatch(value);
 +        }
-+      });
++      }, error => executeSoon(() => {
++        reportException(ERROR_TYPE, error);
++        dispatch({ type: ERROR_TYPE, error });
++      }));
 +    }
++
 +    if (isPromise(action)) {
-+      return action.then(dispatch, err =>
-+        executeSoon(() => reportException("@@redux/middleware/defer", err)));
++      return action.then(dispatch, error => executeSoon(() => {
++        reportException(ERROR_TYPE, error);
++        dispatch({ type: ERROR_TYPE, error });
++      }));
 +    }
++
 +    return next(action);
 +  };
 +}
-+exports.defer = defer;
-diff --git a/devtools/client/shared/redux/middleware/moz.build b/devtools/client/shared/redux/middleware/moz.build
-index e8290a1..2a3e534 100644
---- a/devtools/client/shared/redux/middleware/moz.build
-+++ b/devtools/client/shared/redux/middleware/moz.build
-@@ -1,12 +1,15 @@
- # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
- # vim: set filetype=python:
- # This Source Code Form is subject to the terms of the Mozilla Public
- # License, v. 2.0. If a copy of the MPL was not distributed with this
- # file, You can obtain one at http://mozilla.org/MPL/2.0/.
- 
- DevToolsModules(
-+    'defer.js',
-     'log.js',
-     'promise.js',
-     'thunk.js',
-     'wait-service.js',
- )
-+
-+XPCSHELL_TESTS_MANIFESTS += ['test/xpcshell.ini']
++exports.task = task;
 diff --git a/devtools/client/shared/redux/middleware/test/head.js b/devtools/client/shared/redux/middleware/test/head.js
 new file mode 100644
 index 0000000..fac055b
@@ -143,21 +141,21 @@ index 0000000..fac055b
 +
 +  return deferred.promise;
 +}
-diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-defer-01.js b/devtools/client/shared/redux/middleware/test/test_middleware-defer-01.js
+diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-task-01.js b/devtools/client/shared/redux/middleware/test/test_middleware-task-01.js
 new file mode 100644
-index 0000000..dad8eb6
+index 0000000..a0ecdd4
 --- /dev/null
-+++ b/devtools/client/shared/redux/middleware/test/test_middleware-defer-01.js
-@@ -0,0 +1,63 @@
++++ b/devtools/client/shared/redux/middleware/test/test_middleware-task-01.js
+@@ -0,0 +1,65 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +const { createStore, applyMiddleware } = require("devtools/client/shared/vendor/redux");
-+const { defer } = require("devtools/client/shared/redux/middleware/defer");
++const { task } = require("devtools/client/shared/redux/middleware/task");
 +
 +/**
-+ * Tests that defer middleware allows dispatching generators, promises and objects
++ * Tests that task middleware allows dispatching generators, promises and objects
 + * that return actions;
 + */
 +
@@ -166,25 +164,27 @@ index 0000000..dad8eb6
 +}
 +
 +add_task(function *() {
-+  let store = applyMiddleware(defer)(createStore)(reducer);
++  let store = applyMiddleware(task)(createStore)(reducer);
 +
 +  store.dispatch(fetch1("generator"));
 +  yield waitUntilState(store, () => store.getState().length === 1);
-+  equal(store.getState()[0].data, "generator", "defer middleware async dispatches an action via generator");
++  equal(store.getState()[0].data, "generator", "task middleware async dispatches an action via generator");
 +
 +  store.dispatch(fetch2("promise"));
 +  yield waitUntilState(store, () => store.getState().length === 2);
-+  equal(store.getState()[1].data, "promise", "defer middleware async dispatches an action via promise");
++  equal(store.getState()[1].data, "promise", "task middleware async dispatches an action via promise");
 +
 +  store.dispatch(fetch3("sync"));
 +  yield waitUntilState(store, () => store.getState().length === 3);
-+  equal(store.getState()[2].data, "sync", "defer middleware sync dispatches an action via sync");
++  equal(store.getState()[2].data, "sync", "task middleware sync dispatches an action via sync");
 +});
 +
 +function fetch1 (data) {
 +  return function *(dispatch, getState) {
 +    equal(getState().length, 0, "`getState` is accessible in a generator action");
 +    let moreData = yield new Promise(resolve => resolve(data));
++    // Ensure it handles more than one yield
++    moreData = yield new Promise(resolve => resolve(data));
 +    return { type: "fetch1", data: moreData };
 +  };
 +}
@@ -212,30 +212,30 @@ index 0000000..dad8eb6
 +  }
 +  return [...state];
 +}
-diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-defer-02.js b/devtools/client/shared/redux/middleware/test/test_middleware-defer-02.js
+diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-task-02.js b/devtools/client/shared/redux/middleware/test/test_middleware-task-02.js
 new file mode 100644
-index 0000000..815e63f
+index 0000000..70326ad
 --- /dev/null
-+++ b/devtools/client/shared/redux/middleware/test/test_middleware-defer-02.js
++++ b/devtools/client/shared/redux/middleware/test/test_middleware-task-02.js
 @@ -0,0 +1,54 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +/**
-+ * Tests that defer middleware allows dispatching generators that dispatch
++ * Tests that task middleware allows dispatching generators that dispatch
 + * additional sync and async actions.
 + */
 +
 +const { createStore, applyMiddleware } = require("devtools/client/shared/vendor/redux");
-+const { defer } = require("devtools/client/shared/redux/middleware/defer");
++const { task } = require("devtools/client/shared/redux/middleware/task");
 +
 +function run_test() {
 +  run_next_test();
 +}
 +
 +add_task(function *() {
-+  let store = applyMiddleware(defer)(createStore)(reducer);
++  let store = applyMiddleware(task)(createStore)(reducer);
 +
 +  store.dispatch(comboAction());
 +  yield waitUntilState(store, () => store.getState().length === 3);
@@ -272,12 +272,66 @@ index 0000000..815e63f
 +  }
 +  return [...state];
 +}
+diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-task-03.js b/devtools/client/shared/redux/middleware/test/test_middleware-task-03.js
+new file mode 100644
+index 0000000..59f2040
+--- /dev/null
++++ b/devtools/client/shared/redux/middleware/test/test_middleware-task-03.js
+@@ -0,0 +1,48 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { createStore, applyMiddleware } = require("devtools/client/shared/vendor/redux");
++const { task, ERROR_TYPE } = require("devtools/client/shared/redux/middleware/task");
++
++/**
++ * Tests that the middleware handles errors thrown in tasks, and rejected promises.
++ */
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let store = applyMiddleware(task)(createStore)(reducer);
++
++  store.dispatch(generatorError());
++  yield waitUntilState(store, () => store.getState().length === 1);
++  equal(store.getState()[0].type, ERROR_TYPE, "generator errors dispatch ERROR_TYPE actions");
++  equal(store.getState()[0].error, "task-middleware-error-generator", "generator errors dispatch ERROR_TYPE actions with error");
++
++  store.dispatch(promiseError());
++  yield waitUntilState(store, () => store.getState().length === 2);
++  equal(store.getState()[1].type, ERROR_TYPE, "promise errors dispatch ERROR_TYPE actions");
++  equal(store.getState()[1].error, "task-middleware-error-promise", "promise errors dispatch ERROR_TYPE actions with error");
++});
++
++function generatorError () {
++  return function *(dispatch, getState) {
++    throw "task-middleware-error-generator";
++  };
++}
++
++function promiseError () {
++  return new Promise((_, reject) => {
++    reject("task-middleware-error-promise");
++  });
++}
++
++function reducer (state=[], action) {
++  do_print("Action called: " + action.type);
++  if (action.type === ERROR_TYPE) {
++    state.push(action);
++  }
++  return [...state];
++}
 diff --git a/devtools/client/shared/redux/middleware/test/xpcshell.ini b/devtools/client/shared/redux/middleware/test/xpcshell.ini
 new file mode 100644
-index 0000000..6395237
+index 0000000..098460a
 --- /dev/null
 +++ b/devtools/client/shared/redux/middleware/test/xpcshell.ini
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,10 @@
 +[DEFAULT]
 +tags = devtools
 +head = head.js
@@ -285,8 +339,30 @@ index 0000000..6395237
 +firefox-appdir = browser
 +skip-if = toolkit == 'android' || toolkit == 'gonk'
 +
-+[test_middleware-defer-01.js]
-+[test_middleware-defer-02.js]
++[test_middleware-task-01.js]
++[test_middleware-task-02.js]
++[test_middleware-task-03.js]
+diff --git a/devtools/shared/DevToolsUtils.js b/devtools/shared/DevToolsUtils.js
+index 08e224b..b5316ec 100644
+--- a/devtools/shared/DevToolsUtils.js
++++ b/devtools/shared/DevToolsUtils.js
+@@ -750,8 +750,16 @@ exports.openFileStream = function (filePath) {
+           return;
+         }
+ 
+         resolve(stream);
+       }
+     );
+   });
+ }
++
++exports.isGenerator = function (fn) {
++  return typeof fn === "function" && fn.isGenerator();
++};
++
++exports.isPromise = function (p) {
++  return p && typeof p.then === "function";
++};
 -- 
 2.3.1
 
