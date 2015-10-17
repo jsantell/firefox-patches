@@ -1,29 +1,103 @@
-From 4e995785256a77c5b852267b72c04383f725aa14 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Wed, 14 Oct 2015 23:13:17 -0700
-Subject: [PATCH] Bug 1214872 - Set up state changes in the memory tool.
- r=fitzgen"
-
----
- devtools/client/memory/actions/snapshot.js         | 21 ++++++++
- devtools/client/memory/app.js                      | 57 ++++++++++++++++++----
- devtools/client/memory/components/heap.js          | 38 +++++++++++++++
- devtools/client/memory/components/moz.build        |  1 +
- .../client/memory/components/snapshot-list-item.js |  4 +-
- devtools/client/memory/initializer.js              | 11 ++---
- devtools/client/memory/panel.js                    |  3 ++
- devtools/client/memory/reducers/snapshot.js        | 48 +++++++++++++++---
- .../test/unit/test_action-select-snapshot.js       |  2 +-
- .../memory/test/unit/test_action-take-snapshot.js  | 10 ++--
- devtools/client/themes/memory.css                  | 27 ++++++++++
- 11 files changed, 189 insertions(+), 33 deletions(-)
- create mode 100644 devtools/client/memory/components/heap.js
+Subject: Bug 1214872 - Set up state changes in the memory tool. r=fitzgen
 
 diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
-index 3243e5d..3c3632f 100644
+index 3243e5d..2a671b1 100644
 --- a/devtools/client/memory/actions/snapshot.js
 +++ b/devtools/client/memory/actions/snapshot.js
-@@ -21,8 +21,29 @@ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
+@@ -1,28 +1,95 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
+-const { actions } = require("../constants");
++// @TODO 1215606
++// Use this assert instead of utils when fixed.
++// const { assert } = require("devtools/shared/DevToolsUtils");
++const { createSnapshot, assert } = require("../utils");
++const { actions, snapshotState: states } = require("../constants");
++
++/**
++ * A series of actions are fired from this task to save, read and generate the initial
++ * census from a snapshot.
++ *
++ * @param {MemoryFront}
++ * @param {HeapAnalysesClient}
++ * @param {Object}
++ */
++const takeSnapshotAndCensus = exports.takeSnapshotAndCensus = function takeSnapshotAndCensus (front, heapWorker) {
++  return function *(dispatch, getStore) {
++    let snapshot = yield dispatch(takeSnapshot(front));
++    yield dispatch(readSnapshot(heapWorker, snapshot));
++    yield dispatch(takeCensus(heapWorker, snapshot));
++  };
++};
+ 
+ /**
+  * @param {MemoryFront}
+  */
+ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
+-  return {
+-    type: actions.TAKE_SNAPSHOT,
+-    [PROMISE]: front.saveHeapSnapshot()
++  return function *(dispatch, getStore) {
++    let snapshot = createSnapshot();
++    dispatch({ type: actions.TAKE_SNAPSHOT_START, snapshot });
++    dispatch(selectSnapshot(snapshot));
++
++    let path = yield front.saveHeapSnapshot();
++    dispatch({ type: actions.TAKE_SNAPSHOT_END, snapshot, path });
++
++    return snapshot;
++  };
++};
++
++/**
++ * Reads a snapshot into memory; necessary to do before taking
++ * a census on the snapshot. May only be called once per snapshot.
++ *
++ * @param {HeapAnalysesClient}
++ * @param {Snapshot} snapshot,
++ */
++const readSnapshot = exports.readSnapshot = function readSnapshot (heapWorker, snapshot) {
++  return function *(dispatch, getStore) {
++    // @TODO 1215606
++    assert(snapshot.state === states.SAVED,
++      "Should only read a snapshot once");
++
++    dispatch({ type: actions.READ_SNAPSHOT_START, snapshot });
++    yield heapWorker.readHeapSnapshot(snapshot.path);
++    dispatch({ type: actions.READ_SNAPSHOT_END, snapshot });
++  };
++};
++
++/**
++ * @param {HeapAnalysesClient} heapWorker
++ * @param {Snapshot} snapshot,
++ *
++ * @see {Snapshot} model defined in devtools/client/memory/app.js
++ * @see `devtools/shared/heapsnapshot/HeapAnalysesClient.js`
++ * @see `js/src/doc/Debugger/Debugger.Memory.md` for breakdown details
++ */
++const takeCensus = exports.takeCensus = function takeCensus (heapWorker, snapshot) {
++  return function *(dispatch, getStore) {
++    // @TODO 1215606
++    assert([states.READ, states.SAVED_CENSUS].includes(snapshot.state),
++      "Can only take census of snapshots in READ or SAVED_CENSUS state");
++
++    let breakdown = getStore().breakdown;
++    dispatch({ type: actions.TAKE_CENSUS_START, snapshot, breakdown });
++
++    let census = yield heapWorker.takeCensus(snapshot.path, { breakdown }, { asTreeNode: true });
++    dispatch({ type: actions.TAKE_CENSUS_END, snapshot, census });
+   };
+ };
+ 
+ /**
+  * @param {Snapshot}
   * @see {Snapshot} model defined in devtools/client/memory/app.js
   */
  const selectSnapshot = exports.selectSnapshot = function takeSnapshot (snapshot) {
@@ -33,35 +107,16 @@ index 3243e5d..3c3632f 100644
    };
  };
 +
-+/**
-+ * @param {HeapAnalysesClient} heapWorker
-+ * @param {Snapshot} snapshot,
-+ * @param {Object} breakdown
-+ *
-+ * @see {Snapshot} model defined in devtools/client/memory/app.js
-+ * @see `devtools/shared/heapsnapshot/HeapAnalysesClient.js`
-+ * @see `js/src/doc/Debugger/Debugger.Memory.md` for breakdown details
-+ */
-+const takeCensus = exports.takeCensus = function takeCensus (heapWorker, snapshot, breakdown) {
-+  let takeCensusTask = heapWorker.readHeapSnapshot(snapshot.snapshotId).then(() => {
-+    return heapWorker.takeCensus(snapshot.snapshotId, { breakdown }, { asTreeNode: true });
-+  });
-+
-+  return {
-+    type: actions.TAKE_CENSUS,
-+    snapshot,
-+    [PROMISE]: takeCensusTask,
-+  };
-+};
 diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
-index e048009..94d66f7 100644
+index e048009..f8d39b9 100644
 --- a/devtools/client/memory/app.js
 +++ b/devtools/client/memory/app.js
-@@ -1,71 +1,108 @@
+@@ -1,71 +1,103 @@
  const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
  const { connect } = require("devtools/client/shared/vendor/react-redux");
 -const { selectSnapshot, takeSnapshot } = require("./actions/snapshot");
-+const { takeCensus, selectSnapshot, takeSnapshot } = require("./actions/snapshot");
++const { selectSnapshot, takeSnapshotAndCensus } = require("./actions/snapshot");
++const { snapshotState } = require("./constants");
  const Toolbar = createFactory(require("./components/toolbar"));
  const List = createFactory(require("./components/list"));
  const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
@@ -81,37 +136,42 @@ index e048009..94d66f7 100644
 +  heapWorker: PropTypes.any,
 +
 +  /**
++   * The breakdown object DSL describing how we want
++   * the census data to be.
++   * @see `js/src/doc/Debugger/Debugger.Memory.md`
++   */
++  breakdown: PropTypes.object.isRequired,
++
++  /**
     * {Array<Snapshot>}
     * List of references to all snapshots taken
     */
    snapshots: PropTypes.arrayOf(PropTypes.shape({
++    // Unique ID for a snapshot
      id: PropTypes.number.isRequired,
-     snapshotId: PropTypes.string,
+-    snapshotId: PropTypes.string,
++    // fs path to where the snapshot is stored; used to
++    // identify the snapshot for HeapAnalysesClient.
++    path: PropTypes.string,
++    // Whether or not this snapshot is currently selected.
      selected: PropTypes.bool.isRequired,
 -    status: PropTypes.oneOf([
 -      "start",
 -      "done",
-+    censusData: PropTypes.any,
-+    censusState: PropTypes.oneOf([
-+      "empty",
-+      "loading",
-+      "loaded",
-+      "error",
-+    ]).isRequired,
-+    state: PropTypes.oneOf([
-+      "loading",
-+      "loaded",
-       "error",
-     ]).isRequired,
+-      "error",
+-    ]).isRequired,
++    // Whther or not the snapshot has been read into memory.
++    // Only needed to do once.
++    snapshotRead: PropTypes.bool.isRequired,
++    // State the snapshot is in
++    // @see ./constants.js
++    state: PropTypes.oneOf(Object.keys(snapshotState)).isRequired,
++    // Data of a census breakdown
++    census: PropTypes.any,
    }))
  };
  
-+// Hardcoded breakdown for now
-+const BREAKDOWN = {
-+  by: "internalType",
-+  then: { by: "count", count: true, bytes: true }
-+};
- 
+-
  const App = createClass({
    displayName: "memory-tool",
  
@@ -131,15 +191,8 @@ index e048009..94d66f7 100644
  
    render() {
 -    let { dispatch, snapshots, front } = this.props;
-+    let { dispatch, snapshots, front, heapWorker } = this.props;
++    let { dispatch, snapshots, front, heapWorker, breakdown } = this.props;
 +    let selectedSnapshot = snapshots.find(s => s.selected);
-+
-+    console.log("Selected snapshot:", selectedSnapshot);
-+    if (selectedSnapshot &&
-+        selectedSnapshot.state === "loaded" &&
-+        selectedSnapshot.censusState === "empty") {
-+      dispatch(takeCensus(heapWorker, selectedSnapshot, BREAKDOWN));
-+    }
 +
      return (
        dom.div({ id: "memory-tool" }, [
@@ -147,7 +200,8 @@ index e048009..94d66f7 100644
          Toolbar({
            buttons: [{
              className: "take-snapshot",
-             onClick: () => dispatch(takeSnapshot(front))
+-            onClick: () => dispatch(takeSnapshot(front))
++            onClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker))
            }]
          }),
  
@@ -165,7 +219,7 @@ index e048009..94d66f7 100644
 +
 +          HeapView({
 +            snapshot: selectedSnapshot,
-+            onSnapshotClick: () => dispatch(takeSnapshot(front))
++            onSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker))
 +          }),
 +        ])
        ])
@@ -178,12 +232,14 @@ index e048009..94d66f7 100644
   * and passed to components.
 diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
 new file mode 100644
-index 0000000..8687d7d
+index 0000000..44babd9
 --- /dev/null
 +++ b/devtools/client/memory/components/heap.js
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,49 @@
 +const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
-+const TAKE_SNAPSHOT_TEXT = "Take Snapshot";
++const { getSnapshotStatusText } = require("../utils");
++const { snapshotState: states } = require("../constants");
++const TAKE_SNAPSHOT_TEXT = "Take snapshot";
 +
 +/**
 + * Main view for the memory tool -- contains several panels for different states;
@@ -201,22 +257,31 @@ index 0000000..8687d7d
 +
 +  render() {
 +    let { snapshot, onSnapshotClick } = this.props;
-+    let censusData = snapshot ? snapshot.censusData : null;
++    let pane;
++    let census = snapshot ? snapshot.census : null;
++    let state = snapshot ? snapshot.state : "initial";
++    let statusText = getSnapshotStatusText(snapshot);
 +
-+    let activeState = snapshot == null ? "initial" :
-+                      snapshot.state === "loading" ? "loading" :
-+                      snapshot.censusState === "loading" ? "loading-census" :
-+                      "loaded";
++    switch (state) {
++      case "initial":
++        pane = dom.div({ className: "heap-view-panel", "data-state": "initial" },
++          dom.button({ className: "take-snapshot", onClick: onSnapshotClick }, TAKE_SNAPSHOT_TEXT)
++        );
++        break;
++      case states.SAVING:
++      case states.SAVED:
++      case states.READING:
++      case states.READ:
++      case states.SAVING_CENSUS:
++        pane = dom.div({ className: "heap-view-panel", "data-state": state }, statusText);
++        break;
++      case states.SAVED_CENSUS:
++        pane = dom.div({ className: "heap-view-panel", "data-state": "loaded" }, JSON.stringify(census || {}));
++        break;
++    }
 +
 +    return (
-+      dom.div({ id: "heap-view", "data-active": activeState }, [
-+        dom.div({ className: "heap-view-panel", "data-state": "initial" },
-+          dom.button({ className: "take-snapshot", onClick: onSnapshotClick }, TAKE_SNAPSHOT_TEXT)
-+        ),
-+        dom.div({ className: "heap-view-panel", "data-state": "loading" }, "Taking snapshot..."),
-+        dom.div({ className: "heap-view-panel", "data-state": "loading-census" }, "Taking census..."),
-+        dom.div({ className: "heap-view-panel", "data-state": "loaded" }, JSON.stringify(censusData || {}))
-+      ])
++      dom.div({ id: "heap-view", "data-state": state }, pane)
 +    )
 +  }
 +});
@@ -237,27 +302,85 @@ index f71d199..4e69146 100644
      'toolbar.js',
  )
 diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
-index be4000b..5d7f779 100644
+index be4000b..7bb8285 100644
 --- a/devtools/client/memory/components/snapshot-list-item.js
 +++ b/devtools/client/memory/components/snapshot-list-item.js
-@@ -9,14 +9,16 @@ const SnapshotListItem = module.exports = createClass({
+@@ -1,22 +1,29 @@
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const { getSnapshotStatusText } = require("../utils");
+ 
+ const SnapshotListItem = module.exports = createClass({
+   displayName: "snapshot-list-item",
+ 
+   propTypes: {
+     onClick: PropTypes.func,
+     item: PropTypes.any.isRequired,
      index: PropTypes.number.isRequired,
    },
  
    render() {
      let { index, item, onClick } = this.props;
      let className = `snapshot-list-item ${item.selected ? " selected" : ""}`;
++    let statusText = getSnapshotStatusText(item);
++
      return (
        dom.li({ className, onClick },
 -        dom.span({ className: "snapshot-title" }, `Snapshot #${index}`)
 +        dom.span({
-+          className: `snapshot-title ${item.state === "loading" ? " devtools-throbber" : ""}`
-+        }, `Snapshot #${index}`)
++          className: `snapshot-title ${statusText ? " devtools-throbber" : ""}`
++        }, `Snapshot #${index}`),
++
++        statusText ? dom.span({ className: "snapshot-state" }, statusText) : void 0
        )
      );
    }
  });
  
+diff --git a/devtools/client/memory/constants.js b/devtools/client/memory/constants.js
+index 64501ab..f465b39 100644
+--- a/devtools/client/memory/constants.js
++++ b/devtools/client/memory/constants.js
+@@ -1,12 +1,39 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const actions = exports.actions = {};
+ 
+ // Fired by UI to request a snapshot from the actor.
+-actions.TAKE_SNAPSHOT = "take-snapshot";
++actions.TAKE_SNAPSHOT_START = "take-snapshot-start";
++actions.TAKE_SNAPSHOT_END = "take-snapshot-end";
++
++// When a heap snapshot is read into memory -- only fired
++// once per snapshot.
++actions.READ_SNAPSHOT_START = "read-snapshot-start";
++actions.READ_SNAPSHOT_END = "read-snapshot-end";
++
++// When a census is being performed on a heap snapshot
++actions.TAKE_CENSUS_START = "take-census-start";
++actions.TAKE_CENSUS_END = "take-census-end";
+ 
+ // Fired by UI to select a snapshot to view.
+ actions.SELECT_SNAPSHOT = "select-snapshot";
++
++const snapshotState = exports.snapshotState = {};
++
++/**
++ * Various states a snapshot can be in.
++ * An FSM describing snapshot states:
++ *
++ * SAVING -> SAVED -> READING -> READ   <-  <-  <- SAVED_CENSUS
++ *                                    ↘             ↗
++ *                                     SAVING_CENSUS
++ */
++snapshotState.SAVING = "snapshot-state-saving";
++snapshotState.SAVED = "snapshot-state-saved";
++snapshotState.READING = "snapshot-state-reading";
++snapshotState.READ = "snapshot-state-read";
++snapshotState.SAVING_CENSUS = "snapshot-state-saving-census";
++snapshotState.SAVED_CENSUS = "snapshot-state-saved-census";
 diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
 index 00e8e20..21f02a9 100644
 --- a/devtools/client/memory/initializer.js
@@ -296,6 +419,25 @@ index 00e8e20..21f02a9 100644
  function destroy () {
    return Task.spawn(function*(){});
  }
+diff --git a/devtools/client/memory/moz.build b/devtools/client/memory/moz.build
+index 3c7cba0..773679f 100644
+--- a/devtools/client/memory/moz.build
++++ b/devtools/client/memory/moz.build
+@@ -12,13 +12,14 @@ DIRS += [
+ 
+ DevToolsModules(
+     'app.js',
+     'constants.js',
+     'initializer.js',
+     'panel.js',
+     'reducers.js',
+     'store.js',
++    'utils.js',
+ )
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser/browser.ini']
+ MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+ XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
 diff --git a/devtools/client/memory/panel.js b/devtools/client/memory/panel.js
 index 986e44e..2ffce20 100644
 --- a/devtools/client/memory/panel.js
@@ -354,107 +496,274 @@ index 986e44e..2ffce20 100644
  };
  
  exports.MemoryPanel = MemoryPanel;
+diff --git a/devtools/client/memory/reducers.js b/devtools/client/memory/reducers.js
+index ef7d248..ea91f0e 100644
+--- a/devtools/client/memory/reducers.js
++++ b/devtools/client/memory/reducers.js
+@@ -1 +1,3 @@
+-exports.snapshots = require("./reducers/snapshot");
++exports.snapshots = require("./reducers/snapshots");
++exports.breakdown = require("./reducers/breakdown");
++exports.errors = require("./reducers/errors");
+diff --git a/devtools/client/memory/reducers/breakdown.js b/devtools/client/memory/reducers/breakdown.js
+new file mode 100644
+index 0000000..0a3e82c
+--- /dev/null
++++ b/devtools/client/memory/reducers/breakdown.js
+@@ -0,0 +1,15 @@
++const { actions } = require("../constants");
++
++// Hardcoded breakdown for now
++const DEFAULT_BREAKDOWN = {
++  by: "internalType",
++  then: { by: "count", count: true, bytes: true }
++};
++
++/**
++ * Not much to do here yet until we can change breakdowns,
++ * but this gets it in our store.
++ */
++module.exports = function (state=DEFAULT_BREAKDOWN, action) {
++  return Object.assign({}, DEFAULT_BREAKDOWN);
++};
+diff --git a/devtools/client/memory/reducers/errors.js b/devtools/client/memory/reducers/errors.js
+new file mode 100644
+index 0000000..708a39f
+--- /dev/null
++++ b/devtools/client/memory/reducers/errors.js
+@@ -0,0 +1,13 @@
++const { ERROR_TYPE: TASK_ERROR_TYPE } = require("devtools/client/shared/redux/middleware/task");
++
++/**
++ * Handle errors dispatched from task middleware and
++ * store them so we can check in tests or dump them out.
++ */
++module.exports = function (state=[], action) {
++  switch (action.type) {
++    case TASK_ERROR_TYPE:
++      return [...state, action.error];
++  }
++  return state;
++};
+diff --git a/devtools/client/memory/reducers/moz.build b/devtools/client/memory/reducers/moz.build
+index 3ffb5eb..05af7ca 100644
+--- a/devtools/client/memory/reducers/moz.build
++++ b/devtools/client/memory/reducers/moz.build
+@@ -1,8 +1,10 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+-    'snapshot.js',
++    'breakdown.js',
++    'errors.js',
++    'snapshots.js',
+ )
 diff --git a/devtools/client/memory/reducers/snapshot.js b/devtools/client/memory/reducers/snapshot.js
-index cf1d61f..60bc73c 100644
+deleted file mode 100644
+index cf1d61f..0000000
 --- a/devtools/client/memory/reducers/snapshot.js
-+++ b/devtools/client/memory/reducers/snapshot.js
-@@ -1,32 +1,40 @@
- const { actions } = require("../constants");
++++ /dev/null
+@@ -1,54 +0,0 @@
+-const { actions } = require("../constants");
 -const { PROMISE } = require("devtools/client/shared/redux/middleware/promise");
- const DevToolsUtils = require("devtools/shared/DevToolsUtils");
- 
- function handleTakeSnapshot (state, action) {
-   switch (action.status) {
- 
-     case "start":
-       return [...state, {
-         id: action.seqId,
+-const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+-
+-function handleTakeSnapshot (state, action) {
+-  switch (action.status) {
+-
+-    case "start":
+-      return [...state, {
+-        id: action.seqId,
 -        status: action.status,
-+        state: "loading",
-         // auto selected if this is the first snapshot
+-        // auto selected if this is the first snapshot
 -        selected: state.length === 0
-+        selected: state.length === 0,
-+        censusData: null,
-+        censusState: "empty",
-       }];
- 
-     case "done":
+-      }];
+-
+-    case "done":
 -      let snapshot = state.find(s => s.id === action.seqId);
 -      if (!snapshot) {
-+      // Quick error checking, we'll never have large amounts of snapshots
-+      if (!state.find(s => s.id === action.seqId)) {
-         DevToolsUtils.reportException(`No snapshot with id "${action.seqId}" for TAKE_SNAPSHOT`);
-         break;
-       }
+-        DevToolsUtils.reportException(`No snapshot with id "${action.seqId}" for TAKE_SNAPSHOT`);
+-        break;
+-      }
 -      snapshot.status = "done";
 -      snapshot.snapshotId = action.value;
 -      return [...state];
+-
+-    case "error":
+-      DevToolsUtils.reportException(`No async state found for ${action.type}`);
+-  }
+-  return [...state];
+-}
+-
+-function handleSelectSnapshot (state, action) {
+-  let selected = state.find(s => s.id === action.snapshot.id);
+-
+-  if (!selected) {
+-    DevToolsUtils.reportException(`Cannot select non-existant snapshot ${snapshot.id}`);
+-  }
+-
+-  return state.map(s => {
+-    s.selected = s === selected;
+-    return s;
+-  });
+-}
+-
+-module.exports = function (state=[], action) {
+-  switch (action.type) {
+-    case actions.TAKE_SNAPSHOT:
+-      return handleTakeSnapshot(state, action);
+-    case actions.SELECT_SNAPSHOT:
+-      return handleSelectSnapshot(state, action);
+-  }
+-
+-  return state;
+-};
+diff --git a/devtools/client/memory/reducers/snapshots.js b/devtools/client/memory/reducers/snapshots.js
+new file mode 100644
+index 0000000..30246f42
+--- /dev/null
++++ b/devtools/client/memory/reducers/snapshots.js
+@@ -0,0 +1,59 @@
++const { actions, snapshotState: states } = require("../constants");
++const { getSnapshot } = require("../utils");
 +
-+      return state.map(snapshot => {
-+        if (snapshot.id === action.seqId) {
-+          snapshot.state = "loaded";
-+          snapshot.snapshotId = action.value;
-+        }
-+        // Auto select complete snapshots
-+        snapshot.selected = snapshot.id === action.seqId;
-+        return snapshot;
-+      });
- 
-     case "error":
-       DevToolsUtils.reportException(`No async state found for ${action.type}`);
-   }
-   return [...state];
- }
- 
- function handleSelectSnapshot (state, action) {
-@@ -37,18 +45,42 @@ function handleSelectSnapshot (state, action) {
-   }
- 
-   return state.map(s => {
-     s.selected = s === selected;
-     return s;
-   });
- }
- 
-+function handleTakeCensus (state, action) {
-+  let snapshot = state.find(s => s.id === action.snapshot.id);
++let handlers = Object.create({});
 +
-+  if (!snapshot) {
-+    DevToolsUtils.reportException(`No matching snapshot found for ${action.type}`);
++handlers[actions.TAKE_SNAPSHOT_START] = function (snapshots, { snapshot }) {
++  return [...snapshots, snapshot];
++};
++
++handlers[actions.TAKE_SNAPSHOT_END] = function (snapshots, action) {
++  return snapshots.map(snapshot => {
++    if (snapshot.id === action.snapshot.id) {
++      snapshot.state = states.SAVED;
++      snapshot.path = action.path;
++    }
++    return snapshot;
++  });
++};
++
++handlers[actions.READ_SNAPSHOT_START] = function (snapshots, action) {
++  let snapshot = getSnapshot(snapshots, action.snapshot);
++  snapshot.state = states.READING;
++  return [...snapshots];
++};
++
++handlers[actions.READ_SNAPSHOT_END] = function (snapshots, action) {
++  let snapshot = getSnapshot(snapshots, action.snapshot);
++  snapshot.state = states.READ;
++  return [...snapshots];
++};
++
++handlers[actions.TAKE_CENSUS_START] = function (snapshots, action) {
++  let snapshot = getSnapshot(snapshots, action.snapshot);
++  snapshot.state = states.SAVING_CENSUS;
++  snapshot.census = null;
++  return [...snapshots];
++};
++
++handlers[actions.TAKE_CENSUS_END] = function (snapshots, action) {
++  let snapshot = getSnapshot(snapshots, action.snapshot);
++  snapshot.state = states.SAVED_CENSUS;
++  snapshot.census = action.census;
++  return [...snapshots];
++};
++
++handlers[actions.SELECT_SNAPSHOT] = function (snapshots, action) {
++  return snapshots.map(s => {
++    s.selected = s.id === action.snapshot.id;
++    return s;
++  });
++};
++
++module.exports = function (snapshots=[], action) {
++  let handler = handlers[action.type];
++  if (handler) {
++    return handler(snapshots, action);
 +  }
-+  switch (action.status) {
-+    case "start":
-+      snapshot.censusData = null;
-+      snapshot.censusState = "loading";
-+      break;
-+    case "done":
-+      snapshot.censusData = action.value;
-+      snapshot.censusState = "loaded";
-+      break;
-+    case "error":
-+      DevToolsUtils.reportException(`Error state returned for ${action.type}`);
-+      break;
-+  }
-+  return [...state];
-+}
-+
- module.exports = function (state=[], action) {
-   switch (action.type) {
-     case actions.TAKE_SNAPSHOT:
-       return handleTakeSnapshot(state, action);
-     case actions.SELECT_SNAPSHOT:
-       return handleSelectSnapshot(state, action);
-+    case actions.TAKE_CENSUS:
-+      return handleTakeCensus(state, action);
-   }
++  return snapshots;
++};
+diff --git a/devtools/client/memory/test/unit/head.js b/devtools/client/memory/test/unit/head.js
+index 1693a04..2f5aac32 100644
+--- a/devtools/client/memory/test/unit/head.js
++++ b/devtools/client/memory/test/unit/head.js
+@@ -9,16 +9,17 @@ var { gDevTools } = Cu.import("resource:///modules/devtools/client/framework/gDe
+ var { console } = Cu.import("resource://gre/modules/Console.jsm", {});
+ var { require } = Cu.import("resource://gre/modules/devtools/shared/Loader.jsm", {});
+ var { TargetFactory } = require("devtools/client/framework/target");
+ var DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ var promise = require("promise");
+ var { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ var { expectState } = require("devtools/server/actors/common");
+ var HeapSnapshotFileUtils = require("devtools/shared/heapsnapshot/HeapSnapshotFileUtils");
++var HeapAnalysesClient = require("devtools/shared/heapsnapshot/HeapAnalysesClient");
+ var { addDebuggerToGlobal } = require("resource://gre/modules/jsdebugger.jsm");
+ var Store = require("devtools/client/memory/store");
+ var SYSTEM_PRINCIPAL = Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal);
  
-   return state;
- };
+ DevToolsUtils.testing = true;
+ 
+ function initDebugger () {
+   let global = new Cu.Sandbox(SYSTEM_PRINCIPAL, { freshZone: true });
+@@ -34,18 +35,17 @@ StubbedMemoryFront.prototype.attach = Task.async(function *() {
+   this.state = "attached";
+ });
+ 
+ StubbedMemoryFront.prototype.detach = Task.async(function *() {
+   this.state = "detached";
+ });
+ 
+ StubbedMemoryFront.prototype.saveHeapSnapshot = expectState("attached", Task.async(function *() {
+-  let path = ThreadSafeChromeUtils.saveHeapSnapshot({ debugger: this.dbg });
+-  return HeapSnapshotFileUtils.getSnapshotIdFromPath(path);
++  return ThreadSafeChromeUtils.saveHeapSnapshot({ runtime: true });
+ }), "saveHeapSnapshot");
+ 
+ function waitUntilState (store, predicate) {
+   let deferred = promise.defer();
+   let unsubscribe = store.subscribe(check);
+ 
+   function check () {
+     if (predicate(store.getState())) {
 diff --git a/devtools/client/memory/test/unit/test_action-select-snapshot.js b/devtools/client/memory/test/unit/test_action-select-snapshot.js
-index c4882f1..d605c77 100644
+index c4882f1..6b5069b 100644
 --- a/devtools/client/memory/test/unit/test_action-select-snapshot.js
 +++ b/devtools/client/memory/test/unit/test_action-select-snapshot.js
-@@ -30,9 +30,9 @@ add_task(function *() {
+@@ -1,38 +1,37 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests the reducer responding to the action `selectSnapshot(snapshot)`
+  */
+ 
+ let actions = require("devtools/client/memory/actions/snapshot");
++let { snapshotState: states } = require("devtools/client/memory/constants");
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function *() {
+   let front = new StubbedMemoryFront();
+   yield front.attach();
+   let store = Store();
+ 
+   for (let i = 0; i < 5; i++) {
+     store.dispatch(actions.takeSnapshot(front));
+   }
+ 
+   yield waitUntilState(store, ({ snapshots }) => snapshots.length === 5 && snapshots.every(isDone));
+ 
+-  ok(store.getState().snapshots[0].selected, "snapshot[0] selected by default");
+-
+-  for (let i = 1; i < 5; i++) {
++  for (let i = 0; i < 5; i++) {
+     do_print(`Selecting snapshot[${i}]`);
+     store.dispatch(actions.selectSnapshot(store.getState().snapshots[i]));
      yield waitUntilState(store, ({ snapshots }) => snapshots[i].selected);
  
      let { snapshots } = store.getState();
@@ -464,53 +773,289 @@ index c4882f1..d605c77 100644
  });
  
 -function isDone (s) { return s.status === "done"; }
-+function isDone (s) { return s.state === "loaded"; }
++function isDone (s) { return s.state === states.SAVED; }
+diff --git a/devtools/client/memory/test/unit/test_action-take-census.js b/devtools/client/memory/test/unit/test_action-take-census.js
+new file mode 100644
+index 0000000..25bfdd2
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_action-take-census.js
+@@ -0,0 +1,49 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the async reducer responding to the action `takeCensus(heapWorker, snapshot)`
++ */
++
++var { snapshotState: states } = require("devtools/client/memory/constants");
++var { ERROR_TYPE } = require("devtools/client/shared/redux/middleware/task");
++var actions = require("devtools/client/memory/actions/snapshot");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let front = new StubbedMemoryFront();
++  let heapWorker = new HeapAnalysesClient();
++  yield front.attach();
++  let store = Store();
++
++  store.dispatch(actions.takeSnapshot(front));
++  yield waitUntilState(store, () => {
++    let snapshots = store.getState().snapshots;
++    return snapshots.length === 1 && snapshots[0].state === states.SAVED;
++  });
++
++  let snapshot = store.getState().snapshots[0];
++  equal(snapshot.census, null, "No census data exists yet on the snapshot.");
++
++  // Test error case of wrong state
++  store.dispatch(actions.takeCensus(heapWorker, snapshot));
++  yield waitUntilState(store, () => store.getState().errors.length === 1);
++  ok(/Assertion failure/.test(store.getState().errors[0]),
++    "Error thrown when taking a census of a snapshot that has not been read.");
++
++  store.dispatch(actions.readSnapshot(heapWorker, snapshot));
++  yield waitUntilState(store, () => store.getState().snapshots[0].state === states.READ);
++
++  store.dispatch(actions.takeCensus(heapWorker, snapshot));
++  yield waitUntilState(store, () => store.getState().snapshots[0].state === states.SAVING_CENSUS);
++  yield waitUntilState(store, () => store.getState().snapshots[0].state === states.SAVED_CENSUS);
++
++  snapshot = store.getState().snapshots[0];
++  ok(snapshot.census, "Snapshot has census after saved census");
++  ok(snapshot.census.children.length, "Census is in tree node form with the default breakdown");
++  ok(snapshot.census.children.find(t => t.name === "JSObject"),
++    "Census is in tree node form with the default breakdown");
++});
+diff --git a/devtools/client/memory/test/unit/test_action-take-snapshot-and-census.js b/devtools/client/memory/test/unit/test_action-take-snapshot-and-census.js
+new file mode 100644
+index 0000000..feeb2a8
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_action-take-snapshot-and-census.js
+@@ -0,0 +1,46 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the task creator `takeSnapshotAndCensus()` for the whole flow of
++ * taking a snapshot, and its sub-actions.
++ */
++
++let { snapshotState: states } = require("devtools/client/memory/constants");
++let actions = require("devtools/client/memory/actions/snapshot");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let front = new StubbedMemoryFront();
++  let heapWorker = new HeapAnalysesClient();
++  yield front.attach();
++  let store = Store();
++
++  let i = 0;
++  let expected = ["SAVING", "SAVED", "READING", "READ", "SAVING_CENSUS", "SAVED_CENSUS"];
++  let expectStates = () => {
++    if (i >= expected.length) { return false; }
++
++    let snapshot = store.getState().snapshots[0] || {};
++    let isCorrectState = snapshot.state === states[expected[i]];
++    if (isCorrectState) {
++      ok(true, `Found expected state ${expected[i]}`);
++      i++;
++    }
++    return isCorrectState;
++  };
++
++  let unsubscribe = store.subscribe(expectStates);
++  store.dispatch(actions.takeSnapshotAndCensus(front, heapWorker));
++
++  yield waitUntilState(store, () => i === 6);
++  unsubscribe();
++
++  ok(true, "takeSnapshotAndCensus() produces the correct sequence of states in a snapshot");
++  let snapshot = store.getState().snapshots[0];
++  ok(snapshot.census, "snapshot has census data");
++  ok(snapshot.selected, "snapshot is selected");
++});
 diff --git a/devtools/client/memory/test/unit/test_action-take-snapshot.js b/devtools/client/memory/test/unit/test_action-take-snapshot.js
-index 6961bd9..e10c7d2 100644
+index 6961bd9..2fe7c33 100644
 --- a/devtools/client/memory/test/unit/test_action-take-snapshot.js
 +++ b/devtools/client/memory/test/unit/test_action-take-snapshot.js
-@@ -20,34 +20,34 @@ add_task(function *() {
+@@ -1,63 +1,54 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests the async reducer responding to the action `takeSnapshot(front)`
+  */
+ 
+-var actions = require("devtools/client/memory/actions/snapshot");
++let actions = require("devtools/client/memory/actions/snapshot");
++let { snapshotState: states } = require("devtools/client/memory/constants");
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function *() {
+   let front = new StubbedMemoryFront();
+   yield front.attach();
+   let store = Store();
+ 
+   let unsubscribe = store.subscribe(checkState);
  
    let foundPendingState = false;
    let foundDoneState = false;
-   let foundAllSnapshots = false;
+-  let foundAllSnapshots = false;
  
    function checkState () {
      let { snapshots } = store.getState();
++    let lastSnapshot = snapshots[snapshots.length - 1];
  
 -    if (snapshots.length === 1 && snapshots[0].status === "start") {
-+    if (snapshots.length === 1 && snapshots[0].state === "loading") {
++    if (lastSnapshot.state === states.SAVING) {
        foundPendingState = true;
        ok(foundPendingState, "Got state change for pending heap snapshot request");
-       ok(snapshots[0].selected, "First snapshot is auto-selected");
-       ok(!(snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
+-      ok(snapshots[0].selected, "First snapshot is auto-selected");
+-      ok(!(snapshots[0].snapshotId), "Snapshot does not yet have a snapshotId");
++      ok(!lastSnapshot.path, "Snapshot does not yet have a path");
++      ok(!lastSnapshot.census, "Has no census data when loading");
      }
 -    if (snapshots.length === 1 && snapshots[0].status === "done") {
-+    if (snapshots.length === 1 && snapshots[0].state === "loaded") {
++    else if (lastSnapshot.state === states.SAVED) {
        foundDoneState = true;
        ok(foundDoneState, "Got state change for completed heap snapshot request");
-       ok(snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
-     }
+-      ok(snapshots[0].snapshotId, "Snapshot fetched with a snapshotId");
+-    }
 -    if (snapshots.length === 1 && snapshots[0].status === "error") {
-+    if (snapshots.length === 1 && snapshots[0].state === "error") {
-       ok(false, "takeSnapshot's promise returned with an error");
-     }
- 
+-      ok(false, "takeSnapshot's promise returned with an error");
+-    }
+-
 -    if (snapshots.length === 5 && snapshots.every(s => s.status === "done")) {
-+    if (snapshots.length === 5 && snapshots.every(s => s.state === "loaded")) {
-       foundAllSnapshots = true;
+-      foundAllSnapshots = true;
 -      ok(snapshots.every(s => s.status === "done"), "All snapshots have a snapshotId");
-+      ok(snapshots.every(s => s.state === "loaded"), "All snapshots have a snapshotId");
-       equal(snapshots.length, 5, "Found 5 snapshots");
-       ok(snapshots.every(s => s.snapshotId), "All snapshots have a snapshotId");
-       ok(snapshots[0].selected, "First snapshot still selected");
-       equal(snapshots.filter(s => !s.selected).length, 4, "All other snapshots are unselected");
+-      equal(snapshots.length, 5, "Found 5 snapshots");
+-      ok(snapshots.every(s => s.snapshotId), "All snapshots have a snapshotId");
+-      ok(snapshots[0].selected, "First snapshot still selected");
+-      equal(snapshots.filter(s => !s.selected).length, 4, "All other snapshots are unselected");
++      ok(foundPendingState, "SAVED state occurs after SAVING state");
++      ok(lastSnapshot.path, "Snapshot fetched with a path");
++      ok(snapshots.every(s => s.selected === (s.id === lastSnapshot.id)),
++        "Only recent snapshot is selected");
      }
    }
  
-   store.dispatch(actions.takeSnapshot(front));
+-  store.dispatch(actions.takeSnapshot(front));
+-
+-  yield waitUntilState(store, () => foundPendingState && foundDoneState);
+-
+   for (let i = 0; i < 4; i++) {
+     store.dispatch(actions.takeSnapshot(front));
++    yield waitUntilState(store, () => foundPendingState && foundDoneState);
++
++    // reset state trackers
++    foundDoneState = foundPendingState = false;
+   }
+ 
+-  yield waitUntilState(store, () => foundAllSnapshots);
+   unsubscribe();
+ });
+diff --git a/devtools/client/memory/test/unit/xpcshell.ini b/devtools/client/memory/test/unit/xpcshell.ini
+index ce47c63..e171139 100644
+--- a/devtools/client/memory/test/unit/xpcshell.ini
++++ b/devtools/client/memory/test/unit/xpcshell.ini
+@@ -1,9 +1,11 @@
+ [DEFAULT]
+ tags = devtools
+ head = head.js
+ tail =
+ firefox-appdir = browser
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
+ [test_action-select-snapshot.js]
++[test_action-take-census.js]
+ [test_action-take-snapshot.js]
++[test_action-take-snapshot-and-census.js]
+diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
+new file mode 100644
+index 0000000..80a45d7
+--- /dev/null
++++ b/devtools/client/memory/utils.js
+@@ -0,0 +1,68 @@
++const DevToolsUtils = require("devtools/shared/DevToolsUtils");
++const { snapshotState: states } = require("./constants");
++const SAVING_SNAPSHOT_TEXT = "Saving snapshot...";
++const READING_SNAPSHOT_TEXT = "Reading snapshot...";
++const SAVING_CENSUS_TEXT = "Taking heap census...";
++
++// @TODO 1215606
++// Use DevToolsUtils.assert when fixed.
++exports.assert = function (condition, message) {
++  if (!condition) {
++    const err = new Error("Assertion failure: " + message);
++    DevToolsUtils.reportException("DevToolsUtils.assert", err);
++    throw err;
++  }
++};
++
++/**
++ * Returns a string representing a readable form of the snapshot's state.
++ *
++ * @param {Snapshot} snapshot
++ * @return {String}
++ */
++exports.getSnapshotStatusText = function (snapshot) {
++  switch (snapshot && snapshot.state) {
++    case states.SAVING:
++      return SAVING_SNAPSHOT_TEXT;
++    case states.SAVED:
++    case states.READING:
++      return READING_SNAPSHOT_TEXT;
++    case states.READ:
++    case states.SAVING_CENSUS:
++      return SAVING_CENSUS_TEXT;
++  }
++  return "";
++}
++
++/**
++ * Takes an array of snapshots and a snapshot and returns
++ * the snapshot instance in `snapshots` that matches
++ * the snapshot passed in.
++ *
++ * @param {Array<Snapshot>} snapshots
++ * @param {Snapshot}
++ * @return ?Snapshot
++ */
++exports.getSnapshot = function getSnapshot (snapshots, snapshot) {
++  let found = snapshots.find(s => s.id === snapshot.id);
++  if (!found) {
++    DevToolsUtils.reportException(`No matching snapshot found for ${snapshot.id}`);
++  }
++  return found || null;
++};
++
++/**
++ * Creates a new snapshot object.
++ *
++ * @return {Snapshot}
++ */
++let INC_ID = 0;
++exports.createSnapshot = function createSnapshot () {
++  let id = ++INC_ID;
++  return {
++    id,
++    state: states.SAVING,
++    census: null,
++    path: null,
++  };
++};
 diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
-index 6c15ee8..25757c2 100644
+index 6c15ee8..0a96326 100644
 --- a/devtools/client/themes/memory.css
 +++ b/devtools/client/themes/memory.css
 @@ -15,16 +15,21 @@
@@ -535,7 +1080,7 @@ index 6c15ee8..25757c2 100644
   */
  .devtools-button.take-snapshot {
    margin: 2px 1px;
-@@ -98,16 +103,38 @@
+@@ -98,16 +103,45 @@
    cursor: pointer;
  }
  
@@ -544,27 +1089,34 @@ index 6c15ee8..25757c2 100644
    color: var(--theme-selection-color);
  }
  
++.snapshot-list-item span {
++  display: block;
++}
++
++.snapshot-list-item .snapshot-state {
++  font-size: 90%;
++  color: var(--theme-body-color-alt);
++}
++
++.snapshot-list-item.selected .snapshot-state {
++  /* Text inside a selected item should not be custom colored. */
++  color: inherit !important;
++}
++
 +/**
 + * Main panel
 + */
 +
 +#heap-view {
-+  flex: 1 1 auto; 
++  flex: 1 1 auto;
 +}
 +
 +#heap-view .heap-view-panel {
 +  width: 100%;
 +  height: 100%;
-+  display: none;
 +}
 +
-+#heap-view[data-active="initial"] .heap-view-panel[data-state="initial"] { display: block; }
-+#heap-view[data-active="loading"] .heap-view-panel[data-state="loading"] { display: block; }
-+#heap-view[data-active="loading-census"] .heap-view-panel[data-state="loading-census"] { display: block; }
-+#heap-view[data-active="loaded"] .heap-view-panel[data-state="loaded"] { display: block; }
-+
 +#heap-view .take-snapshot {
-+  
 +}
  
  /**

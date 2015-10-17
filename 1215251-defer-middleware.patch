@@ -60,10 +60,10 @@ index e8290a1..d4024da 100644
 +XPCSHELL_TESTS_MANIFESTS += ['test/xpcshell.ini']
 diff --git a/devtools/client/shared/redux/middleware/task.js b/devtools/client/shared/redux/middleware/task.js
 new file mode 100644
-index 0000000..d9871d7
+index 0000000..d13f593
 --- /dev/null
 +++ b/devtools/client/shared/redux/middleware/task.js
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,42 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -79,34 +79,32 @@ index 0000000..d9871d7
 + * allowing the action to create multiple actions (most likely
 + * asynchronously) and yield on each. If called with a promise, calls `dispatch`
 + * on the results.
-+ *
-+ * If called with a generator, the return value of that generator is also
-+ * dispatched if truthy, so it can also be consumed by another generator action.
 + */
 +
 +function task ({ dispatch, getState }) {
 +  return next => action => {
 +    if (isGenerator(action)) {
-+      return Task.spawn(action.bind(null, dispatch, getState)).then(value => {
-+        if (value) {
-+          return dispatch(value);
-+        }
-+      }, error => executeSoon(() => {
-+        reportException(ERROR_TYPE, error);
-+        dispatch({ type: ERROR_TYPE, error });
-+      }));
++      return Task.spawn(action.bind(null, dispatch, getState))
++        .then(null, handleError.bind(null, dispatch));
 +    }
 +
++    /*
 +    if (isPromise(action)) {
-+      return action.then(dispatch, error => executeSoon(() => {
-+        reportException(ERROR_TYPE, error);
-+        dispatch({ type: ERROR_TYPE, error });
-+      }));
++      return action.then(dispatch, handleError.bind(null, dispatch));
 +    }
++    */
 +
 +    return next(action);
 +  };
 +}
++
++function handleError (dispatch, error) {
++  executeSoon(() => {
++    reportException(ERROR_TYPE, error);
++    dispatch({ type: ERROR_TYPE, error });
++  });
++}
++
 +exports.task = task;
 diff --git a/devtools/client/shared/redux/middleware/test/head.js b/devtools/client/shared/redux/middleware/test/head.js
 new file mode 100644
@@ -143,10 +141,10 @@ index 0000000..fac055b
 +}
 diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-task-01.js b/devtools/client/shared/redux/middleware/test/test_middleware-task-01.js
 new file mode 100644
-index 0000000..a0ecdd4
+index 0000000..685e78a
 --- /dev/null
 +++ b/devtools/client/shared/redux/middleware/test/test_middleware-task-01.js
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,52 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -170,13 +168,9 @@ index 0000000..a0ecdd4
 +  yield waitUntilState(store, () => store.getState().length === 1);
 +  equal(store.getState()[0].data, "generator", "task middleware async dispatches an action via generator");
 +
-+  store.dispatch(fetch2("promise"));
++  store.dispatch(fetch2("sync"));
 +  yield waitUntilState(store, () => store.getState().length === 2);
-+  equal(store.getState()[1].data, "promise", "task middleware async dispatches an action via promise");
-+
-+  store.dispatch(fetch3("sync"));
-+  yield waitUntilState(store, () => store.getState().length === 3);
-+  equal(store.getState()[2].data, "sync", "task middleware sync dispatches an action via sync");
++  equal(store.getState()[1].data, "sync", "task middleware sync dispatches an action via sync");
 +});
 +
 +function fetch1 (data) {
@@ -185,39 +179,30 @@ index 0000000..a0ecdd4
 +    let moreData = yield new Promise(resolve => resolve(data));
 +    // Ensure it handles more than one yield
 +    moreData = yield new Promise(resolve => resolve(data));
-+    return { type: "fetch1", data: moreData };
++    dispatch({ type: "fetch1", data: moreData });
 +  };
 +}
 +
 +function fetch2 (data) {
-+  return new Promise(resolve => {
-+    resolve({
-+      type: "fetch2",
-+      data
-+    });
-+  });
-+}
-+
-+function fetch3 (data) {
 +  return {
-+    type: "fetch3",
++    type: "fetch2",
 +    data
 +  }
 +}
 +
 +function reducer (state=[], action) {
 +  do_print("Action called: " + action.type);
-+  if (["fetch1", "fetch2", "fetch3"].includes(action.type)) {
++  if (["fetch1", "fetch2"].includes(action.type)) {
 +    state.push(action);
 +  }
 +  return [...state];
 +}
 diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-task-02.js b/devtools/client/shared/redux/middleware/test/test_middleware-task-02.js
 new file mode 100644
-index 0000000..70326ad
+index 0000000..bc8f277
 --- /dev/null
 +++ b/devtools/client/shared/redux/middleware/test/test_middleware-task-02.js
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,59 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -240,10 +225,12 @@ index 0000000..70326ad
 +  store.dispatch(comboAction());
 +  yield waitUntilState(store, () => store.getState().length === 3);
 +
-+  equal(store.getState()[0].data, "async", "Async dispatched actions in a generator task are fired");
-+  equal(store.getState()[1].data, "sync", "Sync dispatched actions in a generator task are fired");
-+  equal(store.getState()[2].data.sync.type, "fetchSync", "Return values of yielded sync dispatched actions are correct");
-+  equal(store.getState()[2].data.async.type, "fetchAsync", "Return values of yielded async dispatched actions are correct");
++  equal(store.getState()[0].type, "fetchAsync-start", "Async dispatched actions in a generator task are fired");
++  equal(store.getState()[1].type, "fetchAsync-end", "Async dispatched actions in a generator task are fired");
++  equal(store.getState()[2].type, "fetchSync", "Return values of yielded sync dispatched actions are correct");
++  equal(store.getState()[3].type, "fetch-done", "Return values of yielded async dispatched actions are correct");
++  equal(store.getState()[3].data.sync.data, "sync", "Return values of dispatched sync values are correct");
++  equal(store.getState()[3].data.async, "async", "Return values of dispatched async values are correct");
 +});
 +
 +function comboAction () {
@@ -251,7 +238,7 @@ index 0000000..70326ad
 +    let data = {};
 +    data.async = yield dispatch(fetchAsync("async"));
 +    data.sync = yield dispatch(fetchSync("sync"));
-+    dispatch({ type: "done", data });
++    dispatch({ type: "fetch-done", data });
 +  }
 +}
 +
@@ -261,23 +248,26 @@ index 0000000..70326ad
 +
 +function fetchAsync (data) {
 +  return function *(dispatch) {
-+    return new Promise(resolve => resolve({ type: "fetchAsync", data }));
++    dispatch({ type: "fetchAsync-start" });
++    let val = yield new Promise(resolve => resolve(data));
++    dispatch({ type: "fetchAsync-end" });
++    return val;
 +  };
 +}
 +
 +function reducer (state=[], action) {
 +  do_print("Action called: " + action.type);
-+  if (["fetchSync", "fetchAsync", "done"].includes(action.type)) {
++  if (/fetch/.test(action.type)) {
 +    state.push(action);
 +  }
 +  return [...state];
 +}
 diff --git a/devtools/client/shared/redux/middleware/test/test_middleware-task-03.js b/devtools/client/shared/redux/middleware/test/test_middleware-task-03.js
 new file mode 100644
-index 0000000..59f2040
+index 0000000..320f6a3
 --- /dev/null
 +++ b/devtools/client/shared/redux/middleware/test/test_middleware-task-03.js
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,37 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -300,23 +290,12 @@ index 0000000..59f2040
 +  yield waitUntilState(store, () => store.getState().length === 1);
 +  equal(store.getState()[0].type, ERROR_TYPE, "generator errors dispatch ERROR_TYPE actions");
 +  equal(store.getState()[0].error, "task-middleware-error-generator", "generator errors dispatch ERROR_TYPE actions with error");
-+
-+  store.dispatch(promiseError());
-+  yield waitUntilState(store, () => store.getState().length === 2);
-+  equal(store.getState()[1].type, ERROR_TYPE, "promise errors dispatch ERROR_TYPE actions");
-+  equal(store.getState()[1].error, "task-middleware-error-promise", "promise errors dispatch ERROR_TYPE actions with error");
 +});
 +
 +function generatorError () {
 +  return function *(dispatch, getState) {
 +    throw "task-middleware-error-generator";
 +  };
-+}
-+
-+function promiseError () {
-+  return new Promise((_, reject) => {
-+    reject("task-middleware-error-promise");
-+  });
 +}
 +
 +function reducer (state=[], action) {
