@@ -1,13 +1,13 @@
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Fri, 16 Oct 2015 19:15:54 -0700
-Subject: [PATCH] u
+Subject: Bug 1215397 - Add setBreakdown to change breakdowns in memory tool. r=fitzgen
 
 diff --git a/devtools/client/memory/actions/breakdown.js b/devtools/client/memory/actions/breakdown.js
 new file mode 100644
-index 0000000..4e91188
+index 0000000..77b5677
 --- /dev/null
 +++ b/devtools/client/memory/actions/breakdown.js
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,43 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,7 +16,7 @@ index 0000000..4e91188
 +// @TODO 1215606
 +// Use this assert instead of utils when fixed.
 +// const { assert } = require("devtools/shared/DevToolsUtils");
-+const { createSnapshot, assert } = require("../utils");
++const { stringify, breakdownEquals, createSnapshot, assert } = require("../utils");
 +const { actions, snapshotState: states } = require("../constants");
 +const { takeCensus } = require("./snapshot");
 +
@@ -26,9 +26,10 @@ index 0000000..4e91188
 +    // the breakdown
 +    dispatch(setBreakdown(breakdown));
 +    let snapshot = getState().snapshots.find(s => s.selected);
-+    // If snapshot is in a read state, it's because the census data was cleared
-+    // when changing a breakdown, so it's ok to refetch the census
-+    if (snapshot && snapshot.state === states.READ) {
++
++    // If selected snapshot does not have updated census if the breakdown
++    // changed, retake the census with new breakdown
++    if (snapshot && !breakdownEquals(snapshot.breakdown, breakdown)) {
 +      yield dispatch(takeCensus(heapWorker, snapshot));
 +    }
 +  };
@@ -43,7 +44,7 @@ index 0000000..4e91188
 +const setBreakdown = exports.setBreakdown = function (breakdown) {
 +  // @TODO 1215606
 +  assert(typeof breakdown === "object" && breakdown.by,
-+    "Breakdowns must be an object with a `by` property.");
++    `Breakdowns must be an object with a \`by\` property, attempted to set: ${stringify(breakdown)}`);
 +
 +  return {
 +    type: actions.SET_BREAKDOWN,
@@ -65,10 +66,10 @@ index 3ffb5eb..2b34495 100644
      'snapshot.js',
  )
 diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
-index 2a671b1..6d3516a 100644
+index 2a671b1..c0a1455 100644
 --- a/devtools/client/memory/actions/snapshot.js
 +++ b/devtools/client/memory/actions/snapshot.js
-@@ -1,40 +1,53 @@
+@@ -1,40 +1,50 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this file,
   * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -78,7 +79,7 @@ index 2a671b1..6d3516a 100644
  // Use this assert instead of utils when fixed.
  // const { assert } = require("devtools/shared/DevToolsUtils");
 -const { createSnapshot, assert } = require("../utils");
-+const { getSnapshot, createSnapshot, assert } = require("../utils");
++const { getSnapshot, breakdownEquals, createSnapshot, assert } = require("../utils");
  const { actions, snapshotState: states } = require("../constants");
  
  /**
@@ -101,13 +102,10 @@ index 2a671b1..6d3516a 100644
 +const selectSnapshotAndRefresh = exports.selectSnapshotAndRefresh = function (heapWorker, snapshot) {
 +  return function *(dispatch, getState) {
 +    dispatch(selectSnapshot(snapshot));
-+    snapshot = getSnapshot(getState().snapshots, snapshot);
 +
-+    // If snapshot is in a read state, it's because the census data was cleared
-+    // when changing a breakdown, so it's ok to refetch the census
-+    if (snapshot.state === states.READ) {
-+      yield dispatch(takeCensus(heapWorker, snapshot));
-+    }
++    // Attempt to take another census; if the snapshot already is using
++    // the correct breakdown, this will noop.
++    yield dispatch(takeCensus(heapWorker, snapshot));
 +  };
 +};
 +
@@ -125,7 +123,7 @@ index 2a671b1..6d3516a 100644
      dispatch({ type: actions.TAKE_SNAPSHOT_END, snapshot, path });
  
      return snapshot;
-@@ -44,17 +57,17 @@ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
+@@ -44,17 +54,17 @@ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
  /**
   * Reads a snapshot into memory; necessary to do before taking
   * a census on the snapshot. May only be called once per snapshot.
@@ -144,7 +142,7 @@ index 2a671b1..6d3516a 100644
      yield heapWorker.readHeapSnapshot(snapshot.path);
      dispatch({ type: actions.READ_SNAPSHOT_END, snapshot });
    };
-@@ -64,22 +77,22 @@ const readSnapshot = exports.readSnapshot = function readSnapshot (heapWorker, s
+@@ -64,26 +74,39 @@ const readSnapshot = exports.readSnapshot = function readSnapshot (heapWorker, s
   * @param {HeapAnalysesClient} heapWorker
   * @param {Snapshot} snapshot,
   *
@@ -160,36 +158,110 @@ index 2a671b1..6d3516a 100644
        "Can only take census of snapshots in READ or SAVED_CENSUS state");
  
 -    let breakdown = getStore().breakdown;
+-    dispatch({ type: actions.TAKE_CENSUS_START, snapshot, breakdown });
++    let census;
 +    let breakdown = getState().breakdown;
-     dispatch({ type: actions.TAKE_CENSUS_START, snapshot, breakdown });
++
++    // If breakdown hasn't changed, don't do anything
++    if (breakdownEquals(breakdown, snapshot.breakdown)) {
++      return;
++    }
++
++    // Keep taking a census if the breakdown changes during. Recheck
++    // that the breakdown used for the census is the same as
++    // the state's breakdown.
++    do {
++      breakdown = getState().breakdown;
++      dispatch({ type: actions.TAKE_CENSUS_START, snapshot, breakdown });
++      census = yield heapWorker.takeCensus(snapshot.path, { breakdown }, { asTreeNode: true });
++    } while (!breakdownEquals(breakdown, getState().breakdown));
  
-     let census = yield heapWorker.takeCensus(snapshot.path, { breakdown }, { asTreeNode: true });
-     dispatch({ type: actions.TAKE_CENSUS_END, snapshot, census });
+-    let census = yield heapWorker.takeCensus(snapshot.path, { breakdown }, { asTreeNode: true });
+-    dispatch({ type: actions.TAKE_CENSUS_END, snapshot, census });
++    dispatch({ type: actions.TAKE_CENSUS_END, snapshot, breakdown, census });
    };
  };
  
  /**
+  * @param {Snapshot}
+  * @see {Snapshot} model defined in devtools/client/memory/app.js
+  */
+ const selectSnapshot = exports.selectSnapshot = function takeSnapshot (snapshot) {
 diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
-index f8d39b9..fe26a48 100644
+index f8d39b9..ab6f43d 100644
 --- a/devtools/client/memory/app.js
 +++ b/devtools/client/memory/app.js
-@@ -1,12 +1,14 @@
+@@ -1,64 +1,23 @@
  const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
  const { connect } = require("devtools/client/shared/vendor/react-redux");
 -const { selectSnapshot, takeSnapshotAndCensus } = require("./actions/snapshot");
+-const { snapshotState } = require("./constants");
 +const { selectSnapshotAndRefresh, takeSnapshotAndCensus } = require("./actions/snapshot");
 +const { setBreakdownAndRefresh } = require("./actions/breakdown");
- const { snapshotState } = require("./constants");
 +const { breakdownNameToSpec, getBreakdownDisplayData } = require("./utils");
  const Toolbar = createFactory(require("./components/toolbar"));
  const List = createFactory(require("./components/list"));
  const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
  const HeapView = createFactory(require("./components/heap"));
+-
+-const stateModel = {
+-  /**
+-   * {MemoryFront}
+-   * Used to communicate with the platform.
+-   */
+-  front: PropTypes.any,
+-
+-  /**
+-   * {HeapAnalysesClient}
+-   * Used to communicate with the worker that performs analyses on heaps.
+-   */
+-  heapWorker: PropTypes.any,
+-
+-  /**
+-   * The breakdown object DSL describing how we want
+-   * the census data to be.
+-   * @see `js/src/doc/Debugger/Debugger.Memory.md`
+-   */
+-  breakdown: PropTypes.object.isRequired,
+-
+-  /**
+-   * {Array<Snapshot>}
+-   * List of references to all snapshots taken
+-   */
+-  snapshots: PropTypes.arrayOf(PropTypes.shape({
+-    // Unique ID for a snapshot
+-    id: PropTypes.number.isRequired,
+-    // fs path to where the snapshot is stored; used to
+-    // identify the snapshot for HeapAnalysesClient.
+-    path: PropTypes.string,
+-    // Whether or not this snapshot is currently selected.
+-    selected: PropTypes.bool.isRequired,
+-    // Whther or not the snapshot has been read into memory.
+-    // Only needed to do once.
+-    snapshotRead: PropTypes.bool.isRequired,
+-    // State the snapshot is in
+-    // @see ./constants.js
+-    state: PropTypes.oneOf(Object.keys(snapshotState)).isRequired,
+-    // Data of a census breakdown
+-    census: PropTypes.any,
+-  }))
+-};
++const { app: appModel } = require("./models");
  
- const stateModel = {
-   /**
-    * {MemoryFront}
-@@ -70,27 +72,27 @@ const App = createClass({
+ const App = createClass({
+   displayName: "memory-tool",
+ 
+-  propTypes: stateModel,
++  propTypes: appModel,
+ 
+   childContextTypes: {
+     front: PropTypes.any,
+     heapWorker: PropTypes.any,
+   },
+ 
+   getChildContext() {
+     return {
+@@ -70,27 +29,27 @@ const App = createClass({
    render() {
      let { dispatch, snapshots, front, heapWorker, breakdown } = this.props;
      let selectedSnapshot = snapshots.find(s => s.selected);
@@ -222,6 +294,62 @@ index f8d39b9..fe26a48 100644
            }),
          ])
        ])
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index 44babd9..b0699e1 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -1,25 +1,26 @@
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { getSnapshotStatusText } = require("../utils");
+ const { snapshotState: states } = require("../constants");
++const { snapshot: snapshotModel } = require("../models");
+ const TAKE_SNAPSHOT_TEXT = "Take snapshot";
+ 
+ /**
+  * Main view for the memory tool -- contains several panels for different states;
+  * an initial state of only a button to take a snapshot, loading states, and the
+  * heap view tree.
+  */
+ 
+ const Heap = module.exports = createClass({
+   displayName: "heap-view",
+ 
+   propTypes: {
+     onSnapshotClick: PropTypes.func.isRequired,
+-    snapshot: PropTypes.any,
++    snapshot: snapshotModel,
+   },
+ 
+   render() {
+     let { snapshot, onSnapshotClick } = this.props;
+     let pane;
+     let census = snapshot ? snapshot.census : null;
+     let state = snapshot ? snapshot.state : "initial";
+     let statusText = getSnapshotStatusText(snapshot);
+diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
+index 7bb8285..f06539d 100644
+--- a/devtools/client/memory/components/snapshot-list-item.js
++++ b/devtools/client/memory/components/snapshot-list-item.js
+@@ -1,17 +1,18 @@
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { getSnapshotStatusText } = require("../utils");
++const { snapshot: snapshotModel } = require("../models");
+ 
+ const SnapshotListItem = module.exports = createClass({
+   displayName: "snapshot-list-item",
+ 
+   propTypes: {
+     onClick: PropTypes.func,
+-    item: PropTypes.any.isRequired,
++    item: snapshotModel.isRequired,
+     index: PropTypes.number.isRequired,
+   },
+ 
+   render() {
+     let { index, item, onClick } = this.props;
+     let className = `snapshot-list-item ${item.selected ? " selected" : ""}`;
+     let statusText = getSnapshotStatusText(item);
+ 
 diff --git a/devtools/client/memory/components/toolbar.js b/devtools/client/memory/components/toolbar.js
 index 48da52b..60b0493 100644
 --- a/devtools/client/memory/components/toolbar.js
@@ -314,6 +442,95 @@ index f465b39..e46722a 100644
   *
   * SAVING -> SAVED -> READING -> READ   <-  <-  <- SAVED_CENSUS
   *                                    ↘             ↗
+diff --git a/devtools/client/memory/models.js b/devtools/client/memory/models.js
+new file mode 100644
+index 0000000..f7faeb5
+--- /dev/null
++++ b/devtools/client/memory/models.js
+@@ -0,0 +1,61 @@
++const { MemoryFront } = require("devtools/server/actors/memory");
++const HeapAnalysesClient = require("devtools/shared/heapsnapshot/HeapAnalysesClient");
++const { PropTypes } = require("devtools/client/shared/vendor/react");
++const { snapshotState: states } = require("./constants");
++
++/**
++ * The breakdown object DSL describing how we want
++ * the census data to be.
++ * @see `js/src/doc/Debugger/Debugger.Memory.md`
++ */
++let breakdownModel = exports.breakdown = PropTypes.shape({
++  by: PropTypes.oneOf(["coarseType", "allocationStack", "objectClass", "internalType"]).isRequired,
++});
++
++/**
++ * Snapshot model.
++ */
++let snapshotModel = exports.snapshot = PropTypes.shape({
++  // Unique ID for a snapshot
++  id: PropTypes.number.isRequired,
++  // Whether or not this snapshot is currently selected.
++  selected: PropTypes.bool.isRequired,
++  // fs path to where the snapshot is stored; used to
++  // identify the snapshot for HeapAnalysesClient.
++  path: PropTypes.string,
++  // Data of a census breakdown
++  census: PropTypes.object,
++  // The breakdown used to generate the current census
++  breakdown: breakdownModel,
++  // State the snapshot is in
++  // @see ./constants.js
++  state: function (props, propName) {
++    let stateNames = Object.keys(states);
++    let current = props.state;
++    let shouldHavePath = [states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
++    let shouldHaveCensus = [states.SAVED_CENSUS];
++
++    if (!stateNames.contains(current)) {
++      throw new Error(`Snapshot state must be one of ${stateNames}.`);
++    }
++    if (shouldHavePath.contains(current) && !path) {
++      throw new Error(`Snapshots in state ${current} must have a snapshot path.`);
++    }
++    if (shouldHaveCensus.contains(current) && (!props.census || !props.breakdown)) {
++      throw new Error(`Snapshots in state ${current} must have a census and breakdown.`);
++    }
++  },
++});
++
++let appModel = exports.app = {
++  // {MemoryFront} Used to communicate with platform
++  front: PropTypes.instanceOf(MemoryFront),
++  // {HeapAnalysesClient} Used to interface with snapshots
++  heapWorker: PropTypes.instanceOf(HeapAnalysesClient),
++  // The breakdown object DSL describing how we want
++  // the census data to be.
++  // @see `js/src/doc/Debugger/Debugger.Memory.md`
++  breakdown: breakdownModel.isRequired,
++  // List of reference to all snapshots taken
++  snapshots: PropTypes.arrayOf(snapshotModel).isRequired,
++};
+diff --git a/devtools/client/memory/moz.build b/devtools/client/memory/moz.build
+index 773679f..5285b81 100644
+--- a/devtools/client/memory/moz.build
++++ b/devtools/client/memory/moz.build
+@@ -9,16 +9,17 @@ DIRS += [
+     'modules',
+     'reducers',
+ ]
+ 
+ DevToolsModules(
+     'app.js',
+     'constants.js',
+     'initializer.js',
++    'models.js',
+     'panel.js',
+     'reducers.js',
+     'store.js',
+     'utils.js',
+ )
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser/browser.ini']
+ MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
 diff --git a/devtools/client/memory/reducers/breakdown.js b/devtools/client/memory/reducers/breakdown.js
 index 0a3e82c..8e344e4 100644
 --- a/devtools/client/memory/reducers/breakdown.js
@@ -346,55 +563,96 @@ index 0a3e82c..8e344e4 100644
 +  return state;
  };
 diff --git a/devtools/client/memory/reducers/snapshots.js b/devtools/client/memory/reducers/snapshots.js
-index 30246f42..0c9a024 100644
+index 30246f42..a7f6842 100644
 --- a/devtools/client/memory/reducers/snapshots.js
 +++ b/devtools/client/memory/reducers/snapshots.js
-@@ -45,15 +45,29 @@ handlers[actions.TAKE_CENSUS_END] = function (snapshots, action) {
+@@ -28,23 +28,25 @@ handlers[actions.READ_SNAPSHOT_END] = function (snapshots, action) {
+   snapshot.state = states.READ;
+   return [...snapshots];
+ };
+ 
+ handlers[actions.TAKE_CENSUS_START] = function (snapshots, action) {
+   let snapshot = getSnapshot(snapshots, action.snapshot);
+   snapshot.state = states.SAVING_CENSUS;
+   snapshot.census = null;
++  snapshot.breakdown = action.breakdown;
+   return [...snapshots];
+ };
+ 
+ handlers[actions.TAKE_CENSUS_END] = function (snapshots, action) {
+   let snapshot = getSnapshot(snapshots, action.snapshot);
+   snapshot.state = states.SAVED_CENSUS;
+   snapshot.census = action.census;
++  snapshot.breakdown = action.breakdown;
+   return [...snapshots];
+ };
  
  handlers[actions.SELECT_SNAPSHOT] = function (snapshots, action) {
    return snapshots.map(s => {
      s.selected = s.id === action.snapshot.id;
      return s;
    });
- };
- 
-+/**
-+ * Clears out any census data we have stored for our snapshots,
-+ * and reset them back to READ state if they do have census data.
-+ */
-+handlers[actions.SET_BREAKDOWN] = function (snapshots, action) {
-+  return snapshots.map(s => {
-+    if ([states.SAVING_CENSUS, states.SAVED_CENSUS].includes(s.state)) {
-+      s.state = states.READ;
-+    }
-+    s.census = null;
-+    return s;
-+  });
-+};
-+
- module.exports = function (snapshots=[], action) {
-   let handler = handlers[action.type];
-   if (handler) {
-     return handler(snapshots, action);
+diff --git a/devtools/client/memory/test/unit/head.js b/devtools/client/memory/test/unit/head.js
+index 2f5aac32..96a81c2 100644
+--- a/devtools/client/memory/test/unit/head.js
++++ b/devtools/client/memory/test/unit/head.js
+@@ -54,8 +54,37 @@ function waitUntilState (store, predicate) {
+     }
    }
-   return snapshots;
- };
-diff --git a/devtools/client/memory/test/unit/test_action-set-breakdown-01.js b/devtools/client/memory/test/unit/test_action-set-breakdown-01.js
+ 
+   // Fire the check immediately incase the action has already occurred
+   check();
+ 
+   return deferred.promise;
+ }
++
++function waitUntilSnapshotState (store, expected) {
++  let predicate = () => {
++    let snapshots = store.getState().snapshots;
++    do_print(snapshots.map(x => x.state));
++    return snapshots.length === expected.length &&
++           expected.every((state, i) => state === "*" || snapshots[i].state === state);
++  };
++  do_print(`Waiting for snapshots to be of state: ${expected}`);
++  return waitUntilState(store, predicate);
++}
++
++function isBreakdownType (census, type) {
++  // Little sanity check, all censeses should have atleast a children array
++  if (!census || !Array.isArray(census.children)) {
++    return false;
++  }
++  switch (type) {
++    case "coarseType":
++      return census.children.find(c => c.name === "objects");
++    case "objectClass":
++      return census.children.find(c => c.name === "Function");
++    case "internalType":
++      return census.children.find(c => c.name === "js::BaseShape") &&
++             !census.children.find(c => c.name === "objects");
++    default:
++      throw new Error(`isBreakdownType does not yet support ${type}`);
++  }
++}
+diff --git a/devtools/client/memory/test/unit/test_action-set-breakdown-and-refresh-01.js b/devtools/client/memory/test/unit/test_action-set-breakdown-and-refresh-01.js
 new file mode 100644
-index 0000000..a6e3ce3
+index 0000000..981b6ce
 --- /dev/null
-+++ b/devtools/client/memory/test/unit/test_action-set-breakdown-01.js
-@@ -0,0 +1,42 @@
++++ b/devtools/client/memory/test/unit/test_action-set-breakdown-and-refresh-01.js
+@@ -0,0 +1,92 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
 +/**
-+ * Tests the task creator `takeSnapshotAndCensus()` for the whole flow of
-+ * taking a snapshot, and its sub-actions.
++ * Tests the task creator `setBreakdownAndRefreshAndRefresh()` for breakdown changing.
++ * We test this rather than `setBreakdownAndRefresh` directly, as we use the refresh action
++ * in the app itself composed from `setBreakdownAndRefresh`
 + */
 +
-+let { snapshotState: states } = require("devtools/client/memory/constants");
-+let actions = require("devtools/client/memory/actions/snapshot");
++let { breakdowns, snapshotState: states } = require("devtools/client/memory/constants");
++let { breakdownEquals } = require("devtools/client/memory/utils");
++let { setBreakdownAndRefresh } = require("devtools/client/memory/actions/breakdown");
++let { takeSnapshotAndCensus, selectSnapshotAndRefresh } = require("devtools/client/memory/actions/snapshot");
 +
 +function run_test() {
 +  run_next_test();
@@ -405,44 +663,94 @@ index 0000000..a6e3ce3
 +  let heapWorker = new HeapAnalysesClient();
 +  yield front.attach();
 +  let store = Store();
++  let { getState, dispatch } = store;
 +
-+  // TODO Test changing breakdown without any snapshots
-+  // TODO Test default
-+  // TODO Test non-default is used on new snapshot
-+  // TODO Able to be changed when a snapshot is first created in TAKING_CENSUS state
-+  // TODO Able to be changed when a snapshot is first created in SAVING state
-+  // TODO Is changed when bd changes and currently selected snapshot changes
-+  // TODO Is changed when bd changes and currently NOT selected snapshot
++  // Test default breakdown with no snapshots
++  equal(getState().breakdown.by, "coarseType", "default coarseType breakdown selected at start.");
++  dispatch(setBreakdownAndRefresh(heapWorker, breakdowns.objectClass.breakdown));
++  equal(getState().breakdown.by, "objectClass", "breakdown changed with no snapshots");
 +
-+  /*
-+  let unsubscribe = store.subscribe(expectStates);
-+  store.dispatch(actions.takeSnapshotAndCensus(front, heapWorker));
++  // Test invalid breakdowns
++  ok(getState().errors.length === 0, "No error actions in the queue.");
++  dispatch(setBreakdownAndRefresh(heapWorker, {}));
++  yield waitUntilState(store, () => getState().errors.length === 1);
++  ok(true, "Emits an error action when passing in an invalid breakdown object");
 +
-+  yield waitUntilState(store, () => i === 6);
-+  unsubscribe();
++  equal(getState().breakdown.by, "objectClass",
++    "current breakdown unchanged when passing invalid breakdown");
 +
-+  ok(true, "takeSnapshotAndCensus() produces the correct sequence of states in a snapshot");
-+  let snapshot = store.getState().snapshots[0];
-+  ok(snapshot.census, "snapshot has census data");
-+  ok(snapshot.selected, "snapshot is selected");
-+  */
++  // Test new snapshots
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS]);
++  ok(isBreakdownType(getState().snapshots[0].census, "objectClass"),
++    "New snapshots use the current, non-default breakdown");
++
++
++  // Updates when changing breakdown during `SAVING`
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS, states.SAVING]);
++  dispatch(setBreakdownAndRefresh(heapWorker, breakdowns.coarseType.breakdown));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS, states.SAVED_CENSUS]);
++
++  ok(isBreakdownType(getState().snapshots[1].census, "coarseType"),
++    "Breakdown can be changed while saving snapshots, uses updated breakdown in census");
++
++
++  // Updates when changing breakdown during `SAVING_CENSUS`
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS, states.SAVED_CENSUS, states.SAVING_CENSUS]);
++  dispatch(setBreakdownAndRefresh(heapWorker, breakdowns.objectClass.breakdown));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS, states.SAVED_CENSUS, states.SAVED_CENSUS]);
++
++  ok(breakdownEquals(getState().snapshots[2].breakdown, breakdowns.objectClass.breakdown),
++    "Breakdown can be changed while saving census, stores updated breakdown in snapshot");
++  ok(isBreakdownType(getState().snapshots[2].census, "objectClass"),
++    "Breakdown can be changed while saving census, uses updated breakdown in census");
++
++  // Updates census on currently selected snapshot when changing breakdown
++  ok(getState().snapshots[2].selected, "Third snapshot currently selected");
++  dispatch(setBreakdownAndRefresh(heapWorker, breakdowns.internalType.breakdown));
++  yield waitUntilState(store, () => isBreakdownType(getState().snapshots[2].census, "internalType"));
++  ok(isBreakdownType(getState().snapshots[2].census, "internalType"),
++    "Snapshot census updated when changing breakdowns after already generating one census");
++
++  // Does not update unselected censuses
++  ok(!getState().snapshots[1].selected, "Second snapshot unselected currently");
++  ok(breakdownEquals(getState().snapshots[1].breakdown, breakdowns.coarseType.breakdown),
++    "Second snapshot using `coarseType` breakdown still and not yet updated to correct breakdown");
++  ok(isBreakdownType(getState().snapshots[1].census, "coarseType"),
++    "Second snapshot using `coarseType` still for census and not yet updated to correct breakdown");
++
++  // Updates to current breakdown when switching to stale snapshot
++  dispatch(selectSnapshotAndRefresh(heapWorker, getState().snapshots[1]));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS, states.SAVING_CENSUS, states.SAVED_CENSUS]);
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS, states.SAVED_CENSUS, states.SAVED_CENSUS]);
++
++  ok(getState().snapshots[1].selected, "Second snapshot selected currently");
++  ok(breakdownEquals(getState().snapshots[1].breakdown, breakdowns.internalType.breakdown),
++    "Second snapshot using `internalType` breakdown and updated to correct breakdown");
++  ok(isBreakdownType(getState().snapshots[1].census, "internalType"),
++    "Second snapshot using `internalType` for census and updated to correct breakdown");
 +});
-diff --git a/devtools/client/memory/test/unit/test_action-set-breakdown-02.js b/devtools/client/memory/test/unit/test_action-set-breakdown-02.js
+diff --git a/devtools/client/memory/test/unit/test_action-set-breakdown-and-refresh-02.js b/devtools/client/memory/test/unit/test_action-set-breakdown-and-refresh-02.js
 new file mode 100644
-index 0000000..c0f6cf8
+index 0000000..0ee6e81
 --- /dev/null
-+++ b/devtools/client/memory/test/unit/test_action-set-breakdown-02.js
-@@ -0,0 +1,46 @@
++++ b/devtools/client/memory/test/unit/test_action-set-breakdown-and-refresh-02.js
+@@ -0,0 +1,38 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
 +/**
-+ * Tests the task creator `takeSnapshotAndCensus()` for the whole flow of
-+ * taking a snapshot, and its sub-actions.
++ * Tests the task creator `setBreakdownAndRefreshAndRefresh()` for custom
++ * breakdowns.
 + */
 +
 +let { snapshotState: states } = require("devtools/client/memory/constants");
-+let actions = require("devtools/client/memory/actions/snapshot");
++let { breakdownEquals } = require("devtools/client/memory/utils");
++let { setBreakdownAndRefresh } = require("devtools/client/memory/actions/breakdown");
++let { takeSnapshotAndCensus } = require("devtools/client/memory/actions/snapshot");
++let custom = { by: "internalType", then: { by: "count", bytes: true }};
 +
 +function run_test() {
 +  run_next_test();
@@ -453,34 +761,195 @@ index 0000000..c0f6cf8
 +  let heapWorker = new HeapAnalysesClient();
 +  yield front.attach();
 +  let store = Store();
++  let { getState, dispatch } = store;
 +
-+  /** TEST WITH CUSTOM BREAKDOWNS **/
-+  // TODO test an unparseable breakdown
-+  // TODO test a parseable, but not valid breakdown, cusotm breakdown
-+  //--
-+  // TODO Test changing breakdown without any snapshots
-+  // TODO Test default
-+  // TODO Test non-default is used on new snapshot
-+  // TODO Able to be changed when a snapshot is first created in TAKING_CENSUS state
-+  // TODO Able to be changed when a snapshot is first created in SAVING state
-+  // TODO Is changed when bd changes and currently selected snapshot changes
-+  // TODO Is changed when bd changes and currently NOT selected snapshot
++  dispatch(setBreakdownAndRefresh(heapWorker, custom));
++  ok(breakdownEquals(getState().breakdown, custom),
++    "Custom breakdown stored in breakdown state.");
 +
-+  /*
-+  let unsubscribe = store.subscribe(expectStates);
-+  store.dispatch(actions.takeSnapshotAndCensus(front, heapWorker));
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS]);
 +
-+  yield waitUntilState(store, () => i === 6);
-+  unsubscribe();
-+
-+  ok(true, "takeSnapshotAndCensus() produces the correct sequence of states in a snapshot");
-+  let snapshot = store.getState().snapshots[0];
-+  ok(snapshot.census, "snapshot has census data");
-+  ok(snapshot.selected, "snapshot is selected");
-+  */
++  ok(breakdownEquals(getState().snapshots[0].breakdown, custom),
++    "New snapshot stored custom breakdown when done taking census");
++  ok(getState().snapshots[0].census.children.length, "Census has some children");
++  // Ensure we don't have `count` in any results
++  ok(getState().snapshots[0].census.children.every(c => !c.count), "Census used custom breakdown");
 +});
+diff --git a/devtools/client/memory/test/unit/test_action-set-breakdown.js b/devtools/client/memory/test/unit/test_action-set-breakdown.js
+new file mode 100644
+index 0000000..c65a787
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_action-set-breakdown.js
+@@ -0,0 +1,45 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the action creator `setBreakdown()` for breakdown changing.
++ * Does not test refreshing the census information, check `setBreakdownAndRefresh` action
++ * for that.
++ */
++
++let { breakdowns, snapshotState: states } = require("devtools/client/memory/constants");
++let { setBreakdown } = require("devtools/client/memory/actions/breakdown");
++let { takeSnapshotAndCensus } = require("devtools/client/memory/actions/snapshot");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let front = new StubbedMemoryFront();
++  let heapWorker = new HeapAnalysesClient();
++  yield front.attach();
++  let store = Store();
++  let { getState, dispatch } = store;
++
++  // Test default breakdown with no snapshots
++  equal(getState().breakdown.by, "coarseType", "default coarseType breakdown selected at start.");
++  dispatch(setBreakdown(breakdowns.objectClass.breakdown));
++  equal(getState().breakdown.by, "objectClass", "breakdown changed with no snapshots");
++
++  // Test invalid breakdowns
++  try {
++    dispatch(setBreakdown({}));
++    ok(false, "Throws when passing in an invalid breakdown object");
++  } catch (e) {
++    ok(true, "Throws when passing in an invalid breakdown object");
++  }
++  equal(getState().breakdown.by, "objectClass",
++    "current breakdown unchanged when passing invalid breakdown");
++
++  // Test new snapshots
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS]);
++  ok(isBreakdownType(getState().snapshots[0].census, "objectClass"),
++    "New snapshots use the current, non-default breakdown");
++});
+diff --git a/devtools/client/memory/test/unit/test_action-take-census.js b/devtools/client/memory/test/unit/test_action-take-census.js
+index 25bfdd2..7019d41 100644
+--- a/devtools/client/memory/test/unit/test_action-take-census.js
++++ b/devtools/client/memory/test/unit/test_action-take-census.js
+@@ -1,16 +1,17 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests the async reducer responding to the action `takeCensus(heapWorker, snapshot)`
+  */
+ 
+-var { snapshotState: states } = require("devtools/client/memory/constants");
++var { snapshotState: states, breakdowns } = require("devtools/client/memory/constants");
++var { breakdownEquals } = require("devtools/client/memory/utils");
+ var { ERROR_TYPE } = require("devtools/client/shared/redux/middleware/task");
+ var actions = require("devtools/client/memory/actions/snapshot");
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function *() {
+@@ -38,12 +39,14 @@ add_task(function *() {
+   yield waitUntilState(store, () => store.getState().snapshots[0].state === states.READ);
+ 
+   store.dispatch(actions.takeCensus(heapWorker, snapshot));
+   yield waitUntilState(store, () => store.getState().snapshots[0].state === states.SAVING_CENSUS);
+   yield waitUntilState(store, () => store.getState().snapshots[0].state === states.SAVED_CENSUS);
+ 
+   snapshot = store.getState().snapshots[0];
+   ok(snapshot.census, "Snapshot has census after saved census");
+-  ok(snapshot.census.children.length, "Census is in tree node form with the default breakdown");
+-  ok(snapshot.census.children.find(t => t.name === "JSObject"),
++  ok(snapshot.census.children.length, "Census is in tree node form");
++  ok(isBreakdownType(snapshot.census, "coarseType"),
+     "Census is in tree node form with the default breakdown");
++  ok(breakdownEquals(snapshot.breakdown, breakdowns.coarseType.breakdown),
++    "Snapshot stored correct breakdown used for the census");
+ });
+diff --git a/devtools/client/memory/test/unit/test_utils.js b/devtools/client/memory/test/unit/test_utils.js
+new file mode 100644
+index 0000000..7c49025
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_utils.js
+@@ -0,0 +1,55 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the task creator `takeSnapshotAndCensus()` for the whole flow of
++ * taking a snapshot, and its sub-actions.
++ */
++
++let utils = require("devtools/client/memory/utils");
++let { snapshotState: states, breakdowns } = require("devtools/client/memory/constants");
++let { Preferences } = require("resource://gre/modules/Preferences.jsm");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  ok(utils.breakdownEquals(breakdowns.allocationStack.breakdown, {
++    by: "allocationStack",
++    then: { by: "count", count: true, bytes: true },
++    noStack: { by: "count", count: true, bytes: true },
++  }), "utils.breakdownEquals() passes with preset"),
++
++  ok(!utils.breakdownEquals(breakdowns.allocationStack.breakdown, {
++    by: "allocationStack",
++    then: { by: "count", count: false, bytes: true },
++    noStack: { by: "count", count: true, bytes: true },
++  }), "utils.breakdownEquals() fails when deep properties do not match");
++
++  ok(!utils.breakdownEquals(breakdowns.allocationStack.breakdown, {
++    by: "allocationStack",
++    then: { by: "count", bytes: true },
++    noStack: { by: "count", count: true, bytes: true },
++  }), "utils.breakdownEquals() fails when deep properties are missing.");
++
++  equal(utils.stringify("hello"), "hello", "utils.stringify() works with string");
++  equal(utils.stringify(), "undefined", "utils.stringify() works with undefined");
++  equal(utils.stringify({ hello: "world" }), "{\"hello\":\"world\"}", "utils.stringify() works with an object");
++
++  let s1 = utils.createSnapshot();
++  let s2 = utils.createSnapshot();
++  ok(s1.state, states.SAVING, "utils.createSnapshot() creates snapshot in saving state");
++  ok(s1.id !== s2.id, "utils.createSnapshot() creates snapshot with unique ids");
++
++  ok(utils.breakdownEquals(utils.breakdownNameToSpec("coarseType"), breakdowns.coarseType.breakdown),
++    "utils.breakdownNameToSpec() works for presets");
++  ok(utils.breakdownEquals(utils.breakdownNameToSpec("coarseType"), breakdowns.coarseType.breakdown),
++    "utils.breakdownNameToSpec() works for presets");
++
++  let custom = { by: "internalType", then: { by: "count", bytes: true }};
++  Preferences.set("devtools.memory.custom-breakdowns", JSON.stringify({ "My Breakdown": custom }));
++
++  ok(utils.breakdownEquals(utils.getCustomBreakdowns()["My Breakdown"], custom),
++    "utils.getCustomBreakdowns() returns custom breakdowns");
++});
+diff --git a/devtools/client/memory/test/unit/xpcshell.ini b/devtools/client/memory/test/unit/xpcshell.ini
+index e171139..e4c5d9d 100644
+--- a/devtools/client/memory/test/unit/xpcshell.ini
++++ b/devtools/client/memory/test/unit/xpcshell.ini
+@@ -1,11 +1,15 @@
+ [DEFAULT]
+ tags = devtools
+ head = head.js
+ tail =
+ firefox-appdir = browser
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
+ [test_action-select-snapshot.js]
++[test_action-set-breakdown.js]
++[test_action-set-breakdown-and-refresh-01.js]
++[test_action-set-breakdown-and-refresh-02.js]
+ [test_action-take-census.js]
+ [test_action-take-snapshot.js]
+ [test_action-take-snapshot-and-census.js]
++[test_utils.js]
 diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
-index 80a45d7..09300b6 100644
+index 80a45d7..5626444 100644
 --- a/devtools/client/memory/utils.js
 +++ b/devtools/client/memory/utils.js
 @@ -1,38 +1,109 @@
@@ -594,6 +1063,52 @@ index 80a45d7..09300b6 100644
  
  /**
   * Takes an array of snapshots and a snapshot and returns
+@@ -61,8 +132,45 @@ exports.createSnapshot = function createSnapshot () {
+   let id = ++INC_ID;
+   return {
+     id,
+     state: states.SAVING,
+     census: null,
+     path: null,
+   };
+ };
++
++/**
++ * Takes anything and turns it into a readable string.
++ *
++ * @param {Any} x
++ * @return {String}
++ */
++exports.stringify = function stringify (x) {
++  return typeof x === "object" ? JSON.stringify(x) : String(x);
++};
++
++exports.breakdownEquals = function (obj1, obj2) {
++  let type1 = typeof obj1;
++  let type2 = typeof obj2;
++
++  // Quick checks
++  if (type1 !== type2 || (Array.isArray(obj1) !== Array.isArray(obj2))) {
++    return false;
++  }
++
++  if (Array.isArray(obj1)) {
++    if (obj1.length !== obj2.length) { return false; }
++    return obj1.every((_, i) => exports.breakdownEquals(obj[1], obj2[i]));
++  }
++  else if (type1 === "object") {
++    let k1 = Object.keys(obj1);
++    let k2 = Object.keys(obj2);
++
++    if (k1.length !== k2.length) {
++      return false;
++    }
++
++    return k1.every(k => exports.breakdownEquals(obj1[k], obj2[k]));
++  }
++
++  return obj1 === obj2;
++};
 diff --git a/devtools/client/preferences/devtools.js b/devtools/client/preferences/devtools.js
 index 6dc2538..6c49d03 100644
 --- a/devtools/client/preferences/devtools.js
