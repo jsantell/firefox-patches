@@ -1,10 +1,10 @@
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Fri, 16 Oct 2015 19:15:54 -0700
-Subject: Bug 1215397 - Add setBreakdown to change breakdowns in memory tool. r=fitzgen
+Subject: Bug 1215397 - Add state and UI for breakdowns in memory tool. r=fitzgen
 
 diff --git a/devtools/client/memory/actions/breakdown.js b/devtools/client/memory/actions/breakdown.js
 new file mode 100644
-index 0000000..77b5677
+index 0000000..c9c08c8
 --- /dev/null
 +++ b/devtools/client/memory/actions/breakdown.js
 @@ -0,0 +1,43 @@
@@ -16,7 +16,7 @@ index 0000000..77b5677
 +// @TODO 1215606
 +// Use this assert instead of utils when fixed.
 +// const { assert } = require("devtools/shared/DevToolsUtils");
-+const { stringify, breakdownEquals, createSnapshot, assert } = require("../utils");
++const { breakdownEquals, createSnapshot, assert } = require("../utils");
 +const { actions, snapshotState: states } = require("../constants");
 +const { takeCensus } = require("./snapshot");
 +
@@ -44,7 +44,7 @@ index 0000000..77b5677
 +const setBreakdown = exports.setBreakdown = function (breakdown) {
 +  // @TODO 1215606
 +  assert(typeof breakdown === "object" && breakdown.by,
-+    `Breakdowns must be an object with a \`by\` property, attempted to set: ${stringify(breakdown)}`);
++    `Breakdowns must be an object with a \`by\` property, attempted to set: ${uneval(breakdown)}`);
 +
 +  return {
 +    type: actions.SET_BREAKDOWN,
@@ -66,10 +66,10 @@ index 3ffb5eb..2b34495 100644
      'snapshot.js',
  )
 diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
-index 2a671b1..c0a1455 100644
+index 2a671b1..5ec792e 100644
 --- a/devtools/client/memory/actions/snapshot.js
 +++ b/devtools/client/memory/actions/snapshot.js
-@@ -1,40 +1,50 @@
+@@ -1,40 +1,57 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this file,
   * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -90,8 +90,9 @@ index 2a671b1..c0a1455 100644
   * @param {HeapAnalysesClient}
   * @param {Object}
   */
- const takeSnapshotAndCensus = exports.takeSnapshotAndCensus = function takeSnapshotAndCensus (front, heapWorker) {
+-const takeSnapshotAndCensus = exports.takeSnapshotAndCensus = function takeSnapshotAndCensus (front, heapWorker) {
 -  return function *(dispatch, getStore) {
++const takeSnapshotAndCensus = exports.takeSnapshotAndCensus = function (front, heapWorker) {
 +  return function *(dispatch, getState) {
      let snapshot = yield dispatch(takeSnapshot(front));
      yield dispatch(readSnapshot(heapWorker, snapshot));
@@ -99,6 +100,13 @@ index 2a671b1..c0a1455 100644
    };
  };
  
+ /**
++ * Selects a snapshot and if the snapshot's census is using a different
++ * breakdown, take a new census.
++ *
++ * @param {HeapAnalysesClient}
++ * @param {Snapshot}
++ */
 +const selectSnapshotAndRefresh = exports.selectSnapshotAndRefresh = function (heapWorker, snapshot) {
 +  return function *(dispatch, getState) {
 +    dispatch(selectSnapshot(snapshot));
@@ -109,11 +117,12 @@ index 2a671b1..c0a1455 100644
 +  };
 +};
 +
- /**
++/**
   * @param {MemoryFront}
   */
- const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
+-const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
 -  return function *(dispatch, getStore) {
++const takeSnapshot = exports.takeSnapshot = function (front) {
 +  return function *(dispatch, getState) {
      let snapshot = createSnapshot();
      dispatch({ type: actions.TAKE_SNAPSHOT_START, snapshot });
@@ -123,7 +132,7 @@ index 2a671b1..c0a1455 100644
      dispatch({ type: actions.TAKE_SNAPSHOT_END, snapshot, path });
  
      return snapshot;
-@@ -44,17 +54,17 @@ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
+@@ -44,52 +61,65 @@ const takeSnapshot = exports.takeSnapshot = function takeSnapshot (front) {
  /**
   * Reads a snapshot into memory; necessary to do before taking
   * a census on the snapshot. May only be called once per snapshot.
@@ -142,16 +151,20 @@ index 2a671b1..c0a1455 100644
      yield heapWorker.readHeapSnapshot(snapshot.path);
      dispatch({ type: actions.READ_SNAPSHOT_END, snapshot });
    };
-@@ -64,26 +74,39 @@ const readSnapshot = exports.readSnapshot = function readSnapshot (heapWorker, s
+ };
+ 
+ /**
   * @param {HeapAnalysesClient} heapWorker
   * @param {Snapshot} snapshot,
   *
-  * @see {Snapshot} model defined in devtools/client/memory/app.js
+- * @see {Snapshot} model defined in devtools/client/memory/app.js
++ * @see {Snapshot} model defined in devtools/client/memory/models.js
   * @see `devtools/shared/heapsnapshot/HeapAnalysesClient.js`
   * @see `js/src/doc/Debugger/Debugger.Memory.md` for breakdown details
   */
- const takeCensus = exports.takeCensus = function takeCensus (heapWorker, snapshot) {
+-const takeCensus = exports.takeCensus = function takeCensus (heapWorker, snapshot) {
 -  return function *(dispatch, getStore) {
++const takeCensus = exports.takeCensus = function (heapWorker, snapshot) {
 +  return function *(dispatch, getState) {
      // @TODO 1215606
      assert([states.READ, states.SAVED_CENSUS].includes(snapshot.state),
@@ -184,9 +197,17 @@ index 2a671b1..c0a1455 100644
  
  /**
   * @param {Snapshot}
-  * @see {Snapshot} model defined in devtools/client/memory/app.js
+- * @see {Snapshot} model defined in devtools/client/memory/app.js
++ * @see {Snapshot} model defined in devtools/client/memory/models.js
   */
- const selectSnapshot = exports.selectSnapshot = function takeSnapshot (snapshot) {
+-const selectSnapshot = exports.selectSnapshot = function takeSnapshot (snapshot) {
++const selectSnapshot = exports.selectSnapshot = function (snapshot) {
+   return {
+     type: actions.SELECT_SNAPSHOT,
+     snapshot
+   };
+ };
+ 
 diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
 index f8d39b9..ab6f43d 100644
 --- a/devtools/client/memory/app.js
@@ -295,10 +316,10 @@ index f8d39b9..ab6f43d 100644
          ])
        ])
 diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
-index 44babd9..b0699e1 100644
+index 44babd9..d1ae90f 100644
 --- a/devtools/client/memory/components/heap.js
 +++ b/devtools/client/memory/components/heap.js
-@@ -1,25 +1,26 @@
+@@ -1,46 +1,47 @@
  const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
  const { getSnapshotStatusText } = require("../utils");
  const { snapshotState: states } = require("../constants");
@@ -325,7 +346,30 @@ index 44babd9..b0699e1 100644
      let pane;
      let census = snapshot ? snapshot.census : null;
      let state = snapshot ? snapshot.state : "initial";
-     let statusText = getSnapshotStatusText(snapshot);
+-    let statusText = getSnapshotStatusText(snapshot);
+ 
+     switch (state) {
+       case "initial":
+         pane = dom.div({ className: "heap-view-panel", "data-state": "initial" },
+           dom.button({ className: "take-snapshot", onClick: onSnapshotClick }, TAKE_SNAPSHOT_TEXT)
+         );
+         break;
+       case states.SAVING:
+       case states.SAVED:
+       case states.READING:
+       case states.READ:
+       case states.SAVING_CENSUS:
+-        pane = dom.div({ className: "heap-view-panel", "data-state": state }, statusText);
++        pane = dom.div({ className: "heap-view-panel", "data-state": state },
++          getSnapshotStatusText(snapshot));
+         break;
+       case states.SAVED_CENSUS:
+         pane = dom.div({ className: "heap-view-panel", "data-state": "loaded" }, JSON.stringify(census || {}));
+         break;
+     }
+ 
+     return (
+       dom.div({ id: "heap-view", "data-state": state }, pane)
 diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
 index 7bb8285..f06539d 100644
 --- a/devtools/client/memory/components/snapshot-list-item.js
@@ -593,7 +637,7 @@ index 30246f42..a7f6842 100644
      return s;
    });
 diff --git a/devtools/client/memory/test/unit/head.js b/devtools/client/memory/test/unit/head.js
-index 2f5aac32..96a81c2 100644
+index 2f5aac32..18dda88 100644
 --- a/devtools/client/memory/test/unit/head.js
 +++ b/devtools/client/memory/test/unit/head.js
 @@ -54,8 +54,37 @@ function waitUntilState (store, predicate) {
@@ -618,7 +662,7 @@ index 2f5aac32..96a81c2 100644
 +}
 +
 +function isBreakdownType (census, type) {
-+  // Little sanity check, all censeses should have atleast a children array
++  // Little sanity check, all censuses should have atleast a children array
 +  if (!census || !Array.isArray(census.children)) {
 +    return false;
 +  }
@@ -869,10 +913,10 @@ index 25bfdd2..7019d41 100644
  });
 diff --git a/devtools/client/memory/test/unit/test_utils.js b/devtools/client/memory/test/unit/test_utils.js
 new file mode 100644
-index 0000000..7c49025
+index 0000000..8267df2
 --- /dev/null
 +++ b/devtools/client/memory/test/unit/test_utils.js
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,51 @@
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -907,10 +951,6 @@ index 0000000..7c49025
 +    then: { by: "count", bytes: true },
 +    noStack: { by: "count", count: true, bytes: true },
 +  }), "utils.breakdownEquals() fails when deep properties are missing.");
-+
-+  equal(utils.stringify("hello"), "hello", "utils.stringify() works with string");
-+  equal(utils.stringify(), "undefined", "utils.stringify() works with undefined");
-+  equal(utils.stringify({ hello: "world" }), "{\"hello\":\"world\"}", "utils.stringify() works with an object");
 +
 +  let s1 = utils.createSnapshot();
 +  let s2 = utils.createSnapshot();
@@ -949,10 +989,10 @@ index e171139..e4c5d9d 100644
  [test_action-take-snapshot-and-census.js]
 +[test_utils.js]
 diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
-index 80a45d7..5626444 100644
+index 80a45d7..359d7e3 100644
 --- a/devtools/client/memory/utils.js
 +++ b/devtools/client/memory/utils.js
-@@ -1,38 +1,109 @@
+@@ -1,41 +1,125 @@
 +const { Preferences } = require("resource://gre/modules/Preferences.jsm");
 +const CUSTOM_BREAKDOWN_PREF = "devtools.memory.custom-breakdowns";
  const DevToolsUtils = require("devtools/shared/DevToolsUtils");
@@ -1030,11 +1070,18 @@ index 80a45d7..5626444 100644
 +  let customBreakdowns = exports.getCustomBreakdowns();
 +
 +  // If breakdown is already a breakdown, use it
-+  return typeof name === "object" ? name :
-+                // If it's in our custom breakdowns, use it
-+                customBreakdowns[name] ? customBreakdowns[name] :
-+                // If breakdown name is in our presets, use that
-+                breakdowns[name] ? breakdowns[name].breakdown : Object.create(null);
++  if (typeof name === "object") {
++    return name;
++  }
++  // If it's in our custom breakdowns, use it
++  else if (name in customBreakdowns) {
++    return customBreakdowns[name];
++  }
++  // If breakdown name is in our presets, use that
++  else if (name in breakdowns) {
++    return breakdowns[name].breakdown;
++  }
++  return Object.create(null);
 +};
 +
 +/**
@@ -1044,26 +1091,37 @@ index 80a45d7..5626444 100644
   * @return {String}
   */
  exports.getSnapshotStatusText = function (snapshot) {
-   switch (snapshot && snapshot.state) {
+-  switch (snapshot && snapshot.state) {
++  exports.assert((snapshot || {}).state,
++    `Snapshot must have expected state, found ${(snapshot || {}).state}.`);
++
++  switch (snapshot.state) {
      case states.SAVING:
        return SAVING_SNAPSHOT_TEXT;
      case states.SAVED:
      case states.READING:
        return READING_SNAPSHOT_TEXT;
-+    // If it's read, it shouldn't have any label, as we could've cleared the
-+    // census cache by changing the breakdown, and we should lazily
-+    // go to SAVING_CENSUS
-     case states.READ:
-+      return "";
+-    case states.READ:
      case states.SAVING_CENSUS:
        return SAVING_CENSUS_TEXT;
++    // If it's read, it shouldn't have any label, as we could've cleared the
++    // census cache by changing the breakdown, and we should lazily
++    // go to SAVING_CENSUS. If it's SAVED_CENSUS, we have no status to display.
++    case states.READ:
++    case states.SAVED_CENSUS:
++      return "";
    }
++
++  DevToolsUtils.reportException(`Snapshot in unexpected state: ${snapshot.state}`);
    return "";
  }
  
  /**
   * Takes an array of snapshots and a snapshot and returns
-@@ -61,8 +132,45 @@ exports.createSnapshot = function createSnapshot () {
+  * the snapshot instance in `snapshots` that matches
+  * the snapshot passed in.
+  *
+@@ -61,8 +145,48 @@ exports.createSnapshot = function createSnapshot () {
    let id = ++INC_ID;
    return {
      id,
@@ -1074,15 +1132,14 @@ index 80a45d7..5626444 100644
  };
 +
 +/**
-+ * Takes anything and turns it into a readable string.
++ * Takes two objects and compares them deeply, returning
++ * a boolean indicating if they're equal or not. Used for breakdown
++ * comparison.
 + *
-+ * @param {Any} x
-+ * @return {String}
++ * @param {Any} obj1
++ * @param {Any} obj2
++ * @return {Boolean}
 + */
-+exports.stringify = function stringify (x) {
-+  return typeof x === "object" ? JSON.stringify(x) : String(x);
-+};
-+
 +exports.breakdownEquals = function (obj1, obj2) {
 +  let type1 = typeof obj1;
 +  let type2 = typeof obj2;
@@ -1090,6 +1147,10 @@ index 80a45d7..5626444 100644
 +  // Quick checks
 +  if (type1 !== type2 || (Array.isArray(obj1) !== Array.isArray(obj2))) {
 +    return false;
++  }
++
++  if (obj1 === obj2) {
++    return true;
 +  }
 +
 +  if (Array.isArray(obj1)) {
@@ -1107,7 +1168,7 @@ index 80a45d7..5626444 100644
 +    return k1.every(k => exports.breakdownEquals(obj1[k], obj2[k]));
 +  }
 +
-+  return obj1 === obj2;
++  return false;
 +};
 diff --git a/devtools/client/preferences/devtools.js b/devtools/client/preferences/devtools.js
 index 6dc2538..6c49d03 100644
