@@ -1,0 +1,1935 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 12 Oct 2015 08:29:23 -0700
+Subject: Bug 960776 - Render a tree widget to display heap data. r=fitzgen
+
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+index b1ab07f..55edb10 100644
+--- a/devtools/client/memory/app.js
++++ b/devtools/client/memory/app.js
+@@ -48,17 +48,17 @@ const App = createClass({
+           List({
+             itemComponent: SnapshotListItem,
+             items: snapshots,
+             onClick: snapshot => dispatch(selectSnapshotAndRefresh(heapWorker, snapshot))
+           }),
+ 
+           HeapView({
+             snapshot: selectedSnapshot,
+-            onSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker))
++            onSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker)),
+           }),
+         ])
+       ])
+     );
+   },
+ });
+ 
+ /**
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index b3c6432..09b0f70 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -1,17 +1,58 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const { DOM: dom, createClass, PropTypes, createFactory } = require("devtools/client/shared/vendor/react");
++const Tree = createFactory(require("./tree"));
++const TreeItem = createFactory(require("./tree-item"));
+ const { getSnapshotStatusText } = require("../utils");
+ const { snapshotState: states } = require("../constants");
+ const { snapshot: snapshotModel } = require("../models");
+ const TAKE_SNAPSHOT_TEXT = "Take snapshot";
++const TREE_ROW_HEIGHT = 10;
++
++/**
++ * Creates a hash map mapping node IDs to its parent node.
++ *
++ * @param {CensusTreeNode} node
++ * @param {Object<number, CensusTreeNode>} aggregator
++ *
++ * @return {Object<number, CensusTreeNode>}
++ */
++function createParentMap (node, aggregator=Object.create(null)) {
++  for (let child of (node.children || [])) {
++    aggregator[child.id] = node;
++    createParentMap(child, aggregator);
++  }
++
++  return aggregator;
++}
++
++/**
++ * Creates properties to be passed into the Tree component.
++ *
++ * @param {CensusTreeNode} census
++ * @return {Object}
++ */
++function createTreeProperties (census) {
++  let map = createParentMap(census);
++
++  return {
++    // getParent only used for focusing parents when child selected;
++    // handle this later?
++    getParent: node => map(node.id),
++    getChildren: node => node.children || [],
++    renderItem: (item, depth, focused, arrow) => new TreeItem({ item, depth, focused, arrow }),
++    getRoots: () => census.children,
++    getKey: node => node.id,
++    itemHeight: TREE_ROW_HEIGHT,
++  };
++}
+ 
+ /**
+  * Main view for the memory tool -- contains several panels for different states;
+  * an initial state of only a button to take a snapshot, loading states, and the
+  * heap view tree.
+  */
+ 
+ const Heap = module.exports = createClass({
+@@ -38,17 +79,19 @@ const Heap = module.exports = createClass({
+       case states.SAVED:
+       case states.READING:
+       case states.READ:
+       case states.SAVING_CENSUS:
+         pane = dom.div({ className: "heap-view-panel", "data-state": state },
+           getSnapshotStatusText(snapshot));
+         break;
+       case states.SAVED_CENSUS:
+-        pane = dom.div({ className: "heap-view-panel", "data-state": "loaded" }, JSON.stringify(census || {}));
++        pane = dom.div({ className: "heap-view-panel", "data-state": "loaded" },
++          Tree(createTreeProperties(snapshot.census))
++        );
+         break;
+     }
+ 
+     return (
+       dom.div({ id: "heap-view", "data-state": state }, pane)
+     )
+   }
+ });
+diff --git a/devtools/client/memory/components/moz.build b/devtools/client/memory/components/moz.build
+index 4e69146..1cf36a7 100644
+--- a/devtools/client/memory/components/moz.build
++++ b/devtools/client/memory/components/moz.build
+@@ -3,9 +3,13 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+     'heap.js',
+     'list.js',
+     'snapshot-list-item.js',
+     'toolbar.js',
++    'tree-item.js',
++    'tree.js',
+ )
++
++MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+diff --git a/devtools/client/memory/components/test/mochitest/chrome.ini b/devtools/client/memory/components/test/mochitest/chrome.ini
+new file mode 100644
+index 0000000..310fb8c
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/chrome.ini
+@@ -0,0 +1,12 @@
++[DEFAULT]
++support-files =
++  head.js
++
++[test_tree_01.html]
++[test_tree_02.html]
++[test_tree_03.html]
++[test_tree_04.html]
++[test_tree_05.html]
++[test_tree_06.html]
++[test_tree_07.html]
++[test_tree_08.html]
+diff --git a/devtools/client/memory/components/test/mochitest/head.js b/devtools/client/memory/components/test/mochitest/head.js
+new file mode 100644
+index 0000000..e1562e3
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/head.js
+@@ -0,0 +1,205 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++"use strict";
++
++var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++
++Cu.import("resource://testing-common/Assert.jsm");
++Cu.import("resource://gre/modules/Task.jsm");
++var { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
++
++// Disable logging for all the tests. Both the debugger server and frontend will
++// be affected by this pref.
++var gEnableLogging = Services.prefs.getBoolPref("devtools.debugger.log");
++Services.prefs.setBoolPref("devtools.debugger.log", false);
++
++// Enable the memory tool for all tests.
++var gMemoryToolEnabled = Services.prefs.getBoolPref("devtools.memory.enabled");
++Services.prefs.setBoolPref("devtools.memory.enabled", true);
++
++var { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
++var { require } = Cu.import("resource://gre/modules/devtools/shared/Loader.jsm", {});
++var { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
++var { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
++var { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.jsm", {});
++var DevToolsUtils = require("devtools/shared/DevToolsUtils");
++var { BrowserLoader } = Cu.import("resource://devtools/client/shared/browser-loader.js", {});
++var { TargetFactory } = require("devtools/client/framework/target");
++var { Toolbox } = require("devtools/client/framework/toolbox");
++
++DevToolsUtils.testing = true;
++var { require: bRequire } = BrowserLoader("resource://devtools/client/memory/", this);
++
++var EXAMPLE_URL = "http://example.com/browser/browser/devtools/memory/test/";
++
++// Encoding of the following tree/forest:
++//
++// A
++// |-- B
++// |   |-- E
++// |   |   |-- K
++// |   |   `-- L
++// |   |-- F
++// |   `-- G
++// |-- C
++// |   |-- H
++// |   `-- I
++// `-- D
++//     `-- J
++// M
++// `-- N
++//     `-- O
++var TEST_TREE = {
++  children: {
++    A: ["B", "C", "D"],
++    B: ["E", "F", "G"],
++    C: ["H", "I"],
++    D: ["J"],
++    E: ["K", "L"],
++    F: [],
++    G: [],
++    H: [],
++    I: [],
++    J: [],
++    K: [],
++    L: [],
++    M: ["N"],
++    N: ["O"],
++    O: []
++  },
++  parent: {
++    A: null,
++    B: "A",
++    C: "A",
++    D: "A",
++    E: "B",
++    F: "B",
++    G: "B",
++    H: "C",
++    I: "C",
++    J: "D",
++    K: "E",
++    L: "E",
++    M: null,
++    N: "M",
++    O: "N"
++  }
++};
++
++var TEST_TREE_INTERFACE = {
++  getParent: x => TEST_TREE.parent[x],
++  getChildren: x => TEST_TREE.children[x],
++  renderItem: (x, depth, focused, arrow) => "-".repeat(depth) + x + ":" + focused + "\n",
++  getRoots: () => ["A", "M"],
++  getKey: x => "key-" + x,
++  itemHeight: 1
++};
++
++// All tests are asynchronous.
++SimpleTest.waitForExplicitFinish();
++
++SimpleTest.registerCleanupFunction(() => {
++  info("finish() was called, cleaning up...");
++  Services.prefs.setBoolPref("devtools.debugger.log", gEnableLogging);
++  Services.prefs.setBoolPref("devtools.memory.enabled", gMemoryToolEnabled);
++});
++
++function addTab(url) {
++  info("Adding tab: " + url);
++
++  var deferred = promise.defer();
++  var tab = gBrowser.selectedTab = gBrowser.addTab(url);
++  var linkedBrowser = tab.linkedBrowser;
++
++  linkedBrowser.addEventListener("load", function onLoad() {
++    linkedBrowser.removeEventListener("load", onLoad, true);
++    info("Tab added and finished loading: " + url);
++    deferred.resolve(tab);
++  }, true);
++
++  return deferred.promise;
++}
++
++function removeTab(tab) {
++  info("Removing tab.");
++
++  var deferred = promise.defer();
++  var tabContainer = gBrowser.tabContainer;
++
++  tabContainer.addEventListener("TabClose", function onClose(aEvent) {
++    tabContainer.removeEventListener("TabClose", onClose, false);
++    info("Tab removed and finished closing.");
++    deferred.resolve();
++  }, false);
++
++  gBrowser.removeTab(tab);
++  return deferred.promise;
++}
++
++var withTab = Task.async(function* (url, generator) {
++  var tab = yield addTab(url);
++  try {
++    yield* generator(tab);
++  } finally {
++    yield removeTab(tab);
++  }
++});
++
++var openMemoryTool = Task.async(function* (tab) {
++  info("Initializing a memory panel.");
++
++  var target = TargetFactory.forTab(tab);
++  var debuggee = target.window.wrappedJSObject;
++
++  yield target.makeRemote();
++
++  var toolbox = yield gDevTools.showToolbox(target, "memory");
++  var panel = toolbox.getCurrentPanel();
++  return [target, debuggee, panel];
++});
++
++var closeMemoryTool = Task.async(function* (panel) {
++  info("Closing a memory panel");
++  yield panel._toolbox.destroy();
++});
++
++var withMemoryTool = Task.async(function* (tab, generator) {
++  var [target, debuggee, panel] = yield openMemoryTool(tab);
++  try {
++    yield* generator(target, debuggee, panel);
++  } finally {
++    yield closeMemoryTool(panel);
++  }
++});
++
++var withTabAndMemoryTool = Task.async(function* (url, generator) {
++  yield withTab(url, function* (tab) {
++    yield withMemoryTool(tab, function* (target, debuggee, panel) {
++      yield* generator(tab, target, debuggee, panel);
++    });
++  });
++});
++
++function reload(target) {
++  info("Reloading tab.");
++  var deferred = promise.defer();
++  target.once("navigate", deferred.resolve);
++  target.activeTab.reload();
++  return deferred.promise;
++}
++
++function setState(component, newState) {
++  var deferred = promise.defer();
++  component.setState(newState, deferred.resolve);
++  return deferred.promise;
++}
++
++function setProps(component, newState) {
++  var deferred = promise.defer();
++  component.setProps(newState, deferred.resolve);
++  return deferred.promise;
++}
++
++function isRenderedTree(actual, expectedDescription, msg) {
++    is(actual, expectedDescription.map(x => x + "\n").join(""), msg);
++}
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_01.html b/devtools/client/memory/components/test/mochitest/test_tree_01.html
+new file mode 100644
+index 0000000..8960956
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_01.html
+@@ -0,0 +1,61 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test trees get displayed with the items in correct order and at the correct
++depth.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    let React = bRequire("devtools/client/shared/vendor/react");
++    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++
++    ok(React, "Should get React");
++    ok(Tree, "Should get Tree");
++
++    const t = Tree(TEST_TREE_INTERFACE);
++    ok(t, "Should be able to create Tree instances");
++
++    const tree = React.render(t, window.document.body);
++    ok(tree, "Should be able to mount Tree instances");
++
++    yield setState(tree, {
++      expanded: new Set("ABCDEFGHIJKLMNO".split(""))
++    });
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "Should get the items rendered and indented as expected");
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_02.html b/devtools/client/memory/components/test/mochitest/test_tree_02.html
+new file mode 100644
+index 0000000..f9bef59
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_02.html
+@@ -0,0 +1,42 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test that collapsed subtrees aren't rendered.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    let React = bRequire("devtools/client/shared/vendor/react");
++    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++
++    const tree = React.render(Tree(TEST_TREE_INTERFACE), window.document.body);
++
++    yield setState(tree, {
++      expanded: new Set("MNO".split(""))
++    });
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "Collapsed subtrees shouldn't be rendered");
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_03.html b/devtools/client/memory/components/test/mochitest/test_tree_03.html
+new file mode 100644
+index 0000000..e890502
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_03.html
+@@ -0,0 +1,44 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test Tree's autoExpandDepth.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    let React = bRequire("devtools/client/shared/vendor/react");
++    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++
++    const tree = React.render(Tree(TEST_TREE_INTERFACE), window.document.body);
++
++    yield setProps(tree, {
++      autoExpandDepth: 1
++    });
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "-C:false",
++      "-D:false",
++      "M:false",
++      "-N:false",
++    ], "Tree should be auto expanded one level");
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_04.html b/devtools/client/memory/components/test/mochitest/test_tree_04.html
+new file mode 100644
+index 0000000..0591cfb
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_04.html
+@@ -0,0 +1,56 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test that we only render visible tree items.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    const React = bRequire("devtools/client/shared/vendor/react");
++    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const tree = React.render(Tree(TEST_TREE_INTERFACE), window.document.body);
++
++    yield setState(tree, {
++      expanded: new Set("ABCDEFGHIJKLMNO".split("")),
++      height: 3,
++      scroll: 1
++    });
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:false",
++    ], "Tree should show the second, third, and fourth items + buffer of 1 item at the end");
++
++    yield setState(tree, {
++      height: 2,
++      scroll: 3
++    });
++
++    isRenderedTree(document.body.textContent, [
++      "--E:false",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++    ], "Tree should show the third and fourth item + buffer of 1 item at each end");
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_05.html b/devtools/client/memory/components/test/mochitest/test_tree_05.html
+new file mode 100644
+index 0000000..ab2add9
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_05.html
+@@ -0,0 +1,79 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test focusing with the Tree component.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++
++window.onload = Task.async(function* () {
++  try {
++    const React = bRequire("devtools/client/shared/vendor/react");
++    const { Simulate } = React.addons.TestUtils;
++    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const tree = React.render(Tree(TEST_TREE_INTERFACE), window.document.body);
++
++    yield setState(tree, {
++      focused: "G",
++      expanded: new Set("ABCDEFGHIJKLMNO".split(""))
++    });
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:true",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "G should be focused");
++
++    // Click the first tree node
++    Simulate.click(document.querySelector(".tree-node"));
++
++    // Let the next render happen.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:true",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "A should be focused");
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_06.html b/devtools/client/memory/components/test/mochitest/test_tree_06.html
+new file mode 100644
+index 0000000..f4e172f
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_06.html
+@@ -0,0 +1,297 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test keyboard navigation with the Tree component.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    const React = bRequire("devtools/client/shared/vendor/react");
++    const { Simulate } = React.addons.TestUtils;
++    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const tree = React.render(Tree(TEST_TREE_INTERFACE), window.document.body);
++
++    yield setState(tree, {
++      expanded: new Set("ABCDEFGHIJKLMNO".split(""))
++    });
++
++    // UP ----------------------------------------------------------------------
++
++    info("Up to the previous sibling.");
++
++    yield setState(tree, {
++      focused: "L"
++    });
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowUp" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:true",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the UP, K should be focused.");
++
++    info("Up to the parent.");
++
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowUp" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:true",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the UP, E should be focused.");
++
++    info("Try and navigate up, past the first item.");
++
++    yield setState(tree, {
++      focused: "A"
++    });
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowUp" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:true",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the UP, A should be focused and we shouldn't have overflowed past it.");
++
++    // DOWN --------------------------------------------------------------------
++
++    yield setState(tree, {
++      focused: "K"
++    });
++
++    info("Down to next sibling.");
++
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowDown" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:true",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the DOWN, L should be focused.");
++
++    info("Down to parent's next sibling.");
++
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowDown" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:false",
++      "--F:true",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the DOWN, F should be focused.");
++
++    info("Try and go down past the last item.");
++
++    yield setState(tree, {
++      focused: "O"
++    });
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowDown" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:true",
++    ], "After the DOWN, O should still be focused and we shouldn't have overflowed past it.");
++
++    // LEFT --------------------------------------------------------------------
++
++    info("Left to go to parent.");
++
++    yield setState(tree, {
++      focused: "L"
++    })
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowLeft" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:true",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the LEFT, E should be focused.");
++
++    info("Left to collapse children.");
++
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowLeft" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:true",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the LEFT, E's children should be collapsed.");
++
++    // RIGHT -------------------------------------------------------------------
++
++    info("Right to expand children.");
++
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowRight" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:true",
++      "---K:false",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the RIGHT, E's children should be expanded again.");
++
++    info("Right to go to next item.");
++
++    Simulate.keyDown(document.querySelector(".tree"), { key: "ArrowRight" });
++    // Let the component re-render.
++    yield setState(tree, {});
++
++    isRenderedTree(document.body.textContent, [
++      "A:false",
++      "-B:false",
++      "--E:false",
++      "---K:true",
++      "---L:false",
++      "--F:false",
++      "--G:false",
++      "-C:false",
++      "--H:false",
++      "--I:false",
++      "-D:false",
++      "--J:false",
++      "M:false",
++      "-N:false",
++      "--O:false",
++    ], "After the RIGHT, K should be focused.");
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_07.html b/devtools/client/memory/components/test/mochitest/test_tree_07.html
+new file mode 100644
+index 0000000..5a2fabc
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_07.html
+@@ -0,0 +1,63 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test that arrows get the open attribute when their item's children are expanded.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++  <link rel="stylesheet" href="chrome://browser/skin/devtools/light-theme.css" type="text/css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    const React = bRequire("devtools/client/shared/vendor/react");
++    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const tree = React.render(Tree(TEST_TREE_INTERFACE), window.document.body);
++
++    yield setProps(tree, {
++      renderItem: (item, depth, focused, arrow) => {
++        return React.DOM.div(
++          {
++            id: item,
++            style: { marginLeft: depth * 16 + "px" }
++          },
++          arrow,
++          item
++        );
++      }
++    });
++
++    yield setState(tree, {
++      expanded: new Set("ABCDEFGHIJKLMNO".split(""))
++    });
++
++    let arrows = document.querySelectorAll(".arrow");
++    for (let a of arrows) {
++      ok(a.classList.contains("open"), "Every arrow should be open.");
++    }
++
++    yield setState(tree, {
++      expanded: new Set()
++    });
++
++    arrows = document.querySelectorAll(".arrow");
++    for (let a of arrows) {
++      ok(!a.classList.contains("open"), "Every arrow should be closed.");
++    }
++
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_08.html b/devtools/client/memory/components/test/mochitest/test_tree_08.html
+new file mode 100644
+index 0000000..23f6c50
+--- /dev/null
++++ b/devtools/client/memory/components/test/mochitest/test_tree_08.html
+@@ -0,0 +1,46 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test that when an item in the Tree component is clicked, it steals focus from
++other inputs.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>Tree component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++  <link rel="stylesheet" href="chrome://browser/skin/devtools/light-theme.css" type="text/css">
++</head>
++<body>
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    const React = bRequire("devtools/client/shared/vendor/react");
++    const { Simulate } = React.addons.TestUtils;
++    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const tree = React.render(Tree(TEST_TREE_INTERFACE), window.document.body);
++
++    const input = document.createElement("input");
++    document.body.appendChild(input);
++
++    input.focus();
++    is(document.activeElement, input, "The text input should be focused.");
++
++    Simulate.click(document.querySelector(".tree-node"));
++    // Let the tree re-render, because focus is dealt with on componentDidUpdate.
++    yield setState(tree, {});
++
++    isnot(document.activeElement, input,
++          "The input should have had it's focus stolen by clicking on a tree item.");
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/memory/components/tree-item.js b/devtools/client/memory/components/tree-item.js
+new file mode 100644
+index 0000000..06bdc48
+--- /dev/null
++++ b/devtools/client/memory/components/tree-item.js
+@@ -0,0 +1,27 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const INDENT = 10;
++
++/**
++ * An arrow that displays whether its node is expanded (▼) or collapsed
++ * (▶). When its node has no children, it is hidden.
++ */
++const TreeItem = module.exports = createClass({
++  displayName: "tree-item",
++
++  render() {
++    let { item, depth, arrow, focused } = this.props;
++
++    return dom.div({ className: "heap-tree-item", style: { marginLeft: depth * INDENT }},
++      arrow,
++      dom.span({ className: "heap-tree-item-name" }, item.name),
++      dom.span({ className: "heap-tree-item-bytes" }, item.bytes),
++      dom.span({ className: "heap-tree-item-count" }, item.count),
++      dom.span({ className: "heap-tree-item-total-bytes" }, item.totalBytes),
++      dom.span({ className: "heap-tree-item-total-count" }, item.totalCount)
++    );
++  }
++});
+diff --git a/devtools/client/memory/components/tree.js b/devtools/client/memory/components/tree.js
+new file mode 100644
+index 0000000..cd6ec00
+--- /dev/null
++++ b/devtools/client/memory/components/tree.js
+@@ -0,0 +1,455 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
++const { ViewHelpers } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
++
++const AUTO_EXPAND_DEPTH = 3; // depth
++
++/**
++ * An arrow that displays whether its node is expanded (▼) or collapsed
++ * (▶). When its node has no children, it is hidden.
++ */
++const ArrowExpander = createFactory(createClass({
++  displayName: "ArrowExpander",
++
++  shouldComponentUpdate(nextProps, nextState) {
++    return this.props.item !== nextProps.item
++      || this.props.visible != nextProps.visible
++      || this.props.expanded !== nextProps.expanded;
++  },
++
++  render() {
++    const attrs = {
++      className: "arrow theme-twisty",
++      onClick: this.props.expanded
++        ? () => this.props.onCollapse(this.props.item)
++        : e => this.props.onExpand(this.props.item, e.altKey)
++    };
++
++    if (this.props.expanded) {
++      attrs.className += " open";
++    }
++
++    if (!this.props.visible) {
++      attrs.style = {
++        visibility: "hidden"
++      };
++    }
++
++    return dom.div(attrs);
++  }
++}));
++
++const TreeNode = createFactory(createClass({
++  componentDidUpdate() {
++    if (this.props.focused) {
++      this.refs.button.getDOMNode().focus();
++    }
++  },
++
++  render() {
++    const arrow = ArrowExpander({
++      item: this.props.item,
++      expanded: this.props.expanded,
++      visible: this.props.hasChildren,
++      onExpand: this.props.onExpand,
++      onCollapse: this.props.onCollapse
++    });
++
++    return dom.div(
++      {
++        className: "tree-node div",
++        onFocus: this.props.onFocus,
++        onClick: this.props.onFocus,
++        onBlur: this.props.onBlur,
++        style: {
++          padding: 0,
++          margin: 0
++        }
++      },
++
++      this.props.renderItem(this.props.item,
++                            this.props.depth,
++                            this.props.focused,
++                            arrow),
++
++      // XXX: OSX won't focus/blur regular elements even if you set tabindex
++      // unless there is an input/button child.
++      dom.button(this._buttonAttrs)
++    );
++  },
++
++  _buttonAttrs: {
++    ref: "button",
++    style: {
++      opacity: 0,
++      width: "0 !important",
++      height: "0 !important",
++      padding: "0 !important",
++      outline: "none",
++      MozAppearance: "none",
++      // XXX: Despite resetting all of the above properties (and margin), the
++      // button still ends up with ~79px width, so we set a large negative
++      // margin to completely hide it.
++      MozMarginStart: "-1000px !important",
++    }
++  }
++}));
++
++/**
++ * A generic tree component. See propTypes for the public API.
++ * 
++ * @see `devtools/client/memory/components/test/mochitest/head.js` for usage
++ * @see `devtools/client/memory/components/heap.js` for usage
++ */
++const Tree = module.exports = createClass({
++  displayName: "Tree",
++
++  propTypes: {
++    // Required props
++
++    // A function to get an item's parent, or null if it is a root.
++    getParent: PropTypes.func.isRequired,
++    // A function to get an item's children.
++    getChildren: PropTypes.func.isRequired,
++    // A function which takes an item and ArrowExpander and returns a
++    // component.
++    renderItem: PropTypes.func.isRequired,
++    // A function which returns the roots of the tree (forest).
++    getRoots: PropTypes.func.isRequired,
++    // A function to get a unique key for the given item.
++    getKey: PropTypes.func.isRequired,
++    // The height of an item in the tree including margin and padding, in
++    // pixels.
++    itemHeight: PropTypes.number.isRequired,
++
++    // Optional props
++
++    // A predicate function to filter out unwanted items from the tree.
++    filter: PropTypes.func,
++    // The depth to which we should automatically expand new items.
++    autoExpandDepth: PropTypes.number
++  },
++
++  getDefaultProps() {
++    return {
++      filter: item => true,
++      expanded: new Set(),
++      seen: new Set(),
++      focused: undefined,
++      autoExpandDepth: AUTO_EXPAND_DEPTH
++    };
++  },
++
++  getInitialState() {
++    return {
++      scroll: 0,
++      height: window.innerHeight,
++      expanded: new Set(),
++      seen: new Set(),
++      focused: undefined
++    };
++  },
++
++  componentDidMount() {
++    window.addEventListener("resize", this._updateHeight);
++    this._updateHeight();
++  },
++
++  componentWillUnmount() {
++    window.removeEventListener("resize", this._updateHeight);
++  },
++
++  componentWillReceiveProps(nextProps) {
++    // Automatically expand the first autoExpandDepth levels for new items.
++    for (let { item } of this._dfsFromRoots(this.props.autoExpandDepth)) {
++      if (!this.state.seen.has(item)) {
++        this.state.expanded.add(item);
++        this.state.seen.add(item);
++      }
++    }
++  },
++
++  render() {
++    const traversal = this._dfsFromRoots();
++
++    // Remove 1 from `begin` and add 2 to `end` so that the top and bottom of
++    // the page are filled with the previous and next items respectively,
++    // rather than whitespace if the item is not in full view.
++    const begin = Math.max(((this.state.scroll / this.props.itemHeight) | 0) - 1, 0);
++    const end = begin + 2 + ((this.state.height / this.props.itemHeight) | 0);
++    const toRender = traversal.slice(begin, end);
++
++    const nodes = [
++      dom.div({
++        key: "top-spacer",
++        style: {
++          padding: 0,
++          margin: 0,
++          height: begin * this.props.itemHeight + "px"
++        }
++      })
++    ];
++
++    for (let i = 0; i < toRender.length; i++) {
++      let { item, depth } = toRender[i];
++      nodes.push(TreeNode({
++        key: this.props.getKey(item),
++        item: item,
++        depth: depth,
++        renderItem: this.props.renderItem,
++        focused: this.state.focused === item,
++        expanded: this.state.expanded.has(item),
++        hasChildren: !!this.props.getChildren(item).length,
++        onExpand: this._onExpand,
++        onCollapse: this._onCollapse,
++        onFocus: () => this._onFocus(item)
++      }));
++    }
++
++    nodes.push(dom.div({
++      key: "bottom-spacer",
++      style: {
++        padding: 0,
++        margin: 0,
++        height: (traversal.length - 1 - end) * this.props.itemHeight + "px"
++      }
++    }));
++
++    return dom.div(
++      {
++        className: "tree",
++        ref: "tree",
++        onKeyDown: this._onKeyDown,
++        onScroll: this._onScroll,
++        style: {
++          padding: 0,
++          margin: 0
++        }
++      },
++      nodes
++    );
++  },
++
++  /**
++   * Updates the state's height based on clientHeight.
++   */
++  _updateHeight() {
++    this.setState({
++      height: this.refs.tree.getDOMNode().clientHeight
++    });
++  },
++
++  /**
++   * Perform a pre-order depth-first search from item.
++   */
++  _dfs(item, maxDepth = Infinity, traversal = [], _depth = 0) {
++    if (!this.props.filter(item)) {
++      return traversal;
++    }
++
++    traversal.push({ item, depth: _depth });
++
++    if (!this.state.expanded.has(item)) {
++      return traversal;
++    }
++
++    const nextDepth = _depth + 1;
++
++    if (nextDepth > maxDepth) {
++      return traversal;
++    }
++
++    for (let child of this.props.getChildren(item)) {
++      this._dfs(child, maxDepth, traversal, nextDepth);
++    }
++
++    return traversal;
++  },
++
++  /**
++   * Perform a pre-order depth-first search over the whole forest.
++   */
++  _dfsFromRoots(maxDepth = Infinity) {
++    const traversal = [];
++    for (let root of this.props.getRoots()) {
++      this._dfs(root, maxDepth, traversal);
++    }
++    return traversal;
++  },
++
++  /**
++   * Expands current row.
++   *
++   * @param {Object} item
++   * @param {Boolean} expandAllChildren
++   */
++  _onExpand(item, expandAllChildren) {
++    this.state.expanded.add(item);
++
++    if (expandAllChildren) {
++      for (let { item: child } of this._dfs(item)) {
++        this.state.expanded.add(child);
++      }
++    }
++
++    this.setState({
++      expanded: this.state.expanded
++    });
++  },
++
++  /**
++   * Collapses current row.
++   *
++   * @param {Object} item
++   */
++  _onCollapse(item) {
++    this.state.expanded.delete(item);
++    this.setState({
++      expanded: this.state.expanded
++    });
++  },
++
++  /**
++   * Sets the passed in item to be the focused item.
++   *
++   * @param {Object} item
++   */
++  _onFocus(item) {
++    this.setState({
++      focused: item
++    });
++  },
++
++  /**
++   * Sets the state to have no focused item.
++   */
++  _onBlur() {
++    this.setState({
++      focused: undefined
++    });
++  },
++
++  /**
++   * Fired on a scroll within the tree's container, updates
++   * the stored position of the view port to handle virtual view rendering.
++   *
++   * @param {Event} e
++   */
++  _onScroll(e) {
++    this.setState({
++      scroll: Math.max(this.refs.tree.getDOMNode().scrollTop, 0),
++      height: this.refs.tree.getDOMNode().clientHeight
++    });
++  },
++
++  /**
++   * Handles key down events in the tree's container.
++   *
++   * @param {Event} e
++   */
++  _onKeyDown(e) {
++    if (this.state.focused == null) {
++      return;
++    }
++
++    // Prevent scrolling when pressing navigation keys. Guard against mocked
++    // events received when testing.
++    if (e.nativeEvent && e.nativeEvent.preventDefault) {
++      ViewHelpers.preventScrolling(e.nativeEvent);
++    }
++
++    switch (e.key) {
++      case "ArrowUp":
++        this._focusPrevNode();
++        return false;
++
++      case "ArrowDown":
++        this._focusNextNode();
++        return false;
++
++      case "ArrowLeft":
++        if (this.state.expanded.has(this.state.focused)
++            && this.props.getChildren(this.state.focused).length) {
++          this._onCollapse(this.state.focused);
++        } else {
++          this._focusParentNode();
++        }
++        return false;
++
++      case "ArrowRight":
++        if (!this.state.expanded.has(this.state.focused)) {
++          this._onExpand(this.state.focused);
++        } else {
++          this._focusNextNode();
++        }
++        return false;
++    }
++  },
++
++  /**
++   * Sets the previous node relative to the currently focused item, to focused.
++   */
++  _focusPrevNode() {
++    // Start a depth first search and keep going until we reach the currently
++    // focused node. Focus the previous node in the DFS, if it exists. If it
++    // doesn't exist, we're at the first node already.
++
++    let prev;
++    for (let { item } of this._dfsFromRoots()) {
++      if (item === this.state.focused) {
++        break;
++      }
++      prev = item;
++    }
++
++    if (prev === undefined) {
++      return;
++    }
++
++    this.setState({
++      focused: prev
++    });
++  },
++
++  /**
++   * Handles the down arrow key which will focus either the next child
++   * or sibling row.
++   */
++  _focusNextNode() {
++    // Start a depth first search and keep going until we reach the currently
++    // focused node. Focus the next node in the DFS, if it exists. If it
++    // doesn't exist, we're at the last node already.
++
++    const traversal = this._dfsFromRoots();
++
++    let i = 0;
++    for (let { item } of traversal) {
++      if (item === this.state.focused) {
++        break;
++      }
++      i++;
++    }
++
++    if (i + 1 < traversal.length) {
++      this.setState({
++        focused: traversal[i + 1].item
++      });
++    }
++  },
++
++  /**
++   * Handles the left arrow key, going back up to the current rows'
++   * parent row.
++   */
++  _focusParentNode() {
++    const parent = this.props.getParent(this.state.focused);
++    if (parent) {
++      this.setState({
++        focused: parent
++      });
++    }
++  }
++});
+diff --git a/devtools/client/memory/models.js b/devtools/client/memory/models.js
+index c9afc2d..94c5b20 100644
+--- a/devtools/client/memory/models.js
++++ b/devtools/client/memory/models.js
+@@ -34,23 +34,23 @@ let snapshotModel = exports.snapshot = PropTypes.shape({
+   // State the snapshot is in
+   // @see ./constants.js
+   state: function (props, propName) {
+     let stateNames = Object.keys(states);
+     let current = props.state;
+     let shouldHavePath = [states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
+     let shouldHaveCensus = [states.SAVED_CENSUS];
+ 
+-    if (!stateNames.contains(current)) {
++    if (!stateNames.includes(current)) {
+       throw new Error(`Snapshot state must be one of ${stateNames}.`);
+     }
+-    if (shouldHavePath.contains(current) && !path) {
++    if (shouldHavePath.includes(current) && !path) {
+       throw new Error(`Snapshots in state ${current} must have a snapshot path.`);
+     }
+-    if (shouldHaveCensus.contains(current) && (!props.census || !props.breakdown)) {
++    if (shouldHaveCensus.includes(current) && (!props.census || !props.breakdown)) {
+       throw new Error(`Snapshots in state ${current} must have a census and breakdown.`);
+     }
+   },
+ });
+ 
+ let appModel = exports.app = {
+   // {MemoryFront} Used to communicate with platform
+   front: PropTypes.instanceOf(MemoryFront),
+diff --git a/devtools/client/shared/browser-loader.js b/devtools/client/shared/browser-loader.js
+index d4dc8e9..7ae0cf4 100644
+--- a/devtools/client/shared/browser-loader.js
++++ b/devtools/client/shared/browser-loader.js
+@@ -1,13 +1,15 @@
+ var { classes: Cc, interfaces: Ci, utils: Cu } = Components;
+ 
+ const loaders = Cu.import("resource://gre/modules/commonjs/toolkit/loader.js", {});
+ const devtools = Cu.import("resource://devtools/shared/Loader.jsm", {}).devtools;
+ const { joinURI } = devtools.require("devtools/shared/path");
++const DevToolsUtils = devtools.require("devtools/shared/DevToolsUtils");
++
+ var appConstants;
+ 
+ // Some of the services that the system module requires is not
+ // available in xpcshell tests. This is ok, we can easily polyfill the
+ // values that we need.
+ try {
+   const system = devtools.require("devtools/shared/system");
+   appConstants = system.constants;
+@@ -46,33 +48,36 @@ const VENDOR_CONTENT_URL = "resource://devtools/client/shared/vendor";
+  * @param Object window
+  *        The window instance to evaluate modules within
+  * @return Object
+  *         An object with two properties:
+  *         - loader: the Loader instance
+  *         - require: a function to require modules with
+  */
+ function BrowserLoader(baseURI, window) {
+-  const loaderOptions = devtools.require('@loader/options');
+-
+-  let dynamicPaths = {};
+-  if (appConstants.DEBUG_JS_MODULES) {
+-    // Load in the dev version of React
+-    dynamicPaths["devtools/shared/vendor/react"] =
+-      "resource://devtools/vendor/react-dev.js";
+-  }
++  const loaderOptions = devtools.require("@loader/options");
+ 
+   const opts = {
+     id: "browser-loader",
+     sharedGlobal: true,
+     sandboxPrototype: window,
+-    paths: Object.assign({}, loaderOptions.paths, dynamicPaths),
++    paths: Object.assign({}, loaderOptions.paths),
+     invisibleToDebugger: loaderOptions.invisibleToDebugger,
+     require: (id, require) => {
+-      const uri = require.resolve(id);
++      let uri = require.resolve(id);
++  
++      // TODO bug 1216657, handle this in all loaders, just
++      // not browser loader, and we have to special case
++      // devtools/client/shared/vendor/react because of bug 1217592
++      // will replace the path in the case of "react-redux" and result in "...react-dev.js-redux"
++      if (appConstants.DEBUG_JS_MODULES || DevToolsUtils.testing) {
++        if (id === "devtools/client/shared/vendor/react") {
++          uri = "resource://devtools/client/shared/vendor/react-dev.js";
++        }
++      }
+ 
+       if (!uri.startsWith(baseURI) &&
+           !uri.startsWith(VENDOR_CONTENT_URL)) {
+         return devtools.require(uri);
+       }
+       return require(uri);
+     }
+   };
+diff --git a/devtools/client/themes/dark-theme.css b/devtools/client/themes/dark-theme.css
+index 1604e6c..23cfe71 100644
+--- a/devtools/client/themes/dark-theme.css
++++ b/devtools/client/themes/dark-theme.css
+@@ -274,17 +274,17 @@ div.CodeMirror span.eval-text {
+   cursor: pointer;
+   background-position: -28px -14px;
+ }
+ 
+ .theme-twisty:-moz-focusring {
+   outline-style: none;
+ }
+ 
+-.theme-twisty[open] {
++.theme-twisty[open], .theme-twisty.open  {
+   background-position: -42px -14px;
+ }
+ 
+ .theme-twisty[invisible] {
+   visibility: hidden;
+ }
+ 
+ .theme-checkbox {
+diff --git a/devtools/client/themes/light-theme.css b/devtools/client/themes/light-theme.css
+index e2affa3..9b6af52 100644
+--- a/devtools/client/themes/light-theme.css
++++ b/devtools/client/themes/light-theme.css
+@@ -274,17 +274,17 @@ div.CodeMirror span.eval-text {
+   cursor: pointer;
+   background-position: 0 -14px;
+ }
+ 
+ .theme-twisty:-moz-focusring {
+   outline-style: none;
+ }
+ 
+-.theme-twisty[open] {
++.theme-twisty[open], .theme-twisty.open {
+   background-position: -14px -14px;
+ }
+ 
+ .theme-twisty[invisible] {
+   visibility: hidden;
+ }
+ 
+ /* Use white twisty when next to a selected item in markup view */
+diff --git a/devtools/shared/heapsnapshot/census-tree-node.js b/devtools/shared/heapsnapshot/census-tree-node.js
+index 9eda307..62020aa 100644
+--- a/devtools/shared/heapsnapshot/census-tree-node.js
++++ b/devtools/shared/heapsnapshot/census-tree-node.js
+@@ -8,16 +8,19 @@
+ // report is rendered in the DOM. It must be dead simple to render, with no
+ // further data processing or massaging needed before rendering DOM nodes. Our
+ // goal is to do the census report to CensusTreeNode transformation in the
+ // HeapAnalysesWorker, and ensure that the **only** work that the main thread
+ // has to do is strictly DOM rendering work.
+ 
+ const { Visitor, walk } = require("resource://devtools/shared/heapsnapshot/CensusUtils.js");
+ 
++// Monotonically increasing integer for CensusTreeNode `id`s.
++let INC = 0;
++
+ /**
+  * Return true if the given object is a SavedFrame stack object, false otherwise.
+  *
+  * @param {any} obj
+  * @returns {Boolean}
+  */
+ function isSavedFrame(obj) {
+   return Object.prototype.toString.call(obj) === "[object SavedFrame]";
+@@ -133,25 +136,27 @@ CensusTreeNodeCache.lookupFrame = function (cache, frame) {
+  */
+ CensusTreeNodeCache.lookupNode = function (cache, node) {
+   return isSavedFrame(node.name)
+     ? CensusTreeNodeCache.lookupFrame(cache, node.name)
+     : cache[CensusTreeNodeCache.hashNode(node)];
+ };
+ 
+ /**
+- * Add `child` to `parent`'s set of children.
++ * Add `child` to `parent`'s set of children and store the parent ID
++ * on the child.
+  *
+  * @param {CensusTreeNode} parent
+  * @param {CensusTreeNode} child
+  */
+ function addChild(parent, child) {
+   if (!parent.children) {
+     parent.children = [];
+   }
++  child.parent = parent.id;
+   parent.children.push(child);
+ }
+ 
+ /**
+  * Get an array of each frame in the provided stack.
+  *
+  * @param {SavedFrame} stack
+  * @returns {Array<SavedFrame>}
+@@ -201,19 +206,16 @@ function getArrayOfFrames(stack) {
+  */
+ function makeCensusTreeNodeSubTree(breakdown, report, edge, cache, outParams) {
+   if (!isSavedFrame(edge)) {
+     const node = new CensusTreeNode(edge);
+     outParams.top = outParams.bottom = node;
+     return;
+   }
+ 
+-  // Loop through each frame in the stack and get or create a CensusTreeNode for
+-  // the frame.
+-
+   const frames = getArrayOfFrames(edge);
+   let currentCache = cache;
+   let prevNode;
+   for (let i = 0, length = frames.length; i < length; i++) {
+     const frame = frames[i];
+ 
+     // Get or create the CensusTreeNodeCacheValue for this frame. If we already
+     // have a CensusTreeNodeCacheValue (and hence a CensusTreeNode) for this
+@@ -384,16 +386,17 @@ CensusTreeNodeVisitor.prototype.root = function () {
+  */
+ function CensusTreeNode (name) {
+   this.name = name;
+   this.bytes = 0;
+   this.totalBytes = 0;
+   this.count = 0;
+   this.totalCount = 0;
+   this.children = undefined;
++  this.id = INC++;
+ }
+ 
+ CensusTreeNode.prototype = null;
+ 
+ /**
+  * Compare the given nodes by their `totalBytes` properties, and breaking ties
+  * with the `totalCount`, `bytes`, and `count` properties (in that order).
+  *
+@@ -518,16 +521,18 @@ function invert(tree) {
+  * Returns a recursive "CensusTreeNode" object, looking like:
+  *
+  * CensusTreeNode = {
+  *   // `children` if it exists, is sorted by `bytes`, if they are leaf nodes.
+  *   children: ?[<CensusTreeNode...>],
+  *   name: <?String>
+  *   count: <?Number>
+  *   bytes: <?Number>
++ *   id: <?Number>
++ *   parent: <?Number>
+  * }
+  *
+  * @param {Object} breakdown
+  *        The breakdown used to generate the census report.
+  *
+  * @param {Object} report
+  *        The census report generated with the specified breakdown.
+  *
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js
+index dc01005..95a1ece 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js
++++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js
+@@ -33,32 +33,39 @@ const EXPECTED = {
+   totalCount: 60,
+   children: [
+     {
+       name: "js::Shape",
+       bytes: 500,
+       totalBytes: 500,
+       count: 50,
+       totalCount: 50,
+-      children: undefined
++      children: undefined,
++      id: 2,
++      parent: 1
+     },
+     {
+       name: "JSObject",
+       bytes: 100,
+       totalBytes: 100,
+       count: 10,
+       totalCount: 10,
+-      children: undefined
++      children: undefined,
++      id: 3,
++      parent: 1
+     },
+     {
+       name: "JSString",
+       bytes: 0,
+       totalBytes: 0,
+       count: 0,
+       totalCount: 0,
+-      children: undefined
++      children: undefined,
++      id: 4,
++      parent: 1
+     },
+   ],
++  id: 1
+ };
+ 
+ function run_test() {
+   compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
+ }
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js
+index 0c9eae6..31fe8e0 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js
++++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js
+@@ -96,14 +96,15 @@ const EXPECTED = {
+     {
+       name: "scripts",
+       count: 1,
+       totalCount: 1,
+       bytes: 1,
+       totalBytes: 1,
+       children: undefined
+     },
+-  ]
++  ],
++  id: 1
+ };
+ 
+ function run_test() {
+   compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
+ }
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js
+index 0c71395..4646194 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js
++++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js
+@@ -65,14 +65,15 @@ const EXPECTED = {
+     {
+       name: "Function",
+       bytes: 10,
+       totalBytes: 10,
+       count: 10,
+       totalCount: 10,
+       children: undefined
+     },
+-  ]
++  ],
++  id: 1
+ };
+ 
+ function run_test() {
+   compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
+ }
+-- 
+2.3.1
+
