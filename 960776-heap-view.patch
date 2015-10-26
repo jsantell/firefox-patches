@@ -1,12 +1,12 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Mon, 12 Oct 2015 08:29:23 -0700
-Subject: Bug 960776 - Render a tree widget to display heap data. r=fitzgen
+Date: Mon, 26 Oct 2015 10:01:06 -0700
+Subject: Bug 960776 - Implement heap view tree for memory tools. r=fitzgen
 
 diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
-index b1ab07f..55edb10 100644
+index 4bf85d5..5009399 100644
 --- a/devtools/client/memory/app.js
 +++ b/devtools/client/memory/app.js
-@@ -48,17 +48,17 @@ const App = createClass({
+@@ -60,17 +60,17 @@ const App = createClass({
            List({
              itemComponent: SnapshotListItem,
              items: snapshots,
@@ -1588,7 +1588,7 @@ index 0000000..cd6ec00
 +  }
 +});
 diff --git a/devtools/client/memory/models.js b/devtools/client/memory/models.js
-index c9afc2d..94c5b20 100644
+index fd524a5..cc9cd69 100644
 --- a/devtools/client/memory/models.js
 +++ b/devtools/client/memory/models.js
 @@ -34,23 +34,23 @@ let snapshotModel = exports.snapshot = PropTypes.shape({
@@ -1615,68 +1615,24 @@ index c9afc2d..94c5b20 100644
    },
  });
  
- let appModel = exports.app = {
-   // {MemoryFront} Used to communicate with platform
-   front: PropTypes.instanceOf(MemoryFront),
+ let allocationsModel = exports.allocations = PropTypes.shape({
+   // True iff we are recording allocation stacks right now.
+   recording: PropTypes.bool.isRequired,
 diff --git a/devtools/client/shared/browser-loader.js b/devtools/client/shared/browser-loader.js
-index d4dc8e9..7ae0cf4 100644
+index 7f69bbd..b6e125f 100644
 --- a/devtools/client/shared/browser-loader.js
 +++ b/devtools/client/shared/browser-loader.js
-@@ -1,13 +1,15 @@
- var { classes: Cc, interfaces: Ci, utils: Cu } = Components;
- 
- const loaders = Cu.import("resource://gre/modules/commonjs/toolkit/loader.js", {});
- const devtools = Cu.import("resource://devtools/shared/Loader.jsm", {}).devtools;
- const { joinURI } = devtools.require("devtools/shared/path");
-+const DevToolsUtils = devtools.require("devtools/shared/DevToolsUtils");
-+
- var appConstants;
- 
- // Some of the services that the system module requires is not
- // available in xpcshell tests. This is ok, we can easily polyfill the
- // values that we need.
- try {
-   const system = devtools.require("devtools/shared/system");
-   appConstants = system.constants;
-@@ -46,33 +48,36 @@ const VENDOR_CONTENT_URL = "resource://devtools/client/shared/vendor";
-  * @param Object window
-  *        The window instance to evaluate modules within
-  * @return Object
-  *         An object with two properties:
-  *         - loader: the Loader instance
-  *         - require: a function to require modules with
-  */
- function BrowserLoader(baseURI, window) {
--  const loaderOptions = devtools.require('@loader/options');
--
--  let dynamicPaths = {};
--  if (appConstants.DEBUG_JS_MODULES) {
--    // Load in the dev version of React
--    dynamicPaths["devtools/shared/vendor/react"] =
--      "resource://devtools/vendor/react-dev.js";
--  }
-+  const loaderOptions = devtools.require("@loader/options");
- 
+@@ -34,17 +34,17 @@ function BrowserLoader(baseURI, window) {
+   const loaderOptions = devtools.require("@loader/options");
    const opts = {
      id: "browser-loader",
      sharedGlobal: true,
      sandboxPrototype: window,
--    paths: Object.assign({}, loaderOptions.paths, dynamicPaths),
-+    paths: Object.assign({}, loaderOptions.paths),
+     paths: Object.assign({}, loaderOptions.paths),
      invisibleToDebugger: loaderOptions.invisibleToDebugger,
      require: (id, require) => {
 -      const uri = require.resolve(id);
 +      let uri = require.resolve(id);
-+  
-+      // TODO bug 1216657, handle this in all loaders, just
-+      // not browser loader, and we have to special case
-+      // devtools/client/shared/vendor/react because of bug 1217592
-+      // will replace the path in the case of "react-redux" and result in "...react-dev.js-redux"
-+      if (appConstants.DEBUG_JS_MODULES || DevToolsUtils.testing) {
-+        if (id === "devtools/client/shared/vendor/react") {
-+          uri = "resource://devtools/client/shared/vendor/react-dev.js";
-+        }
-+      }
  
        if (!uri.startsWith(baseURI) &&
            !uri.startsWith(VENDOR_CONTENT_URL)) {
@@ -1732,7 +1688,7 @@ index e2affa3..9b6af52 100644
  
  /* Use white twisty when next to a selected item in markup view */
 diff --git a/devtools/shared/heapsnapshot/census-tree-node.js b/devtools/shared/heapsnapshot/census-tree-node.js
-index 9eda307..62020aa 100644
+index 9eda307..1a66e3c 100644
 --- a/devtools/shared/heapsnapshot/census-tree-node.js
 +++ b/devtools/shared/heapsnapshot/census-tree-node.js
 @@ -8,16 +8,19 @@
@@ -1804,7 +1760,7 @@ index 9eda307..62020aa 100644
  
      // Get or create the CensusTreeNodeCacheValue for this frame. If we already
      // have a CensusTreeNodeCacheValue (and hence a CensusTreeNode) for this
-@@ -384,16 +386,17 @@ CensusTreeNodeVisitor.prototype.root = function () {
+@@ -384,16 +386,18 @@ CensusTreeNodeVisitor.prototype.root = function () {
   */
  function CensusTreeNode (name) {
    this.name = name;
@@ -1813,7 +1769,8 @@ index 9eda307..62020aa 100644
    this.count = 0;
    this.totalCount = 0;
    this.children = undefined;
-+  this.id = INC++;
++  this.id = ++INC;
++  this.parent = undefined;
  }
  
  CensusTreeNode.prototype = null;
@@ -1822,7 +1779,7 @@ index 9eda307..62020aa 100644
   * Compare the given nodes by their `totalBytes` properties, and breaking ties
   * with the `totalCount`, `bytes`, and `count` properties (in that order).
   *
-@@ -518,16 +521,18 @@ function invert(tree) {
+@@ -518,16 +522,18 @@ function invert(tree) {
   * Returns a recursive "CensusTreeNode" object, looking like:
   *
   * CensusTreeNode = {
@@ -1842,10 +1799,10 @@ index 9eda307..62020aa 100644
   *        The census report generated with the specified breakdown.
   *
 diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js
-index dc01005..95a1ece 100644
+index dc01005..c9f5c4e 100644
 --- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js
 +++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-01.js
-@@ -33,32 +33,39 @@ const EXPECTED = {
+@@ -33,32 +33,40 @@ const EXPECTED = {
    totalCount: 60,
    children: [
      {
@@ -1856,7 +1813,7 @@ index dc01005..95a1ece 100644
        totalCount: 50,
 -      children: undefined
 +      children: undefined,
-+      id: 2,
++      id: 3,
 +      parent: 1
      },
      {
@@ -1867,7 +1824,7 @@ index dc01005..95a1ece 100644
        totalCount: 10,
 -      children: undefined
 +      children: undefined,
-+      id: 3,
++      id: 2,
 +      parent: 1
      },
      {
@@ -1882,53 +1839,680 @@ index dc01005..95a1ece 100644
 +      parent: 1
      },
    ],
-+  id: 1
++  id: 1,
++  parent: undefined,
  };
  
  function run_test() {
    compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
  }
 diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js
-index 0c9eae6..31fe8e0 100644
+index 0c9eae6..26bc45b 100644
 --- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js
 +++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-02.js
-@@ -96,14 +96,15 @@ const EXPECTED = {
+@@ -43,67 +43,85 @@ const EXPECTED = {
+       totalBytes: 70,
+       children: [
+         {
+           name: "js::Shape2",
+           bytes: 40,
+           totalBytes: 40,
+           count: 4,
+           totalCount: 4,
+-          children: undefined
++          children: undefined,
++          id: 9,
++          parent: 7,
+         },
+         {
+           name: "js::Shape",
+           bytes: 30,
+           totalBytes: 30,
+           count: 3,
+           totalCount: 3,
+-          children: undefined
++          children: undefined,
++          id: 8,
++          parent: 7,
+         },
+-      ]
++      ],
++      id: 7,
++      parent: 1,
+     },
+     {
+       name: "objects",
+       count: 0,
+       totalCount: 3,
+       bytes: 0,
+       totalBytes: 30,
+       children: [
+         {
+           name: "Array",
+           bytes: 20,
+           totalBytes: 20,
+           count: 2,
+           totalCount: 2,
+-          children: undefined
++          children: undefined,
++          id: 4,
++          parent: 2,
+         },
+         {
+           name: "Function",
+           bytes: 10,
+           totalBytes: 10,
+           count: 1,
+           totalCount: 1,
+-          children: undefined
++          children: undefined,
++          id: 3,
++          parent: 2,
+         },
+-      ]
++      ],
++      id: 2,
++      parent: 1,
+     },
+     {
+       name: "strings",
+       count: 1,
+       totalCount: 1,
+       bytes: 10,
+       totalBytes: 10,
+-      children: undefined
++      children: undefined,
++      id: 6,
++      parent: 1,
+     },
      {
        name: "scripts",
        count: 1,
        totalCount: 1,
        bytes: 1,
        totalBytes: 1,
-       children: undefined
+-      children: undefined
++      children: undefined,
++      id: 5,
++      parent: 1,
      },
 -  ]
 +  ],
-+  id: 1
++  id: 1,
++  parent: undefined,
  };
  
  function run_test() {
    compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
  }
 diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js
-index 0c71395..4646194 100644
+index 0c71395..29bac60 100644
 --- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js
 +++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-03.js
-@@ -65,14 +65,15 @@ const EXPECTED = {
+@@ -30,49 +30,61 @@ const EXPECTED = {
+   totalBytes: 170,
+   children: [
+     {
+       name: "Array",
+       bytes: 100,
+       totalBytes: 100,
+       count: 1,
+       totalCount: 1,
+-      children: undefined
++      children: undefined,
++      id: 3,
++      parent: 1,
+     },
+     {
+       name: "other",
+       count: 0,
+       totalCount: 6,
+       bytes: 0,
+       totalBytes: 60,
+       children: [
+         {
+           name: "JIT::CODE::LATER!!!",
+           bytes: 40,
+           totalBytes: 40,
+           count: 4,
+           totalCount: 4,
+-          children: undefined
++          children: undefined,
++          id: 6,
++          parent: 4,
+         },
+         {
+           name: "JIT::CODE::NOW!!!",
+           bytes: 20,
+           totalBytes: 20,
+           count: 2,
+           totalCount: 2,
+-          children: undefined
++          children: undefined,
++          id: 5,
++          parent: 4,
+         },
+-      ]
++      ],
++      id: 4,
++      parent: 1,
+     },
      {
        name: "Function",
        bytes: 10,
        totalBytes: 10,
        count: 10,
        totalCount: 10,
-       children: undefined
+-      children: undefined
++      children: undefined,
++      id: 2,
++      parent: 1,
      },
 -  ]
 +  ],
-+  id: 1
++  id: 1,
++  parent: undefined,
  };
  
  function run_test() {
    compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
+ }
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-04.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-04.js
+index df662fd..4b63670 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-04.js
++++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-04.js
+@@ -62,68 +62,88 @@ function run_test() {
+             totalCount: 5,
+             children: [
+               {
+                 name: stack3,
+                 bytes: 30,
+                 totalBytes: 30,
+                 count: 3,
+                 totalCount: 3,
+-                children: undefined
++                children: undefined,
++                id: 7,
++                parent: 5,
+               },
+               {
+                 name: stack2,
+                 bytes: 20,
+                 totalBytes: 20,
+                 count: 2,
+                 totalCount: 2,
+-                children: undefined
++                children: undefined,
++                id: 6,
++                parent: 5,
+               }
+-            ]
++            ],
++            id: 5,
++            parent: 2,
+           },
+           {
+             name: stack4,
+             bytes: 40,
+             totalBytes: 40,
+             count: 4,
+             totalCount: 4,
+-            children: undefined
++            children: undefined,
++            id: 8,
++            parent: 2,
+           },
+           {
+             name: stack1.parent,
+             bytes: 0,
+             totalBytes: 10,
+             count: 0,
+             totalCount: 1,
+             children: [
+               {
+                 name: stack1,
+                 bytes: 10,
+                 totalBytes: 10,
+                 count: 1,
+                 totalCount: 1,
+-                children: undefined
++                children: undefined,
++                id: 4,
++                parent: 3,
+               },
+-            ]
++            ],
++            id: 3,
++            parent: 2,
+           },
+-        ]
++        ],
++        id: 2,
++        parent: 1,
+       },
+       {
+         name: "noStack",
+         bytes: 60,
+         totalBytes: 60,
+         count: 6,
+         totalCount: 6,
+-        children: undefined
++        children: undefined,
++        id: 10,
++        parent: 1,
+       },
+       {
+         name: stack5,
+         bytes: 50,
+         totalBytes: 50,
+         count: 5,
+         totalCount: 5,
+-        children: undefined
++        children: undefined,
++        id: 9,
++        parent: 1,
+       },
+-    ]
++    ],
++    id: 1,
++    parent: undefined,
+   };
+ 
+   compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
+ }
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-05.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-05.js
+index 4089e18..bf340c9 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-05.js
++++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-05.js
+@@ -66,53 +66,71 @@ function run_test() {
+                 totalCount: 10,
+                 children: [
+                   {
+                     name: "other",
+                     bytes: 40,
+                     totalBytes: 40,
+                     count: 4,
+                     totalCount: 4,
+-                    children: undefined
++                    children: undefined,
++                    id: 8,
++                    parent: 4,
+                   },
+                   {
+                     name: "Baz",
+                     bytes: 30,
+                     totalBytes: 30,
+                     count: 3,
+                     totalCount: 3,
+-                    children: undefined
++                    children: undefined,
++                    id: 7,
++                    parent: 4,
+                   },
+                   {
+                     name: "Bar",
+                     bytes: 20,
+                     totalBytes: 20,
+                     count: 2,
+                     totalCount: 2,
+-                    children: undefined
++                    children: undefined,
++                    id: 6,
++                    parent: 4,
+                   },
+                   {
+                     name: "Foo",
+                     bytes: 10,
+                     totalBytes: 10,
+                     count: 1,
+                     totalCount: 1,
+-                    children: undefined
++                    children: undefined,
++                    id: 5,
++                    parent: 4,
+                   },
+-                ]
++                ],
++                id: 4,
++                parent: 3,
+               }
+-            ]
++            ],
++            id: 3,
++            parent: 2,
+           }
+-        ]
++        ],
++        id: 2,
++        parent: 1,
+       },
+       {
+         name: "noStack",
+         bytes: 50,
+         totalBytes: 50,
+         count: 5,
+         totalCount: 5,
+-        children: undefined
++        children: undefined,
++        id: 9,
++        parent: 1,
+       },
+-    ]
++    ],
++    id: 1,
++    parent: undefined,
+   };
+ 
+   compareCensusViewData(BREAKDOWN, REPORT, EXPECTED);
+ }
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-06.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-06.js
+index 0470247..7af22eb 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-06.js
++++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-06.js
+@@ -60,102 +60,128 @@ function run_test() {
+         totalCount: 5,
+         children: [
+           {
+             name: null,
+             bytes: 0,
+             totalBytes: 100,
+             count: 0,
+             totalCount: 10,
+-            children: undefined
++            children: undefined,
++            id: 16,
++            parent: 15,
+           }
+-        ]
++        ],
++        id: 15,
++        parent: 14,
+       },
+       {
+         name: abc_Stack,
+         bytes: 50,
+         totalBytes: 50,
+         count: 5,
+         totalCount: 5,
+         children: [
+           {
+             name: null,
+             bytes: 0,
+             totalBytes: 100,
+             count: 0,
+             totalCount: 10,
+-            children: undefined
++            children: undefined,
++            id: 18,
++            parent: 17,
+           },
+           {
+             name: abc_Stack.parent,
+             bytes: 0,
+             totalBytes: 30,
+             count: 0,
+             totalCount: 3,
+             children: [
+               {
+                 name: null,
+                 bytes: 0,
+                 totalBytes: 100,
+                 count: 0,
+                 totalCount: 10,
+-                children: undefined
++                children: undefined,
++                id: 22,
++                parent: 19,
+               },
+               {
+                 name: abc_Stack.parent.parent,
+                 bytes: 0,
+                 totalBytes: 10,
+                 count: 0,
+                 totalCount: 1,
+                 children: [
+                   {
+                     name: null,
+                     bytes: 0,
+                     totalBytes: 100,
+                     count: 0,
+                     totalCount: 10,
+-                    children: undefined
++                    children: undefined,
++                    id: 21,
++                    parent: 20,
+                   }
+-                ]
++                ],
++                id: 20,
++                parent: 19,
+               },
+               {
+                 name: dbc_Stack.parent.parent,
+                 bytes: 0,
+                 totalBytes: 10,
+                 count: 0,
+                 totalCount: 1,
+                 children: [
+                   {
+                     name: null,
+                     bytes: 0,
+                     totalBytes: 100,
+                     count: 0,
+                     totalCount: 10,
+-                    children: undefined
++                    children: undefined,
++                    id: 24,
++                    parent: 23,
+                   }
+-                ]
++                ],
++                id: 23,
++                parent: 19,
+               }
+-            ]
++            ],
++            id: 19,
++            parent: 17,
+           },
+           {
+             name: ec_Stack.parent,
+             bytes: 0,
+             totalBytes: 10,
+             count: 0,
+             totalCount: 1,
+             children: [
+               {
+                 name: null,
+                 bytes: 0,
+                 totalBytes: 100,
+                 count: 0,
+                 totalCount: 10,
+-                children: undefined
+-              }
+-            ]
+-          }
+-        ]
++                children: undefined,
++                id: 26,
++                parent: 25,
++              },
++            ],
++            id: 25,
++            parent: 17,
++          },
++        ],
++        id: 17,
++        parent: 14,
+       }
+-    ]
++    ],
++    id: 14,
++    parent: undefined,
+   };
+ 
+   compareCensusViewData(BREAKDOWN, REPORT, EXPECTED, { invert: true });
+ }
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-07.js b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-07.js
+index 95a2e12..ea56f77 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-07.js
++++ b/devtools/shared/heapsnapshot/tests/unit/test_census-tree-node-07.js
+@@ -65,21 +65,27 @@ function run_test() {
+             totalCount: 8,
+             children: [
+               {
+                 name: null,
+                 bytes: 0,
+                 totalBytes: 220,
+                 count: 0,
+                 totalCount: 22,
+-                children: undefined
++                children: undefined,
++                id: 14,
++                parent: 13,
+               }
+-            ]
++            ],
++            id: 13,
++            parent: 12,
+           }
+-        ]
++        ],
++        id: 12,
++        parent: 11,
+       },
+       {
+         name: "JSAtom",
+         bytes: 60,
+         totalBytes: 60,
+         count: 6,
+         totalCount: 6,
+         children: [
+@@ -91,21 +97,27 @@ function run_test() {
+             totalCount: 6,
+             children: [
+               {
+                 name: null,
+                 bytes: 0,
+                 totalBytes: 220,
+                 count: 0,
+                 totalCount: 22,
+-                children: undefined
++                children: undefined,
++                id: 17,
++                parent: 16,
+               }
+-            ]
++            ],
++            id: 16,
++            parent: 15,
+           }
+-        ]
++        ],
++        id: 15,
++        parent: 11,
+       },
+       {
+         name: "Array",
+         bytes: 50,
+         totalBytes: 50,
+         count: 5,
+         totalCount: 5,
+         children: [
+@@ -117,21 +129,27 @@ function run_test() {
+             totalCount: 5,
+             children: [
+               {
+                 name: null,
+                 bytes: 0,
+                 totalBytes: 220,
+                 count: 0,
+                 totalCount: 22,
+-                children: undefined
++                children: undefined,
++                id: 20,
++                parent: 19,
+               }
+-            ]
++            ],
++            id: 19,
++            parent: 18,
+           }
+-        ]
++        ],
++        id: 18,
++        parent: 11,
+       },
+       {
+         name: "js::jit::JitScript",
+         bytes: 30,
+         totalBytes: 30,
+         count: 3,
+         totalCount: 3,
+         children: [
+@@ -143,21 +161,27 @@ function run_test() {
+             totalCount: 3,
+             children: [
+               {
+                 name: null,
+                 bytes: 0,
+                 totalBytes: 220,
+                 count: 0,
+                 totalCount: 22,
+-                children: undefined
++                children: undefined,
++                id: 26,
++                parent: 25,
+               }
+-            ]
++            ],
++            id: 25,
++            parent: 24,
+           }
+-        ]
++        ],
++        id: 24,
++        parent: 11,
+       },
+       {
+         name: "other",
+         bytes: 0,
+         totalBytes: 0,
+         count: 0,
+         totalCount: 0,
+         children: [
+@@ -169,19 +193,27 @@ function run_test() {
+             totalCount: 5,
+             children: [
+               {
+                 name: null,
+                 bytes: 0,
+                 totalBytes: 220,
+                 count: 0,
+                 totalCount: 22,
+-                children: undefined
++                children: undefined,
++                id: 23,
++                parent: 22,
+               }
+-            ]
++            ],
++            id: 22,
++            parent: 21,
+           }
+-        ]
+-      }
+-    ]
++        ],
++        id: 21,
++        parent: 11,
++      },
++    ],
++    id: 11,
++    parent: undefined,
+   };
+ 
+   compareCensusViewData(BREAKDOWN, REPORT, EXPECTED, { invert: true });
  }
 -- 
 2.3.1
