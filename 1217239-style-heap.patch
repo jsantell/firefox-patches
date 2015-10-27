@@ -1,0 +1,334 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Mon, 26 Oct 2015 17:30:48 -0700
+Subject: Bug 1217239 - Style the heap widget in memory tools. r=fitzgen
+
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index 09b0f70..c09ed69 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -4,17 +4,19 @@
+ 
+ const { DOM: dom, createClass, PropTypes, createFactory } = require("devtools/client/shared/vendor/react");
+ const Tree = createFactory(require("./tree"));
+ const TreeItem = createFactory(require("./tree-item"));
+ const { getSnapshotStatusText } = require("../utils");
+ const { snapshotState: states } = require("../constants");
+ const { snapshot: snapshotModel } = require("../models");
+ const TAKE_SNAPSHOT_TEXT = "Take snapshot";
+-const TREE_ROW_HEIGHT = 10;
++// If HEAP_TREE_ROW_HEIGHT changes, be sure to change `var(--heap-tree-row-height)`
++// in `devtools/client/themes/memory.css`
++const HEAP_TREE_ROW_HEIGHT = 14;
+ 
+ /**
+  * Creates a hash map mapping node IDs to its parent node.
+  *
+  * @param {CensusTreeNode} node
+  * @param {Object<number, CensusTreeNode>} aggregator
+  *
+  * @return {Object<number, CensusTreeNode>}
+@@ -40,17 +42,17 @@ function createTreeProperties (census) {
+   return {
+     // getParent only used for focusing parents when child selected;
+     // handle this later?
+     getParent: node => map(node.id),
+     getChildren: node => node.children || [],
+     renderItem: (item, depth, focused, arrow) => new TreeItem({ item, depth, focused, arrow }),
+     getRoots: () => census.children,
+     getKey: node => node.id,
+-    itemHeight: TREE_ROW_HEIGHT,
++    itemHeight: HEAP_TREE_ROW_HEIGHT,
+   };
+ }
+ 
+ /**
+  * Main view for the memory tool -- contains several panels for different states;
+  * an initial state of only a button to take a snapshot, loading states, and the
+  * heap view tree.
+  */
+@@ -80,16 +82,23 @@ const Heap = module.exports = createClass({
+       case states.READING:
+       case states.READ:
+       case states.SAVING_CENSUS:
+         pane = dom.div({ className: "heap-view-panel", "data-state": state },
+           getSnapshotStatusText(snapshot));
+         break;
+       case states.SAVED_CENSUS:
+         pane = dom.div({ className: "heap-view-panel", "data-state": "loaded" },
++          dom.div({ className: "header" },
++            dom.span({ className: "heap-tree-item-bytes" }, "Bytes"),
++            dom.span({ className: "heap-tree-item-count" }, "Count"),
++            dom.span({ className: "heap-tree-item-total-bytes" }, "Total Bytes"),
++            dom.span({ className: "heap-tree-item-total-count" }, "Total Count"),
++            dom.span({ className: "heap-tree-item-name" }, "Name")
++          ),
+           Tree(createTreeProperties(snapshot.census))
+         );
+         break;
+     }
+ 
+     return (
+       dom.div({ id: "heap-view", "data-state": state }, pane)
+     )
+diff --git a/devtools/client/memory/components/tree-item.js b/devtools/client/memory/components/tree-item.js
+index 80bc331..5cad38e 100644
+--- a/devtools/client/memory/components/tree-item.js
++++ b/devtools/client/memory/components/tree-item.js
+@@ -14,23 +14,25 @@ const MAX_SOURCE_LENGTH = 200;
+  * (▶). When its node has no children, it is hidden.
+  */
+ const TreeItem = module.exports = createClass({
+   displayName: "tree-item",
+ 
+   render() {
+     let { item, depth, arrow, focused } = this.props;
+ 
+-    return dom.div({ className: "heap-tree-item", style: { marginLeft: depth * INDENT }},
+-      arrow,
+-      dom.span({ className: "heap-tree-item-name" }, this.toLabel(item.name)),
++    return dom.div({ className: "heap-tree-item" },
+       dom.span({ className: "heap-tree-item-bytes" }, item.bytes),
+       dom.span({ className: "heap-tree-item-count" }, item.count),
+       dom.span({ className: "heap-tree-item-total-bytes" }, item.totalBytes),
+-      dom.span({ className: "heap-tree-item-total-count" }, item.totalCount)
++      dom.span({ className: "heap-tree-item-total-count" }, item.totalCount),
++      dom.span({ className: "heap-tree-item-name", style: { marginLeft: depth * INDENT }},
++        arrow,
++        this.toLabel(item.name)
++      )
+     );
+   },
+ 
+   /**
+    * Convert the given item name to a renderable.
+    */
+   toLabel(name) {
+     return isSavedFrame(name)
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index 3fd81b6..31c8810 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -14,19 +14,34 @@
+ .theme-light {
+   --cell-border-color: rgba(0,0,0,0.15);
+   --cell-border-color-light: rgba(0,0,0,0.1);
+   --focus-cell-border-color: rgba(0,0,0,0.3);
+   --row-alt-background-color: rgba(76,158,217,0.1);
+   --row-hover-background-color: rgba(76,158,217,0.2);
+ }
+ 
++html, .theme-body, #app, #memory-tool, #memory-tool-container {
++  height: 100%;
++}
++
++.theme-body {
++  overflow: hidden;
++  background-color: var(--theme-body-background);
++}
++
+ #memory-tool-container {
+   display: flex;
+   flex-direction: row;
++  --toolbar-height: 20px;
++  /**
++   * If --heap-tree-row-height changes, be sure to change HEAP_TREE_ROW_HEIGHT
++   * in `devtools/client/memory/components/heap.js`.
++   */
++  --heap-tree-row-height: 14px;
+ }
+ 
+ /**
+  * TODO bug 1213100
+  * should generalize toolbar buttons with images in them
+  * toolbars.inc.css contains definitions for .devtools-button,
+  * I wager that many of the below styles can be rolled into that
+  */
+@@ -58,17 +73,17 @@
+ /**
+  * TODO bug 1213100
+  * Should this be codified in .devtools-toolbar itself?
+  */
+ #memory-tool .devtools-toolbar {
+   display: flex;
+   flex-direction: row;
+   align-items: center;
+-  height: 20px;
++  height: var(--toolbar-height);
+ }
+ 
+ /**
+  * TODO bug 1213100
+  * Once we figure out how to store invertable buttons (pseudo element like in this case?)
+  * we should add a .invertable class to handle this generally, rather than the definitions
+  * in toolbars.inc.css.
+  *
+@@ -86,23 +101,28 @@
+  */
+ 
+ .list {
+   margin: 0;
+   padding: 0;
+   width: 186px;
+   list-style-type: none;
+   font-size: 12px;
++  height: 100%;
++  overflow-y: scroll;
++  background-color: var(--theme-toolbar-background);
++  border-color: var(--theme-splitter-color);
++  color: var(--theme-body-color-alt);
++  border-left-width: 1px;
+ }
+ 
+ .list > li {
+   height: 40px;
+   color: var(--theme-body-color);
+-  border-bottom: 1px solid transparent;
+-  border-top: 1px solid rgba(128,128,128,0.15);
++  border-bottom: 1px solid rgba(128,128,128,0.15);
+   padding: 8px;
+   cursor: pointer;
+ }
+ 
+ .list > li.selected {
+   background-color: var(--theme-selection-background);
+   color: var(--theme-selection-color);
+ }
+@@ -122,81 +142,105 @@
+ }
+ 
+ /**
+  * Main panel
+  */
+ 
+ #heap-view {
+   flex: 1 1 auto;
++  border-color: var(--theme-splitter-color);
++  color: var(--theme-body-color)
++  border-left-width: 1px;
+ }
+ 
+ #heap-view .heap-view-panel {
+   width: 100%;
+   height: 100%;
+ }
+ 
+ #heap-view .take-snapshot {
+ }
+ 
+ /**
+- * Heap View
++ * Heap Tree View
+  */
+ 
+-.heap-view {
+-  position: relative;
++#heap-view .theme-twisty {
++  float: left;
+ }
+ 
+-.heap-view .theme-twisty {
+-  text-align: end;
++.tree {
++  height: 100%;
++  overflow-y: scroll;
+ }
+ 
+-.heap-tree-item {
++.tree .header {
++  height: 17px;
++  overflow: hidden;
++  color: var(--theme-body-color);
++  background-color: var(--theme-tab-toolbar-background);
++}
++
++.tree span {
++  border-left-color: var(--cell-border-color);
++  border-left-width: 1px;
++}
++
++.tree-node {
++  height: var(--heap-tree-row-height);
++}
++
++.heap-tree-item, .header {
+   list-style-type: none;
+-  /* display: none; */
++  height: var(--heap-tree-row-height);
+ }
+ 
+-.heap-tree-item[expanded] {
+-  display: block;
++.heap-tree-item span, .header span {
++  float: left;
+ }
+ 
+-.heap-tree-item:nth-child(2n) {
++.tree-node:nth-child(2n) {
+   background-color: var(--row-alt-background-color);
+ }
+ 
+-.heap-tree-item:hover {
++.tree-node:hover {
+   background-color: var(--row-hover-background-color);
+ }
+ 
+-.heap-tree-item:focus {
++.tree-node:focus {
+   background-color: var(--theme-selection-background);
+ }
+ 
+-.heap-tree-item:focus description {
+-  color: var(--theme-selection-color) !important;
++.header {
++  background-color: var(--theme-tab-toolbar-background);
+ }
+ 
+-.heap-tree-item:focus .call-tree-cell {
+-  -moz-border-end-color: var(--focus-cell-border-color);
++.header span {
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  text-align: center;
++  font-size: 90%;
+ }
+ 
+-
+-.heap-tree-cell[type="bytes"], .heap-tree-cell[type="count"] {
+-  position: absolute;
++.heap-tree-item-bytes,
++.heap-tree-item-count,
++.heap-tree-item-total-bytes,
++.heap-tree-item-total-count {
+   text-align: right;
+-  width: 40px;
++  border-right: var(--cell-border-color) 1px solid;
++  padding-right: 5px;
+ }
+ 
+-.heap-tree-cell[type="name"] {
+-  width: 150px;
+-  white-space: nowrap;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-  display: block;
++.heap-tree-item-count,
++.heap-tree-item-total-count {
++  width: 5vw;
+ }
+ 
+-.heap-tree-cell[type="count"] {
+-  left: 300px;
++.heap-tree-item-bytes,
++.heap-tree-item-total-bytes {
++  width: 7vw;
+ }
+ 
+-.heap-tree-cell[type="bytes"] {
+-  left: 250px;
++.heap-tree-item-name {
++  padding-left: 10px;
+ }
+-- 
+2.3.1
+
