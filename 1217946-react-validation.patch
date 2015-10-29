@@ -1,0 +1,395 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 28 Oct 2015 08:34:47 -0700
+Subject: Bug 1217946 - Fix all validation failures and deprecated components. r=fitzgen
+
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+index 4dc89ef..4d006f0 100644
+--- a/devtools/client/memory/app.js
++++ b/devtools/client/memory/app.js
+@@ -1,30 +1,38 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { connect } = require("devtools/client/shared/vendor/react-redux");
++const { breakdowns } = require("./constants");
+ const { toggleRecordingAllocationStacks } = require("./actions/allocations");
+ const { setBreakdownAndRefresh } = require("./actions/breakdown");
+ const { toggleInvertedAndRefresh } = require("./actions/inverted");
+ const { selectSnapshotAndRefresh, takeSnapshotAndCensus } = require("./actions/snapshot");
+ const { breakdownNameToSpec, getBreakdownDisplayData } = require("./utils");
+ const Toolbar = createFactory(require("./components/toolbar"));
+ const List = createFactory(require("./components/list"));
+ const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
+ const HeapView = createFactory(require("./components/heap"));
+ const { app: appModel } = require("./models");
+ 
+ const App = createClass({
+   displayName: "memory-tool",
+ 
+   propTypes: appModel,
+ 
++  getDefaultProps() {
++    return {
++      breakdown: breakdowns.coarseType.breakdown,
++      inverted: false,
++    };
++  },
++
+   childContextTypes: {
+     front: PropTypes.any,
+     heapWorker: PropTypes.any,
+   },
+ 
+   getChildContext() {
+     return {
+       front: this.props.front,
+@@ -41,44 +49,44 @@ const App = createClass({
+       breakdown,
+       allocations,
+       inverted
+     } = this.props;
+ 
+     let selectedSnapshot = snapshots.find(s => s.selected);
+ 
+     return (
+-      dom.div({ id: "memory-tool" }, [
++      dom.div({ id: "memory-tool" },
+ 
+         Toolbar({
+           breakdowns: getBreakdownDisplayData(),
+           onTakeSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker)),
+           onBreakdownChange: breakdown =>
+             dispatch(setBreakdownAndRefresh(heapWorker, breakdownNameToSpec(breakdown))),
+           onToggleRecordAllocationStacks: () =>
+             dispatch(toggleRecordingAllocationStacks(front)),
+           allocations,
+           inverted,
+           onToggleInverted: () =>
+             dispatch(toggleInvertedAndRefresh(heapWorker))
+         }),
+ 
+-        dom.div({ id: "memory-tool-container" }, [
++        dom.div({ id: "memory-tool-container" },
+           List({
+             itemComponent: SnapshotListItem,
+             items: snapshots,
+             onClick: snapshot => dispatch(selectSnapshotAndRefresh(heapWorker, snapshot))
+           }),
+ 
+           HeapView({
+             snapshot: selectedSnapshot,
+             onSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker)),
+-          }),
+-        ])
+-      ])
++          })
++        )
++      )
+     );
+   },
+ });
+ 
+ /**
+  * Passed into react-redux's `connect` method that is called on store change
+  * and passed to components.
+  */
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index 6bf3421..02da247 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -68,50 +68,50 @@ const Heap = module.exports = createClass({
+     let { snapshot, onSnapshotClick } = this.props;
+     let census = snapshot ? snapshot.census : null;
+     let state = snapshot ? snapshot.state : "initial";
+     let statusText = snapshot ? getSnapshotStatusTextFull(snapshot) : "";
+     let content;
+ 
+     switch (state) {
+       case "initial":
+-        content = dom.button({
++        content = [dom.button({
+           className: "devtools-toolbarbutton take-snapshot",
+           onClick: onSnapshotClick,
+           // Want to use the [standalone] tag to leverage our styles,
+           // but React hates that evidently
+           "data-standalone": true,
+           "data-text-only": true,
+-        }, TAKE_SNAPSHOT_TEXT)
++        }, TAKE_SNAPSHOT_TEXT)];
+         break;
+       case states.ERROR:
+         content = [
+           dom.span({ className: "snapshot-status error" }, statusText),
+           dom.pre({}, safeErrorString(snapshot.error || new Error("blahblah"))),
+         ];
+         break;
+       case states.SAVING:
+       case states.SAVED:
+       case states.READING:
+       case states.READ:
+       case states.SAVING_CENSUS:
+-        content = dom.span({ className: "snapshot-status devtools-throbber" }, statusText)
++        content = [dom.span({ className: "snapshot-status devtools-throbber" }, statusText)];
+         break;
+       case states.SAVED_CENSUS:
+         content = [
+           dom.div({ className: "header" },
+             dom.span({ className: "heap-tree-item-bytes" }, "Bytes"),
+             dom.span({ className: "heap-tree-item-count" }, "Count"),
+             dom.span({ className: "heap-tree-item-total-bytes" }, "Total Bytes"),
+             dom.span({ className: "heap-tree-item-total-count" }, "Total Count"),
+             dom.span({ className: "heap-tree-item-name" }, "Name")
+           ),
+           Tree(createTreeProperties(snapshot.census))
+         ];
+         break;
+     }
+-    let pane = dom.div({ className: "heap-view-panel", "data-state": state }, content);
++    let pane = dom.div({ className: "heap-view-panel", "data-state": state }, ...content);
+ 
+     return (
+       dom.div({ id: "heap-view", "data-state": state }, pane)
+     )
+   }
+ });
+diff --git a/devtools/client/memory/components/list.js b/devtools/client/memory/components/list.js
+index a31c452..10cbaac 100644
+--- a/devtools/client/memory/components/list.js
++++ b/devtools/client/memory/components/list.js
+@@ -17,16 +17,16 @@ const List = module.exports = createClass({
+     onClick: PropTypes.func,
+     items: PropTypes.array.isRequired,
+   },
+ 
+   render() {
+     let { items, onClick, itemComponent: Item } = this.props;
+ 
+     return (
+-      dom.ul({ className: "list" }, items.map((item, index) => {
++      dom.ul({ className: "list" }, ...items.map((item, index) => {
+         return Item({
+           item, index, onClick: () => onClick(item),
+         });
+       }))
+     );
+   }
+ });
+diff --git a/devtools/client/memory/components/toolbar.js b/devtools/client/memory/components/toolbar.js
+index 5fd6a7e..ef10763 100644
+--- a/devtools/client/memory/components/toolbar.js
++++ b/devtools/client/memory/components/toolbar.js
+@@ -1,13 +1,13 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-const { DOM, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+ 
+ const models = require("../models");
+ 
+ const Toolbar = module.exports = createClass({
+   displayName: "toolbar",
+   propTypes: {
+     breakdowns: PropTypes.arrayOf(PropTypes.shape({
+       name: PropTypes.string.isRequired,
+@@ -28,40 +28,40 @@ const Toolbar = module.exports = createClass({
+       breakdowns,
+       onToggleRecordAllocationStacks,
+       allocations,
+       onToggleInverted,
+       inverted
+     } = this.props;
+ 
+     return (
+-      DOM.div({ className: "devtools-toolbar" }, [
+-        DOM.button({ className: `take-snapshot devtools-button`, onClick: onTakeSnapshotClick }),
++      dom.div({ className: "devtools-toolbar" },
++        dom.button({ className: `take-snapshot devtools-button`, onClick: onTakeSnapshotClick }),
+ 
+-        DOM.select({
++        dom.select({
+           className: `select-breakdown`,
+           onChange: e => onBreakdownChange(e.target.value),
+-        }, breakdowns.map(({ name, displayName }) => DOM.option({ value: name }, displayName))),
++        }, ...breakdowns.map(({ name, displayName }) => dom.option({ value: name }, displayName))),
+ 
+-        DOM.label({}, [
+-          DOM.input({
++        dom.label({},
++          dom.input({
+             type: "checkbox",
+             checked: inverted,
+             onChange: onToggleInverted,
+           }),
+           // TODO bug 1214799
+           "Invert tree"
+-        ]),
++        ),
+ 
+-        DOM.label({}, [
+-          DOM.input({
++        dom.label({},
++          dom.input({
+             type: "checkbox",
+             checked: allocations.recording,
+             disabled: allocations.togglingInProgress,
+             onChange: onToggleRecordAllocationStacks,
+           }),
+           // TODO bug 1214799
+           "Record allocation stacks"
+-        ])
+-])
++        )
++      )
+     );
+   }
+ });
+diff --git a/devtools/client/memory/components/tree.js b/devtools/client/memory/components/tree.js
+index cd6ec00..6dbcbd9 100644
+--- a/devtools/client/memory/components/tree.js
++++ b/devtools/client/memory/components/tree.js
+@@ -40,17 +40,17 @@ const ArrowExpander = createFactory(createClass({
+ 
+     return dom.div(attrs);
+   }
+ }));
+ 
+ const TreeNode = createFactory(createClass({
+   componentDidUpdate() {
+     if (this.props.focused) {
+-      this.refs.button.getDOMNode().focus();
++      this.refs.button.focus();
+     }
+   },
+ 
+   render() {
+     const arrow = ArrowExpander({
+       item: this.props.item,
+       expanded: this.props.expanded,
+       visible: this.props.hasChildren,
+@@ -233,17 +233,17 @@ const Tree = module.exports = createClass({
+     );
+   },
+ 
+   /**
+    * Updates the state's height based on clientHeight.
+    */
+   _updateHeight() {
+     this.setState({
+-      height: this.refs.tree.getDOMNode().clientHeight
++      height: this.refs.tree.clientHeight
+     });
+   },
+ 
+   /**
+    * Perform a pre-order depth-first search from item.
+    */
+   _dfs(item, maxDepth = Infinity, traversal = [], _depth = 0) {
+     if (!this.props.filter(item)) {
+@@ -335,18 +335,18 @@ const Tree = module.exports = createClass({
+   /**
+    * Fired on a scroll within the tree's container, updates
+    * the stored position of the view port to handle virtual view rendering.
+    *
+    * @param {Event} e
+    */
+   _onScroll(e) {
+     this.setState({
+-      scroll: Math.max(this.refs.tree.getDOMNode().scrollTop, 0),
+-      height: this.refs.tree.getDOMNode().clientHeight
++      scroll: Math.max(this.refs.tree.scrollTop, 0),
++      height: this.refs.tree.clientHeight
+     });
+   },
+ 
+   /**
+    * Handles key down events in the tree's container.
+    *
+    * @param {Event} e
+    */
+diff --git a/devtools/client/memory/models.js b/devtools/client/memory/models.js
+index c557582..7b24692 100644
+--- a/devtools/client/memory/models.js
++++ b/devtools/client/memory/models.js
+@@ -14,16 +14,17 @@ const { snapshotState: states } = require("./constants");
+  */
+ let breakdownModel = exports.breakdown = PropTypes.shape({
+   by: PropTypes.oneOf(["coarseType", "allocationStack", "objectClass", "internalType"]).isRequired,
+ });
+ 
+ /**
+  * Snapshot model.
+  */
++let stateKeys = Object.keys(states).map(state => states[state]);
+ let snapshotModel = exports.snapshot = PropTypes.shape({
+   // Unique ID for a snapshot
+   id: PropTypes.number.isRequired,
+   // Whether or not this snapshot is currently selected.
+   selected: PropTypes.bool.isRequired,
+   // fs path to where the snapshot is stored; used to
+   // identify the snapshot for HeapAnalysesClient.
+   path: PropTypes.string,
+@@ -32,29 +33,28 @@ let snapshotModel = exports.snapshot = PropTypes.shape({
+   // The breakdown used to generate the current census
+   breakdown: breakdownModel,
+   // Whether the currently cached census tree is inverted or not.
+   inverted: PropTypes.bool,
+   // If an error was thrown while processing this snapshot, the `Error` instance is attached here.
+   error: PropTypes.object,
+   // State the snapshot is in
+   // @see ./constants.js
+-  state: function (props, propName) {
+-    let stateNames = Object.keys(states);
+-    let current = props.state;
++  state: function (snapshot, propName) {
++    let current = snapshot.state;
+     let shouldHavePath = [states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
+     let shouldHaveCensus = [states.SAVED_CENSUS];
+ 
+-    if (!stateNames.includes(current)) {
+-      throw new Error(`Snapshot state must be one of ${stateNames}.`);
++    if (!stateKeys.includes(current)) {
++      throw new Error(`Snapshot state must be one of ${stateKeys}.`);
+     }
+-    if (shouldHavePath.includes(current) && !path) {
++    if (shouldHavePath.includes(current) && !snapshot.path) {
+       throw new Error(`Snapshots in state ${current} must have a snapshot path.`);
+     }
+-    if (shouldHaveCensus.includes(current) && (!props.census || !props.breakdown)) {
++    if (shouldHaveCensus.includes(current) && (!snapshot.census || !snapshot.breakdown)) {
+       throw new Error(`Snapshots in state ${current} must have a census and breakdown.`);
+     }
+   },
+ });
+ 
+ let allocationsModel = exports.allocations = PropTypes.shape({
+   // True iff we are recording allocation stacks right now.
+   recording: PropTypes.bool.isRequired,
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index c91a163..da31de5 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -117,17 +117,16 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+ }
+ 
+ .list > li {
+   height: 40px;
+   color: var(--theme-body-color);
+   border-bottom: 1px solid rgba(128,128,128,0.15);
+   padding: 8px;
+   cursor: pointer;
+-  color: var(--theme-selection-color);
+ }
+ 
+ .list > li.selected {
+   background-color: var(--theme-selection-background);
+   color: var(--theme-selection-color);
+ }
+ 
+ .snapshot-list-item span {
+-- 
+2.3.1
+

@@ -1,0 +1,275 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 27 Oct 2015 14:07:13 -0700
+Subject: Bug 1218679 - Add integration/smoke-screen tests for memory tool. r=fitzgen
+
+diff --git a/devtools/client/memory/constants.js b/devtools/client/memory/constants.js
+index f311fa2..f106465 100644
+--- a/devtools/client/memory/constants.js
++++ b/devtools/client/memory/constants.js
+@@ -24,16 +24,19 @@ actions.TOGGLE_RECORD_ALLOCATION_STACKS_START = "toggle-record-allocation-stacks
+ actions.TOGGLE_RECORD_ALLOCATION_STACKS_END = "toggle-record-allocation-stacks-end";
+ 
+ // Fired by UI to select a snapshot to view.
+ actions.SELECT_SNAPSHOT = "select-snapshot";
+ 
+ // Fired to toggle tree inversion on or off.
+ actions.TOGGLE_INVERTED = "toggle-inverted";
+ 
++// Fired to set a new breakdown.
++actions.SET_BREAKDOWN = "set-breakdown";
++
+ // Options passed to MemoryFront's startRecordingAllocations never change.
+ exports.ALLOCATION_RECORDING_OPTIONS = {
+   probability: 1,
+   maxLogLength: 1
+ };
+ 
+ const COUNT = { by: "count", count: true, bytes: true };
+ const INTERNAL_TYPE = { by: "internalType", then: COUNT };
+diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
+index 8b62455..143c064 100644
+--- a/devtools/client/memory/initializer.js
++++ b/devtools/client/memory/initializer.js
+@@ -14,21 +14,29 @@ const { Provider } = require("devtools/client/shared/vendor/react-redux");
+ const App = createFactory(require("devtools/client/memory/app"));
+ const Store = require("devtools/client/memory/store");
+ 
+ /**
+  * The current target, toolbox, MemoryFront, and HeapAnalysesClient, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront, gHeapAnalysesClient;
+ 
++/**
++ * Globals set by initialize()
++ */
++var gRoot, gStore, gApp, gProvider;
++
+ function initialize () {
+   return Task.spawn(function*() {
+-    let root = document.querySelector("#app");
+-    let store = Store();
+-    let app = createElement(App, { front: gFront, heapWorker: gHeapAnalysesClient });
+-    let provider = createElement(Provider, { store }, app);
+-    render(provider, root);
++    gRoot = document.querySelector("#app");
++    gStore = Store();
++    gApp = createElement(App, {
++      front: gFront,
++      heapWorker: gHeapAnalysesClient
++    });
++    gProvider = createElement(Provider, { store: gStore }, gApp);
++    render(gProvider, gRoot);
+   });
+ }
+ 
+ function destroy () {
+   return Task.spawn(function*(){});
+ }
+diff --git a/devtools/client/memory/test/browser/browser.ini b/devtools/client/memory/test/browser/browser.ini
+index 48a2e9e..79c70b8 100644
+--- a/devtools/client/memory/test/browser/browser.ini
++++ b/devtools/client/memory/test/browser/browser.ini
+@@ -1,7 +1,9 @@
+ [DEFAULT]
+ tags = devtools
+ subsuite = devtools
+ support-files =
+   head.js
+ 
++[browser_memory-breakdowns-01.js]
++[browser_memory-simple-01.js]
+ [browser_memory_transferHeapSnapshot_e10s_01.js]
+diff --git a/devtools/client/memory/test/browser/browser_memory-breakdowns-01.js b/devtools/client/memory/test/browser/browser_memory-breakdowns-01.js
+new file mode 100644
+index 0000000..8701ef8
+--- /dev/null
++++ b/devtools/client/memory/test/browser/browser_memory-breakdowns-01.js
+@@ -0,0 +1,33 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that the heap tree renders rows based on the breakdown
++ */
++
++const TEST_URL = "http://example.com/browser/devtools/client/memory/test/browser/doc_steady_allocation.html";
++
++this.test = makeMemoryTest(TEST_URL, function* ({ tab, panel }) {
++  const { gStore, document } = panel.panelWin;
++  const $$ = document.querySelectorAll.bind(document);
++
++  yield takeSnapshot(panel.panelWin);
++
++  yield waitUntilSnapshotState(gStore, [states.SAVED_CENSUS]);
++
++  info("Check coarse type heap view");
++  ["objects", "other", "scripts", "strings"].forEach(findNameCell);
++
++  yield setBreakdown(panel.panelWin, "objectClass");
++  info("Check object class heap view");
++  ["Function", "Object"].forEach(findNameCell);
++
++  yield setBreakdown(panel.panelWin, "internalType");
++  info("Check internal type heap view");
++  ["JSObject"].forEach(findNameCell);
++
++  function findNameCell (name) {
++    let el = Array.prototype.find.call($$(".tree .heap-tree-item-name span"), el => el.textContent === name);
++    ok(el, `Found heap tree item cell for ${name}.`);
++  }
++});
+diff --git a/devtools/client/memory/test/browser/browser_memory-simple-01.js b/devtools/client/memory/test/browser/browser_memory-simple-01.js
+new file mode 100644
+index 0000000..7a52c31
+--- /dev/null
++++ b/devtools/client/memory/test/browser/browser_memory-simple-01.js
+@@ -0,0 +1,35 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests taking snapshots and default states.
++ */
++
++const TEST_URL = "http://example.com/browser/devtools/client/memory/test/browser/doc_steady_allocation.html";
++
++this.test = makeMemoryTest(TEST_URL, function* ({ tab, panel }) {
++  const { gStore, document } = panel.panelWin;
++  const { getState, dispatch } = gStore;
++
++  let snapshotEls = document.querySelectorAll("#memory-tool-container .list li");
++  is(getState().snapshots.length, 0, "Starts with no snapshots in store");
++  is(snapshotEls.length, 0, "No snapshots rendered");
++
++  yield takeSnapshot(panel.panelWin);
++  snapshotEls = document.querySelectorAll("#memory-tool-container .list li");
++  is(getState().snapshots.length, 1, "One snapshot was created in store");
++  is(snapshotEls.length, 1, "One snapshot was rendered");
++  ok(snapshotEls[0].classList.contains("selected"), "Only snapshot has `selected` class");
++
++  yield takeSnapshot(panel.panelWin);
++  snapshotEls = document.querySelectorAll("#memory-tool-container .list li");
++  is(getState().snapshots.length, 2, "Two snapshots created in store");
++  is(snapshotEls.length, 2, "Two snapshots rendered");
++  ok(!snapshotEls[0].classList.contains("selected"), "First snapshot no longer has `selected` class");
++  ok(snapshotEls[1].classList.contains("selected"), "Second snapshot has `selected` class");
++
++  yield waitUntilSnapshotState(gStore, [states.SAVED_CENSUS, states.SAVED_CENSUS]);
++
++  ok(document.querySelector(".heap-tree-item-name"),
++    "Should have rendered some tree items");
++});
+diff --git a/devtools/client/memory/test/browser/doc_steady_allocation.html b/devtools/client/memory/test/browser/doc_steady_allocation.html
+new file mode 100644
+index 0000000..65703c8
+--- /dev/null
++++ b/devtools/client/memory/test/browser/doc_steady_allocation.html
+@@ -0,0 +1,16 @@
++<!DOCTYPE html>
++<html>
++    <body>
++        <script>
++         var objects = window.objects = [];
++
++         var allocate = this.allocate = function allocate() {
++           for (var i = 0; i < 100; i++)
++             objects.push({});
++           setTimeout(allocate, 10);
++         }
++
++         allocate();
++        </script>
++    </body>
++</html>
+diff --git a/devtools/client/memory/test/browser/head.js b/devtools/client/memory/test/browser/head.js
+index 6b6d526..ddddbb2 100644
+--- a/devtools/client/memory/test/browser/head.js
++++ b/devtools/client/memory/test/browser/head.js
+@@ -3,16 +3,19 @@
+ 
+ "use strict";
+ 
+ // Load the shared test helpers into this compartment.
+ Services.scriptloader.loadSubScript(
+   "chrome://mochitests/content/browser/devtools/client/framework/test/shared-head.js",
+   this);
+ 
++var { snapshotState: states } = require("devtools/client/memory/constants");
++var { breakdownEquals, breakdownNameToSpec } = require("devtools/client/memory/utils");
++
+ Services.prefs.setBoolPref("devtools.memory.enabled", true);
+ 
+ /**
+  * Open the memory panel for the given tab.
+  */
+ this.openMemoryPanel = Task.async(function* (tab) {
+   info("Opening memory panel.");
+   const target = TargetFactory.forTab(tab);
+@@ -58,8 +61,64 @@ function makeMemoryTest(url, generator) {
+     }
+ 
+     yield closeMemoryPanel(tab);
+     yield removeTab(tab);
+ 
+     finish();
+   });
+ }
++
++function waitUntilState (store, predicate) {
++  let deferred = promise.defer();
++  let unsubscribe = store.subscribe(check);
++
++  function check () {
++    if (predicate(store.getState())) {
++      unsubscribe();
++      deferred.resolve()
++    }
++  }
++
++  // Fire the check immediately incase the action has already occurred
++  check();
++
++  return deferred.promise;
++}
++
++function waitUntilSnapshotState (store, expected) {
++  let predicate = () => {
++    let snapshots = store.getState().snapshots;
++    info(snapshots.map(x => x.state));
++    return snapshots.length === expected.length &&
++           expected.every((state, i) => state === "*" || snapshots[i].state === state);
++  };
++  info(`Waiting for snapshots to be of state: ${expected}`);
++  return waitUntilState(store, predicate);
++}
++
++function takeSnapshot (window) {
++  let { gStore, document } = window;
++  let snapshotCount = gStore.getState().snapshots.length;
++  info(`Taking snapshot...`);
++  document.querySelector(".devtools-toolbar .take-snapshot").click();
++  return waitUntilState(gStore, () => gStore.getState().snapshots.length === snapshotCount + 1);
++}
++
++/**
++ * Sets breakdown and waits for currently selected breakdown to use it
++ * and be completed the census.
++ */
++function setBreakdown (window, type) {
++  info(`Setting breakdown to ${type}...`);
++  let { gStore, gHeapAnalysesClient } = window;
++  // XXX: Should handle this via clicking the DOM, but React doesn't
++  // fire the onChange event, so just change it in the store.
++  // window.document.querySelector(`.select-breakdown`).value = type;
++  gStore.dispatch(require("devtools/client/memory/actions/breakdown")
++                         .setBreakdownAndRefresh(gHeapAnalysesClient, breakdownNameToSpec(type)));
++
++  return waitUntilState(window.gStore, () => {
++    let selected = window.gStore.getState().snapshots.find(s => s.selected);
++    return selected.state === states.SAVED_CENSUS &&
++           breakdownEquals(breakdownNameToSpec(type), selected.breakdown);
++  });
++}
+-- 
+2.3.1
+

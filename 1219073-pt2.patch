@@ -1,0 +1,371 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 28 Oct 2015 12:59:53 -0700
+Subject: Bug 1219073 - part 2 - Add styling and link to the debugger of SavedFrames in memory tool tree. r=fitzgen
+
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+index 4dc89ef..794bd9c 100644
+--- a/devtools/client/memory/app.js
++++ b/devtools/client/memory/app.js
+@@ -18,34 +18,37 @@ const { app: appModel } = require("./models");
+ const App = createClass({
+   displayName: "memory-tool",
+ 
+   propTypes: appModel,
+ 
+   childContextTypes: {
+     front: PropTypes.any,
+     heapWorker: PropTypes.any,
++    toolbox: PropTypes.any,
+   },
+ 
+   getChildContext() {
+     return {
+       front: this.props.front,
+       heapWorker: this.props.heapWorker,
++      toolbox: this.props.toolbox,
+     }
+   },
+ 
+   render() {
+     let {
+       dispatch,
+       snapshots,
+       front,
+       heapWorker,
+       breakdown,
+       allocations,
+-      inverted
++      inverted,
++      toolbox,
+     } = this.props;
+ 
+     let selectedSnapshot = snapshots.find(s => s.selected);
+ 
+     return (
+       dom.div({ id: "memory-tool" }, [
+ 
+         Toolbar({
+@@ -66,16 +69,17 @@ const App = createClass({
+             itemComponent: SnapshotListItem,
+             items: snapshots,
+             onClick: snapshot => dispatch(selectSnapshotAndRefresh(heapWorker, snapshot))
+           }),
+ 
+           HeapView({
+             snapshot: selectedSnapshot,
+             onSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker)),
++            toolbox
+           }),
+         ])
+       ])
+     );
+   },
+ });
+ 
+ /**
+diff --git a/devtools/client/memory/components/frame.js b/devtools/client/memory/components/frame.js
+new file mode 100644
+index 0000000..fe058f3
+--- /dev/null
++++ b/devtools/client/memory/components/frame.js
+@@ -0,0 +1,35 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const { URL } = require("sdk/url");
++
++const Frame = module.exports = createClass({
++  displayName: "frame-view",
++
++  propTypes: {
++    frame: PropTypes.object.isRequired,
++    toolbox: PropTypes.object.isRequired,
++  },
++
++  render() {
++    let { toolbox, frame } = this.props;
++
++    let url = new URL(frame.source);
++    let spec = url.toString();
++    let func = frame.functionDisplayFrame || "";
++    let tooltip = `${func} (${spec}:${frame.line}:${frame.column})`;
++    let onClick = () => toolbox.viewSourceInDebugger(spec, frame.line);
++
++    return dom.span({ className: "frame-link", title: tooltip },
++      dom.span({ className: "frame-link-function-display-name" }, func),
++      dom.a({ className: "frame-link-filename", onClick }, url.fileName),
++      dom.span({ className: "frame-link-colon" }, ":"),
++      dom.span({ className: "frame-link-line" }, frame.line),
++      dom.span({ className: "frame-link-colon" }, ":"),
++      dom.span({ className: "frame-link-column" }, frame.column),
++      dom.span({ className: "frame-link-host" }, url.host)
++    );
++  }
++});
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index f4b0dfc..09c662e 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -32,23 +32,23 @@ function createParentMap (node, aggregator=Object.create(null)) {
+ }
+ 
+ /**
+  * Creates properties to be passed into the Tree component.
+  *
+  * @param {CensusTreeNode} census
+  * @return {Object}
+  */
+-function createTreeProperties (census) {
++function createTreeProperties (census, toolbox) {
+   let map = createParentMap(census);
+ 
+   return {
+-    getParent: node => map(node.id),
++    getParent: node => map[node.id],
+     getChildren: node => node.children || [],
+-    renderItem: (item, depth, focused, arrow) => new TreeItem({ item, depth, focused, arrow }),
++    renderItem: (item, depth, focused, arrow) => new TreeItem({ toolbox, item, depth, focused, arrow }),
+     getRoots: () => census.children,
+     getKey: node => node.id,
+     itemHeight: HEAP_TREE_ROW_HEIGHT,
+     // Because we never add or remove children when viewing the same census, we
+     // can always reuse a cached traversal if one is available.
+     reuseCachedTraversal: traversal => true,
+   };
+ }
+@@ -63,17 +63,17 @@ const Heap = module.exports = createClass({
+   displayName: "heap-view",
+ 
+   propTypes: {
+     onSnapshotClick: PropTypes.func.isRequired,
+     snapshot: snapshotModel,
+   },
+ 
+   render() {
+-    let { snapshot, onSnapshotClick } = this.props;
++    let { snapshot, onSnapshotClick, toolbox } = this.props;
+     let census = snapshot ? snapshot.census : null;
+     let state = snapshot ? snapshot.state : "initial";
+     let statusText = snapshot ? getSnapshotStatusTextFull(snapshot) : "";
+     let content;
+ 
+     switch (state) {
+       case "initial":
+         content = dom.button({
+@@ -102,17 +102,17 @@ const Heap = module.exports = createClass({
+         content = [
+           dom.div({ className: "header" },
+             dom.span({ className: "heap-tree-item-bytes" }, "Bytes"),
+             dom.span({ className: "heap-tree-item-count" }, "Count"),
+             dom.span({ className: "heap-tree-item-total-bytes" }, "Total Bytes"),
+             dom.span({ className: "heap-tree-item-total-count" }, "Total Count"),
+             dom.span({ className: "heap-tree-item-name" }, "Name")
+           ),
+-          Tree(createTreeProperties(snapshot.census))
++          Tree(createTreeProperties(snapshot.census, toolbox))
+         ];
+         break;
+     }
+     let pane = dom.div({ className: "heap-view-panel", "data-state": state }, content);
+ 
+     return (
+       dom.div({ id: "heap-view", "data-state": state }, pane)
+     )
+diff --git a/devtools/client/memory/components/moz.build b/devtools/client/memory/components/moz.build
+index 1cf36a7..2078bca 100644
+--- a/devtools/client/memory/components/moz.build
++++ b/devtools/client/memory/components/moz.build
+@@ -1,14 +1,15 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
++    'frame.js',
+     'heap.js',
+     'list.js',
+     'snapshot-list-item.js',
+     'toolbar.js',
+     'tree-item.js',
+     'tree.js',
+ )
+ 
+diff --git a/devtools/client/memory/components/tree-item.js b/devtools/client/memory/components/tree-item.js
+index 01f51f0..0383d40 100644
+--- a/devtools/client/memory/components/tree-item.js
++++ b/devtools/client/memory/components/tree-item.js
+@@ -1,52 +1,40 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { isSavedFrame } = require("devtools/shared/DevToolsUtils");
+-const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
++const FrameView = createFactory(require("./frame"));
+ 
+ const INDENT = 10;
+ const MAX_SOURCE_LENGTH = 200;
+ 
+ 
+ /**
+  * An arrow that displays whether its node is expanded (▼) or collapsed
+  * (▶). When its node has no children, it is hidden.
+  */
+ const TreeItem = module.exports = createClass({
+   displayName: "tree-item",
+ 
+   render() {
+-    let { item, depth, arrow, focused } = this.props;
++    let { item, depth, arrow, focused, toolbox } = this.props;
+ 
+     return dom.div({ className: `heap-tree-item ${focused ? "focused" :""}` },
+-      dom.span({ className: "heap-tree-item-bytes" }, item.bytes),
+-      dom.span({ className: "heap-tree-item-count" }, item.count),
+-      dom.span({ className: "heap-tree-item-total-bytes" }, item.totalBytes),
+-      dom.span({ className: "heap-tree-item-total-count" }, item.totalCount),
+-      dom.span({ className: "heap-tree-item-name", style: { marginLeft: depth * INDENT }},
++      dom.span({ className: "heap-tree-item-field heap-tree-item-bytes" }, item.bytes),
++      dom.span({ className: "heap-tree-item-field heap-tree-item-count" }, item.count),
++      dom.span({ className: "heap-tree-item-field heap-tree-item-total-bytes" }, item.totalBytes),
++      dom.span({ className: "heap-tree-item-field heap-tree-item-total-count" }, item.totalCount),
++      dom.span({ className: "heap-tree-item-field heap-tree-item-name", style: { marginLeft: depth * INDENT }},
+         arrow,
+-        this.toLabel(item.name)
++        this.toLabel(item.name, toolbox)
+       )
+     );
+   },
+ 
+-  toLabel(name) {
++  toLabel(name, toolbox) {
+     return isSavedFrame(name)
+-      ? this.savedFrameToLabel(name)
++      ? FrameView({ frame: name, toolbox })
+       : String(name);
+   },
+-
+-  savedFrameToLabel(frame) {
+-    return [
+-      dom.span({ className: "heap-tree-item-function-display-name" },
+-               frame.functionDisplayFrame || ""),
+-      dom.span({ className: "heap-tree-item-at" }, "@"),
+-      dom.span({ className: "heap-tree-item-source" }, frame.source.slice(0, MAX_SOURCE_LENGTH)),
+-      dom.span({ className: "heap-tree-item-colon" }, ":"),
+-      dom.span({ className: "heap-tree-item-line" }, frame.line),
+-      dom.span({ className: "heap-tree-item-colon" }, ":"),
+-      dom.span({ className: "heap-tree-item-column" }, frame.column)
+-    ];
+-  }
+ });
+diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
+index 8b62455..8b22722 100644
+--- a/devtools/client/memory/initializer.js
++++ b/devtools/client/memory/initializer.js
+@@ -18,17 +18,17 @@ const Store = require("devtools/client/memory/store");
+  * The current target, toolbox, MemoryFront, and HeapAnalysesClient, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront, gHeapAnalysesClient;
+ 
+ function initialize () {
+   return Task.spawn(function*() {
+     let root = document.querySelector("#app");
+     let store = Store();
+-    let app = createElement(App, { front: gFront, heapWorker: gHeapAnalysesClient });
++    let app = createElement(App, { toolbox: gToolbox, front: gFront, heapWorker: gHeapAnalysesClient });
+     let provider = createElement(Provider, { store }, app);
+     render(provider, root);
+   });
+ }
+ 
+ function destroy () {
+   return Task.spawn(function*(){});
+ }
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index c91a163..e54aa85 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -214,17 +214,17 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+   height: var(--heap-tree-row-height);
+ }
+ 
+ .heap-tree-item, .header {
+   list-style-type: none;
+   height: var(--heap-tree-row-height);
+ }
+ 
+-.heap-tree-item span, .header span {
++.heap-tree-item-field, .header span {
+   float: left;
+ }
+ 
+ .tree-node:nth-child(2n) {
+   background-color: var(--row-alt-background-color);
+ }
+ 
+ .tree-node:hover {
+@@ -263,17 +263,17 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+ }
+ 
+ .heap-tree-item-bytes,
+ .heap-tree-item-total-bytes {
+   width: 7vw;
+ }
+ 
+ .heap-tree-item-name {
+-  padding-left: 10px;
++  padding-left: 5px;
+ }
+ 
+ .error::before {
+   content: "";
+   background-image: url(chrome://devtools/skin/themes/images/webconsole.svg);
+   background-repeat: no-repeat;
+   background-size: 72px 60px;
+   width: 12px;
+@@ -282,8 +282,39 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+ 
+   background-position: -24px -24px;
+   margin: 2px 5px 0 0;
+   max-height: 12px;
+ }
+ .theme-light .error::before {
+   background-image: url(chrome://devtools/skin/themes/images/webconsole.svg#light-icons);
+ }
++
++/**
++ * Frame View components
++ */
++
++.focused .frame-link-filename,
++.focused .frame-link-column,
++.focused .frame-link-line,
++.focused .frame-link-host,
++.focused .frame-link-colon {
++  color: var(--theme-selection-color);
++}
++
++.frame-link-filename {
++  color: var(--theme-highlight-blue);
++  cursor: pointer;
++}
++
++.frame-link-filename:hover {
++  text-decoration: underline;
++}
++
++.frame-link-column, .frame-link-line, .frame-link-colon {
++  color: var(--theme-highlight-orange);
++}
++
++.frame-link-host {
++  font-size: 90%;
++  margin-left: 5px;
++  color: var(--theme-content-color2);
++}
+-- 
+2.3.1
+

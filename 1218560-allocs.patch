@@ -1,0 +1,170 @@
+From: Nick Fitzgerald <fitzgen@gmail.com>
+Date: Tue, 27 Oct 2015 09:20:19 -0700
+Subject: Bug 1218560 - Fix heap tree view with allocation stack breakdown; r=jsantell
+
+diff --git a/devtools/client/memory/components/tree-item.js b/devtools/client/memory/components/tree-item.js
+index 4d92b99..ac506a8 100644
+--- a/devtools/client/memory/components/tree-item.js
++++ b/devtools/client/memory/components/tree-item.js
+@@ -1,14 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++const { isSavedFrame } = require("devtools/shared/DevToolsUtils");
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++
+ const INDENT = 10;
++const MAX_SOURCE_LENGTH = 200;
++
+ 
+ /**
+  * An arrow that displays whether its node is expanded (▼) or collapsed
+  * (▶). When its node has no children, it is hidden.
+  */
+ const TreeItem = module.exports = createClass({
+   displayName: "tree-item",
+ 
+@@ -17,13 +21,32 @@ const TreeItem = module.exports = createClass({
+ 
+     return dom.div({ className: "heap-tree-item" },
+       dom.span({ className: "heap-tree-item-bytes" }, item.bytes),
+       dom.span({ className: "heap-tree-item-count" }, item.count),
+       dom.span({ className: "heap-tree-item-total-bytes" }, item.totalBytes),
+       dom.span({ className: "heap-tree-item-total-count" }, item.totalCount),
+       dom.span({ className: "heap-tree-item-name", style: { marginLeft: depth * INDENT }},
+         arrow,
+-        item.name
++        this.toLabel(item.name)
+       )
+     );
++  },
++
++  toLabel(name) {
++    return isSavedFrame(name)
++      ? this.savedFrameToLabel(name)
++      : String(name);
++  },
++
++  savedFrameToLabel(frame) {
++    return [
++      dom.span({ className: "heap-tree-item-function-display-name" },
++               frame.functionDisplayFrame || ""),
++      dom.span({ className: "heap-tree-item-at" }, "@"),
++      dom.span({ className: "heap-tree-item-source" }, frame.source.slice(0, MAX_SOURCE_LENGTH)),
++      dom.span({ className: "heap-tree-item-colon" }, ":"),
++      dom.span({ className: "heap-tree-item-line" }, frame.line),
++      dom.span({ className: "heap-tree-item-colon" }, ":"),
++      dom.span({ className: "heap-tree-item-column" }, frame.column)
++    ];
+   }
+ });
+diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
+index 8b62455..d45bef3 100644
+--- a/devtools/client/memory/initializer.js
++++ b/devtools/client/memory/initializer.js
+@@ -14,21 +14,29 @@ const { Provider } = require("devtools/client/shared/vendor/react-redux");
+ const App = createFactory(require("devtools/client/memory/app"));
+ const Store = require("devtools/client/memory/store");
+ 
+ /**
+  * The current target, toolbox, MemoryFront, and HeapAnalysesClient, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront, gHeapAnalysesClient;
+ 
++/**
++ * Globals set by initialize().
++ */
++var gRoot, gStore, gApp, gProvider;
++
+ function initialize () {
+   return Task.spawn(function*() {
+-    let root = document.querySelector("#app");
+-    let store = Store();
+-    let app = createElement(App, { front: gFront, heapWorker: gHeapAnalysesClient });
+-    let provider = createElement(Provider, { store }, app);
+-    render(provider, root);
++    gRoot = document.querySelector("#app");
++    gStore = Store();
++    gApp = createElement(App, {
++      front: gFront,
++      heapWorker: gHeapAnalysesClient
++    });
++    gProvider = createElement(Provider, { store: gStore }, gApp);
++    render(gProvider, gRoot);
+   });
+ }
+ 
+ function destroy () {
+   return Task.spawn(function*(){});
+ }
+diff --git a/devtools/client/memory/test/browser/doc_steady_allocation.html b/devtools/client/memory/test/browser/doc_steady_allocation.html
+new file mode 100644
+index 0000000..65703c8
+--- /dev/null
++++ b/devtools/client/memory/test/browser/doc_steady_allocation.html
+@@ -0,0 +1,16 @@
++<!DOCTYPE html>
++<html>
++    <body>
++        <script>
++         var objects = window.objects = [];
++
++         var allocate = this.allocate = function allocate() {
++           for (var i = 0; i < 100; i++)
++             objects.push({});
++           setTimeout(allocate, 10);
++         }
++
++         allocate();
++        </script>
++    </body>
++</html>
+diff --git a/devtools/client/memory/test/browser/head.js b/devtools/client/memory/test/browser/head.js
+index 6b6d526..d7aa8a4 100644
+--- a/devtools/client/memory/test/browser/head.js
++++ b/devtools/client/memory/test/browser/head.js
+@@ -5,16 +5,20 @@
+ 
+ // Load the shared test helpers into this compartment.
+ Services.scriptloader.loadSubScript(
+   "chrome://mochitests/content/browser/devtools/client/framework/test/shared-head.js",
+   this);
+ 
+ Services.prefs.setBoolPref("devtools.memory.enabled", true);
+ 
++function dumpn(msg) {
++  dump("MEMORY: " + msg + "\n");
++}
++
+ /**
+  * Open the memory panel for the given tab.
+  */
+ this.openMemoryPanel = Task.async(function* (tab) {
+   info("Opening memory panel.");
+   const target = TargetFactory.forTab(tab);
+   const toolbox = yield gDevTools.showToolbox(target, "memory");
+   info("Memory panel shown successfully.");
+diff --git a/devtools/shared/DevToolsUtils.js b/devtools/shared/DevToolsUtils.js
+index a2a03da..01f3e7f 100644
+--- a/devtools/shared/DevToolsUtils.js
++++ b/devtools/shared/DevToolsUtils.js
+@@ -813,8 +813,15 @@ exports.openFileStream = function (filePath) {
+ 
+ exports.isGenerator = function (fn) {
+   return typeof fn === "function" && fn.isGenerator();
+ };
+ 
+ exports.isPromise = function (p) {
+   return p && typeof p.then === "function";
+ };
++
++/**
++ * Return true if `thing` is a SavedFrame, false otherwise.
++ */
++exports.isSavedFrame = function (thing) {
++  return Object.prototype.toString.call(thing) === "[object SavedFrame]";
++};
+-- 
+2.3.1
+

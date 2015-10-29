@@ -1,0 +1,405 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Tue, 27 Oct 2015 17:27:59 -0700
+Subject: Bug 1218674 - Style heap view states and overall tree. r=fitzgen
+
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index 5c16e0a..b7dc929 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -1,17 +1,16 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-const { safeErrorString } = require("devtools/shared/DevToolsUtils");
+ const { DOM: dom, createClass, PropTypes, createFactory } = require("devtools/client/shared/vendor/react");
+ const Tree = createFactory(require("./tree"));
+ const TreeItem = createFactory(require("./tree-item"));
+-const { getSnapshotStatusText } = require("../utils");
++const { getSnapshotStatusTextFull } = require("../utils");
+ const { snapshotState: states } = require("../constants");
+ const { snapshot: snapshotModel } = require("../models");
+ const TAKE_SNAPSHOT_TEXT = "Take snapshot";
+ // If HEAP_TREE_ROW_HEIGHT changes, be sure to change `var(--heap-tree-row-height)`
+ // in `devtools/client/themes/memory.css`
+ const HEAP_TREE_ROW_HEIGHT = 14;
+ 
+ /**
+@@ -36,18 +35,16 @@ function createParentMap (node, aggregator=Object.create(null)) {
+  *
+  * @param {CensusTreeNode} census
+  * @return {Object}
+  */
+ function createTreeProperties (census) {
+   let map = createParentMap(census);
+ 
+   return {
+-    // getParent only used for focusing parents when child selected;
+-    // handle this later?
+     getParent: node => map(node.id),
+     getChildren: node => node.children || [],
+     renderItem: (item, depth, focused, arrow) => new TreeItem({ item, depth, focused, arrow }),
+     getRoots: () => census.children,
+     getKey: node => node.id,
+     itemHeight: HEAP_TREE_ROW_HEIGHT,
+   };
+ }
+@@ -63,50 +60,54 @@ const Heap = module.exports = createClass({
+ 
+   propTypes: {
+     onSnapshotClick: PropTypes.func.isRequired,
+     snapshot: snapshotModel,
+   },
+ 
+   render() {
+     let { snapshot, onSnapshotClick } = this.props;
+-    let pane;
+     let census = snapshot ? snapshot.census : null;
+     let state = snapshot ? snapshot.state : "initial";
++    let statusText = snapshot ? getSnapshotStatusTextFull(snapshot) : "";
++    let content;
+ 
+     switch (state) {
+       case "initial":
+-        pane = dom.div({ className: "heap-view-panel", "data-state": "initial" },
+-          dom.button({ className: "take-snapshot", onClick: onSnapshotClick }, TAKE_SNAPSHOT_TEXT)
+-        );
++        content = dom.button({
++          className: "devtools-toolbarbutton take-snapshot",
++          onClick: onSnapshotClick,
++          // Want to use the [standalone] tag to leverage our styles,
++          // but React hates that evidently
++          "data-standalone": true,
++          "data-text-only": true,
++        }, TAKE_SNAPSHOT_TEXT)
+         break;
+       case states.ERROR:
+-        pane = dom.div({ className: "heap-view-panel" },
+-                       dom.h2({}, "There was an error processing this snapshot"),
+-                       dom.pre({}, safeErrorString(snapshot.error)));
++        content = dom.span({ className: "snapshot-status error" }, statusText)
+         break;
+       case states.SAVING:
+       case states.SAVED:
+       case states.READING:
+       case states.READ:
+       case states.SAVING_CENSUS:
+-        pane = dom.div({ className: "heap-view-panel", "data-state": state },
+-          getSnapshotStatusText(snapshot));
++        content = dom.span({ className: "snapshot-status devtools-throbber" }, statusText)
+         break;
+       case states.SAVED_CENSUS:
+-        pane = dom.div({ className: "heap-view-panel", "data-state": "loaded" },
++        content = [
+           dom.div({ className: "header" },
+             dom.span({ className: "heap-tree-item-bytes" }, "Bytes"),
+             dom.span({ className: "heap-tree-item-count" }, "Count"),
+             dom.span({ className: "heap-tree-item-total-bytes" }, "Total Bytes"),
+             dom.span({ className: "heap-tree-item-total-count" }, "Total Count"),
+             dom.span({ className: "heap-tree-item-name" }, "Name")
+           ),
+           Tree(createTreeProperties(snapshot.census))
+-        );
++        ];
+         break;
+     }
++    let pane = dom.div({ className: "heap-view-panel", "data-state": state }, content);
+ 
+     return (
+       dom.div({ id: "heap-view", "data-state": state }, pane)
+     )
+   }
+ });
+diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
+index f4c9425..9d7a60d 100644
+--- a/devtools/client/memory/utils.js
++++ b/devtools/client/memory/utils.js
+@@ -81,16 +81,17 @@ exports.breakdownNameToSpec = function (name) {
+   else if (name in breakdowns) {
+     return breakdowns[name].breakdown;
+   }
+   return Object.create(null);
+ };
+ 
+ /**
+  * Returns a string representing a readable form of the snapshot's state.
++ * More brief than `getSnapshotStatusText`.
+  *
+  * @param {Snapshot} snapshot
+  * @return {String}
+  */
+ exports.getSnapshotStatusText = function (snapshot) {
+   assert((snapshot || {}).state,
+     `Snapshot must have expected state, found ${(snapshot || {}).state}.`);
+ 
+@@ -112,16 +113,33 @@ exports.getSnapshotStatusText = function (snapshot) {
+       return "";
+   }
+ 
+   assert(false, `Snapshot in unexpected state: ${snapshot.state}`);
+   return "";
+ }
+ 
+ /**
++ * Returns a string representing a readable form of the snapshot's state;
++ * more verbose than `getSnapshotStatusText`.
++ *
++ * @param {Snapshot} snapshot
++ * @return {String}
++ */
++exports.getSnapshotStatusTextFull = function (snapshot) {
++  assert((snapshot || {}).state,
++    `Snapshot must have expected state, found ${(snapshot || {}).state}.`);
++  switch (snapshot.state) {
++    case states.ERROR:
++      return `There was an error processing this snapshot: ${DevToolsUtils.safeErrorString(snapshot.error)}`;
++  }
++  return exports.getSnapshotStatusText(snapshot);
++}
++
++/**
+  * Takes an array of snapshots and a snapshot and returns
+  * the snapshot instance in `snapshots` that matches
+  * the snapshot passed in.
+  *
+  * @param {Array<Snapshot>} snapshots
+  * @param {Snapshot}
+  * @return ?Snapshot
+  */
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index 76703e5..2be7a80 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -20,17 +20,18 @@
+ }
+ 
+ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+   height: 100%;
+ }
+ 
+ .theme-body {
+   overflow: hidden;
+-  background-color: var(--theme-body-background);
++  /* Not sure why .theme-body declares it as `background` and overrides */
++  background-color: var(--theme-toolbar-background) !important;
+ }
+ 
+ #memory-tool-container {
+   display: flex;
+   flex-direction: row;
+   --toolbar-height: 20px;
+   /**
+    * If --heap-tree-row-height changes, be sure to change HEAP_TREE_ROW_HEIGHT
+@@ -40,37 +41,37 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+ }
+ 
+ /**
+  * TODO bug 1213100
+  * should generalize toolbar buttons with images in them
+  * toolbars.inc.css contains definitions for .devtools-button,
+  * I wager that many of the below styles can be rolled into that
+  */
+-.devtools-button.take-snapshot {
++.devtools-toolbar .devtools-button.take-snapshot {
+   margin: 2px 1px;
+   padding: 1px;
+   border-width: 0px;
+   /* [standalone] buttons override min-height from 18px to 24px -- why? */
+   min-height: 18px;
+   /* not sure why this is needed for positioning */
+   display: -moz-box;
+ }
+ 
+-.devtools-button.take-snapshot::before {
++.devtools-toolbar .devtools-button.take-snapshot::before {
+   background-image: url(images/command-screenshot.png);
+   -moz-appearance: none;
+   width: 16px;
+   height: 16px;
+   background-size: 64px 16px;
+   background-position: 0 center;
+   background-repeat: no-repeat;
+ }
+ @media (min-resolution: 1.1dppx) {
+-  .devtools-button.take-snapshot::before {
++  .devtools-toolbar .devtools-button.take-snapshot::before {
+     background-image: url(images/command-screenshot@2x.png);
+   }
+ }
+ 
+ /**
+  * TODO bug 1213100
+  * Should this be codified in .devtools-toolbar itself?
+  */
+@@ -104,19 +105,20 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+   margin: 0;
+   padding: 0;
+   width: 186px;
+   list-style-type: none;
+   font-size: 12px;
+   height: 100%;
+   overflow-y: scroll;
+   background-color: var(--theme-toolbar-background);
+-  border-color: var(--theme-splitter-color);
+   color: var(--theme-body-color-alt);
+-  border-left-width: 1px;
++  border-color: var(--theme-splitter-color);
++  border-style: solid;
++  border-width: 0px 1px 0px 0px;
+ }
+ 
+ .list > li {
+   height: 40px;
+   color: var(--theme-body-color);
+   border-bottom: 1px solid rgba(128,128,128,0.15);
+   padding: 8px;
+   cursor: pointer;
+@@ -144,39 +146,53 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+ 
+ /**
+  * Main panel
+  */
+ 
+ #heap-view {
+   flex: 1 1 auto;
+   border-color: var(--theme-splitter-color);
+-  color: var(--theme-body-color)
++  color: var(--theme-body-color);
+   border-left-width: 1px;
+ }
+ 
+ #heap-view .heap-view-panel {
+   width: 100%;
+   height: 100%;
++  background-color: var(--theme-toolbar-background)
++}
++
++#heap-view .heap-view-panel .snapshot-status, #heap-view .take-snapshot {
++  font-size: 120%;
++  display: block;
++  margin: 65px auto;
++}
++
++#heap-view .heap-view-panel .snapshot-status {
++  width: 500px;
++  text-align: center;
+ }
+ 
+ #heap-view .take-snapshot {
++  padding: 5px;
+ }
+ 
+ /**
+  * Heap Tree View
+  */
+ 
+ #heap-view .theme-twisty {
+   float: left;
+ }
+ 
+ .tree {
+   height: 100%;
+   overflow-y: scroll;
++  background-color: var(--theme-body-background);
+ }
+ 
+ .tree .header {
+   height: 17px;
+   overflow: hidden;
+   color: var(--theme-body-color);
+   background-color: var(--theme-tab-toolbar-background);
+ }
+@@ -241,8 +257,25 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+ .heap-tree-item-bytes,
+ .heap-tree-item-total-bytes {
+   width: 7vw;
+ }
+ 
+ .heap-tree-item-name {
+   padding-left: 10px;
+ }
++
++.error::before {
++  content: "";
++  background-image: url(chrome://devtools/skin/themes/images/webconsole.svg);
++  background-repeat: no-repeat;
++  background-size: 72px 60px;
++  width: 12px;
++  height: 12px;
++  display: inline-block;
++
++  background-position: -24px -24px;
++  margin: 2px 5px 0 0;
++  max-height: 12px;
++}
++.theme-light .error::before {
++  background-image: url(chrome://devtools/skin/themes/images/webconsole.svg#light-icons);
++}
+diff --git a/devtools/client/themes/toolbars.inc.css b/devtools/client/themes/toolbars.inc.css
+index a19d8962..5400d20 100644
+--- a/devtools/client/themes/toolbars.inc.css
++++ b/devtools/client/themes/toolbars.inc.css
+@@ -74,17 +74,17 @@
+ }
+ 
+ .devtools-menulist:-moz-focusring,
+ .devtools-toolbarbutton:-moz-focusring {
+   outline: 1px dotted hsla(210,30%,85%,0.7);
+   outline-offset: -4px;
+ }
+ 
+-.devtools-toolbarbutton[standalone] {
++.devtools-toolbarbutton[standalone], .devtools-toolbarbutton[data-standalone] {
+   -moz-margin-end: 5px;
+   border-width: 1px;
+   border-style: solid;
+ }
+ .devtools-toolbarbutton[label][standalone] {
+   min-height: 2em;
+ }
+ 
+@@ -159,20 +159,22 @@
+ }
+ .theme-light .devtools-menulist,
+ .theme-light .devtools-toolbarbutton {
+   border-color: rgba(170, 170, 170, .5); /* Splitters */
+ }
+ 
+ /* Text-only buttons */
+ .theme-light .devtools-toolbarbutton[label]:not([text-as-image]):not([type=menu-button]),
++.theme-light .devtools-toolbarbutton[data-text-only],
+ .theme-light #toolbox-buttons .devtools-toolbarbutton[text-as-image] {
+   background-color: rgba(170, 170, 170, .2); /* Splitter */
+ }
+ .theme-dark .devtools-toolbarbutton[label]:not([text-as-image]):not([type=menu-button]),
++.theme-dark .devtools-toolbarbutton[data-text-only],
+ .theme-dark #toolbox-buttons .devtools-toolbarbutton[text-as-image] {
+   background-color: rgba(0, 0, 0, .2); /* Splitter */
+ }
+ 
+ /* Button States */
+ .theme-dark .devtools-toolbarbutton:not([disabled]):hover,
+ .theme-dark #toolbox-buttons .devtools-toolbarbutton:not([disabled])[text-as-image]:hover,
+ .theme-dark .devtools-toolbarbutton:not([disabled])[label]:not([text-as-image]):not([type=menu-button]):hover {
+@@ -265,17 +267,17 @@
+   margin: 0;
+   padding: 0;
+   min-width: 32px;
+   min-height: 18px;
+   /* The icon is absolutely positioned in the button using ::before */
+   position: relative;
+ }
+ 
+-.devtools-button[standalone] {
++.devtools-button[standalone], .devtools-button[data-standalone] {
+   min-height: 32px;
+   border-width: 1px;
+ }
+ 
+ /* Button States */
+ .theme-dark .devtools-button:not([disabled]):hover {
+   background: rgba(0, 0, 0, .3); /* Splitters */
+ }
+-- 
+2.3.1
+

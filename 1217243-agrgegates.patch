@@ -1,0 +1,253 @@
+From 26bbf427ff1ceffc5c41718cb06990cdd2cf5e97 Mon Sep 17 00:00:00 2001
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 28 Oct 2015 21:27:46 -0700
+Subject: [PATCH] Bug 1217243 - Display snapshot aggregate values and timestamp
+ in the snapshot list view. r=fitzgen
+
+---
+ .../client/memory/components/snapshot-list-item.js | 27 +++++++---
+ .../test/unit/test_utils-get-snapshot-totals.js    | 63 ++++++++++++++++++++++
+ devtools/client/memory/test/unit/xpcshell.ini      |  1 +
+ devtools/client/memory/utils.js                    | 30 +++++++++++
+ devtools/client/themes/memory.css                  | 22 ++++++--
+ 5 files changed, 133 insertions(+), 10 deletions(-)
+ create mode 100644 devtools/client/memory/test/unit/test_utils-get-snapshot-totals.js
+
+diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
+index 890edb1..32e914c 100644
+--- a/devtools/client/memory/components/snapshot-list-item.js
++++ b/devtools/client/memory/components/snapshot-list-item.js
+@@ -1,34 +1,49 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+-const { getSnapshotStatusText } = require("../utils");
++const { getSnapshotTotals, getSnapshotStatusText } = require("../utils");
++const { snapshotState: states } = require("../constants");
+ const { snapshot: snapshotModel } = require("../models");
+ 
+ const SnapshotListItem = module.exports = createClass({
+   displayName: "snapshot-list-item",
+ 
+   propTypes: {
+     onClick: PropTypes.func,
+     item: snapshotModel.isRequired,
+     index: PropTypes.number.isRequired,
+   },
+ 
+   render() {
+-    let { index, item, onClick } = this.props;
+-    let className = `snapshot-list-item ${item.selected ? " selected" : ""}`;
+-    let statusText = getSnapshotStatusText(item);
++    let { index, item: snapshot, onClick } = this.props;
++    let className = `snapshot-list-item ${snapshot.selected ? " selected" : ""}`;
++    let statusText = getSnapshotStatusText(snapshot);
++
++    let details;
++    if (snapshot.state === states.SAVED_CENSUS) {
++      let { bytes, count } = getSnapshotTotals(snapshot);
++      let formatBytes = `${(bytes / 1000000).toFixed(2)} MB`;
++      let formatCount = `${count} objects`;
++
++      details = dom.span({ className: "snapshot-totals" },
++        // TODO bug 1214799
++        dom.span({ className: "total-bytes" }, formatBytes),
++        dom.span({ className: "total-count" }, formatCount)
++      );
++    } else {
++      details = dom.span({ className: "snapshot-state" }, statusText);
++    }
+ 
+     return (
+       dom.li({ className, onClick },
+         dom.span({
+           className: `snapshot-title ${statusText ? " devtools-throbber" : ""}`
+         }, `Snapshot #${index}`),
+-
+-        statusText ? dom.span({ className: "snapshot-state" }, statusText) : void 0
++        details
+       )
+     );
+   }
+ });
+ 
+diff --git a/devtools/client/memory/test/unit/test_utils-get-snapshot-totals.js b/devtools/client/memory/test/unit/test_utils-get-snapshot-totals.js
+new file mode 100644
+index 0000000..3b69ce7
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_utils-get-snapshot-totals.js
+@@ -0,0 +1,63 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests that we use the correct snapshot aggregate value
++ * in `utils.getSnapshotTotals(snapshot)`
++ */
++
++let { breakdowns, snapshotState: states } = require("devtools/client/memory/constants");
++let { getSnapshotTotals, breakdownEquals } = require("devtools/client/memory/utils");
++let { toggleInvertedAndRefresh } = require("devtools/client/memory/actions/inverted");
++let { takeSnapshotAndCensus } = require("devtools/client/memory/actions/snapshot");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let front = new StubbedMemoryFront();
++  let heapWorker = new HeapAnalysesClient();
++  yield front.attach();
++  let store = Store();
++  let { getState, dispatch } = store;
++
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS]);
++
++  ok(!getState().snapshots[0].inverted, "Snapshot is not inverted");
++  ok(isBreakdownType(getState().snapshots[0].census, "coarseType"),
++    "Snapshot using `coarseType` breakdown");
++
++  let census = getState().snapshots[0].census;
++  let result = aggregate(census);
++  let totalBytes = result.bytes;
++  let totalCount = result.count;
++
++  ok(totalBytes > 0, "counted up bytes in the census");
++  ok(totalCount > 0, "counted up count in the census");
++
++  result = getSnapshotTotals(getState().snapshots[0])
++  equal(totalBytes, result.bytes, "getSnapshotTotals reuslted in correct bytes");
++  equal(totalCount, result.count, "getSnapshotTotals reuslted in correct count");
++
++  dispatch(toggleInvertedAndRefresh(heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVING_CENSUS]);
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS]);
++  ok(getState().snapshots[0].inverted, "Snapshot is inverted");
++
++  result = getSnapshotTotals(getState().snapshots[0])
++  equal(totalBytes, result.bytes, "getSnapshotTotals reuslted in correct bytes when inverted");
++  equal(totalCount, result.count, "getSnapshotTotals reuslted in correct count when inverted");
++});
++
++function aggregate (census) {
++  let totalBytes = census.bytes;
++  let totalCount = census.count;
++  for (let child of (census.children || [])) {
++    let { bytes, count } = aggregate(child);
++    totalBytes += bytes
++    totalCount += count;
++  }
++  return { bytes: totalBytes, count: totalCount };
++}
+diff --git a/devtools/client/memory/test/unit/xpcshell.ini b/devtools/client/memory/test/unit/xpcshell.ini
+index 40ecb58..232f6db 100644
+--- a/devtools/client/memory/test/unit/xpcshell.ini
++++ b/devtools/client/memory/test/unit/xpcshell.ini
+@@ -12,8 +12,9 @@ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ [test_action-select-snapshot.js]
+ [test_action-set-breakdown.js]
+ [test_action-set-breakdown-and-refresh-01.js]
+ [test_action-set-breakdown-and-refresh-02.js]
+ [test_action-take-census.js]
+ [test_action-take-snapshot.js]
+ [test_action-take-snapshot-and-census.js]
+ [test_utils.js]
++[test_utils-get-snapshot-totals.js]
+diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
+index 2e67066..1530322 100644
+--- a/devtools/client/memory/utils.js
++++ b/devtools/client/memory/utils.js
+@@ -202,8 +202,38 @@ exports.breakdownEquals = function (obj1, obj2) {
+       return false;
+     }
+ 
+     return k1.every(k => exports.breakdownEquals(obj1[k], obj2[k]));
+   }
+ 
+   return false;
+ };
++
++/**
++ * Takes a snapshot and returns the total bytes and
++ * total count that this snapshot represents.
++ *
++ * @param {Snapshot} snapshot
++ * @return {Object}
++ */
++exports.getSnapshotTotals = function (snapshot) {
++  let bytes, count;
++
++  let census = snapshot.census;
++
++  if (snapshot.inverted) {
++    while (census) {
++      bytes = census.totalBytes;
++      count = census.totalCount;
++      census = census.children && census.children[0];
++    }
++  } else {
++    bytes = census.totalBytes;
++    count = census.totalCount;
++  }
++
++  return {
++    bytes: bytes || 0,
++    count: count || 0,
++  };
++};
++
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index da31de5..a010cb6 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -124,26 +124,40 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+   cursor: pointer;
+ }
+ 
+ .list > li.selected {
+   background-color: var(--theme-selection-background);
+   color: var(--theme-selection-color);
+ }
+ 
++.snapshot-list-item {
++  position: relative;
++}
+ .snapshot-list-item span {
+   display: block;
+ }
+-
+-.snapshot-list-item .snapshot-state {
++.snapshot-list-item .snapshot-state, .snapshot-list-item .snapshot-totals {
+   font-size: 90%;
+   color: var(--theme-body-color-alt);
++  position: absolute;
+ }
+-
+-.snapshot-list-item.selected .snapshot-state {
++.snapshot-list-item .snapshot-state {
++  top: 25px;
++}
++.snapshot-list-item .snapshot-totals {
++  top: 38px;
++}
++.snapshot-list-item .total-bytes, .snapshot-list-item .total-count {
++  float: left;
++}
++.snapshot-list-item .total-bytes {
++  margin-right: 3px;
++}
++.snapshot-list-item.selected .snapshot-state, .snapshot-list-item.selected .snapshot-totals {
+   /* Text inside a selected item should not be custom colored. */
+   color: inherit !important;
+ }
+ 
+ /**
+  * Main panel
+  */
+ 
+-- 
+2.3.1
+
