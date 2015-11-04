@@ -1,30 +1,83 @@
-From 26bbf427ff1ceffc5c41718cb06990cdd2cf5e97 Mon Sep 17 00:00:00 2001
 From: Jordan Santell <jsantell@mozilla.com>
 Date: Wed, 28 Oct 2015 21:27:46 -0700
-Subject: [PATCH] Bug 1217243 - Display snapshot aggregate values and timestamp
- in the snapshot list view. r=fitzgen
+Subject: Bug 1217243 - Display snapshot aggregate values and timestamp in the snapshot list view. r=fitzgen
 
----
- .../client/memory/components/snapshot-list-item.js | 27 +++++++---
- .../test/unit/test_utils-get-snapshot-totals.js    | 63 ++++++++++++++++++++++
- devtools/client/memory/test/unit/xpcshell.ini      |  1 +
- devtools/client/memory/utils.js                    | 30 +++++++++++
- devtools/client/themes/memory.css                  | 22 ++++++--
- 5 files changed, 133 insertions(+), 10 deletions(-)
- create mode 100644 devtools/client/memory/test/unit/test_utils-get-snapshot-totals.js
-
+diff --git a/browser/locales/en-US/chrome/browser/devtools/memory.properties b/browser/locales/en-US/chrome/browser/devtools/memory.properties
+index 2065e9a..8c050e4 100644
+--- a/browser/locales/en-US/chrome/browser/devtools/memory.properties
++++ b/browser/locales/en-US/chrome/browser/devtools/memory.properties
+@@ -19,16 +19,24 @@ memory.label=Memory
+ # This is used as the label for the toolbox panel.
+ memory.panelLabel=Memory Panel
+ 
+ # LOCALIZATION NOTE (memory.tooltip):
+ # This string is displayed in the tooltip of the tab when the memory tool is
+ # displayed inside the developer tools window.
+ memory.tooltip=Memory
+ 
++# LOCALIZATION NOTE (aggregate.mb): The label annotating the number of bytes (in megabytes)
++# in a snapshot. %S represents the value, rounded to 2 decimal points.
++aggregate.mb=%S MB
++
++# LOCALIZATION NOTE (snapshot-title.loading): The title for a snapshot before
++# it has a creation time to display.
++snapshot-title.loading=Processing…
++
+ # LOCALIZATION NOTE (checkbox.invertTree): The label describing the boolean
+ # checkbox whether or not to invert the tree.
+ checkbox.invertTree=Invert tree
+ 
+ # LOCALIZATION NOTE (checkbox.recordAllocationStacks): The label describing the boolean
+ # checkbox whether or not to record allocation stacks.
+ checkbox.recordAllocationStacks=Record allocation stacks
+ 
+diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
+index eae960c..431d5ca 100644
+--- a/devtools/client/memory/actions/snapshot.js
++++ b/devtools/client/memory/actions/snapshot.js
+@@ -70,26 +70,29 @@ const takeSnapshot = exports.takeSnapshot = function (front) {
+  * @param {HeapAnalysesClient}
+  * @param {Snapshot} snapshot,
+  */
+ const readSnapshot = exports.readSnapshot = function readSnapshot (heapWorker, snapshot) {
+   return function *(dispatch, getState) {
+     assert(snapshot.state === states.SAVED,
+       `Should only read a snapshot once. Found snapshot in state ${snapshot.state}`);
+ 
++    let creationTime;
++
+     dispatch({ type: actions.READ_SNAPSHOT_START, snapshot });
+     try {
+       yield heapWorker.readHeapSnapshot(snapshot.path);
++      creationTime = yield heapWorker.getCreationTime(snapshot.path);
+     } catch (error) {
+       reportException("readSnapshot", error);
+       dispatch({ type: actions.SNAPSHOT_ERROR, snapshot, error });
+       return;
+     }
+ 
+-    dispatch({ type: actions.READ_SNAPSHOT_END, snapshot });
++    dispatch({ type: actions.READ_SNAPSHOT_END, snapshot, creationTime });
+   };
+ };
+ 
+ /**
+  * @param {HeapAnalysesClient} heapWorker
+  * @param {Snapshot} snapshot,
+  *
+  * @see {Snapshot} model defined in devtools/client/memory/models.js
 diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
-index 890edb1..32e914c 100644
+index 0d084cf..5fe19d4 100644
 --- a/devtools/client/memory/components/snapshot-list-item.js
 +++ b/devtools/client/memory/components/snapshot-list-item.js
-@@ -1,34 +1,49 @@
+@@ -1,34 +1,47 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this file,
   * You can obtain one at http://mozilla.org/MPL/2.0/. */
  
  const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
--const { getSnapshotStatusText } = require("../utils");
-+const { getSnapshotTotals, getSnapshotStatusText } = require("../utils");
+-const { L10N, getSnapshotStatusText } = require("../utils");
++const { L10N, getSnapshotTitle, getSnapshotTotals, getSnapshotStatusText } = require("../utils");
 +const { snapshotState: states } = require("../constants");
  const { snapshot: snapshotModel } = require("../models");
  
@@ -44,17 +97,15 @@ index 890edb1..32e914c 100644
 +    let { index, item: snapshot, onClick } = this.props;
 +    let className = `snapshot-list-item ${snapshot.selected ? " selected" : ""}`;
 +    let statusText = getSnapshotStatusText(snapshot);
++    let title = getSnapshotTitle(snapshot);
 +
 +    let details;
 +    if (snapshot.state === states.SAVED_CENSUS) {
-+      let { bytes, count } = getSnapshotTotals(snapshot);
-+      let formatBytes = `${(bytes / 1000000).toFixed(2)} MB`;
-+      let formatCount = `${count} objects`;
++      let { bytes } = getSnapshotTotals(snapshot);
++      let formatBytes = L10N.getFormatStr("aggregate.mb", L10N.numberWithDecimals(bytes / 1000000, 2));
 +
 +      details = dom.span({ className: "snapshot-totals" },
-+        // TODO bug 1214799
-+        dom.span({ className: "total-bytes" }, formatBytes),
-+        dom.span({ className: "total-count" }, formatCount)
++        dom.span({ className: "total-bytes" }, formatBytes)
 +      );
 +    } else {
 +      details = dom.span({ className: "snapshot-state" }, statusText);
@@ -64,15 +115,81 @@ index 890edb1..32e914c 100644
        dom.li({ className, onClick },
          dom.span({
            className: `snapshot-title ${statusText ? " devtools-throbber" : ""}`
-         }, `Snapshot #${index}`),
+-        }, `Snapshot #${index}`),
 -
 -        statusText ? dom.span({ className: "snapshot-state" }, statusText) : void 0
++        }, title),
 +        details
        )
      );
    }
  });
  
+diff --git a/devtools/client/memory/models.js b/devtools/client/memory/models.js
+index 7b24692..71b7e29 100644
+--- a/devtools/client/memory/models.js
++++ b/devtools/client/memory/models.js
+@@ -31,32 +31,38 @@ let snapshotModel = exports.snapshot = PropTypes.shape({
+   // Data of a census breakdown
+   census: PropTypes.object,
+   // The breakdown used to generate the current census
+   breakdown: breakdownModel,
+   // Whether the currently cached census tree is inverted or not.
+   inverted: PropTypes.bool,
+   // If an error was thrown while processing this snapshot, the `Error` instance is attached here.
+   error: PropTypes.object,
++  // The creation time of the snapshot; required after the snapshot has been read.
++  creationTime: PropTypes.number,
+   // State the snapshot is in
+   // @see ./constants.js
+   state: function (snapshot, propName) {
+     let current = snapshot.state;
+     let shouldHavePath = [states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
++    let shouldHaveCreationTime = [states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
+     let shouldHaveCensus = [states.SAVED_CENSUS];
+ 
+     if (!stateKeys.includes(current)) {
+       throw new Error(`Snapshot state must be one of ${stateKeys}.`);
+     }
+     if (shouldHavePath.includes(current) && !snapshot.path) {
+       throw new Error(`Snapshots in state ${current} must have a snapshot path.`);
+     }
+     if (shouldHaveCensus.includes(current) && (!snapshot.census || !snapshot.breakdown)) {
+       throw new Error(`Snapshots in state ${current} must have a census and breakdown.`);
+     }
++    if (shouldHaveCreationTime.includes(current) && !snapshot.creationTime) {
++      throw new Error(`Snapshots in state ${current} must have a creation time.`);
++    }
+   },
+ });
+ 
+ let allocationsModel = exports.allocations = PropTypes.shape({
+   // True iff we are recording allocation stacks right now.
+   recording: PropTypes.bool.isRequired,
+   // True iff we are in the process of toggling the recording of allocation
+   // stacks on or off right now.
+diff --git a/devtools/client/memory/reducers/snapshots.js b/devtools/client/memory/reducers/snapshots.js
+index 8a5d996..f42f6ba 100644
+--- a/devtools/client/memory/reducers/snapshots.js
++++ b/devtools/client/memory/reducers/snapshots.js
+@@ -32,16 +32,17 @@ handlers[actions.READ_SNAPSHOT_START] = function (snapshots, action) {
+   let snapshot = getSnapshot(snapshots, action.snapshot);
+   snapshot.state = states.READING;
+   return [...snapshots];
+ };
+ 
+ handlers[actions.READ_SNAPSHOT_END] = function (snapshots, action) {
+   let snapshot = getSnapshot(snapshots, action.snapshot);
+   snapshot.state = states.READ;
++  snapshot.creationTime = action.creationTime;
+   return [...snapshots];
+ };
+ 
+ handlers[actions.TAKE_CENSUS_START] = function (snapshots, action) {
+   let snapshot = getSnapshot(snapshots, action.snapshot);
+   snapshot.state = states.SAVING_CENSUS;
+   snapshot.census = null;
+   snapshot.breakdown = action.breakdown;
 diff --git a/devtools/client/memory/test/unit/test_utils-get-snapshot-totals.js b/devtools/client/memory/test/unit/test_utils-get-snapshot-totals.js
 new file mode 100644
 index 0000000..3b69ce7
@@ -157,10 +274,48 @@ index 40ecb58..232f6db 100644
  [test_utils.js]
 +[test_utils-get-snapshot-totals.js]
 diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
-index 2e67066..1530322 100644
+index 1cd37f5..e88e45e 100644
 --- a/devtools/client/memory/utils.js
 +++ b/devtools/client/memory/utils.js
-@@ -202,8 +202,38 @@ exports.breakdownEquals = function (obj1, obj2) {
+@@ -8,16 +8,37 @@ const STRINGS_URI = "chrome://browser/locale/devtools/memory.properties"
+ const L10N = exports.L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const { assert } = require("devtools/shared/DevToolsUtils");
+ const { Preferences } = require("resource://gre/modules/Preferences.jsm");
+ const CUSTOM_BREAKDOWN_PREF = "devtools.memory.custom-breakdowns";
+ const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ const { snapshotState: states, breakdowns } = require("./constants");
+ 
+ /**
++ * Takes a snapshot object and returns the
++ * localized form of its timestamp to be used as a title.
++ *
++ * @param {Snapshot} snapshot
++ * @return {String}
++ */
++exports.getSnapshotTitle = function (snapshot) {
++  if (!snapshot.creationTime) {
++    return L10N.getStr("snapshot-title.loading");
++  }
++
++  let date = new Date(snapshot.creationTime / 1000);
++  return date.toLocaleTimeString(void 0, {
++    year: "2-digit",
++    month: "2-digit",
++    day: "2-digit",
++    hour12: false
++  });
++};
++
++/**
+  * Returns an array of objects with the unique key `name`
+  * and `displayName` for each breakdown.
+  *
+  * @return {Object{name, displayName}}
+  */
+ exports.getBreakdownDisplayData = function () {
+   return exports.getBreakdownNames().map(name => {
+     // If it's a preset use the display name value
+@@ -211,8 +232,38 @@ exports.breakdownEquals = function (obj1, obj2) {
        return false;
      }
  
@@ -200,10 +355,10 @@ index 2e67066..1530322 100644
 +};
 +
 diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
-index da31de5..a010cb6 100644
+index 63924d2..6d2b680 100644
 --- a/devtools/client/themes/memory.css
 +++ b/devtools/client/themes/memory.css
-@@ -124,26 +124,40 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
+@@ -124,26 +124,37 @@ html, .theme-body, #app, #memory-tool, #memory-tool-container {
    cursor: pointer;
  }
  
@@ -228,16 +383,13 @@ index da31de5..a010cb6 100644
 -
 -.snapshot-list-item.selected .snapshot-state {
 +.snapshot-list-item .snapshot-state {
-+  top: 25px;
++  top: 38px;
 +}
 +.snapshot-list-item .snapshot-totals {
 +  top: 38px;
 +}
-+.snapshot-list-item .total-bytes, .snapshot-list-item .total-count {
-+  float: left;
-+}
 +.snapshot-list-item .total-bytes {
-+  margin-right: 3px;
++  float: left;
 +}
 +.snapshot-list-item.selected .snapshot-state, .snapshot-list-item.selected .snapshot-totals {
    /* Text inside a selected item should not be custom colored. */
@@ -248,6 +400,131 @@ index da31de5..a010cb6 100644
   * Main panel
   */
  
+diff --git a/devtools/shared/heapsnapshot/HeapAnalysesClient.js b/devtools/shared/heapsnapshot/HeapAnalysesClient.js
+index 8182e57..8130211 100644
+--- a/devtools/shared/heapsnapshot/HeapAnalysesClient.js
++++ b/devtools/shared/heapsnapshot/HeapAnalysesClient.js
+@@ -123,9 +123,23 @@ HeapAnalysesClient.prototype.takeCensusDiff = function (firstSnapshotFilePath,
+                                                         censusOptions,
+                                                         requestOptions = {}) {
+   return this._worker.performTask("takeCensusDiff", {
+     firstSnapshotFilePath,
+     secondSnapshotFilePath,
+     censusOptions,
+     requestOptions
+   });
+-}
++};
++
++/**
++ * Request the creation time given a snapshot file path. Returns `null`
++ * if snapshot does not exist.
++ *
++ * @param {String} snapshotFilePath
++ *        The path to the snapshot.
++ * @return {Number?}
++ *        The unix timestamp of the creation time of the snapshot, or null if
++ *        snapshot does not exist.
++ */
++HeapAnalysesClient.prototype.getCreationTime = function (snapshotFilePath) {
++  return this._worker.performTask("getCreationTime", snapshotFilePath);
++};
+diff --git a/devtools/shared/heapsnapshot/HeapAnalysesWorker.js b/devtools/shared/heapsnapshot/HeapAnalysesWorker.js
+index aebff40..99050b6 100644
+--- a/devtools/shared/heapsnapshot/HeapAnalysesWorker.js
++++ b/devtools/shared/heapsnapshot/HeapAnalysesWorker.js
+@@ -73,8 +73,16 @@ workerHelper.createTask(self, "takeCensusDiff", request => {
+   if (requestOptions.asTreeNode) {
+     return censusReportToCensusTreeNode(censusOptions.breakdown, delta);
+   } else if (requestOptions.asInvertedTreeNode) {
+     return censusReportToCensusTreeNode(censusOptions.breakdown, delta, { invert: true });
+   } else {
+     return delta;
+   }
+ });
++
++/**
++ * @see HeapAnalysesClient.prototype.getCreationTime
++ */
++workerHelper.createTask(self, "getCreationTime", (snapshotFilePath) => {
++  let snapshot = snapshots[snapshotFilePath];
++  return snapshot ? snapshot.creationTime : null;
++});
+diff --git a/devtools/shared/heapsnapshot/tests/unit/test_HeapAnalyses_getCreationTime_01.js b/devtools/shared/heapsnapshot/tests/unit/test_HeapAnalyses_getCreationTime_01.js
+new file mode 100644
+index 0000000..29e27e74
+--- /dev/null
++++ b/devtools/shared/heapsnapshot/tests/unit/test_HeapAnalyses_getCreationTime_01.js
+@@ -0,0 +1,47 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Test that the HeapAnalyses{Client,Worker} can get a HeapSnapshot's
++// creation time.
++
++function waitForTenMilliseconds() {
++  const start = Date.now();
++  while (Date.now() - start < 10) ;
++}
++
++function run_test() {
++  run_next_test();
++}
++
++const BREAKDOWN = {
++  by: "internalType",
++  then: { by: "count", count: true, bytes: true }
++};
++
++add_task(function* () {
++  const client = new HeapAnalysesClient();
++  const start = Date.now() * 1000;
++
++  // Because Date.now() is less precise than the snapshot's time stamp, give it
++  // a little bit of head room.
++  waitForTenMilliseconds();
++  const snapshotFilePath = saveNewHeapSnapshot();
++  waitForTenMilliseconds();
++  const end = Date.now() * 1000;
++
++  yield client.readHeapSnapshot(snapshotFilePath);
++  ok(true, "Should have read the heap snapshot");
++
++  let time = yield client.getCreationTime("/not/a/real/path", {
++    breakdown: BREAKDOWN
++  });
++  equal(time, null, "getCreationTime returns `null` when snapshot does not exist");
++
++  time = yield client.getCreationTime(snapshotFilePath, {
++    breakdown: BREAKDOWN
++  });
++  ok(time >= start, "creation time occurred after start");
++  ok(time <= end, "creation time occurred before end");
++
++  client.destroy();
++});
+diff --git a/devtools/shared/heapsnapshot/tests/unit/xpcshell.ini b/devtools/shared/heapsnapshot/tests/unit/xpcshell.ini
+index 5e7928d..e298f34 100644
+--- a/devtools/shared/heapsnapshot/tests/unit/xpcshell.ini
++++ b/devtools/shared/heapsnapshot/tests/unit/xpcshell.ini
+@@ -18,16 +18,17 @@ support-files =
+ [test_census_diff_06.js]
+ [test_census-tree-node-01.js]
+ [test_census-tree-node-02.js]
+ [test_census-tree-node-03.js]
+ [test_census-tree-node-04.js]
+ [test_census-tree-node-05.js]
+ [test_census-tree-node-06.js]
+ [test_census-tree-node-07.js]
++[test_HeapAnalyses_getCreationTime_01.js]
+ [test_HeapAnalyses_readHeapSnapshot_01.js]
+ [test_HeapAnalyses_takeCensusDiff_01.js]
+ [test_HeapAnalyses_takeCensusDiff_02.js]
+ [test_HeapAnalyses_takeCensus_01.js]
+ [test_HeapAnalyses_takeCensus_02.js]
+ [test_HeapAnalyses_takeCensus_03.js]
+ [test_HeapAnalyses_takeCensus_04.js]
+ [test_HeapAnalyses_takeCensus_05.js]
 -- 
 2.3.1
 
