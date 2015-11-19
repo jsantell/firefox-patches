@@ -1,0 +1,746 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 11 Nov 2015 09:52:36 -0800
+Subject: Bug 1215953 - Add feature for importing heap snapshots into the memory tool. r=fitzgen,ntim
+
+diff --git a/devtools/client/locales/en-US/memory.properties b/devtools/client/locales/en-US/memory.properties
+index 61f6a45..0b120dd 100644
+--- a/devtools/client/locales/en-US/memory.properties
++++ b/devtools/client/locales/en-US/memory.properties
+@@ -27,16 +27,20 @@ memory.tooltip=Memory
+ # LOCALIZATION NOTE (snapshot.io.save): The label for the link that saves a snapshot
+ # to disk.
+ snapshot.io.save=Save
+ 
+ # LOCALIZATION NOTE (snapshot.io.save.window): The title for the window displayed when
+ # saving a snapshot to disk.
+ snapshot.io.save.window=Save Heap Snapshot
+ 
++# LOCALIZATION NOTE (snapshot.io.import.window): The title for the window displayed when
++# importing a snapshot form disk.
++snapshot.io.import.window=Import Heap Snapshot
++
+ # LOCALIZATION NOTE (snapshot.io.filter): The title for the filter used to
+ # filter file types (*.fxsnapshot)
+ snapshot.io.filter=Firefox Heap Snapshots
+ 
+ # LOCALIZATION NOTE (aggregate.mb): The label annotating the number of bytes (in megabytes)
+ # in a snapshot. %S represents the value, rounded to 2 decimal points.
+ aggregate.mb=%S MB
+ 
+@@ -55,16 +59,20 @@ checkbox.recordAllocationStacks=Record allocation stacks
+ # LOCALIZATION NOTE (toolbar.breakdownBy): The label describing the select menu
+ # options of the breakdown options.
+ toolbar.breakdownBy=Group by:
+ 
+ # LOCALIZATION NOTE (take-snapshot): The label describing the button that initiates
+ # taking a snapshot, either as the main label, or a tooltip.
+ take-snapshot=Take snapshot
+ 
++# LOCALIZATION NOTE (import-snapshot): The label describing the button that initiates
++# importing a snapshot.
++import-snapshot=Import...
++
+ # LOCALIZATION NOTE (filter.placeholder): The placeholder text used for the
+ # memory tool's filter search box.
+ filter.placeholder=Filter
+ 
+ # LOCALIZATION NOTE (viewsourceindebugger): The label for the tooltip when hovering over
+ # a link in the heap tree to jump to the debugger view.
+ # %S represents the URL to match in the debugger.
+ viewsourceindebugger=View source in Debugger → %S
+@@ -84,16 +92,21 @@ tree-item.root=(root)
+ 
+ # LOCALIZATION NOTE (tree-item.percent): A percent of bytes or count displayed in the tree view.
+ tree-item.percent=%S%
+ 
+ # LOCALIZATION NOTE (snapshot.state.saving.full): The label describing the snapshot
+ # state SAVING, used in the main heap view.
+ snapshot.state.saving.full=Saving snapshot…
+ 
++# LOCALIZATION NOTE (snapshot.state.importing.full): The label describing the snapshot
++# state IMPORTING, used in the main heap view. %S represents the basename of the file
++# imported.
++snapshot.state.importing.full=Importing %S…
++
+ # LOCALIZATION NOTE (snapshot.state.reading.full): The label describing the snapshot
+ # state READING, and SAVED, due to these states being combined visually, used
+ # in the main heap view.
+ snapshot.state.reading.full=Reading snapshot…
+ 
+ # LOCALIZATION NOTE (snapshot.state.saving-census.full): The label describing the snapshot
+ # state SAVING, used in the main heap view.
+ snapshot.state.saving-census.full=Saving census…
+@@ -101,16 +114,20 @@ snapshot.state.saving-census.full=Saving census…
+ # LOCALIZATION NOTE (snapshot.state.error.full): The label describing the snapshot
+ # state ERROR, used in the main heap view.
+ snapshot.state.error.full=There was an error processing this snapshot.
+ 
+ # LOCALIZATION NOTE (snapshot.state.saving): The label describing the snapshot
+ # state SAVING, used in the snapshot list view
+ snapshot.state.saving=Saving snapshot…
+ 
++# LOCALIZATION NOTE (snapshot.state.importing): The label describing the snapshot
++# state IMPORTING, used in the snapshot list view
++snapshot.state.importing=Importing snapshot…
++
+ # LOCALIZATION NOTE (snapshot.state.reading): The label describing the snapshot
+ # state READING, and SAVED, due to these states being combined visually, used
+ # in the snapshot list view.
+ snapshot.state.reading=Reading snapshot…
+ 
+ # LOCALIZATION NOTE (snapshot.state.saving-census): The label describing the snapshot
+ # state SAVING, used in snapshot list view.
+ snapshot.state.saving-census=Saving census…
+diff --git a/devtools/client/memory/actions/io.js b/devtools/client/memory/actions/io.js
+index 89bea8c..0b912c2 100644
+--- a/devtools/client/memory/actions/io.js
++++ b/devtools/client/memory/actions/io.js
+@@ -1,25 +1,27 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const { assert } = require("devtools/shared/DevToolsUtils");
++const { reportException, assert } = require("devtools/shared/DevToolsUtils");
+ const { snapshotState: states, actions } = require("../constants");
+-const { L10N, openFilePicker } = require("../utils");
++const { L10N, openFilePicker, createSnapshot } = require("../utils");
++const { readSnapshot, takeCensus, selectSnapshot } = require("./snapshot");
+ const { OS } = require("resource://gre/modules/osfile.jsm");
+ const VALID_EXPORT_STATES = [states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
+ 
+ exports.pickFileAndExportSnapshot = function (snapshot) {
+   return function* (dispatch, getState) {
+     let outputFile = yield openFilePicker({
+       title: L10N.getFormatStr("snapshot.io.save.window"),
+       defaultName: OS.Path.basename(snapshot.path),
+-      filters: [[L10N.getFormatStr("snapshot.io.filter"), "*.fxsnapshot"]]
++      filters: [[L10N.getFormatStr("snapshot.io.filter"), "*.fxsnapshot"]],
++      mode: "save",
+     });
+ 
+     if (!outputFile) {
+       return;
+     }
+ 
+     yield dispatch(exportSnapshot(snapshot, outputFile.path));
+   };
+@@ -38,8 +40,48 @@ const exportSnapshot = exports.exportSnapshot = function (snapshot, dest) {
+     } catch (error) {
+       reportException("exportSnapshot", error);
+       dispatch({ type: actions.EXPORT_SNAPSHOT_ERROR, snapshot, error });
+     }
+ 
+     dispatch({ type: actions.EXPORT_SNAPSHOT_END, snapshot });
+   };
+ };
++
++const pickFileAndImportSnapshotAndCensus = exports.pickFileAndImportSnapshotAndCensus = function (heapWorker) {
++  return function* (dispatch, getState) {
++    let input = yield openFilePicker({
++      title: L10N.getFormatStr("snapshot.io.import.window"),
++      filters: [[L10N.getFormatStr("snapshot.io.filter"), "*.fxsnapshot"]],
++      mode: "open",
++    });
++
++    if (!input) {
++      return;
++    }
++
++    yield dispatch(importSnapshotAndCensus(heapWorker, input.path));
++  };
++};
++
++const importSnapshotAndCensus = exports.importSnapshotAndCensus = function (heapWorker, path) {
++  return function* (dispatch, getState) {
++    let snapshot = createSnapshot();
++
++    // Override the defaults for a new snapshot
++    snapshot.path = path;
++    snapshot.state = states.IMPORTING;
++    snapshot.imported = true;
++
++    dispatch({ type: actions.IMPORT_SNAPSHOT_START, snapshot });
++    dispatch(selectSnapshot(snapshot));
++
++    try {
++      yield dispatch(readSnapshot(heapWorker, snapshot));
++      yield dispatch(takeCensus(heapWorker, snapshot));
++    } catch (error) {
++      reportException("importSnapshot", error);
++      dispatch({ type: actions.IMPORT_SNAPSHOT_ERROR, error, snapshot });
++    }
++
++    dispatch({ type: actions.IMPORT_SNAPSHOT_END, snapshot });
++  };
++};
+diff --git a/devtools/client/memory/actions/snapshot.js b/devtools/client/memory/actions/snapshot.js
+index a8263df..48991d2 100644
+--- a/devtools/client/memory/actions/snapshot.js
++++ b/devtools/client/memory/actions/snapshot.js
+@@ -67,17 +67,17 @@ const takeSnapshot = exports.takeSnapshot = function (front) {
+  * Reads a snapshot into memory; necessary to do before taking
+  * a census on the snapshot. May only be called once per snapshot.
+  *
+  * @param {HeapAnalysesClient}
+  * @param {Snapshot} snapshot,
+  */
+ const readSnapshot = exports.readSnapshot = function readSnapshot (heapWorker, snapshot) {
+   return function *(dispatch, getState) {
+-    assert(snapshot.state === states.SAVED,
++    assert([states.SAVED, states.IMPORTING].includes(snapshot.state),
+       `Should only read a snapshot once. Found snapshot in state ${snapshot.state}`);
+ 
+     let creationTime;
+ 
+     dispatch({ type: actions.READ_SNAPSHOT_START, snapshot });
+     try {
+       yield heapWorker.readHeapSnapshot(snapshot.path);
+       creationTime = yield heapWorker.getCreationTime(snapshot.path);
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+index 8781641..fa539df 100644
+--- a/devtools/client/memory/app.js
++++ b/devtools/client/memory/app.js
+@@ -4,17 +4,17 @@
+ 
+ const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { connect } = require("devtools/client/shared/vendor/react-redux");
+ const { breakdowns } = require("./constants");
+ const { toggleRecordingAllocationStacks } = require("./actions/allocations");
+ const { setBreakdownAndRefresh } = require("./actions/breakdown");
+ const { toggleInvertedAndRefresh } = require("./actions/inverted");
+ const { setFilterStringAndRefresh } = require("./actions/filter");
+-const { pickFileAndExportSnapshot } = require("./actions/io");
++const { pickFileAndExportSnapshot, pickFileAndImportSnapshotAndCensus } = require("./actions/io");
+ const { selectSnapshotAndRefresh, takeSnapshotAndCensus } = require("./actions/snapshot");
+ const { breakdownNameToSpec, getBreakdownDisplayData } = require("./utils");
+ const Toolbar = createFactory(require("./components/toolbar"));
+ const List = createFactory(require("./components/list"));
+ const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
+ const HeapView = createFactory(require("./components/heap"));
+ const { app: appModel } = require("./models");
+ 
+@@ -56,16 +56,17 @@ const App = createClass({
+ 
+     let selectedSnapshot = snapshots.find(s => s.selected);
+ 
+     return (
+       dom.div({ id: "memory-tool" },
+ 
+         Toolbar({
+           breakdowns: getBreakdownDisplayData(),
++          onImportClick: () => dispatch(pickFileAndImportSnapshotAndCensus(heapWorker)),
+           onTakeSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker)),
+           onBreakdownChange: breakdown =>
+             dispatch(setBreakdownAndRefresh(heapWorker, breakdownNameToSpec(breakdown))),
+           onToggleRecordAllocationStacks: () =>
+             dispatch(toggleRecordingAllocationStacks(front)),
+           allocations,
+           inverted,
+           onToggleInverted: () =>
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index ec5a924..8584605 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -108,16 +108,17 @@ const Heap = module.exports = createClass({
+         }, L10N.getStr("take-snapshot"))];
+         break;
+       case states.ERROR:
+         content = [
+           dom.span({ className: "snapshot-status error" }, statusText),
+           dom.pre({}, safeErrorString(snapshot.error))
+         ];
+         break;
++      case states.IMPORTING:
+       case states.SAVING:
+       case states.SAVED:
+       case states.READING:
+       case states.READ:
+       case states.SAVING_CENSUS:
+         content = [dom.span({ className: "snapshot-status devtools-throbber" }, statusText)];
+         break;
+       case states.SAVED_CENSUS:
+diff --git a/devtools/client/memory/components/toolbar.js b/devtools/client/memory/components/toolbar.js
+index 52d2d7d..17d37b2 100644
+--- a/devtools/client/memory/components/toolbar.js
++++ b/devtools/client/memory/components/toolbar.js
+@@ -9,28 +9,30 @@ const models = require("../models");
+ const Toolbar = module.exports = createClass({
+   displayName: "toolbar",
+   propTypes: {
+     breakdowns: PropTypes.arrayOf(PropTypes.shape({
+       name: PropTypes.string.isRequired,
+       displayName: PropTypes.string.isRequired,
+     })).isRequired,
+     onTakeSnapshotClick: PropTypes.func.isRequired,
++    onImportClick: PropTypes.func.isRequired,
+     onBreakdownChange: PropTypes.func.isRequired,
+     onToggleRecordAllocationStacks: PropTypes.func.isRequired,
+     allocations: models.allocations,
+     onToggleInverted: PropTypes.func.isRequired,
+     inverted: PropTypes.bool.isRequired,
+     filterString: PropTypes.string,
+     setFilterString: PropTypes.func.isRequired,
+   },
+ 
+   render() {
+     let {
+       onTakeSnapshotClick,
++      onImportClick,
+       onBreakdownChange,
+       breakdowns,
+       onToggleRecordAllocationStacks,
+       allocations,
+       onToggleInverted,
+       inverted,
+       filterString,
+       setFilterString
+@@ -40,16 +42,24 @@ const Toolbar = module.exports = createClass({
+       dom.div({ className: "devtools-toolbar" },
+         dom.button({
+           id: "take-snapshot",
+           className: `take-snapshot devtools-button`,
+           onClick: onTakeSnapshotClick,
+           title: L10N.getStr("take-snapshot")
+         }),
+ 
++        dom.button({
++          id: "import-snapshot",
++          className: "devtools-toolbarbutton import-snapshot devtools-button",
++          onClick: onImportClick,
++          title: L10N.getStr("import-snapshot"),
++          "data-text-only": true,
++        }, L10N.getStr("import-snapshot")),
++
+         dom.div({ className: "toolbar-group" },
+           dom.label({ className: "breakdown-by" },
+             L10N.getStr("toolbar.breakdownBy"),
+             dom.select({
+               id: "select-breakdown",
+               className: `select-breakdown`,
+               onChange: e => onBreakdownChange(e.target.value),
+             }, ...breakdowns.map(({ name, displayName }) => dom.option({ key: name, value: name }, displayName)))
+diff --git a/devtools/client/memory/constants.js b/devtools/client/memory/constants.js
+index 3e23301..40a4b5a 100644
+--- a/devtools/client/memory/constants.js
++++ b/devtools/client/memory/constants.js
+@@ -24,16 +24,22 @@ actions.TOGGLE_RECORD_ALLOCATION_STACKS_START = "toggle-record-allocation-stacks
+ actions.TOGGLE_RECORD_ALLOCATION_STACKS_END = "toggle-record-allocation-stacks-end";
+ 
+ // When a heap snapshot is being saved to a user-specified
+ // location on disk.
+ actions.EXPORT_SNAPSHOT_START = "export-snapshot-start";
+ actions.EXPORT_SNAPSHOT_END = "export-snapshot-end";
+ actions.EXPORT_SNAPSHOT_ERROR = "export-snapshot-error";
+ 
++// When a heap snapshot is being read from a user selected file,
++// and represents the entire state until the census is available.
++actions.IMPORT_SNAPSHOT_START = "import-snapshot-start";
++actions.IMPORT_SNAPSHOT_END = "import-snapshot-end";
++actions.IMPORT_SNAPSHOT_ERROR = "import-snapshot-error";
++
+ // Fired by UI to select a snapshot to view.
+ actions.SELECT_SNAPSHOT = "select-snapshot";
+ 
+ // Fired to toggle tree inversion on or off.
+ actions.TOGGLE_INVERTED = "toggle-inverted";
+ 
+ // Fired to set a new breakdown.
+ actions.SET_BREAKDOWN = "set-breakdown";
+@@ -88,22 +94,23 @@ const breakdowns = exports.breakdowns = {
+ };
+ 
+ const snapshotState = exports.snapshotState = {};
+ 
+ /**
+  * Various states a snapshot can be in.
+  * An FSM describing snapshot states:
+  *
+- *     SAVING -> SAVED -> READING -> READ   <-  <-  <- SAVED_CENSUS
+- *                                        ↘             ↗
+- *                                         SAVING_CENSUS
++ *     SAVING -> SAVED    -> READING -> READ     SAVED_CENSUS
++ *               IMPORTING ↗                ↘     ↑  ↓
++ *                                            SAVING_CENSUS
+  *
+  * Any of these states may go to the ERROR state, from which they can never
+  * leave (mwah ha ha ha!)
+  */
+ snapshotState.ERROR = "snapshot-state-error";
++snapshotState.IMPORTING = "snapshot-state-importing";
+ snapshotState.SAVING = "snapshot-state-saving";
+ snapshotState.SAVED = "snapshot-state-saved";
+ snapshotState.READING = "snapshot-state-reading";
+ snapshotState.READ = "snapshot-state-read";
+ snapshotState.SAVING_CENSUS = "snapshot-state-saving-census";
+ snapshotState.SAVED_CENSUS = "snapshot-state-saved-census";
+diff --git a/devtools/client/memory/models.js b/devtools/client/memory/models.js
+index 707814c..0989ebc 100644
+--- a/devtools/client/memory/models.js
++++ b/devtools/client/memory/models.js
+@@ -34,23 +34,25 @@ let snapshotModel = exports.snapshot = PropTypes.shape({
+   breakdown: breakdownModel,
+   // Whether the currently cached census tree is inverted or not.
+   inverted: PropTypes.bool,
+   // If present, the currently cached census's filter string used for pruning
+   // the tree items.
+   filter: PropTypes.string,
+   // If an error was thrown while processing this snapshot, the `Error` instance is attached here.
+   error: PropTypes.object,
++  // Boolean indicating whether or not this snapshot was imported.
++  imported: PropTypes.bool.isRequired,
+   // The creation time of the snapshot; required after the snapshot has been read.
+   creationTime: PropTypes.number,
+   // The current state the snapshot is in.
+   // @see ./constants.js
+   state: function (snapshot, propName) {
+     let current = snapshot.state;
+-    let shouldHavePath = [states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
++    let shouldHavePath = [states.IMPORTING, states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
+     let shouldHaveCreationTime = [states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
+     let shouldHaveCensus = [states.SAVED_CENSUS];
+ 
+     if (!stateKeys.includes(current)) {
+       throw new Error(`Snapshot state must be one of ${stateKeys}.`);
+     }
+     if (shouldHavePath.includes(current) && !snapshot.path) {
+       throw new Error(`Snapshots in state ${current} must have a snapshot path.`);
+diff --git a/devtools/client/memory/reducers/snapshots.js b/devtools/client/memory/reducers/snapshots.js
+index c16157d..0b18cbb 100644
+--- a/devtools/client/memory/reducers/snapshots.js
++++ b/devtools/client/memory/reducers/snapshots.js
+@@ -23,16 +23,18 @@ handlers[actions.TAKE_SNAPSHOT_END] = function (snapshots, action) {
+     if (snapshot.id === action.snapshot.id) {
+       snapshot.state = states.SAVED;
+       snapshot.path = action.path;
+     }
+     return snapshot;
+   });
+ };
+ 
++handlers[actions.IMPORT_SNAPSHOT_START] = handlers[actions.TAKE_SNAPSHOT_START];
++
+ handlers[actions.READ_SNAPSHOT_START] = function (snapshots, action) {
+   let snapshot = getSnapshot(snapshots, action.snapshot);
+   snapshot.state = states.READING;
+   return [...snapshots];
+ };
+ 
+ handlers[actions.READ_SNAPSHOT_END] = function (snapshots, action) {
+   let snapshot = getSnapshot(snapshots, action.snapshot);
+diff --git a/devtools/client/memory/test/unit/test_action-import-snapshot-and-census.js b/devtools/client/memory/test/unit/test_action-import-snapshot-and-census.js
+new file mode 100644
+index 0000000..ead012e
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_action-import-snapshot-and-census.js
+@@ -0,0 +1,97 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests the task creator `importSnapshotAndCensus()` for the whole flow of
++ * importing a snapshot, and its sub-actions.
++ */
++
++let { actions, snapshotState: states } = require("devtools/client/memory/constants");
++let { breakdownEquals } = require("devtools/client/memory/utils");
++let { exportSnapshot, importSnapshotAndCensus } = require("devtools/client/memory/actions/io");
++let { takeSnapshotAndCensus } = require("devtools/client/memory/actions/snapshot");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let front = new StubbedMemoryFront();
++  let heapWorker = new HeapAnalysesClient();
++  yield front.attach();
++  let store = Store();
++  let { subscribe, dispatch, getState } = store;
++
++  /**
++   * Export a snapshot first
++   */
++  let file = FileUtils.getFile("TmpD", ["tmp.fxsnapshot"]);
++  file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, FileUtils.PERMS_FILE);
++  let destPath = file.path;
++  let stat = yield OS.File.stat(destPath);
++  ok(stat.size === 0, "new file is 0 bytes at start");
++
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS]);
++
++  let exportEvents = Promise.all([
++    waitUntilAction(store, actions.EXPORT_SNAPSHOT_START),
++    waitUntilAction(store, actions.EXPORT_SNAPSHOT_END)
++  ]);
++  dispatch(exportSnapshot(getState().snapshots[0], destPath));
++  yield exportEvents;
++
++  /**
++   * Now import our freshly exported snapshot
++   */
++  let i = 0;
++  let expected = ["IMPORTING", "READING", "READ", "SAVING_CENSUS", "SAVED_CENSUS"];
++  let expectStates = () => {
++    let snapshot = getState().snapshots[1];
++    if (!snapshot) {
++      return;
++    }
++    let isCorrectState = snapshot.state === states[expected[i]];
++    if (isCorrectState) {
++      ok(true, `Found expected state ${expected[i]}`);
++      i++;
++    }
++  };
++
++  let unsubscribe = subscribe(expectStates);
++  dispatch(importSnapshotAndCensus(heapWorker, destPath));
++
++  yield waitUntilState(store, () => i === 5);
++  unsubscribe();
++  equal(i, 5, "importSnapshotAndCensus() produces the correct sequence of states in a snapshot");
++  equal(getState().snapshots[1].state, states.SAVED_CENSUS, "imported snapshot is in SAVED_CENSUS state");
++  ok(getState().snapshots[1].selected, "imported snapshot is selected");
++
++  /**
++   * Check snapshot data
++   */
++  let snapshot1 = getState().snapshots[0];
++  let snapshot2 = getState().snapshots[1];
++
++  ok(breakdownEquals(snapshot1.breakdown, snapshot2.breakdown),
++    "imported snapshot has correct breakdown");
++
++  // Clone the census data so we can destructively remove the ID/parents to compare
++  // equal census data
++  let census1 = stripUnique(JSON.parse(JSON.stringify(snapshot1.census)));
++  let census2 = stripUnique(JSON.parse(JSON.stringify(snapshot2.census)));
++
++  equal(JSON.stringify(census1), JSON.stringify(census2), "Imported snapshot has correct census");
++
++  function stripUnique (obj) {
++    let children = obj.children || [];
++    for (let child of children) {
++      delete child.id;
++      delete child.parent;
++      stripUnique(child);
++    }
++    delete obj.id;
++    delete obj.parent;
++    return obj;
++  }
++});
+diff --git a/devtools/client/memory/test/unit/xpcshell.ini b/devtools/client/memory/test/unit/xpcshell.ini
+index 897db97..d0f3ed36 100644
+--- a/devtools/client/memory/test/unit/xpcshell.ini
++++ b/devtools/client/memory/test/unit/xpcshell.ini
+@@ -4,16 +4,17 @@ head = head.js
+ tail =
+ firefox-appdir = browser
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
+ [test_action-export-snapshot.js]
+ [test_action-filter-01.js]
+ [test_action-filter-02.js]
+ [test_action-filter-03.js]
++[test_action-import-snapshot-and-census.js]
+ [test_action-select-snapshot.js]
+ [test_action-set-breakdown.js]
+ [test_action-set-breakdown-and-refresh-01.js]
+ [test_action-set-breakdown-and-refresh-02.js]
+ [test_action-take-census.js]
+ [test_action-take-snapshot.js]
+ [test_action-take-snapshot-and-census.js]
+ [test_action-toggle-inverted.js]
+diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
+index f95e4c3..9f18900 100644
+--- a/devtools/client/memory/utils.js
++++ b/devtools/client/memory/utils.js
+@@ -4,16 +4,17 @@
+ 
+ const { Cu, Cc, Ci } = require("chrome");
+ 
+ Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ const STRINGS_URI = "chrome://devtools/locale/memory.properties"
+ const L10N = exports.L10N = new ViewHelpers.L10N(STRINGS_URI);
+ 
+ const { URL } = require("sdk/url");
++const { OS } = require("resource://gre/modules/osfile.jsm");
+ const { assert } = require("devtools/shared/DevToolsUtils");
+ const { Preferences } = require("resource://gre/modules/Preferences.jsm");
+ const CUSTOM_BREAKDOWN_PREF = "devtools.memory.custom-breakdowns";
+ const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ const { snapshotState: states, breakdowns } = require("./constants");
+ 
+ /**
+  * Takes a snapshot object and returns the
+@@ -22,16 +23,21 @@ const { snapshotState: states, breakdowns } = require("./constants");
+  * @param {Snapshot} snapshot
+  * @return {String}
+  */
+ exports.getSnapshotTitle = function (snapshot) {
+   if (!snapshot.creationTime) {
+     return L10N.getStr("snapshot-title.loading");
+   }
+ 
++  if (snapshot.imported) {
++    // Strip out the extension if it's the expected ".fxsnapshot"
++    return OS.Path.basename(snapshot.path.replace(/\.fxsnapshot$/, ""));
++  }
++
+   let date = new Date(snapshot.creationTime / 1000);
+   return date.toLocaleTimeString(void 0, {
+     year: "2-digit",
+     month: "2-digit",
+     day: "2-digit",
+     hour12: false
+   });
+ };
+@@ -119,16 +125,18 @@ exports.getSnapshotStatusText = function (snapshot) {
+   assert((snapshot || {}).state,
+     `Snapshot must have expected state, found ${(snapshot || {}).state}.`);
+ 
+   switch (snapshot.state) {
+     case states.ERROR:
+       return L10N.getStr("snapshot.state.error");
+     case states.SAVING:
+       return L10N.getStr("snapshot.state.saving");
++    case states.IMPORTING:
++      return L10N.getStr("snapshot.state.importing");
+     case states.SAVED:
+     case states.READING:
+       return L10N.getStr("snapshot.state.reading");
+     case states.SAVING_CENSUS:
+       return L10N.getStr("snapshot.state.saving-census");
+     // Both READ and SAVED_CENSUS state do not have any message
+     // to show as other content will be displayed.
+     case states.READ:
+@@ -150,16 +158,18 @@ exports.getSnapshotStatusText = function (snapshot) {
+ exports.getSnapshotStatusTextFull = function (snapshot) {
+   assert((snapshot || {}).state,
+     `Snapshot must have expected state, found ${(snapshot || {}).state}.`);
+   switch (snapshot.state) {
+     case states.ERROR:
+       return L10N.getStr("snapshot.state.error.full");
+     case states.SAVING:
+       return L10N.getStr("snapshot.state.saving.full");
++    case states.IMPORTING:
++      return L10N.getFormatStr("snapshot.state.importing", OS.Path.basename(snapshot.path));
+     case states.SAVED:
+     case states.READING:
+       return L10N.getStr("snapshot.state.reading.full");
+     case states.SAVING_CENSUS:
+       return L10N.getStr("snapshot.state.saving-census.full");
+     // Both READ and SAVED_CENSUS state do not have any full message
+     // to show as other content will be displayed.
+     case states.READ:
+@@ -193,16 +203,18 @@ exports.getSnapshot = function getSnapshot (snapshots, snapshot) {
+ let INC_ID = 0;
+ exports.createSnapshot = function createSnapshot () {
+   let id = ++INC_ID;
+   return {
+     id,
+     state: states.SAVING,
+     census: null,
+     path: null,
++    imported: false,
++    selected: false,
+   };
+ };
+ 
+ /**
+  * Takes two objects and compares them deeply, returning
+  * a boolean indicating if they're equal or not. Used for breakdown
+  * comparison.
+  *
+@@ -322,22 +334,31 @@ exports.parseSource = function (source) {
+  * @param {String} .title
+  *        The title displayed in the file picker window.
+  * @param {Array<Array<String>>} .filters
+  *        An array of filters to display in the file picker. Each filter in the array
+  *        is a duple of two strings, one a name for the filter, and one the filter itself
+  *        (like "*.json").
+  * @param {String} .defaultName
+  *        The default name chosen by the file picker window.
++ * @param {String} .mode
++ *        The mode that this filepicker should open in. Can be "open" or "save".
+  * @return {Promise<?nsILocalFile>}
+  *        The file selected by the user, or null, if cancelled.
+  */
+-exports.openFilePicker = function({ title, filters, defaultName }) {
++exports.openFilePicker = function({ title, filters, defaultName, mode }) {
++  mode = mode === "save" ? Ci.nsIFilePicker.modeSave :
++         mode === "open" ? Ci.nsIFilePicker.modeOpen : null;
++
++  if (mode == void 0) {
++    throw new Error("No valid mode specified for nsIFilePicker.");
++  }
++
+   let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+-  fp.init(window, title, Ci.nsIFilePicker.modeSave);
++  fp.init(window, title, mode);
+ 
+   for (let filter of (filters || [])) {
+     fp.appendFilter(filter[0], filter[1]);
+   }
+   fp.defaultString = defaultName;
+ 
+   return new Promise(resolve => {
+     fp.open({
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index 19f0ba6..cd82ab5 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -59,19 +59,20 @@ html, body, #app, #memory-tool {
+    * and aligned vertically in the middle of the container.
+    */
+   display: flex;
+   align-items: center;
+   flex: 1;
+   /**
+    * We want this to be exactly at a --sidebar-width distance from the
+    * toolbar's start boundary. A .devtools-toolbar has a 3px start padding
+-   * and the preceeding .take-snapshot button is exactly 32px.
++   * and the preceeding .take-snapshot button is exactly 32px, and the import
++   * button 78px.
+    */
+-  margin-inline-start: calc(var(--sidebar-width) - 3px - 32px);
++  margin-inline-start: calc(var(--sidebar-width) - 3px - 32px - 78px);
+   border-inline-start: 1px solid var(--theme-splitter-color);
+   padding-inline-start: 5px;
+ }
+ 
+ .devtools-toolbar > .toolbar-group > label {
+   /**
+    * Flex: contains form controls and text, which need to be laid out
+    * horizontally, vertically aligned in the middle of the container.
+@@ -91,16 +92,24 @@ html, body, #app, #memory-tool {
+   background-position: 0 center;
+ }
+ @media (min-resolution: 1.1dppx) {
+   .devtools-toolbar > .devtools-button.take-snapshot::before {
+     background-image: url(images/command-screenshot@2x.png);
+   }
+ }
+ 
++/**
++ * Due to toolbar styles of `.devtools-toolbarbutton:not([label])` which overrides
++ * .devtools-toolbarbutton's min-width of 78px, reset the min-width.
++ */
++#import-snapshot {
++  min-width: 78px;
++}
++
+ .spacer {
+   flex: 1;
+ }
+ 
+ /**
+  * TODO bug 1213100
+  * Once we figure out how to store invertable buttons (pseudo element like in
+  * this case?) we should add a .invertable class to handle this generally,
+-- 
+2.3.1
+

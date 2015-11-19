@@ -1,0 +1,353 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 19 Nov 2015 11:53:22 -0800
+Subject: Bug 1226319 - part 1 - Move the memory tool's tree component to shared to use for JIT view. r=fitzgen
+
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index 24e747f5..81ac380 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -1,15 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { DOM: dom, createClass, PropTypes, createFactory } = require("devtools/client/shared/vendor/react");
+ const { assert, safeErrorString } = require("devtools/shared/DevToolsUtils");
+-const Tree = createFactory(require("./tree"));
++const Tree = createFactory(require("devtools/client/shared/components/tree"));
+ const TreeItem = createFactory(require("./tree-item"));
+ const { getStatusTextFull, L10N } = require("../utils");
+ const { snapshotState: states, diffingState } = require("../constants");
+ const { snapshot: snapshotModel, diffingModel } = require("../models");
+ // If HEAP_TREE_ROW_HEIGHT changes, be sure to change `var(--heap-tree-row-height)`
+ // in `devtools/client/themes/memory.css`
+ const HEAP_TREE_ROW_HEIGHT = 14;
+ 
+diff --git a/devtools/client/memory/components/moz.build b/devtools/client/memory/components/moz.build
+index 2078bca..11effad 100644
+--- a/devtools/client/memory/components/moz.build
++++ b/devtools/client/memory/components/moz.build
+@@ -5,12 +5,9 @@
+ 
+ DevToolsModules(
+     'frame.js',
+     'heap.js',
+     'list.js',
+     'snapshot-list-item.js',
+     'toolbar.js',
+     'tree-item.js',
+-    'tree.js',
+ )
+-
+-MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+diff --git a/devtools/client/performance/performance-controller.js b/devtools/client/performance/performance-controller.js
+index f44140b..c546500 100644
+--- a/devtools/client/performance/performance-controller.js
++++ b/devtools/client/performance/performance-controller.js
+@@ -1,15 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+-const { loader, require } = Cu.import("resource://devtools/shared/Loader.jsm", {});
++const BrowserLoaderModule = {};
++Cu.import("resource://devtools/client/shared/browser-loader.js", BrowserLoaderModule);
++const { require } = BrowserLoaderModule.BrowserLoader("resource://devtools/client/performance/", this);
++const { loader } = Cu.import("resource://devtools/shared/Loader.jsm", {});
+ 
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { Heritage, ViewHelpers, WidgetMethods } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ 
+ // Events emitted by various objects in the panel.
+ const EVENTS = require("devtools/client/performance/events");
+ Object.defineProperty(this, "EVENTS", {
+   value: EVENTS,
+diff --git a/devtools/client/shared/components/moz.build b/devtools/client/shared/components/moz.build
+new file mode 100644
+index 0000000..49ba5dc
+--- /dev/null
++++ b/devtools/client/shared/components/moz.build
+@@ -0,0 +1,11 @@
++# -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++DevToolsModules(
++    'tree.js',
++)
++
++MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+diff --git a/devtools/client/memory/components/test/mochitest/chrome.ini b/devtools/client/shared/components/test/mochitest/chrome.ini
+similarity index 100%
+rename from devtools/client/memory/components/test/mochitest/chrome.ini
+rename to devtools/client/shared/components/test/mochitest/chrome.ini
+diff --git a/devtools/client/memory/components/test/mochitest/head.js b/devtools/client/shared/components/test/mochitest/head.js
+similarity index 98%
+rename from devtools/client/memory/components/test/mochitest/head.js
+rename to devtools/client/shared/components/test/mochitest/head.js
+index 2ff5d95..2c12e59 100644
+--- a/devtools/client/memory/components/test/mochitest/head.js
++++ b/devtools/client/shared/components/test/mochitest/head.js
+@@ -23,19 +23,19 @@ var { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+ var { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
+ var { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.jsm", {});
+ var DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ var { BrowserLoader } = Cu.import("resource://devtools/client/shared/browser-loader.js", {});
+ var { TargetFactory } = require("devtools/client/framework/target");
+ var { Toolbox } = require("devtools/client/framework/toolbox");
+ 
+ DevToolsUtils.testing = true;
+-var { require: bRequire } = BrowserLoader("resource://devtools/client/memory/", this);
++var { require: bRequire } = BrowserLoader("resource://devtools/client/shared/", this);
+ 
+-var EXAMPLE_URL = "http://example.com/browser/browser/devtools/memory/test/";
++var EXAMPLE_URL = "http://example.com/browser/browser/devtools/shared/test/";
+ 
+ // Encoding of the following tree/forest:
+ //
+ // A
+ // |-- B
+ // |   |-- E
+ // |   |   |-- K
+ // |   |   `-- L
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_01.html b/devtools/client/shared/components/test/mochitest/test_tree_01.html
+similarity index 94%
+rename from devtools/client/memory/components/test/mochitest/test_tree_01.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_01.html
+index ed5312f..7abd0ef 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_01.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_01.html
+@@ -13,17 +13,17 @@ depth.
+ <body>
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ window.onload = Task.async(function* () {
+   try {
+     let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     let React = bRequire("devtools/client/shared/vendor/react");
+-    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    let Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+ 
+     ok(React, "Should get React");
+     ok(Tree, "Should get Tree");
+ 
+     const t = Tree(TEST_TREE_INTERFACE);
+     ok(t, "Should be able to create Tree instances");
+ 
+     const tree = ReactDOM.render(t, window.document.body);
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_02.html b/devtools/client/shared/components/test/mochitest/test_tree_02.html
+similarity index 93%
+rename from devtools/client/memory/components/test/mochitest/test_tree_02.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_02.html
+index b97ae1e..36f906e 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_02.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_02.html
+@@ -12,17 +12,17 @@ Test that collapsed subtrees aren't rendered.
+ <body>
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ window.onload = Task.async(function* () {
+   try {
+     let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     let React = bRequire("devtools/client/shared/vendor/react");
+-    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    let Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+ 
+     const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
+ 
+     yield setState(tree, {
+       expanded: new Set("MNO".split(""))
+     });
+ 
+     isRenderedTree(document.body.textContent, [
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_03.html b/devtools/client/shared/components/test/mochitest/test_tree_03.html
+similarity index 93%
+rename from devtools/client/memory/components/test/mochitest/test_tree_03.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_03.html
+index dda3df0d..a854703 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_03.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_03.html
+@@ -12,17 +12,17 @@ Test Tree's autoExpandDepth.
+ <body>
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ window.onload = Task.async(function* () {
+   try {
+     let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     let React = bRequire("devtools/client/shared/vendor/react");
+-    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    let Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+ 
+     const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
+ 
+     yield setProps(tree, {
+       autoExpandDepth: 1
+     });
+ 
+     isRenderedTree(document.body.textContent, [
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_04.html b/devtools/client/shared/components/test/mochitest/test_tree_04.html
+similarity index 94%
+rename from devtools/client/memory/components/test/mochitest/test_tree_04.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_04.html
+index 26ac889..2676158 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_04.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_04.html
+@@ -12,17 +12,17 @@ Test that we only render visible tree items.
+ <body>
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ window.onload = Task.async(function* () {
+   try {
+     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     const React = bRequire("devtools/client/shared/vendor/react");
+-    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+     const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
+ 
+     yield setState(tree, {
+       expanded: new Set("ABCDEFGHIJKLMNO".split("")),
+       height: 3,
+       scroll: 1
+     });
+ 
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_05.html b/devtools/client/shared/components/test/mochitest/test_tree_05.html
+similarity index 95%
+rename from devtools/client/memory/components/test/mochitest/test_tree_05.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_05.html
+index fc0a9f0..c49c776 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_05.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_05.html
+@@ -14,17 +14,17 @@ Test focusing with the Tree component.
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ 
+ window.onload = Task.async(function* () {
+   try {
+     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     const React = bRequire("devtools/client/shared/vendor/react");
+     const { Simulate } = React.addons.TestUtils;
+-    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+     const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
+ 
+     yield setState(tree, {
+       focused: "G",
+       expanded: new Set("ABCDEFGHIJKLMNO".split(""))
+     });
+ 
+     isRenderedTree(document.body.textContent, [
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_06.html b/devtools/client/shared/components/test/mochitest/test_tree_06.html
+similarity index 98%
+rename from devtools/client/memory/components/test/mochitest/test_tree_06.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_06.html
+index cbc92c0..26ad5e1 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_06.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_06.html
+@@ -13,17 +13,17 @@ Test keyboard navigation with the Tree component.
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ window.onload = Task.async(function* () {
+   try {
+     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     const React = bRequire("devtools/client/shared/vendor/react");
+     const { Simulate } = React.addons.TestUtils;
+-    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+     const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
+ 
+     yield setState(tree, {
+       expanded: new Set("ABCDEFGHIJKLMNO".split(""))
+     });
+ 
+     // UP ----------------------------------------------------------------------
+ 
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_07.html b/devtools/client/shared/components/test/mochitest/test_tree_07.html
+similarity index 95%
+rename from devtools/client/memory/components/test/mochitest/test_tree_07.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_07.html
+index 18c7ee3..70ed777 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_07.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_07.html
+@@ -13,17 +13,17 @@ Test that arrows get the open attribute when their item's children are expanded.
+ <body>
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ window.onload = Task.async(function* () {
+   try {
+     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     const React = bRequire("devtools/client/shared/vendor/react");
+-    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+     const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
+ 
+     yield setProps(tree, {
+       renderItem: (item, depth, focused, arrow) => {
+         return React.DOM.div(
+           {
+             id: item,
+             style: { marginLeft: depth * 16 + "px" }
+diff --git a/devtools/client/memory/components/test/mochitest/test_tree_08.html b/devtools/client/shared/components/test/mochitest/test_tree_08.html
+similarity index 94%
+rename from devtools/client/memory/components/test/mochitest/test_tree_08.html
+rename to devtools/client/shared/components/test/mochitest/test_tree_08.html
+index 9248ec3..0a13734 100644
+--- a/devtools/client/memory/components/test/mochitest/test_tree_08.html
++++ b/devtools/client/shared/components/test/mochitest/test_tree_08.html
+@@ -15,17 +15,17 @@ other inputs.
+ <pre id="test">
+ <script src="head.js" type="application/javascript;version=1.8"></script>
+ <script type="application/javascript;version=1.8">
+ window.onload = Task.async(function* () {
+   try {
+     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+     const React = bRequire("devtools/client/shared/vendor/react");
+     const { Simulate } = React.addons.TestUtils;
+-    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
++    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
+     const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
+ 
+     const input = document.createElement("input");
+     document.body.appendChild(input);
+ 
+     input.focus();
+     is(document.activeElement, input, "The text input should be focused.");
+ 
+diff --git a/devtools/client/memory/components/tree.js b/devtools/client/shared/components/tree.js
+similarity index 100%
+rename from devtools/client/memory/components/tree.js
+rename to devtools/client/shared/components/tree.js
+diff --git a/devtools/client/shared/moz.build b/devtools/client/shared/moz.build
+index 7f0f6af..b04bb16 100644
+--- a/devtools/client/shared/moz.build
++++ b/devtools/client/shared/moz.build
+@@ -3,16 +3,17 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ BROWSER_CHROME_MANIFESTS += ['test/browser.ini']
+ XPCSHELL_TESTS_MANIFESTS += ['test/unit/xpcshell.ini']
+ 
+ DIRS += [
++    'components',
+     'redux',
+     'vendor',
+     'widgets',
+ ]
+ 
+ DevToolsModules(
+     'AppCacheUtils.jsm',
+     'autocomplete-popup.js',
+-- 
+2.3.1
+

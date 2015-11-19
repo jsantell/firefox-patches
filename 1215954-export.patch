@@ -1,0 +1,646 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 5 Nov 2015 17:06:14 -0800
+Subject: Bug 1215954 - Add feature to save a heap snapshot from memory tool to disk. r=fitzgen,vp
+
+diff --git a/devtools/client/locales/en-US/memory.properties b/devtools/client/locales/en-US/memory.properties
+index e4dcde4..61f6a45 100644
+--- a/devtools/client/locales/en-US/memory.properties
++++ b/devtools/client/locales/en-US/memory.properties
+@@ -19,16 +19,28 @@ memory.label=Memory
+ # This is used as the label for the toolbox panel.
+ memory.panelLabel=Memory Panel
+ 
+ # LOCALIZATION NOTE (memory.tooltip):
+ # This string is displayed in the tooltip of the tab when the memory tool is
+ # displayed inside the developer tools window.
+ memory.tooltip=Memory
+ 
++# LOCALIZATION NOTE (snapshot.io.save): The label for the link that saves a snapshot
++# to disk.
++snapshot.io.save=Save
++
++# LOCALIZATION NOTE (snapshot.io.save.window): The title for the window displayed when
++# saving a snapshot to disk.
++snapshot.io.save.window=Save Heap Snapshot
++
++# LOCALIZATION NOTE (snapshot.io.filter): The title for the filter used to
++# filter file types (*.fxsnapshot)
++snapshot.io.filter=Firefox Heap Snapshots
++
+ # LOCALIZATION NOTE (aggregate.mb): The label annotating the number of bytes (in megabytes)
+ # in a snapshot. %S represents the value, rounded to 2 decimal points.
+ aggregate.mb=%S MB
+ 
+ # LOCALIZATION NOTE (snapshot-title.loading): The title for a snapshot before
+ # it has a creation time to display.
+ snapshot-title.loading=Processing…
+ 
+diff --git a/devtools/client/memory/actions/io.js b/devtools/client/memory/actions/io.js
+new file mode 100644
+index 0000000..89bea8c
+--- /dev/null
++++ b/devtools/client/memory/actions/io.js
+@@ -0,0 +1,45 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { assert } = require("devtools/shared/DevToolsUtils");
++const { snapshotState: states, actions } = require("../constants");
++const { L10N, openFilePicker } = require("../utils");
++const { OS } = require("resource://gre/modules/osfile.jsm");
++const VALID_EXPORT_STATES = [states.SAVED, states.READ, states.SAVING_CENSUS, states.SAVED_CENSUS];
++
++exports.pickFileAndExportSnapshot = function (snapshot) {
++  return function* (dispatch, getState) {
++    let outputFile = yield openFilePicker({
++      title: L10N.getFormatStr("snapshot.io.save.window"),
++      defaultName: OS.Path.basename(snapshot.path),
++      filters: [[L10N.getFormatStr("snapshot.io.filter"), "*.fxsnapshot"]]
++    });
++
++    if (!outputFile) {
++      return;
++    }
++
++    yield dispatch(exportSnapshot(snapshot, outputFile.path));
++  };
++};
++
++const exportSnapshot = exports.exportSnapshot = function (snapshot, dest) {
++  return function* (dispatch, getState) {
++
++    dispatch({ type: actions.EXPORT_SNAPSHOT_START, snapshot });
++
++    assert(VALID_EXPORT_STATES.includes(snapshot.state),
++      `Snapshot is in invalid state for exporting: ${snapshot.state}`);
++
++    try {
++      yield OS.File.copy(snapshot.path, dest);
++    } catch (error) {
++      reportException("exportSnapshot", error);
++      dispatch({ type: actions.EXPORT_SNAPSHOT_ERROR, snapshot, error });
++    }
++
++    dispatch({ type: actions.EXPORT_SNAPSHOT_END, snapshot });
++  };
++};
+diff --git a/devtools/client/memory/actions/moz.build b/devtools/client/memory/actions/moz.build
+index 1fb9f95..83ca635 100644
+--- a/devtools/client/memory/actions/moz.build
++++ b/devtools/client/memory/actions/moz.build
+@@ -3,10 +3,11 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+     'allocations.js',
+     'breakdown.js',
+     'filter.js',
+     'inverted.js',
++    'io.js',
+     'snapshot.js',
+ )
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+index 454153d..8781641 100644
+--- a/devtools/client/memory/app.js
++++ b/devtools/client/memory/app.js
+@@ -4,16 +4,17 @@
+ 
+ const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { connect } = require("devtools/client/shared/vendor/react-redux");
+ const { breakdowns } = require("./constants");
+ const { toggleRecordingAllocationStacks } = require("./actions/allocations");
+ const { setBreakdownAndRefresh } = require("./actions/breakdown");
+ const { toggleInvertedAndRefresh } = require("./actions/inverted");
+ const { setFilterStringAndRefresh } = require("./actions/filter");
++const { pickFileAndExportSnapshot } = require("./actions/io");
+ const { selectSnapshotAndRefresh, takeSnapshotAndCensus } = require("./actions/snapshot");
+ const { breakdownNameToSpec, getBreakdownDisplayData } = require("./utils");
+ const Toolbar = createFactory(require("./components/toolbar"));
+ const List = createFactory(require("./components/list"));
+ const SnapshotListItem = createFactory(require("./components/snapshot-list-item"));
+ const HeapView = createFactory(require("./components/heap"));
+ const { app: appModel } = require("./models");
+ 
+@@ -73,17 +74,18 @@ const App = createClass({
+           setFilterString: filterString =>
+             dispatch(setFilterStringAndRefresh(filterString, heapWorker)),
+         }),
+ 
+         dom.div({ id: "memory-tool-container" },
+           List({
+             itemComponent: SnapshotListItem,
+             items: snapshots,
+-            onClick: snapshot => dispatch(selectSnapshotAndRefresh(heapWorker, snapshot))
++            onClick: snapshot => dispatch(selectSnapshotAndRefresh(heapWorker, snapshot)),
++            onSave: snapshot => dispatch(pickFileAndExportSnapshot(snapshot))
+           }),
+ 
+           HeapView({
+             snapshot: selectedSnapshot,
+             onSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker)),
+             toolbox
+           })
+         )
+diff --git a/devtools/client/memory/components/list.js b/devtools/client/memory/components/list.js
+index ee78f70..cbb2f0c 100644
+--- a/devtools/client/memory/components/list.js
++++ b/devtools/client/memory/components/list.js
+@@ -18,15 +18,15 @@ const List = module.exports = createClass({
+     items: PropTypes.array.isRequired,
+   },
+ 
+   render() {
+     let { items, onClick, itemComponent: Item } = this.props;
+ 
+     return (
+       dom.ul({ className: "list" }, ...items.map((item, index) => {
+-        return Item({
++        return Item(Object.assign({}, this.props, {
+           key: index, item, index, onClick: () => onClick(item),
+-        });
++        }));
+       }))
+     );
+   }
+ });
+diff --git a/devtools/client/memory/components/snapshot-list-item.js b/devtools/client/memory/components/snapshot-list-item.js
+index f555227..2152b94 100644
+--- a/devtools/client/memory/components/snapshot-list-item.js
++++ b/devtools/client/memory/components/snapshot-list-item.js
+@@ -6,41 +6,50 @@ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/ven
+ const { L10N, getSnapshotTitle, getSnapshotTotals, getSnapshotStatusText } = require("../utils");
+ const { snapshotState: states } = require("../constants");
+ const { snapshot: snapshotModel } = require("../models");
+ 
+ const SnapshotListItem = module.exports = createClass({
+   displayName: "snapshot-list-item",
+ 
+   propTypes: {
+-    onClick: PropTypes.func,
++    onClick: PropTypes.func.isRequired,
++    onSave: PropTypes.func.isRequired,
+     item: snapshotModel.isRequired,
+     index: PropTypes.number.isRequired,
+   },
+ 
+   render() {
+-    let { index, item: snapshot, onClick } = this.props;
++    let { index, item: snapshot, onClick, onSave } = this.props;
+     let className = `snapshot-list-item ${snapshot.selected ? " selected" : ""}`;
+     let statusText = getSnapshotStatusText(snapshot);
+     let title = getSnapshotTitle(snapshot);
+ 
+     let details;
+     if (snapshot.state === states.SAVED_CENSUS) {
+       let { bytes } = getSnapshotTotals(snapshot);
+       let formatBytes = L10N.getFormatStr("aggregate.mb", L10N.numberWithDecimals(bytes / 1000000, 2));
+ 
+       details = dom.span({ className: "snapshot-totals" },
+         dom.span({ className: "total-bytes" }, formatBytes)
+       );
+     } else {
+       details = dom.span({ className: "snapshot-state" }, statusText);
+     }
+ 
++    let saveLink = !snapshot.path ? void 0 : dom.a({
++      onClick: () => onSave(snapshot),
++      className: "save",
++    }, L10N.getFormatStr("snapshot.io.save"));
++
+     return (
+       dom.li({ className, onClick },
+         dom.span({
+           className: `snapshot-title ${statusText ? " devtools-throbber" : ""}`
+         }, title),
+-        details
++        dom.div({ className: "snapshot-info" },
++          details,
++          saveLink
++        )
+       )
+     );
+   }
+ });
+diff --git a/devtools/client/memory/constants.js b/devtools/client/memory/constants.js
+index c6f90a1..3e23301 100644
+--- a/devtools/client/memory/constants.js
++++ b/devtools/client/memory/constants.js
+@@ -18,16 +18,22 @@ actions.READ_SNAPSHOT_END = "read-snapshot-end";
+ // When a census is being performed on a heap snapshot
+ actions.TAKE_CENSUS_START = "take-census-start";
+ actions.TAKE_CENSUS_END = "take-census-end";
+ 
+ // When requesting that the server start/stop recording allocation stacks.
+ actions.TOGGLE_RECORD_ALLOCATION_STACKS_START = "toggle-record-allocation-stacks-start";
+ actions.TOGGLE_RECORD_ALLOCATION_STACKS_END = "toggle-record-allocation-stacks-end";
+ 
++// When a heap snapshot is being saved to a user-specified
++// location on disk.
++actions.EXPORT_SNAPSHOT_START = "export-snapshot-start";
++actions.EXPORT_SNAPSHOT_END = "export-snapshot-end";
++actions.EXPORT_SNAPSHOT_ERROR = "export-snapshot-error";
++
+ // Fired by UI to select a snapshot to view.
+ actions.SELECT_SNAPSHOT = "select-snapshot";
+ 
+ // Fired to toggle tree inversion on or off.
+ actions.TOGGLE_INVERTED = "toggle-inverted";
+ 
+ // Fired to set a new breakdown.
+ actions.SET_BREAKDOWN = "set-breakdown";
+diff --git a/devtools/client/memory/store.js b/devtools/client/memory/store.js
+index 485266f..2bcd2ee 100644
+--- a/devtools/client/memory/store.js
++++ b/devtools/client/memory/store.js
+@@ -3,11 +3,25 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { combineReducers } = require("../shared/vendor/redux");
+ const createStore = require("../shared/redux/create-store");
+ const reducers = require("./reducers");
+ const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ 
+ module.exports = function () {
+-  let shouldLog = DevToolsUtils.testing;
+-  return createStore({ log: shouldLog })(combineReducers(reducers), {});
++  let shouldLog = false;
++  let history;
++
++  // If testing, store the action history in an array
++  // we'll later attach to the store
++  if (DevToolsUtils.testing) {
++    history = [];
++  }
++
++  let store = createStore({ log: shouldLog, history })(combineReducers(reducers), {});
++
++  if (history) {
++    store.history = history;
++  }
++
++  return store;
+ };
+diff --git a/devtools/client/memory/test/unit/head.js b/devtools/client/memory/test/unit/head.js
+index 5234259..c33f472 100644
+--- a/devtools/client/memory/test/unit/head.js
++++ b/devtools/client/memory/test/unit/head.js
+@@ -3,16 +3,18 @@
+ 
+ "use strict";
+ 
+ var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+ var { Services } = Cu.import("resource://gre/modules/Services.jsm", {});
+ var { gDevTools } = Cu.import("resource://devtools/client/framework/gDevTools.jsm", {});
+ var { console } = Cu.import("resource://gre/modules/Console.jsm", {});
+ var { require } = Cu.import("resource://devtools/shared/Loader.jsm", {});
++var { OS } = require("resource://gre/modules/osfile.jsm");
++var { FileUtils } = require("resource://gre/modules/FileUtils.jsm");
+ var { TargetFactory } = require("devtools/client/framework/target");
+ var DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ var promise = require("promise");
+ var { Task } = Cu.import("resource://gre/modules/Task.jsm", {});
+ var { expectState } = require("devtools/server/actors/common");
+ var HeapSnapshotFileUtils = require("devtools/shared/heapsnapshot/HeapSnapshotFileUtils");
+ var HeapAnalysesClient = require("devtools/shared/heapsnapshot/HeapAnalysesClient");
+ var { addDebuggerToGlobal } = require("resource://gre/modules/jsdebugger.jsm");
+@@ -65,16 +67,35 @@ function waitUntilState (store, predicate) {
+   }
+ 
+   // Fire the check immediately incase the action has already occurred
+   check();
+ 
+   return deferred.promise;
+ }
+ 
++function waitUntilAction (store, actionType) {
++  let deferred = promise.defer();
++  let unsubscribe = store.subscribe(check);
++  let history = store.history;
++  let index = history.length;
++
++  do_print(`Waiting for action "${actionType}"`);
++  function check () {
++    let action = history[index++];
++    if (action && action.type === actionType) {
++      do_print(`Found action "${actionType}"`);
++      unsubscribe();
++      deferred.resolve(store.getState());
++    }
++  }
++
++  return deferred.promise;
++}
++
+ function waitUntilSnapshotState (store, expected) {
+   let predicate = () => {
+     let snapshots = store.getState().snapshots;
+     do_print(snapshots.map(x => x.state));
+     return snapshots.length === expected.length &&
+            expected.every((state, i) => state === "*" || snapshots[i].state === state);
+   };
+   do_print(`Waiting for snapshots to be of state: ${expected}`);
+diff --git a/devtools/client/memory/test/unit/test_action-export-snapshot.js b/devtools/client/memory/test/unit/test_action-export-snapshot.js
+new file mode 100644
+index 0000000..22b19b2
+--- /dev/null
++++ b/devtools/client/memory/test/unit/test_action-export-snapshot.js
+@@ -0,0 +1,43 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Test exporting a snapshot to a user specified location on disk.
++
++let { exportSnapshot } = require("devtools/client/memory/actions/io");
++let { takeSnapshotAndCensus } = require("devtools/client/memory/actions/snapshot");
++let { snapshotState: states, actions } = require("devtools/client/memory/constants");
++
++function run_test() {
++  run_next_test();
++}
++
++add_task(function *() {
++  let front = new StubbedMemoryFront();
++  let heapWorker = new HeapAnalysesClient();
++  yield front.attach();
++  let store = Store();
++  const { getState, dispatch } = store;
++
++  let file = FileUtils.getFile("TmpD", ["tmp.fxsnapshot"]);
++  file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, FileUtils.PERMS_FILE);
++  let destPath = file.path;
++  let stat = yield OS.File.stat(destPath);
++  ok(stat.size === 0, "new file is 0 bytes at start");
++
++  dispatch(takeSnapshotAndCensus(front, heapWorker));
++  yield waitUntilSnapshotState(store, [states.SAVED_CENSUS]);
++
++  let exportEvents = Promise.all([
++    waitUntilAction(store, actions.EXPORT_SNAPSHOT_START),
++    waitUntilAction(store, actions.EXPORT_SNAPSHOT_END)
++  ]);
++  dispatch(exportSnapshot(getState().snapshots[0], destPath));
++  yield exportEvents;
++
++  stat = yield OS.File.stat(destPath);
++  do_print(stat.size);
++  ok(stat.size > 0, "destination file is more than 0 bytes");
++
++  heapWorker.destroy();
++  yield front.detach();
++});
+diff --git a/devtools/client/memory/test/unit/test_utils.js b/devtools/client/memory/test/unit/test_utils.js
+index 7ec94813..519a432 100644
+--- a/devtools/client/memory/test/unit/test_utils.js
++++ b/devtools/client/memory/test/unit/test_utils.js
+@@ -30,17 +30,17 @@ add_task(function *() {
+   ok(!utils.breakdownEquals(breakdowns.allocationStack.breakdown, {
+     by: "allocationStack",
+     then: { by: "count", bytes: true },
+     noStack: { by: "count", count: true, bytes: true },
+   }), "utils.breakdownEquals() fails when deep properties are missing.");
+ 
+   let s1 = utils.createSnapshot();
+   let s2 = utils.createSnapshot();
+-  ok(s1.state, states.SAVING, "utils.createSnapshot() creates snapshot in saving state");
++  equal(s1.state, states.SAVING, "utils.createSnapshot() creates snapshot in saving state");
+   ok(s1.id !== s2.id, "utils.createSnapshot() creates snapshot with unique ids");
+ 
+   ok(utils.breakdownEquals(utils.breakdownNameToSpec("coarseType"), breakdowns.coarseType.breakdown),
+     "utils.breakdownNameToSpec() works for presets");
+   ok(utils.breakdownEquals(utils.breakdownNameToSpec("coarseType"), breakdowns.coarseType.breakdown),
+     "utils.breakdownNameToSpec() works for presets");
+ 
+   let custom = { by: "internalType", then: { by: "count", bytes: true }};
+diff --git a/devtools/client/memory/test/unit/xpcshell.ini b/devtools/client/memory/test/unit/xpcshell.ini
+index d580f7f..897db97 100644
+--- a/devtools/client/memory/test/unit/xpcshell.ini
++++ b/devtools/client/memory/test/unit/xpcshell.ini
+@@ -1,15 +1,16 @@
+ [DEFAULT]
+ tags = devtools devtools-memory
+ head = head.js
+ tail =
+ firefox-appdir = browser
+ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ 
++[test_action-export-snapshot.js]
+ [test_action-filter-01.js]
+ [test_action-filter-02.js]
+ [test_action-filter-03.js]
+ [test_action-select-snapshot.js]
+ [test_action-set-breakdown.js]
+ [test_action-set-breakdown-and-refresh-01.js]
+ [test_action-set-breakdown-and-refresh-02.js]
+ [test_action-take-census.js]
+diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
+index ac2a0d5..f95e4c3 100644
+--- a/devtools/client/memory/utils.js
++++ b/devtools/client/memory/utils.js
+@@ -1,13 +1,13 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-const { Cu } = require("chrome");
++const { Cu, Cc, Ci } = require("chrome");
+ 
+ Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ const STRINGS_URI = "chrome://devtools/locale/memory.properties"
+ const L10N = exports.L10N = new ViewHelpers.L10N(STRINGS_URI);
+ 
+ const { URL } = require("sdk/url");
+ const { assert } = require("devtools/shared/DevToolsUtils");
+ const { Preferences } = require("resource://gre/modules/Preferences.jsm");
+@@ -309,8 +309,45 @@ exports.parseSource = function (source) {
+       long = L10N.getStr("unknownSource");
+     }
+ 
+     short = long.slice(0, 100);
+   }
+ 
+   return { short, long, host };
+ };
++
++/**
++ * Takes some configurations and opens up a file picker and returns
++ * a promise to the chosen file if successful.
++ *
++ * @param {String} .title
++ *        The title displayed in the file picker window.
++ * @param {Array<Array<String>>} .filters
++ *        An array of filters to display in the file picker. Each filter in the array
++ *        is a duple of two strings, one a name for the filter, and one the filter itself
++ *        (like "*.json").
++ * @param {String} .defaultName
++ *        The default name chosen by the file picker window.
++ * @return {Promise<?nsILocalFile>}
++ *        The file selected by the user, or null, if cancelled.
++ */
++exports.openFilePicker = function({ title, filters, defaultName }) {
++  let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
++  fp.init(window, title, Ci.nsIFilePicker.modeSave);
++
++  for (let filter of (filters || [])) {
++    fp.appendFilter(filter[0], filter[1]);
++  }
++  fp.defaultString = defaultName;
++
++  return new Promise(resolve => {
++    fp.open({
++      done: result => {
++        if (result === Ci.nsIFilePicker.returnCancel) {
++          resolve(null);
++          return;
++        }
++        resolve(fp.file);
++      }
++    });
++  });
++};
+diff --git a/devtools/client/shared/redux/create-store.js b/devtools/client/shared/redux/create-store.js
+index 22aed29..cca0f64 100644
+--- a/devtools/client/shared/redux/create-store.js
++++ b/devtools/client/shared/redux/create-store.js
+@@ -4,36 +4,43 @@
+ "use strict";
+ 
+ const { createStore, applyMiddleware } = require("devtools/client/shared/vendor/redux");
+ const { thunk } = require("./middleware/thunk");
+ const { waitUntilService } = require("./middleware/wait-service");
+ const { task } = require("./middleware/task");
+ const { log } = require("./middleware/log");
+ const { promise } = require("./middleware/promise");
++const { history } = require("./middleware/history");
+ 
+ /**
+  * This creates a dispatcher with all the standard middleware in place
+  * that all code requires. It can also be optionally configured in
+  * various ways, such as logging and recording.
+  *
+- * @param {object} opts - boolean configuration flags
++ * @param {object} opts:
+  *        - log: log all dispatched actions to console
++ *        - history: an array to store every action in. Should only be
++ *                   used in tests.
+  *        - middleware: array of middleware to be included in the redux store
+  */
+ module.exports = (opts={}) => {
+   const middleware = [
+     task,
+     thunk,
+     waitUntilService,
+     promise,
+   ];
+ 
+-  if (opts.log) {
+-    middleware.push(log);
++  if (opts.history) {
++    middleware.push(history(opts.history));
+   }
+ 
+   if (opts.middleware) {
+     opts.middleware.forEach(fn => middleware.push(fn));
+   }
+ 
++  if (opts.log) {
++    middleware.push(log);
++  }
++
+   return applyMiddleware(...middleware)(createStore);
+ }
+diff --git a/devtools/client/shared/redux/middleware/history.js b/devtools/client/shared/redux/middleware/history.js
+new file mode 100644
+index 0000000..b76ade0
+--- /dev/null
++++ b/devtools/client/shared/redux/middleware/history.js
+@@ -0,0 +1,23 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const DevToolsUtils = require("devtools/shared/DevToolsUtils");
++
++/**
++ * A middleware that stores every action coming through the store in the passed
++ * in logging object. Should only be used for tests, as it collects all
++ * action information, which will cause memory bloat.
++ */
++exports.history = (log=[]) => ({ dispatch, getState }) => {
++  if (!DevToolsUtils.testing) {
++    console.warn(`Using history middleware stores all actions in state for testing\
++                  and devtools is not currently running in test mode. Be sure this is\
++                  intentional.`);
++  }
++  return next => action => {
++    log.push(action);
++    next(action);
++  };
++};
+diff --git a/devtools/client/shared/redux/middleware/moz.build b/devtools/client/shared/redux/middleware/moz.build
+index d4024da..33fa9f5 100644
+--- a/devtools/client/shared/redux/middleware/moz.build
++++ b/devtools/client/shared/redux/middleware/moz.build
+@@ -1,15 +1,16 @@
+ # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
++    'history.js',
+     'log.js',
+     'promise.js',
+     'task.js',
+     'thunk.js',
+     'wait-service.js',
+ )
+ 
+ XPCSHELL_TESTS_MANIFESTS += ['test/xpcshell.ini']
+diff --git a/devtools/client/themes/memory.css b/devtools/client/themes/memory.css
+index 86568f0..19f0ba6 100644
+--- a/devtools/client/themes/memory.css
++++ b/devtools/client/themes/memory.css
+@@ -148,24 +148,34 @@ html, body, #app, #memory-tool {
+   /**
+    * Flex: contains several children, which need to be laid out vertically.
+    */
+   display: flex;
+   flex-direction: column;
+   color: var(--theme-body-color);
+   border-bottom: 1px solid rgba(128,128,128,0.15);
+   padding: 8px;
+-  cursor: pointer;
+ }
+ 
+ .snapshot-list-item.selected {
+   background-color: var(--theme-selection-background);
+   color: var(--theme-selection-color);
+ }
+ 
++.snapshot-list-item .snapshot-info {
++  display: flex;
++  justify-content: space-between;
++  font-size: 90%;
++}
++
++.snapshot-list-item .save {
++  text-decoration: underline;
++  cursor: pointer;
++}
++
+ .snapshot-list-item > .snapshot-title {
+   margin-bottom: 14px;
+ }
+ 
+ .snapshot-list-item > .snapshot-state,
+ .snapshot-list-item > .snapshot-totals {
+   font-size: 90%;
+   color: var(--theme-body-color-alt);
+-- 
+2.3.1
+
