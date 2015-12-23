@@ -1,0 +1,159 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 11 Dec 2015 10:35:07 -0500
+Subject: Bug 1231943 - Add basic telemetry for memory tool. r=fitzgen
+
+diff --git a/devtools/client/memory/initializer.js b/devtools/client/memory/initializer.js
+index 8c1d3cb..a2c2186 100644
+--- a/devtools/client/memory/initializer.js
++++ b/devtools/client/memory/initializer.js
+@@ -10,43 +10,47 @@ Cu.import("resource://devtools/client/shared/browser-loader.js", BrowserLoaderMo
+ const { require } = BrowserLoaderModule.BrowserLoader("resource://devtools/client/memory/", this);
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { createFactory, createElement } = require("devtools/client/shared/vendor/react");
+ const ReactDOM = require("devtools/client/shared/vendor/react-dom");
+ const { Provider } = require("devtools/client/shared/vendor/react-redux");
+ const App = createFactory(require("devtools/client/memory/app"));
+ const Store = require("devtools/client/memory/store");
+ const { assert } = require("devtools/shared/DevToolsUtils");
++const Telemetry = require("devtools/client/shared/telemetry");
+ 
+ /**
+  * The current target, toolbox, MemoryFront, and HeapAnalysesClient, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront, gHeapAnalysesClient;
+ 
+ /**
+  * Variables set by `initialize()`
+  */
+-var gStore, gRoot, gApp, gProvider, unsubscribe, isHighlighted;
++var gStore, gRoot, gApp, gProvider, unsubscribe, isHighlighted, telemetry;
+ 
+ var initialize = Task.async(function*() {
++  telemetry = new Telemetry();
++  telemetry.toolOpened("memory");
+   gRoot = document.querySelector("#app");
+   gStore = Store();
+   gApp = createElement(App, { toolbox: gToolbox, front: gFront, heapWorker: gHeapAnalysesClient });
+   gProvider = createElement(Provider, { store: gStore }, gApp);
+   ReactDOM.render(gProvider, gRoot);
+   unsubscribe = gStore.subscribe(onStateChange);
+ });
+ 
+ var destroy = Task.async(function*() {
+   const ok = ReactDOM.unmountComponentAtNode(gRoot);
+   assert(ok, "Should successfully unmount the memory tool's top level React component");
+ 
++  telemetry.toolClosed("memory");
+   unsubscribe();
+ 
+-  gStore, gRoot, gApp, gProvider, unsubscribe, isHighlighted = null;
++  gStore, gRoot, gApp, gProvider, unsubscribe, isHighlighted, telemetry = null;
+ });
+ 
+ /**
+  * Fired on any state change, currently only handles toggling
+  * the highlighting of the tool when recording allocations.
+  */
+ function onStateChange () {
+   let isRecording = gStore.getState().allocations.recording;
+diff --git a/devtools/client/shared/telemetry.js b/devtools/client/shared/telemetry.js
+index 872ec4a..9714e90 100644
+--- a/devtools/client/shared/telemetry.js
++++ b/devtools/client/shared/telemetry.js
+@@ -140,16 +140,21 @@ Telemetry.prototype = {
+       userHistogram: "DEVTOOLS_CANVASDEBUGGER_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_CANVASDEBUGGER_TIME_ACTIVE_SECONDS"
+     },
+     performance: {
+       histogram: "DEVTOOLS_JSPROFILER_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_JSPROFILER_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_JSPROFILER_TIME_ACTIVE_SECONDS"
+     },
++    memory: {
++      histogram: "DEVTOOLS_MEMORY_OPENED_BOOLEAN",
++      userHistogram: "DEVTOOLS_MEMORY_OPENED_PER_USER_FLAG",
++      timerHistogram: "DEVTOOLS_MEMORY_TIME_ACTIVE_SECONDS"
++    },
+     netmonitor: {
+       histogram: "DEVTOOLS_NETMONITOR_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_NETMONITOR_OPENED_PER_USER_FLAG",
+       timerHistogram: "DEVTOOLS_NETMONITOR_TIME_ACTIVE_SECONDS"
+     },
+     storage: {
+       histogram: "DEVTOOLS_STORAGE_OPENED_BOOLEAN",
+       userHistogram: "DEVTOOLS_STORAGE_OPENED_PER_USER_FLAG",
+diff --git a/toolkit/components/telemetry/Histograms.json b/toolkit/components/telemetry/Histograms.json
+index 3d28f46..c8c426f 100644
+--- a/toolkit/components/telemetry/Histograms.json
++++ b/toolkit/components/telemetry/Histograms.json
+@@ -7019,16 +7019,21 @@
+     "kind": "boolean",
+     "description": "How many times has the devtool's Canvas Debugger been opened?"
+   },
+   "DEVTOOLS_JSPROFILER_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+     "description": "How many times has the devtool's JS Profiler been opened?"
+   },
++  "DEVTOOLS_MEMORY_OPENED_BOOLEAN": {
++    "expires_in_version": "never",
++    "kind": "boolean",
++    "description": "How many times has the devtool's Memory Tool been opened?"
++  },
+   "DEVTOOLS_NETMONITOR_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+     "description": "How many times has the devtool's Network Monitor been opened?"
+   },
+   "DEVTOOLS_STORAGE_OPENED_BOOLEAN": {
+     "expires_in_version": "never",
+     "kind": "boolean",
+@@ -7190,16 +7195,21 @@
+     "kind": "flag",
+     "description": "How many users have opened the devtool's Canvas Debugger?"
+   },
+   "DEVTOOLS_JSPROFILER_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+     "description": "How many users have opened the devtool's JS Profiler?"
+   },
++  "DEVTOOLS_MEMORY_OPENED_PER_USER_FLAG": {
++    "expires_in_version": "never",
++    "kind": "flag",
++    "description": "How many users have opened the devtool's Memory Tool?"
++  },
+   "DEVTOOLS_NETMONITOR_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+     "description": "How many users have opened the devtool's Network Monitor?"
+   },
+   "DEVTOOLS_STORAGE_OPENED_PER_USER_FLAG": {
+     "expires_in_version": "never",
+     "kind": "flag",
+@@ -7395,16 +7405,23 @@
+   },
+   "DEVTOOLS_JSPROFILER_TIME_ACTIVE_SECONDS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000000",
+     "n_buckets": 100,
+     "description": "How long has the JS profiler been active (seconds)"
+   },
++  "DEVTOOLS_MEMORY_TIME_ACTIVE_SECONDS": {
++    "expires_in_version": "never",
++    "kind": "exponential",
++    "high": "10000000",
++    "n_buckets": 100,
++    "description": "How long has the Memory Tool been active (seconds)"
++  },
+   "DEVTOOLS_NETMONITOR_TIME_ACTIVE_SECONDS": {
+     "expires_in_version": "never",
+     "kind": "exponential",
+     "high": "10000000",
+     "n_buckets": 100,
+     "description": "How long has the network monitor been active (seconds)"
+   },
+   "DEVTOOLS_STORAGE_TIME_ACTIVE_SECONDS": {
+-- 
+2.3.1
+

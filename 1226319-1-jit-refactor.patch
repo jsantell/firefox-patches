@@ -1,6 +1,6 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Thu, 19 Nov 2015 11:53:22 -0800
-Subject: Bug 1226319 - part 1 - Move the memory tool's tree component to shared to use for JIT view. r=fitzgen
+Date: Fri, 20 Nov 2015 17:22:30 -0800
+Subject: Bug 1226319 - pt1 - Move react tree widget in memory tool to shared components. r=fitzgen
 
 diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
 index 24e747f5..81ac380 100644
@@ -40,30 +40,79 @@ index 2078bca..11effad 100644
  )
 -
 -MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
-diff --git a/devtools/client/performance/performance-controller.js b/devtools/client/performance/performance-controller.js
-index f44140b..c546500 100644
---- a/devtools/client/performance/performance-controller.js
-+++ b/devtools/client/performance/performance-controller.js
-@@ -1,15 +1,18 @@
- /* This Source Code Form is subject to the terms of the Mozilla Public
-  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
-  * You can obtain one at http://mozilla.org/MPL/2.0/. */
- "use strict";
+diff --git a/devtools/client/shared/browser-loader.js b/devtools/client/shared/browser-loader.js
+index b6e125f..c8c94bf 100644
+--- a/devtools/client/shared/browser-loader.js
++++ b/devtools/client/shared/browser-loader.js
+@@ -1,62 +1,62 @@
+ var { classes: Cc, interfaces: Ci, utils: Cu } = Components;
  
- var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
--const { loader, require } = Cu.import("resource://devtools/shared/Loader.jsm", {});
-+const BrowserLoaderModule = {};
-+Cu.import("resource://devtools/client/shared/browser-loader.js", BrowserLoaderModule);
-+const { require } = BrowserLoaderModule.BrowserLoader("resource://devtools/client/performance/", this);
-+const { loader } = Cu.import("resource://devtools/shared/Loader.jsm", {});
+ const loaders = Cu.import("resource://gre/modules/commonjs/toolkit/loader.js", {});
+-const devtools = Cu.import("resource://devtools/shared/Loader.jsm", {}).devtools;
++const { devtools, DevToolsLoader } = Cu.import("resource://devtools/shared/Loader.jsm", {});
+ const { joinURI } = devtools.require("devtools/shared/path");
+ const VENDOR_CONTENT_URL = "resource://devtools/client/shared/vendor";
++const COMPONENTS_URL = "resource://devtools/client/shared/components";
  
- const { Task } = require("resource://gre/modules/Task.jsm");
- const { Heritage, ViewHelpers, WidgetMethods } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ /*
+  * Create a loader to be used in a browser environment. This evaluates
+  * modules in their own environment, but sets window (the normal
+  * global object) as the sandbox prototype, so when a variable is not
+  * defined it checks `window` before throwing an error. This makes all
+  * browser APIs available to modules by default, like a normal browser
+  * environment, but modules are still evaluated in their own scope.
+  *
+  * Another very important feature of this loader is that it *only*
+  * deals with modules loaded from under `baseURI`. Anything loaded
+  * outside of that path will still be loaded from the devtools loader,
+  * so all system modules are still shared and cached across instances.
+  * An exception to this is anything under
+- * `devtools/client/shared/content`, which is where shared libraries
+- * live that should be evaluated in a browser environment.
++ * `devtools/client/shared/{vendor/components}`, which is where shared libraries
++ * and React components live that should be evaluated in a browser environment.
+  *
+  * @param string baseURI
+  *        Base path to load modules from.
+  * @param Object window
+  *        The window instance to evaluate modules within
+  * @return Object
+  *         An object with two properties:
+  *         - loader: the Loader instance
+  *         - require: a function to require modules with
+  */
+ function BrowserLoader(baseURI, window) {
+   const loaderOptions = devtools.require("@loader/options");
++
+   const opts = {
+     id: "browser-loader",
+     sharedGlobal: true,
+     sandboxPrototype: window,
+     paths: Object.assign({}, loaderOptions.paths),
+     invisibleToDebugger: loaderOptions.invisibleToDebugger,
+     require: (id, require) => {
+       let uri = require.resolve(id);
  
- // Events emitted by various objects in the panel.
- const EVENTS = require("devtools/client/performance/events");
- Object.defineProperty(this, "EVENTS", {
-   value: EVENTS,
+       if (!uri.startsWith(baseURI) &&
++          !uri.startsWith(COMPONENTS_URL) &&
+           !uri.startsWith(VENDOR_CONTENT_URL)) {
+         return devtools.require(uri);
+       }
+       return require(uri);
+     }
+   };
+ 
+-  // The main.js file does not have to actually exist. It just
+-  // represents the base environment, so requires will be relative to
+-  // that path when used outside of modules.
+   const mainModule = loaders.Module(baseURI, joinURI(baseURI, "main.js"));
+   const mainLoader = loaders.Loader(opts);
+ 
+   return {
+     loader: mainLoader,
+     require: loaders.Require(mainLoader, mainModule)
+   };
+ }
 diff --git a/devtools/client/shared/components/moz.build b/devtools/client/shared/components/moz.build
 new file mode 100644
 index 0000000..49ba5dc
@@ -86,10 +135,10 @@ similarity index 100%
 rename from devtools/client/memory/components/test/mochitest/chrome.ini
 rename to devtools/client/shared/components/test/mochitest/chrome.ini
 diff --git a/devtools/client/memory/components/test/mochitest/head.js b/devtools/client/shared/components/test/mochitest/head.js
-similarity index 98%
+similarity index 97%
 rename from devtools/client/memory/components/test/mochitest/head.js
 rename to devtools/client/shared/components/test/mochitest/head.js
-index 2ff5d95..2c12e59 100644
+index 2ff5d95..e61d1de 100644
 --- a/devtools/client/memory/components/test/mochitest/head.js
 +++ b/devtools/client/shared/components/test/mochitest/head.js
 @@ -23,19 +23,19 @@ var { gDevTools } = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
@@ -102,7 +151,7 @@ index 2ff5d95..2c12e59 100644
  
  DevToolsUtils.testing = true;
 -var { require: bRequire } = BrowserLoader("resource://devtools/client/memory/", this);
-+var { require: bRequire } = BrowserLoader("resource://devtools/client/shared/", this);
++var { require: browserRequire } = BrowserLoader("resource://devtools/client/shared/", this);
  
 -var EXAMPLE_URL = "http://example.com/browser/browser/devtools/memory/test/";
 +var EXAMPLE_URL = "http://example.com/browser/browser/devtools/shared/test/";
@@ -115,23 +164,27 @@ index 2ff5d95..2c12e59 100644
  // |   |   |-- K
  // |   |   `-- L
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_01.html b/devtools/client/shared/components/test/mochitest/test_tree_01.html
-similarity index 94%
+similarity index 86%
 rename from devtools/client/memory/components/test/mochitest/test_tree_01.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_01.html
-index ed5312f..7abd0ef 100644
+index ed5312f..e1d7869 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_01.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_01.html
-@@ -13,17 +13,17 @@ depth.
+@@ -11,19 +11,19 @@ depth.
+   <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
+ </head>
  <body>
  <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  window.onload = Task.async(function* () {
    try {
-     let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     let React = bRequire("devtools/client/shared/vendor/react");
+-    let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    let React = bRequire("devtools/client/shared/vendor/react");
 -    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    let Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    let ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    let React = browserRequire("devtools/client/shared/vendor/react");
++    let Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
  
      ok(React, "Should get React");
      ok(Tree, "Should get Tree");
@@ -141,23 +194,27 @@ index ed5312f..7abd0ef 100644
  
      const tree = ReactDOM.render(t, window.document.body);
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_02.html b/devtools/client/shared/components/test/mochitest/test_tree_02.html
-similarity index 93%
+similarity index 81%
 rename from devtools/client/memory/components/test/mochitest/test_tree_02.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_02.html
-index b97ae1e..36f906e 100644
+index b97ae1e..7117610 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_02.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_02.html
-@@ -12,17 +12,17 @@ Test that collapsed subtrees aren't rendered.
+@@ -10,19 +10,19 @@ Test that collapsed subtrees aren't rendered.
+   <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
+ </head>
  <body>
  <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  window.onload = Task.async(function* () {
    try {
-     let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     let React = bRequire("devtools/client/shared/vendor/react");
+-    let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    let React = bRequire("devtools/client/shared/vendor/react");
 -    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    let Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    let ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    let React = browserRequire("devtools/client/shared/vendor/react");
++    let Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
  
      const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
  
@@ -167,23 +224,27 @@ index b97ae1e..36f906e 100644
  
      isRenderedTree(document.body.textContent, [
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_03.html b/devtools/client/shared/components/test/mochitest/test_tree_03.html
-similarity index 93%
+similarity index 81%
 rename from devtools/client/memory/components/test/mochitest/test_tree_03.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_03.html
-index dda3df0d..a854703 100644
+index dda3df0d..464d8de 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_03.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_03.html
-@@ -12,17 +12,17 @@ Test Tree's autoExpandDepth.
+@@ -10,19 +10,19 @@ Test Tree's autoExpandDepth.
+   <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
+ </head>
  <body>
  <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  window.onload = Task.async(function* () {
    try {
-     let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     let React = bRequire("devtools/client/shared/vendor/react");
+-    let ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    let React = bRequire("devtools/client/shared/vendor/react");
 -    let Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    let Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    let ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    let React = browserRequire("devtools/client/shared/vendor/react");
++    let Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
  
      const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
  
@@ -193,23 +254,27 @@ index dda3df0d..a854703 100644
  
      isRenderedTree(document.body.textContent, [
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_04.html b/devtools/client/shared/components/test/mochitest/test_tree_04.html
-similarity index 94%
+similarity index 85%
 rename from devtools/client/memory/components/test/mochitest/test_tree_04.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_04.html
-index 26ac889..2676158 100644
+index 26ac889..bb0fd4e 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_04.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_04.html
-@@ -12,17 +12,17 @@ Test that we only render visible tree items.
+@@ -10,19 +10,19 @@ Test that we only render visible tree items.
+   <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
+ </head>
  <body>
  <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  window.onload = Task.async(function* () {
    try {
-     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     const React = bRequire("devtools/client/shared/vendor/react");
+-    const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    const React = bRequire("devtools/client/shared/vendor/react");
 -    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    const ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    const React = browserRequire("devtools/client/shared/vendor/react");
++    const Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
      const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
  
      yield setState(tree, {
@@ -219,23 +284,28 @@ index 26ac889..2676158 100644
      });
  
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_05.html b/devtools/client/shared/components/test/mochitest/test_tree_05.html
-similarity index 95%
+similarity index 88%
 rename from devtools/client/memory/components/test/mochitest/test_tree_05.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_05.html
-index fc0a9f0..c49c776 100644
+index fc0a9f0..229fe5e 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_05.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_05.html
-@@ -14,17 +14,17 @@ Test focusing with the Tree component.
+@@ -11,20 +11,20 @@ Test focusing with the Tree component.
+ </head>
+ <body>
+ <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  
  window.onload = Task.async(function* () {
    try {
-     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     const React = bRequire("devtools/client/shared/vendor/react");
+-    const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    const React = bRequire("devtools/client/shared/vendor/react");
++    const ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    const React = browserRequire("devtools/client/shared/vendor/react");
      const { Simulate } = React.addons.TestUtils;
 -    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    const Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
      const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
  
      yield setState(tree, {
@@ -245,23 +315,28 @@ index fc0a9f0..c49c776 100644
  
      isRenderedTree(document.body.textContent, [
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_06.html b/devtools/client/shared/components/test/mochitest/test_tree_06.html
-similarity index 98%
+similarity index 96%
 rename from devtools/client/memory/components/test/mochitest/test_tree_06.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_06.html
-index cbc92c0..26ad5e1 100644
+index cbc92c0..7e2f7e6 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_06.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_06.html
-@@ -13,17 +13,17 @@ Test keyboard navigation with the Tree component.
+@@ -10,20 +10,20 @@ Test keyboard navigation with the Tree component.
+   <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
+ </head>
+ <body>
  <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  window.onload = Task.async(function* () {
    try {
-     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     const React = bRequire("devtools/client/shared/vendor/react");
+-    const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    const React = bRequire("devtools/client/shared/vendor/react");
++    const ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    const React = browserRequire("devtools/client/shared/vendor/react");
      const { Simulate } = React.addons.TestUtils;
 -    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    const Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
      const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
  
      yield setState(tree, {
@@ -271,23 +346,27 @@ index cbc92c0..26ad5e1 100644
      // UP ----------------------------------------------------------------------
  
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_07.html b/devtools/client/shared/components/test/mochitest/test_tree_07.html
-similarity index 95%
+similarity index 87%
 rename from devtools/client/memory/components/test/mochitest/test_tree_07.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_07.html
-index 18c7ee3..70ed777 100644
+index 18c7ee3..50ce27f 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_07.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_07.html
-@@ -13,17 +13,17 @@ Test that arrows get the open attribute when their item's children are expanded.
+@@ -11,19 +11,19 @@ Test that arrows get the open attribute when their item's children are expanded.
+   <link rel="stylesheet" href="chrome://browser/skin/devtools/light-theme.css" type="text/css">
+ </head>
  <body>
  <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  window.onload = Task.async(function* () {
    try {
-     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     const React = bRequire("devtools/client/shared/vendor/react");
+-    const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    const React = bRequire("devtools/client/shared/vendor/react");
 -    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    const ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    const React = browserRequire("devtools/client/shared/vendor/react");
++    const Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
      const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
  
      yield setProps(tree, {
@@ -297,23 +376,28 @@ index 18c7ee3..70ed777 100644
              id: item,
              style: { marginLeft: depth * 16 + "px" }
 diff --git a/devtools/client/memory/components/test/mochitest/test_tree_08.html b/devtools/client/shared/components/test/mochitest/test_tree_08.html
-similarity index 94%
+similarity index 85%
 rename from devtools/client/memory/components/test/mochitest/test_tree_08.html
 rename to devtools/client/shared/components/test/mochitest/test_tree_08.html
-index 9248ec3..0a13734 100644
+index 9248ec3..b764cf8 100644
 --- a/devtools/client/memory/components/test/mochitest/test_tree_08.html
 +++ b/devtools/client/shared/components/test/mochitest/test_tree_08.html
-@@ -15,17 +15,17 @@ other inputs.
+@@ -12,20 +12,20 @@ other inputs.
+   <link rel="stylesheet" href="chrome://browser/skin/devtools/light-theme.css" type="text/css">
+ </head>
+ <body>
  <pre id="test">
  <script src="head.js" type="application/javascript;version=1.8"></script>
  <script type="application/javascript;version=1.8">
  window.onload = Task.async(function* () {
    try {
-     const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
-     const React = bRequire("devtools/client/shared/vendor/react");
+-    const ReactDOM = bRequire("devtools/client/shared/vendor/react-dom");
+-    const React = bRequire("devtools/client/shared/vendor/react");
++    const ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    const React = browserRequire("devtools/client/shared/vendor/react");
      const { Simulate } = React.addons.TestUtils;
 -    const Tree = React.createFactory(bRequire("devtools/client/memory/components/tree"));
-+    const Tree = React.createFactory(bRequire("devtools/client/shared/components/tree"));
++    const Tree = React.createFactory(browserRequire("devtools/client/shared/components/tree"));
      const tree = ReactDOM.render(Tree(TEST_TREE_INTERFACE), window.document.body);
  
      const input = document.createElement("input");

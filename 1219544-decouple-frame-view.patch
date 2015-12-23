@@ -1,0 +1,1469 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 23 Dec 2015 15:36:42 -0500
+Subject: Bug 1219544 - Decouple the react Frame component from the memory view and pull out source utilities from frame utilities in performance tool. r=fitzgen
+
+diff --git a/devtools/client/framework/toolbox.js b/devtools/client/framework/toolbox.js
+index 8872985..abce404 100644
+--- a/devtools/client/framework/toolbox.js
++++ b/devtools/client/framework/toolbox.js
+@@ -14,17 +14,17 @@ const OS_HISTOGRAM = "DEVTOOLS_OS_ENUMERATED_PER_USER";
+ const OS_IS_64_BITS = "DEVTOOLS_OS_IS_64_BITS_PER_USER";
+ const SCREENSIZE_HISTOGRAM = "DEVTOOLS_SCREEN_RESOLUTION_ENUMERATED_PER_USER";
+ 
+ var {Cc, Ci, Cu} = require("chrome");
+ var promise = require("promise");
+ var EventEmitter = require("devtools/shared/event-emitter");
+ var Telemetry = require("devtools/client/shared/telemetry");
+ var HUDService = require("devtools/client/webconsole/hudservice");
+-var sourceUtils = require("devtools/client/shared/source-utils");
++var viewSource = require("devtools/client/shared/view-source");
+ 
+ Cu.import("resource://gre/modules/Services.jsm");
+ Cu.import("resource://devtools/client/framework/gDevTools.jsm");
+ Cu.import("resource://devtools/client/scratchpad/scratchpad-manager.jsm");
+ Cu.import("resource://devtools/client/shared/DOMHelpers.jsm");
+ Cu.import("resource://gre/modules/Task.jsm");
+ 
+ loader.lazyImporter(this, "CommandUtils",
+@@ -2131,40 +2131,40 @@ Toolbox.prototype = {
+     return this.frame.contentWindow.gViewSourceUtils;
+   },
+ 
+   /**
+    * Opens source in style editor. Falls back to plain "view-source:".
+    * @see devtools/client/shared/source-utils.js
+    */
+   viewSourceInStyleEditor: function(sourceURL, sourceLine) {
+-    return sourceUtils.viewSourceInStyleEditor(this, sourceURL, sourceLine);
++    return viewSource.viewSourceInStyleEditor(this, sourceURL, sourceLine);
+   },
+ 
+   /**
+    * Opens source in debugger. Falls back to plain "view-source:".
+    * @see devtools/client/shared/source-utils.js
+    */
+   viewSourceInDebugger: function(sourceURL, sourceLine) {
+-    return sourceUtils.viewSourceInDebugger(this, sourceURL, sourceLine);
++    return viewSource.viewSourceInDebugger(this, sourceURL, sourceLine);
+   },
+ 
+   /**
+    * Opens source in scratchpad. Falls back to plain "view-source:".
+    * TODO The `sourceURL` for scratchpad instances are like `Scratchpad/1`.
+    * If instances are scoped one-per-browser-window, then we should be able
+    * to infer the URL from this toolbox, or use the built in scratchpad IN
+    * the toolbox.
+    *
+    * @see devtools/client/shared/source-utils.js
+    */
+   viewSourceInScratchpad: function(sourceURL, sourceLine) {
+-    return sourceUtils.viewSourceInScratchpad(sourceURL, sourceLine);
++    return viewSource.viewSourceInScratchpad(sourceURL, sourceLine);
+   },
+ 
+   /**
+    * Opens source in plain "view-source:".
+    * @see devtools/client/shared/source-utils.js
+    */
+   viewSource: function(sourceURL, sourceLine) {
+-    return sourceUtils.viewSource(this, sourceURL, sourceLine);
++    return viewSource.viewSource(this, sourceURL, sourceLine);
+   },
+ };
+diff --git a/devtools/client/memory/app.js b/devtools/client/memory/app.js
+index c0b2d21..0be65c8 100644
+--- a/devtools/client/memory/app.js
++++ b/devtools/client/memory/app.js
+@@ -93,17 +93,17 @@ const App = createClass({
+             onClick: onClickSnapshotListItem,
+             diffing,
+           }),
+ 
+           HeapView({
+             snapshot: selectedSnapshot,
+             diffing,
+             onSnapshotClick: () => dispatch(takeSnapshotAndCensus(front, heapWorker)),
+-            toolbox
++            linkToDebugger: (frame) => toolbox.viewSourceInDebugger(frame.source, frame.line),
+           })
+         )
+       )
+     );
+   },
+ });
+ 
+ /**
+diff --git a/devtools/client/memory/components/frame.js b/devtools/client/memory/components/frame.js
+deleted file mode 100644
+index 8b954218..0000000
+--- a/devtools/client/memory/components/frame.js
++++ /dev/null
+@@ -1,40 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
+-const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+-const { L10N, parseSource } = require("../utils");
+-
+-const Frame = module.exports = createClass({
+-  displayName: "frame-view",
+-
+-  propTypes: {
+-    frame: PropTypes.object.isRequired,
+-    toolbox: PropTypes.object.isRequired,
+-  },
+-
+-  render() {
+-    let { toolbox, frame } = this.props;
+-    const { short, long, host } = parseSource(frame.source);
+-
+-    let func = frame.functionDisplayName || "";
+-    let tooltip = `${func} (${long}:${frame.line}:${frame.column})`;
+-    let viewTooltip = L10N.getFormatStr("viewsourceindebugger", `${long}:${frame.line}:${frame.column}`);
+-    let onClick = () => toolbox.viewSourceInDebugger(long, frame.line);
+-
+-    let fields = [
+-      dom.span({ className: "frame-link-function-display-name" }, func),
+-      dom.a({ className: "frame-link-filename", onClick, title: viewTooltip }, short),
+-      dom.span({ className: "frame-link-colon" }, ":"),
+-      dom.span({ className: "frame-link-line" }, frame.line),
+-      dom.span({ className: "frame-link-colon" }, ":"),
+-      dom.span({ className: "frame-link-column" }, frame.column)
+-    ];
+-
+-    if (host) {
+-      fields.push(dom.span({ className: "frame-link-host" }, host));
+-    }
+-
+-    return dom.span({ className: "frame-link", title: tooltip }, ...fields);
+-  }
+-});
+diff --git a/devtools/client/memory/components/heap.js b/devtools/client/memory/components/heap.js
+index 81ac380..d249110 100644
+--- a/devtools/client/memory/components/heap.js
++++ b/devtools/client/memory/components/heap.js
+@@ -29,21 +29,21 @@ function createParentMap (node, aggregator=Object.create(null)) {
+ 
+   return aggregator;
+ }
+ 
+ /**
+  * Creates properties to be passed into the Tree component.
+  *
+  * @param {censusModel} census
+- * @param {Object} toolbox
++ * @param {Function} linkToDebugger
+  * @param {Object} diffing
+  * @return {Object}
+  */
+-function createTreeProperties(census, toolbox, diffing) {
++function createTreeProperties(census, linkToDebugger, diffing) {
+   const report = census.report;
+   let map = createParentMap(report);
+   const { totalBytes, totalCount } = report;
+ 
+   const getPercentBytes = totalBytes === 0
+     ? _ => 0
+     : bytes => (bytes / totalBytes) * 100;
+ 
+@@ -55,17 +55,17 @@ function createTreeProperties(census, toolbox, diffing) {
+     autoExpandDepth: 0,
+     getParent: node => {
+       const parent = map[node.id];
+       return parent === report ? null : parent;
+     },
+     getChildren: node => node.children || [],
+     renderItem: (item, depth, focused, arrow, expanded) =>
+       new TreeItem({
+-        toolbox,
++        linkToDebugger,
+         item,
+         depth,
+         focused,
+         arrow,
+         expanded,
+         getPercentBytes,
+         getPercentCount,
+         showSign: !!diffing,
+@@ -86,22 +86,22 @@ function createTreeProperties(census, toolbox, diffing) {
+  */
+ 
+ const Heap = module.exports = createClass({
+   displayName: "heap-view",
+ 
+   propTypes: {
+     onSnapshotClick: PropTypes.func.isRequired,
+     snapshot: snapshotModel,
+-    toolbox: PropTypes.object.isRequired,
++    linkToDebugger: PropTypes.func.isRequired,
+     diffing: diffingModel,
+   },
+ 
+   render() {
+-    let { snapshot, diffing, onSnapshotClick, toolbox } = this.props;
++    let { snapshot, diffing, onSnapshotClick, linkToDebugger } = this.props;
+ 
+     let census;
+     let state;
+     let statusText;
+     let error;
+     if (diffing) {
+       census = diffing.census;
+       state = diffing.state;
+@@ -179,17 +179,17 @@ const Heap = module.exports = createClass({
+         content.push(
+           dom.div({ className: "header" },
+             dom.span({ className: "heap-tree-item-bytes" }, L10N.getStr("heapview.field.bytes")),
+             dom.span({ className: "heap-tree-item-count" }, L10N.getStr("heapview.field.count")),
+             dom.span({ className: "heap-tree-item-total-bytes" }, L10N.getStr("heapview.field.totalbytes")),
+             dom.span({ className: "heap-tree-item-total-count" }, L10N.getStr("heapview.field.totalcount")),
+             dom.span({ className: "heap-tree-item-name" }, L10N.getStr("heapview.field.name"))
+           ),
+-          Tree(createTreeProperties(census, toolbox, diffing))
++          Tree(createTreeProperties(census, linkToDebugger, diffing))
+         );
+         break;
+ 
+       default:
+         assert(false, "Unexpected state: ${state}");
+     }
+     assert(!!content, "Should have set content in the above switch block");
+ 
+diff --git a/devtools/client/memory/components/moz.build b/devtools/client/memory/components/moz.build
+index 11effad..85c192d 100644
+--- a/devtools/client/memory/components/moz.build
++++ b/devtools/client/memory/components/moz.build
+@@ -1,13 +1,12 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+-    'frame.js',
+     'heap.js',
+     'list.js',
+     'snapshot-list-item.js',
+     'toolbar.js',
+     'tree-item.js',
+ )
+diff --git a/devtools/client/memory/components/tree-item.js b/devtools/client/memory/components/tree-item.js
+index 0d525af..c3a04f8 100644
+--- a/devtools/client/memory/components/tree-item.js
++++ b/devtools/client/memory/components/tree-item.js
+@@ -1,16 +1,17 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { isSavedFrame } = require("devtools/shared/DevToolsUtils");
+ const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { L10N } = require("../utils");
+-const FrameView = createFactory(require("./frame"));
++const FrameView = createFactory(require("devtools/client/shared/components/frame"));
++const unknownSourceString = L10N.getStr("unknownSource");
+ 
+ const INDENT = 10;
+ const MAX_SOURCE_LENGTH = 200;
+ 
+ 
+ /**
+  * An arrow that displays whether its node is expanded (▼) or collapsed
+  * (▶). When its node has no children, it is hidden.
+@@ -50,16 +51,17 @@ const TreeItem = module.exports = createClass({
+       item,
+       depth,
+       arrow,
+       focused,
+       toolbox,
+       getPercentBytes,
+       getPercentCount,
+       showSign,
++      linkToDebugger,
+     } = this.props;
+ 
+     const bytes = this.formatNumber(showSign, item.bytes);
+     const percentBytes = this.formatPercent(showSign, getPercentBytes(item.bytes));
+ 
+     const count = this.formatNumber(showSign, item.count);
+     const percentCount = this.formatPercent(showSign, getPercentCount(item.count));
+ 
+@@ -79,24 +81,31 @@ const TreeItem = module.exports = createClass({
+       dom.span({ className: "heap-tree-item-field heap-tree-item-total-bytes" },
+                dom.span({ className: "heap-tree-number" }, totalBytes),
+                dom.span({ className: "heap-tree-percent" }, percentTotalBytes)),
+       dom.span({ className: "heap-tree-item-field heap-tree-item-total-count" },
+                dom.span({ className: "heap-tree-number" }, totalCount),
+                dom.span({ className: "heap-tree-percent" }, percentTotalCount)),
+       dom.span({ className: "heap-tree-item-field heap-tree-item-name", style: { marginLeft: depth * INDENT }},
+         arrow,
+-        this.toLabel(item.name, toolbox)
++        this.toLabel(item.name, linkToDebugger)
+       )
+     );
+   },
+ 
+-  toLabel(name, toolbox) {
++  toLabel(name, linkToDebugger) {
+     if (isSavedFrame(name)) {
+-      return FrameView({ frame: name, toolbox });
++      let onClickTooltipString =
++        L10N.getFormatStr("viewsourceindebugger",`${name.source}:${name.line}:${name.column}`);
++      return FrameView({
++        frame: name,
++        onClick: () => linkToDebugger(name),
++        onClickTooltipString,
++        unknownSourceString
++      });
+     }
+ 
+     if (name === null) {
+       return L10N.getStr("tree-item.root");
+     }
+ 
+     if (name === "noStack") {
+       return L10N.getStr("tree-item.nostack");
+diff --git a/devtools/client/memory/test/unit/test_utils.js b/devtools/client/memory/test/unit/test_utils.js
+index 519a432..dac25a3 100644
+--- a/devtools/client/memory/test/unit/test_utils.js
++++ b/devtools/client/memory/test/unit/test_utils.js
+@@ -44,27 +44,8 @@ add_task(function *() {
+     "utils.breakdownNameToSpec() works for presets");
+ 
+   let custom = { by: "internalType", then: { by: "count", bytes: true }};
+   Preferences.set("devtools.memory.custom-breakdowns", JSON.stringify({ "My Breakdown": custom }));
+ 
+   ok(utils.breakdownEquals(utils.getCustomBreakdowns()["My Breakdown"], custom),
+     "utils.getCustomBreakdowns() returns custom breakdowns");
+ });
+-
+-// Test `utils.parseSource`.
+-add_task(function* () {
+-  const url = "http://example.com/foo/bar/baz.js";
+-  let results = utils.parseSource(url);
+-  equal(results.short, "baz.js");
+-  equal(results.long, url);
+-  equal(results.host, "example.com");
+-
+-  results = utils.parseSource("self-hosted");
+-  equal(results.short, "self-hosted");
+-  equal(results.long, "self-hosted");
+-  equal(results.host, undefined);
+-
+-  results = utils.parseSource("");
+-  equal(typeof results.short, "string");
+-  equal(typeof results.long, "string");
+-  equal(results.host, undefined);
+-});
+diff --git a/devtools/client/memory/utils.js b/devtools/client/memory/utils.js
+index b5695c2..5d42774 100644
+--- a/devtools/client/memory/utils.js
++++ b/devtools/client/memory/utils.js
+@@ -336,59 +336,16 @@ exports.getSnapshotTotals = function (census) {
+     bytes = report.totalBytes;
+     count = report.totalCount;
+   }
+ 
+   return { bytes, count };
+ };
+ 
+ /**
+- * Parse a source into a short and long name as well as a host name.
+- *
+- * @param {String} source
+- *        The source to parse.
+- *
+- * @returns {Object}
+- *          An object with the following properties:
+- *            - {String} short: A short name for the source.
+- *            - {String} long: The full, long name for the source.
+- *            - {String?} host: If available, the host name for the source.
+- */
+-exports.parseSource = function (source) {
+-  const sourceStr = source ? String(source) : "";
+-
+-  let short;
+-  let long;
+-  let host;
+-
+-  try {
+-    const url = new URL(sourceStr);
+-    short = url.fileName;
+-    host = url.host;
+-    long = url.toString();
+-  } catch (e) {
+-    // Malformed URI.
+-    long = sourceStr;
+-    short = sourceStr.slice(0, 100);
+-  }
+-
+-  if (!short) {
+-    // Last ditch effort.
+-
+-    if (!long) {
+-      long = L10N.getStr("unknownSource");
+-    }
+-
+-    short = long.slice(0, 100);
+-  }
+-
+-  return { short, long, host };
+-};
+-
+-/**
+  * Takes some configurations and opens up a file picker and returns
+  * a promise to the chosen file if successful.
+  *
+  * @param {String} .title
+  *        The title displayed in the file picker window.
+  * @param {Array<Array<String>>} .filters
+  *        An array of filters to display in the file picker. Each filter in the array
+  *        is a duple of two strings, one a name for the filter, and one the filter itself
+diff --git a/devtools/client/performance/modules/logic/frame-utils.js b/devtools/client/performance/modules/logic/frame-utils.js
+index 64ef670..1445595 100644
+--- a/devtools/client/performance/modules/logic/frame-utils.js
++++ b/devtools/client/performance/modules/logic/frame-utils.js
+@@ -1,50 +1,32 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const { Cc, Ci, Cu, Cr } = require("chrome");
+-
+ loader.lazyRequireGetter(this, "Services");
+ loader.lazyRequireGetter(this, "global",
+   "devtools/client/performance/modules/global");
+ const demangle = require("devtools/client/shared/demangle");
++const { isChromeScheme, isContentScheme, parseURL } =
++  require("devtools/client/shared/source-utils");
+ 
+ // Character codes used in various parsing helper functions.
+-const CHAR_CODE_A = "a".charCodeAt(0);
+-const CHAR_CODE_C = "c".charCodeAt(0);
+-const CHAR_CODE_E = "e".charCodeAt(0);
+-const CHAR_CODE_F = "f".charCodeAt(0);
+-const CHAR_CODE_H = "h".charCodeAt(0);
+-const CHAR_CODE_I = "i".charCodeAt(0);
+-const CHAR_CODE_J = "j".charCodeAt(0);
+-const CHAR_CODE_L = "l".charCodeAt(0);
+-const CHAR_CODE_M = "m".charCodeAt(0);
+-const CHAR_CODE_O = "o".charCodeAt(0);
+-const CHAR_CODE_P = "p".charCodeAt(0);
+ const CHAR_CODE_R = "r".charCodeAt(0);
+-const CHAR_CODE_S = "s".charCodeAt(0);
+-const CHAR_CODE_T = "t".charCodeAt(0);
+-const CHAR_CODE_U = "u".charCodeAt(0);
+ const CHAR_CODE_0 = "0".charCodeAt(0);
+ const CHAR_CODE_9 = "9".charCodeAt(0);
+ const CHAR_CODE_CAP_Z = "Z".charCodeAt(0);
+ 
+ const CHAR_CODE_LPAREN = "(".charCodeAt(0);
+ const CHAR_CODE_RPAREN = ")".charCodeAt(0);
+ const CHAR_CODE_COLON = ":".charCodeAt(0);
+-const CHAR_CODE_SLASH = "/".charCodeAt(0);
+ const CHAR_CODE_SPACE = " ".charCodeAt(0);
+ const CHAR_CODE_UNDERSCORE = "_".charCodeAt(0);
+ 
+-// The cache used in the `nsIURL` function.
+-const gNSURLStore = new Map();
+-
+ // The cache used to store inflated frames.
+ const gInflatedFrameStore = new WeakMap();
+ 
+ // The cache used to store frame data from `getInfo`.
+ const gFrameData = new WeakMap();
+ 
+ /**
+  * Parses the raw location of this function call to retrieve the actual
+@@ -145,51 +127,41 @@ function parseLocation(location, fallbackLine, fallbackColumn) {
+           i > 0 &&
+           location.charCodeAt(i - 1) === CHAR_CODE_SPACE) {
+         parenIndex = i;
+         break;
+       }
+     }
+   }
+ 
+-  let uri;
++  let parsedUrl;
+   if (lineAndColumnIndex > 0) {
+     let resource = location.substring(parenIndex + 1, lineAndColumnIndex);
+     url = resource.split(" -> ").pop();
+     if (url) {
+-      uri = nsIURL(url);
++      parsedUrl = parseURL(url);
+     }
+   }
+ 
+-  let functionName, fileName, hostName, port, host;
++  let functionName, fileName, port, host;
+   line = line || fallbackLine;
+   column = column || fallbackColumn;
+ 
+-  // If the URI digged out from the `location` is valid, this is a JS frame.
+-  if (uri) {
++  // If the URL digged out from the `location` is valid, this is a JS frame.
++  if (parsedUrl) {
+     functionName = location.substring(0, parenIndex - 1);
+-    fileName = uri.fileName || "/";
+-    hostName = getHost(url, uri.host);
+-    // nsIURL throws when accessing a piece of a URL that doesn't
+-    // exist, because we can't have nice things. Only check this if hostName
+-    // exists, to save an extra try/catch.
+-    if (hostName) {
+-      try {
+-        port = uri.port === -1 ? null : uri.port;
+-        host = port !== null ? `${hostName}:${port}` : hostName;
+-      } catch (e) {
+-        host = hostName;
+-      }
+-    }
++    fileName = parsedUrl.fileName;
++    port = parsedUrl.port;
++    host = parsedUrl.host;
+   } else {
+     functionName = location;
+     url = null;
+   }
+ 
+-  return { functionName, fileName, hostName, host, port, url, line, column };
++  return { functionName, fileName, host, port, url, line, column };
+ };
+ 
+ /**
+  * Sets the properties of `isContent` and `category` on a frame.
+  *
+  * @param {InflatedFrame} frame
+  */
+ function computeIsContentAndCategory(frame) {
+@@ -351,139 +323,16 @@ InflatedFrame.prototype.getFrameKey = function getFrameKey(options) {
+     options.isMetaCategoryOut = true;
+     return this.category;
+   }
+ 
+   // Return an empty string denoting that this frame should be skipped.
+   return "";
+ };
+ 
+-/**
+- * Helper for getting an nsIURL instance out of a string.
+- */
+-function nsIURL(url) {
+-  let cached = gNSURLStore.get(url);
+-  // If we cached a valid URI, or `null` in the case
+-  // of a failure, return it.
+-  if (cached !== void 0) {
+-    return cached;
+-  }
+-  let uri = null;
+-  try {
+-    uri = Services.io.newURI(url, null, null).QueryInterface(Ci.nsIURL);
+-    // Access the host, because the constructor doesn't necessarily throw
+-    // if it's invalid, but accessing the host can throw as well
+-    uri.host;
+-  } catch(e) {
+-    // The passed url string is invalid.
+-    uri = null;
+-  }
+-
+-  gNSURLStore.set(url, uri);
+-  return uri;
+-};
+-
+-/**
+- * Takes a `host` string from an nsIURL instance and
+- * returns the same string, or null, if it's an invalid host.
+- */
+-function getHost (url, hostName) {
+-  return isChromeScheme(url, 0) ? null : hostName;
+-}
+-
+-// For the functions below, we assume that we will never access the location
+-// argument out of bounds, which is indeed the vast majority of cases.
+-//
+-// They are written this way because they are hot. Each frame is checked for
+-// being content or chrome when processing the profile.
+-
+-function isColonSlashSlash(location, i) {
+-  return location.charCodeAt(++i) === CHAR_CODE_COLON &&
+-         location.charCodeAt(++i) === CHAR_CODE_SLASH &&
+-         location.charCodeAt(++i) === CHAR_CODE_SLASH;
+-}
+-
+-function isContentScheme(location, i) {
+-  let firstChar = location.charCodeAt(i);
+-
+-  switch (firstChar) {
+-  case CHAR_CODE_H: // "http://" or "https://"
+-    if (location.charCodeAt(++i) === CHAR_CODE_T &&
+-        location.charCodeAt(++i) === CHAR_CODE_T &&
+-        location.charCodeAt(++i) === CHAR_CODE_P) {
+-      if (location.charCodeAt(i + 1) === CHAR_CODE_S) {
+-        ++i;
+-      }
+-      return isColonSlashSlash(location, i);
+-    }
+-    return false;
+-
+-  case CHAR_CODE_F: // "file://"
+-    if (location.charCodeAt(++i) === CHAR_CODE_I &&
+-        location.charCodeAt(++i) === CHAR_CODE_L &&
+-        location.charCodeAt(++i) === CHAR_CODE_E) {
+-      return isColonSlashSlash(location, i);
+-    }
+-    return false;
+-
+-  case CHAR_CODE_A: // "app://"
+-    if (location.charCodeAt(++i) == CHAR_CODE_P &&
+-        location.charCodeAt(++i) == CHAR_CODE_P) {
+-      return isColonSlashSlash(location, i);
+-    }
+-    return false;
+-
+-  default:
+-    return false;
+-  }
+-}
+-
+-function isChromeScheme(location, i) {
+-  let firstChar = location.charCodeAt(i);
+-
+-  switch (firstChar) {
+-  case CHAR_CODE_C: // "chrome://"
+-    if (location.charCodeAt(++i) === CHAR_CODE_H &&
+-        location.charCodeAt(++i) === CHAR_CODE_R &&
+-        location.charCodeAt(++i) === CHAR_CODE_O &&
+-        location.charCodeAt(++i) === CHAR_CODE_M &&
+-        location.charCodeAt(++i) === CHAR_CODE_E) {
+-      return isColonSlashSlash(location, i);
+-    }
+-    return false;
+-
+-  case CHAR_CODE_R: // "resource://"
+-    if (location.charCodeAt(++i) === CHAR_CODE_E &&
+-        location.charCodeAt(++i) === CHAR_CODE_S &&
+-        location.charCodeAt(++i) === CHAR_CODE_O &&
+-        location.charCodeAt(++i) === CHAR_CODE_U &&
+-        location.charCodeAt(++i) === CHAR_CODE_R &&
+-        location.charCodeAt(++i) === CHAR_CODE_C &&
+-        location.charCodeAt(++i) === CHAR_CODE_E) {
+-      return isColonSlashSlash(location, i);
+-    }
+-    return false;
+-
+-  case CHAR_CODE_J: // "jar:file://"
+-    if (location.charCodeAt(++i) === CHAR_CODE_A &&
+-        location.charCodeAt(++i) === CHAR_CODE_R &&
+-        location.charCodeAt(++i) === CHAR_CODE_COLON &&
+-        location.charCodeAt(++i) === CHAR_CODE_F &&
+-        location.charCodeAt(++i) === CHAR_CODE_I &&
+-        location.charCodeAt(++i) === CHAR_CODE_L &&
+-        location.charCodeAt(++i) === CHAR_CODE_E) {
+-      return isColonSlashSlash(location, i);
+-    }
+-    return false;
+-
+-  default:
+-    return false;
+-  }
+-}
+-
+ function isNumeric(c) {
+   return c >= CHAR_CODE_0 && c <= CHAR_CODE_9;
+ }
+ 
+ function shouldDemangle(name) {
+   return name && name.charCodeAt &&
+          name.charCodeAt(0) === CHAR_CODE_UNDERSCORE &&
+          name.charCodeAt(1) === CHAR_CODE_UNDERSCORE &&
+diff --git a/devtools/client/performance/test/unit/test_frame-utils-01.js b/devtools/client/performance/test/unit/test_frame-utils-01.js
+index 6dc43f5..aabd226 100644
+--- a/devtools/client/performance/test/unit/test_frame-utils-01.js
++++ b/devtools/client/performance/test/unit/test_frame-utils-01.js
+@@ -54,33 +54,33 @@ add_task(function () {
+   for (let frame of CONTENT_LOCATIONS) {
+     ok(isContent.apply(null, frameify(frame)), `${frame[0]} should be considered a content frame.`);
+   }
+ 
+   for (let frame of CHROME_LOCATIONS) {
+     ok(!isContent.apply(null, frameify(frame)), `${frame[0]} should not be considered a content frame.`);
+   }
+ 
+-  // functionName, fileName, hostName, url, line, column
+-  const FIELDS = ["functionName", "fileName", "hostName", "url", "line", "column", "host", "port"];
++  // functionName, fileName, host, url, line, column
++  const FIELDS = ["functionName", "fileName", "host", "url", "line", "column", "host", "port"];
+   const PARSED_CONTENT = [
+     ["hello/<.world", "bar.js", "foo", "https://foo/bar.js", 123, 987, "foo", null],
+     ["hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, 987, "foo", null],
+     ["hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, null, "foo", null],
+     ["hello/<.world", "bar.js", "foo", "http://foo/bar.js#baz", 123, 987, "foo", null],
+     ["hello/<.world", "bar.js", "foo", "http://foo/bar.js?myquery=params&search=1", 123, 987, "foo", null],
+     ["hello/<.world", "/", "foo", "http://foo/#bar", 123, 987, "foo", null],
+     ["hello/<.world", "/", "foo", "http://foo/", 123, 987, "foo", null],
+     ["hello/<.world", "file.js", "myfxosapp", "app://myfxosapp/file.js", 100, 1, "myfxosapp", null],
+-    ["hello/<.world", "file.js", "localhost", "http://localhost:8888/file.js", 100, 1, "localhost:8888", 8888],
+-    ["hello/<.world", "file.js", "localhost", "http://localhost:8888/file.js", 100, null, "localhost:8888", 8888],
+-    ["hello/<.world", "/", "localhost", "http://localhost:8888/", 1, null, "localhost:8888", 8888],
+-    ["hello/<.world", "/", "localhost", "http://localhost:8888/", 100, 50, "localhost:8888", 8888],
+-    ["Native[\"arraycopy(blah)\"]", "profiler.html", "localhost", "http://localhost:8888/profiler.html", 4, null, "localhost:8888", 8888],
+-    ["Native[\"arraycopy(blah)\"]", "profiler.html", "localhost", "http://localhost:8888/profiler.html", 4, 5, "localhost:8888", 8888],
++    ["hello/<.world", "file.js", "localhost:8888", "http://localhost:8888/file.js", 100, 1, "localhost:8888", 8888],
++    ["hello/<.world", "file.js", "localhost:8888", "http://localhost:8888/file.js", 100, null, "localhost:8888", 8888],
++    ["hello/<.world", "/", "localhost:8888", "http://localhost:8888/", 1, null, "localhost:8888", 8888],
++    ["hello/<.world", "/", "localhost:8888", "http://localhost:8888/", 100, 50, "localhost:8888", 8888],
++    ["Native[\"arraycopy(blah)\"]", "profiler.html", "localhost:8888", "http://localhost:8888/profiler.html", 4, null, "localhost:8888", 8888],
++    ["Native[\"arraycopy(blah)\"]", "profiler.html", "localhost:8888", "http://localhost:8888/profiler.html", 4, 5, "localhost:8888", 8888],
+   ];
+ 
+   for (let i = 0; i < PARSED_CONTENT.length; i++) {
+     let parsed = parseLocation.apply(null, CONTENT_LOCATIONS[i]);
+     for (let j = 0; j < FIELDS.length; j++) {
+       equal(parsed[FIELDS[j]], PARSED_CONTENT[i][j], `${CONTENT_LOCATIONS[i]} was parsed to correct ${FIELDS[j]}`);
+     }
+   }
+diff --git a/devtools/client/performance/test/unit/test_tree-model-08.js b/devtools/client/performance/test/unit/test_tree-model-08.js
+index 16fdd7e..26d2d1d 100644
+--- a/devtools/client/performance/test/unit/test_tree-model-08.js
++++ b/devtools/client/performance/test/unit/test_tree-model-08.js
+@@ -60,29 +60,29 @@ add_task(function test() {
+       location: "main (http://localhost:8888/file.js:123:987)",
+       line: 123,
+     }), false),
+     new FrameNode("main (resource://devtools/timeline.js:123)", compute({
+       location: "main (resource://devtools/timeline.js:123)",
+     }), false),
+   ];
+ 
+-  let fields = ["nodeType", "functionName", "fileName", "hostName", "url", "line", "column", "categoryData.abbrev", "isContent", "port"]
++  let fields = ["nodeType", "functionName", "fileName", "host", "url", "line", "column", "categoryData.abbrev", "isContent", "port"]
+   let expected = [
+-    // nodeType, functionName, fileName, hostName, url, line, column, categoryData.abbrev, isContent, port
++    // nodeType, functionName, fileName, host, url, line, column, categoryData.abbrev, isContent, port
+     ["Frame", "hello/<.world", "bar.js", "foo", "http://foo/bar.js", 123, 987, void 0, true],
+     ["Frame", "hello/<.world", "bar.js", "foo", "http://foo/bar.js#baz", 123, 987, void 0, true],
+     ["Frame", "hello/<.world", "/", "foo", "http://foo/#bar", 123, 987, void 0, true],
+     ["Frame", "hello/<.world", "/", "foo", "http://foo/", 123, 987, void 0, true],
+     ["Frame", "hello/<.world", "baz.js", "bar", "http://bar/baz.js", 123, 987, "other", false],
+     ["Frame", "Foo::Bar::Baz", null, null, null, 456, void 0, "other", false],
+     ["Frame", "EnterJIT", null, null, null, null, null, "js", false],
+     ["Frame", "chrome://browser/content/content.js", null, null, null, 456, null, "other", false],
+     ["Frame", "hello/<.world", "foo.js", null, "resource://gre/foo.js", 123, 434, "other", false],
+-    ["Frame", "main", "file.js", "localhost", "http://localhost:8888/file.js", 123, 987, null, true, 8888],
++    ["Frame", "main", "file.js", "localhost:8888", "http://localhost:8888/file.js", 123, 987, null, true, 8888],
+     ["Frame", "main", "timeline.js", null, "resource://devtools/timeline.js", 123, null, "tools", false]
+   ];
+ 
+   for (let i = 0; i < frames.length; i++) {
+     let info = frames[i].getInfo();
+     let expect = expected[i];
+ 
+     for (let j = 0; j < fields.length; j++) {
+diff --git a/devtools/client/shared/components/frame.js b/devtools/client/shared/components/frame.js
+new file mode 100644
+index 0000000..a2a71db
+--- /dev/null
++++ b/devtools/client/shared/components/frame.js
+@@ -0,0 +1,50 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
++const { getSourceNames } = require("devtools/client/shared/source-utils");
++
++const Frame = module.exports = createClass({
++  displayName: "frame-view",
++
++  propTypes: {
++    // SavedFrame
++    frame: PropTypes.object.isRequired,
++    // Clicking on the frame link -- probably should link to the debugger.
++    onClick: PropTypes.func.isRequired,
++    // Tooltip to display when hovering over the link to the frame;
++    // Something like "View source in debugger -> http://foo.com/file.js:100:2".
++    onClickTooltipString: PropTypes.string.isRequired,
++    // Source to display when cannot determine a good display name.
++    // Something like "(unknown)".
++    unknownSourceString: PropTypes.string.isRequired,
++  },
++
++  render() {
++    let { onClick, frame, onClickTooltipString, unknownSourceString } = this.props;
++    const { short, long, host } = getSourceNames(frame.source, unknownSourceString);
++
++    let func = frame.functionDisplayName || "";
++    let tooltip = `${func} (${long}:${frame.line}:${frame.column})`;
++
++    let fields = [
++      dom.span({ className: "frame-link-function-display-name" }, func),
++      dom.a({
++        className: "frame-link-filename",
++        onClick,
++        title: onClickTooltipString
++      }, short),
++      dom.span({ className: "frame-link-colon" }, ":"),
++      dom.span({ className: "frame-link-line" }, frame.line),
++      dom.span({ className: "frame-link-colon" }, ":"),
++      dom.span({ className: "frame-link-column" }, frame.column)
++    ];
++
++    if (host) {
++      fields.push(dom.span({ className: "frame-link-host" }, host));
++    }
++
++    return dom.span({ className: "frame-link", title: tooltip }, ...fields);
++  }
++});
+diff --git a/devtools/client/shared/components/moz.build b/devtools/client/shared/components/moz.build
+index 49ba5dc..e1091dc 100644
+--- a/devtools/client/shared/components/moz.build
++++ b/devtools/client/shared/components/moz.build
+@@ -1,11 +1,12 @@
+ # -*- Mode: python; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 40 -*-
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
++    'frame.js',
+     'tree.js',
+ )
+ 
+ MOCHITEST_CHROME_MANIFESTS += ['test/mochitest/chrome.ini']
+diff --git a/devtools/client/shared/moz.build b/devtools/client/shared/moz.build
+index 2b8e7a1..7ef86a6 100644
+--- a/devtools/client/shared/moz.build
++++ b/devtools/client/shared/moz.build
+@@ -34,10 +34,11 @@ DevToolsModules(
+     'options-view.js',
+     'output-parser.js',
+     'poller.js',
+     'source-utils.js',
+     'SplitView.jsm',
+     'telemetry.js',
+     'theme-switching.js',
+     'theme.js',
+-    'undo.js'
++    'undo.js',
++    'view-source.js',
+ )
+diff --git a/devtools/client/shared/source-utils.js b/devtools/client/shared/source-utils.js
+index 08375d6..7401168 100644
+--- a/devtools/client/shared/source-utils.js
++++ b/devtools/client/shared/source-utils.js
+@@ -1,141 +1,210 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
+ "use strict";
+ 
+-loader.lazyRequireGetter(this, "Services");
+-loader.lazyImporter(this, "gDevTools", "resource://devtools/client/framework/gDevTools.jsm");
+-loader.lazyImporter(this, "Task", "resource://gre/modules/Task.jsm");
++const { URL } = require("sdk/url");
++
++// Character codes used in various parsing helper functions.
++const CHAR_CODE_A = "a".charCodeAt(0);
++const CHAR_CODE_C = "c".charCodeAt(0);
++const CHAR_CODE_E = "e".charCodeAt(0);
++const CHAR_CODE_F = "f".charCodeAt(0);
++const CHAR_CODE_H = "h".charCodeAt(0);
++const CHAR_CODE_I = "i".charCodeAt(0);
++const CHAR_CODE_J = "j".charCodeAt(0);
++const CHAR_CODE_L = "l".charCodeAt(0);
++const CHAR_CODE_M = "m".charCodeAt(0);
++const CHAR_CODE_O = "o".charCodeAt(0);
++const CHAR_CODE_P = "p".charCodeAt(0);
++const CHAR_CODE_R = "r".charCodeAt(0);
++const CHAR_CODE_S = "s".charCodeAt(0);
++const CHAR_CODE_T = "t".charCodeAt(0);
++const CHAR_CODE_U = "u".charCodeAt(0);
++const CHAR_CODE_COLON = ":".charCodeAt(0);
++const CHAR_CODE_SLASH = "/".charCodeAt(0);
+ 
+-var DevToolsUtils = require("devtools/shared/DevToolsUtils");
++// The cache used in the `nsIURL` function.
++const gURLStore = new Map();
+ 
+ /**
+- * Tries to open a Stylesheet file in the Style Editor. If the file is not found,
+- * it is opened in source view instead.
+- * Returns a promise resolving to a boolean indicating whether or not
+- * the source was able to be displayed in the StyleEditor, as the built-in Firefox
+- * View Source is the fallback.
++ * Takes a string and returns an object containing all the properties
++ * available on an URL instance, with additional properties (fileName),
++ * Leverages caching.
+  *
+- * @param {Toolbox} toolbox
+- * @param {string} sourceURL
+- * @param {number} sourceLine
++ * @TODO If loaded through Browser Loader, we can use the web API URL
++ * directly, giving us the same interface without needing the SDK --
++ * we still need to add `fileName` though.
+  *
+- * @return {Promise<boolean>}
++ * @param {String} location
++ * @return {Object?} An object containing most properties available
++ *                   in https://developer.mozilla.org/en-US/docs/Web/API/URL
+  */
+-exports.viewSourceInStyleEditor = Task.async(function *(toolbox, sourceURL, sourceLine) {
+-  let panel = yield toolbox.loadTool("styleeditor");
++
++function parseURL(location) {
++  let url = gURLStore.get(location);
++
++  if (url !== void 0) {
++    return url;
++  }
+ 
+   try {
+-    yield panel.selectStyleSheet(sourceURL, sourceLine);
+-    yield toolbox.selectTool("styleeditor");
+-    return true;
+-  } catch (e) {
+-    exports.viewSource(toolbox, sourceURL, sourceLine);
+-    return false;
++    url = new URL(location);
++    // Definitions:
++    // Example: https://foo.com:8888/file.js
++    // `hostname`: "foo.com"
++    // `host`: "foo.com:8888"
++    //
++    // sdk/url does not match several definitions.: both `host` and `hostname`
++    // are actually the `hostname` (even though this is the `host` property on the
++    // original nsIURL, with `hostPort` representing the actual `host` name, AH!!!)
++    // So normalize all that garbage here.
++    let isChrome = isChromeScheme(location);
++    let fileName = url.fileName || "/";
++    let hostname = isChrome ? null : url.hostname;
++    let host = isChrome ? null :
++               url.port ? `${url.host}:${url.port}` :
++               url.host;
++
++    let parsed = Object.assign({}, url, { host, fileName, hostname });
++    gURLStore.set(location, parsed);
++    return parsed;
++  }
++  catch (e) {
++    gURLStore.set(location, null);
++    return null;
+   }
+-});
++}
+ 
+ /**
+- * Tries to open a JavaScript file in the Debugger. If the file is not found,
+- * it is opened in source view instead.
+- * Returns a promise resolving to a boolean indicating whether or not
+- * the source was able to be displayed in the Debugger, as the built-in Firefox
+- * View Source is the fallback.
+- *
+- * @param {Toolbox} toolbox
+- * @param {string} sourceURL
+- * @param {number} sourceLine
++ * Parse a source into a short and long name as well as a host name.
+  *
+- * @return {Promise<boolean>}
++ * @param {String} source
++ *        The source to parse. Can be a URI or names like "(eval)" or "self-hosted".
++ * @param {String} unknownSourceString
++ *        The string to use if no valid source name can be generated.
++ * @return {Object}
++ *         An object with the following properties:
++ *           - {String} short: A short name for the source.
++ *           - {String} long: The full, long name for the source.
++ *           - {String?} host: If available, the host name for the source.
+  */
+-exports.viewSourceInDebugger = Task.async(function *(toolbox, sourceURL, sourceLine) {
+-  // If the Debugger was already open, switch to it and try to show the
+-  // source immediately. Otherwise, initialize it and wait for the sources
+-  // to be added first.
+-  let debuggerAlreadyOpen = toolbox.getPanel("jsdebugger");
+-  let { panelWin: dbg } = yield toolbox.loadTool("jsdebugger");
+-
+-  if (!debuggerAlreadyOpen) {
+-    yield dbg.DebuggerController.waitForSourcesLoaded();
+-  }
++function getSourceNames (source, unknownSourceString) {
++  let short, long, host;
++  const sourceStr = source ? String(source) : "";
++  const parsedUrl = parseURL(sourceStr);
+ 
+-  let { DebuggerView } = dbg;
+-  let { Sources } = DebuggerView;
++  if (!parsedUrl) {
++    // Malformed URI.
++    long = sourceStr;
++    short = sourceStr.slice(0, 100);
++  } else {
++    short = parsedUrl.fileName;
++    long = parsedUrl.href;
++    host = parsedUrl.host;
++  }
+ 
+-  let item = Sources.getItemForAttachment(a => a.source.url === sourceURL);
+-  if (item) {
+-    yield toolbox.selectTool("jsdebugger");
+-    const isLoading = dbg.DebuggerController.getState().sources.selectedSource !== item.attachment.source.actor;
+-    DebuggerView.setEditorLocation(item.attachment.source.actor, sourceLine, { noDebug: true });
+-    if (isLoading) {
+-      yield dbg.DebuggerController.waitForSourceShown(sourceURL);
++  if (!short) {
++    if (!long) {
++      long = unknownSourceString;
+     }
+-    return true;
++    short = long.slice(0, 100);
+   }
+ 
+-  // If not found, still attempt to open in View Source
+-  exports.viewSource(toolbox, sourceURL, sourceLine);
+-  return false;
+-});
++  return { short, long, host };
++}
+ 
+-/**
+- * Tries to open a JavaScript file in the corresponding Scratchpad.
+- *
+- * @param {string} sourceURL
+- * @param {number} sourceLine
+- *
+- * @return {Promise}
+- */
+-exports.viewSourceInScratchpad = Task.async(function *(sourceURL, sourceLine) {
+-  // Check for matching top level scratchpad window.
+-  let wins = Services.wm.getEnumerator("devtools:scratchpad");
++// For the functions below, we assume that we will never access the location
++// argument out of bounds, which is indeed the vast majority of cases.
++//
++// They are written this way because they are hot. Each frame is checked for
++// being content or chrome when processing the profile.
+ 
+-  while (wins.hasMoreElements()) {
+-    let win = wins.getNext();
++function isColonSlashSlash(location, i=0) {
++  return location.charCodeAt(++i) === CHAR_CODE_COLON &&
++         location.charCodeAt(++i) === CHAR_CODE_SLASH &&
++         location.charCodeAt(++i) === CHAR_CODE_SLASH;
++}
+ 
+-    if (!win.closed && win.Scratchpad.uniqueName === sourceURL) {
+-      win.focus();
+-      win.Scratchpad.editor.setCursor({ line: sourceLine, ch: 0 });
+-      return;
+-    }
+-  }
++function isContentScheme(location, i=0) {
++  let firstChar = location.charCodeAt(i);
+ 
+-  // For scratchpads within toolbox
+-  for (let [, toolbox] of gDevTools) {
+-    let scratchpadPanel = toolbox.getPanel("scratchpad");
+-    if (scratchpadPanel) {
+-      let { scratchpad } = scratchpadPanel;
+-      if (scratchpad.uniqueName === sourceURL) {
+-        toolbox.selectTool("scratchpad");
+-        toolbox.raise();
+-        scratchpad.editor.focus();
+-        scratchpad.editor.setCursor({ line: sourceLine, ch: 0 });
+-        return;
++  switch (firstChar) {
++  case CHAR_CODE_H: // "http://" or "https://"
++    if (location.charCodeAt(++i) === CHAR_CODE_T &&
++        location.charCodeAt(++i) === CHAR_CODE_T &&
++        location.charCodeAt(++i) === CHAR_CODE_P) {
++      if (location.charCodeAt(i + 1) === CHAR_CODE_S) {
++        ++i;
+       }
++      return isColonSlashSlash(location, i);
++    }
++    return false;
++
++  case CHAR_CODE_F: // "file://"
++    if (location.charCodeAt(++i) === CHAR_CODE_I &&
++        location.charCodeAt(++i) === CHAR_CODE_L &&
++        location.charCodeAt(++i) === CHAR_CODE_E) {
++      return isColonSlashSlash(location, i);
++    }
++    return false;
++
++  case CHAR_CODE_A: // "app://"
++    if (location.charCodeAt(++i) == CHAR_CODE_P &&
++        location.charCodeAt(++i) == CHAR_CODE_P) {
++      return isColonSlashSlash(location, i);
+     }
++    return false;
++
++  default:
++    return false;
+   }
+-});
++}
+ 
+-/**
+- * Open a link in Firefox's View Source.
+- *
+- * @param {Toolbox} toolbox
+- * @param {string} sourceURL
+- * @param {number} sourceLine
+- *
+- * @return {Promise}
+- */
+-exports.viewSource = Task.async(function *(toolbox, sourceURL, sourceLine) {
+-  // Attempt to access view source via a browser first, which may display it in
+-  // a tab, if enabled.
+-  let browserWin = Services.wm.getMostRecentWindow("navigator:browser");
+-  if (browserWin) {
+-    return browserWin.BrowserViewSourceOfDocument({
+-      URL: sourceURL,
+-      lineNumber: sourceLine
+-    });
++function isChromeScheme(location, i=0) {
++  let firstChar = location.charCodeAt(i);
++
++  switch (firstChar) {
++  case CHAR_CODE_C: // "chrome://"
++    if (location.charCodeAt(++i) === CHAR_CODE_H &&
++        location.charCodeAt(++i) === CHAR_CODE_R &&
++        location.charCodeAt(++i) === CHAR_CODE_O &&
++        location.charCodeAt(++i) === CHAR_CODE_M &&
++        location.charCodeAt(++i) === CHAR_CODE_E) {
++      return isColonSlashSlash(location, i);
++    }
++    return false;
++
++  case CHAR_CODE_R: // "resource://"
++    if (location.charCodeAt(++i) === CHAR_CODE_E &&
++        location.charCodeAt(++i) === CHAR_CODE_S &&
++        location.charCodeAt(++i) === CHAR_CODE_O &&
++        location.charCodeAt(++i) === CHAR_CODE_U &&
++        location.charCodeAt(++i) === CHAR_CODE_R &&
++        location.charCodeAt(++i) === CHAR_CODE_C &&
++        location.charCodeAt(++i) === CHAR_CODE_E) {
++      return isColonSlashSlash(location, i);
++    }
++    return false;
++
++  case CHAR_CODE_J: // "jar:file://"
++    if (location.charCodeAt(++i) === CHAR_CODE_A &&
++        location.charCodeAt(++i) === CHAR_CODE_R &&
++        location.charCodeAt(++i) === CHAR_CODE_COLON &&
++        location.charCodeAt(++i) === CHAR_CODE_F &&
++        location.charCodeAt(++i) === CHAR_CODE_I &&
++        location.charCodeAt(++i) === CHAR_CODE_L &&
++        location.charCodeAt(++i) === CHAR_CODE_E) {
++      return isColonSlashSlash(location, i);
++    }
++    return false;
++
++  default:
++    return false;
+   }
+-  let utils = toolbox.gViewSourceUtils;
+-  utils.viewSource(sourceURL, null, toolbox.doc, sourceLine || 0);
+-});
++}
++
++exports.parseURL = parseURL;
++exports.getSourceNames = getSourceNames;
++exports.isChromeScheme = isChromeScheme;
++exports.isContentScheme = isContentScheme;
+diff --git a/devtools/client/shared/test/unit/test_source-utils.js b/devtools/client/shared/test/unit/test_source-utils.js
+new file mode 100644
+index 0000000..ea92ce3
+--- /dev/null
++++ b/devtools/client/shared/test/unit/test_source-utils.js
+@@ -0,0 +1,77 @@
++/* Any copyright is dedicated to the Public Domain.
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++
++/**
++ * Tests utility functions contained in `source-utils.js`
++ */
++
++const Cu = Components.utils;
++const { require } = Cu.import("resource://devtools/shared/Loader.jsm", {});
++const sourceUtils = require("devtools/client/shared/source-utils");
++
++function run_test() {
++  run_next_test();
++}
++
++const CHROME_URLS = [
++  "chrome://foo", "resource://baz", "jar:file:///Users/root"
++];
++
++const CONTENT_URLS = [
++  "http://mozilla.org", "https://mozilla.org", "file:///Users/root", "app://fxosapp"
++];
++
++// Test `sourceUtils.parseURL`
++add_task(function* () {
++  let parsed = sourceUtils.parseURL("https://foo.com:8888/boo/bar.js?q=query");
++  equal(parsed.fileName, "bar.js", "parseURL parsed valid fileName");
++  equal(parsed.host, "foo.com:8888", "parseURL parsed valid host");
++  equal(parsed.hostname, "foo.com", "parseURL parsed valid hostname");
++  equal(parsed.port, "8888", "parseURL parsed valid port");
++  equal(parsed.href, "https://foo.com:8888/boo/bar.js?q=query", "parseURL parsed valid href");
++
++  parsed = sourceUtils.parseURL("https://foo.com");
++  equal(parsed.host, "foo.com", "parseURL parsed valid host when no port given");
++  equal(parsed.hostname, "foo.com", "parseURL parsed valid hostname when no port given");
++
++  equal(sourceUtils.parseURL("self-hosted"), null, "parseURL returns `null` for invalid URLs");
++});
++
++// Test `sourceUtils.isContentScheme`.
++add_task(function* () {
++  for (let url of CHROME_URLS) {
++    ok(!sourceUtils.isContentScheme(url), `${url} correctly identified as not content scheme`);
++  }
++  for (let url of CONTENT_URLS) {
++    ok(sourceUtils.isContentScheme(url), `${url} correctly identified as content scheme`);
++  }
++});
++
++// Test `sourceUtils.isChromeScheme`.
++add_task(function* () {
++  for (let url of CHROME_URLS) {
++    ok(sourceUtils.isChromeScheme(url), `${url} correctly identified as chrome scheme`);
++  }
++  for (let url of CONTENT_URLS) {
++    ok(!sourceUtils.isChromeScheme(url), `${url} correctly identified as not chrome scheme`);
++  }
++});
++
++// Test `sourceUtils.getSourceNames`.
++add_task(function* () {
++  const url = "http://example.com:8888/foo/bar/baz.js";
++  let results = sourceUtils.getSourceNames(url);
++  equal(results.short, "baz.js");
++  equal(results.long, url);
++  equal(results.host, "example.com:8888");
++
++  results = sourceUtils.getSourceNames("self-hosted");
++  equal(results.short, "self-hosted");
++  equal(results.long, "self-hosted");
++  equal(results.host, undefined);
++
++  results = sourceUtils.getSourceNames("", "<unknown>");
++  equal(results.short, "<unknown>");
++  equal(results.long, "<unknown>");
++  equal(results.host, undefined);
++});
+diff --git a/devtools/client/shared/test/unit/xpcshell.ini b/devtools/client/shared/test/unit/xpcshell.ini
+index ed059ef..b553ef5 100644
+--- a/devtools/client/shared/test/unit/xpcshell.ini
++++ b/devtools/client/shared/test/unit/xpcshell.ini
+@@ -10,11 +10,12 @@ skip-if = toolkit == 'android' || toolkit == 'gonk'
+ [test_attribute-parsing-02.js]
+ [test_bezierCanvas.js]
+ [test_cubicBezier.js]
+ [test_escapeCSSComment.js]
+ [test_parseDeclarations.js]
+ [test_parsePseudoClassesAndAttributes.js]
+ [test_parseSingleValue.js]
+ [test_rewriteDeclarations.js]
++[test_source-utils.js]
+ [test_undoStack.js]
+ [test_VariablesView_filtering-without-controller.js]
+ [test_VariablesView_getString_promise.js]
+diff --git a/devtools/client/shared/view-source.js b/devtools/client/shared/view-source.js
+new file mode 100644
+index 0000000..08375d6
+--- /dev/null
++++ b/devtools/client/shared/view-source.js
+@@ -0,0 +1,141 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++loader.lazyRequireGetter(this, "Services");
++loader.lazyImporter(this, "gDevTools", "resource://devtools/client/framework/gDevTools.jsm");
++loader.lazyImporter(this, "Task", "resource://gre/modules/Task.jsm");
++
++var DevToolsUtils = require("devtools/shared/DevToolsUtils");
++
++/**
++ * Tries to open a Stylesheet file in the Style Editor. If the file is not found,
++ * it is opened in source view instead.
++ * Returns a promise resolving to a boolean indicating whether or not
++ * the source was able to be displayed in the StyleEditor, as the built-in Firefox
++ * View Source is the fallback.
++ *
++ * @param {Toolbox} toolbox
++ * @param {string} sourceURL
++ * @param {number} sourceLine
++ *
++ * @return {Promise<boolean>}
++ */
++exports.viewSourceInStyleEditor = Task.async(function *(toolbox, sourceURL, sourceLine) {
++  let panel = yield toolbox.loadTool("styleeditor");
++
++  try {
++    yield panel.selectStyleSheet(sourceURL, sourceLine);
++    yield toolbox.selectTool("styleeditor");
++    return true;
++  } catch (e) {
++    exports.viewSource(toolbox, sourceURL, sourceLine);
++    return false;
++  }
++});
++
++/**
++ * Tries to open a JavaScript file in the Debugger. If the file is not found,
++ * it is opened in source view instead.
++ * Returns a promise resolving to a boolean indicating whether or not
++ * the source was able to be displayed in the Debugger, as the built-in Firefox
++ * View Source is the fallback.
++ *
++ * @param {Toolbox} toolbox
++ * @param {string} sourceURL
++ * @param {number} sourceLine
++ *
++ * @return {Promise<boolean>}
++ */
++exports.viewSourceInDebugger = Task.async(function *(toolbox, sourceURL, sourceLine) {
++  // If the Debugger was already open, switch to it and try to show the
++  // source immediately. Otherwise, initialize it and wait for the sources
++  // to be added first.
++  let debuggerAlreadyOpen = toolbox.getPanel("jsdebugger");
++  let { panelWin: dbg } = yield toolbox.loadTool("jsdebugger");
++
++  if (!debuggerAlreadyOpen) {
++    yield dbg.DebuggerController.waitForSourcesLoaded();
++  }
++
++  let { DebuggerView } = dbg;
++  let { Sources } = DebuggerView;
++
++  let item = Sources.getItemForAttachment(a => a.source.url === sourceURL);
++  if (item) {
++    yield toolbox.selectTool("jsdebugger");
++    const isLoading = dbg.DebuggerController.getState().sources.selectedSource !== item.attachment.source.actor;
++    DebuggerView.setEditorLocation(item.attachment.source.actor, sourceLine, { noDebug: true });
++    if (isLoading) {
++      yield dbg.DebuggerController.waitForSourceShown(sourceURL);
++    }
++    return true;
++  }
++
++  // If not found, still attempt to open in View Source
++  exports.viewSource(toolbox, sourceURL, sourceLine);
++  return false;
++});
++
++/**
++ * Tries to open a JavaScript file in the corresponding Scratchpad.
++ *
++ * @param {string} sourceURL
++ * @param {number} sourceLine
++ *
++ * @return {Promise}
++ */
++exports.viewSourceInScratchpad = Task.async(function *(sourceURL, sourceLine) {
++  // Check for matching top level scratchpad window.
++  let wins = Services.wm.getEnumerator("devtools:scratchpad");
++
++  while (wins.hasMoreElements()) {
++    let win = wins.getNext();
++
++    if (!win.closed && win.Scratchpad.uniqueName === sourceURL) {
++      win.focus();
++      win.Scratchpad.editor.setCursor({ line: sourceLine, ch: 0 });
++      return;
++    }
++  }
++
++  // For scratchpads within toolbox
++  for (let [, toolbox] of gDevTools) {
++    let scratchpadPanel = toolbox.getPanel("scratchpad");
++    if (scratchpadPanel) {
++      let { scratchpad } = scratchpadPanel;
++      if (scratchpad.uniqueName === sourceURL) {
++        toolbox.selectTool("scratchpad");
++        toolbox.raise();
++        scratchpad.editor.focus();
++        scratchpad.editor.setCursor({ line: sourceLine, ch: 0 });
++        return;
++      }
++    }
++  }
++});
++
++/**
++ * Open a link in Firefox's View Source.
++ *
++ * @param {Toolbox} toolbox
++ * @param {string} sourceURL
++ * @param {number} sourceLine
++ *
++ * @return {Promise}
++ */
++exports.viewSource = Task.async(function *(toolbox, sourceURL, sourceLine) {
++  // Attempt to access view source via a browser first, which may display it in
++  // a tab, if enabled.
++  let browserWin = Services.wm.getMostRecentWindow("navigator:browser");
++  if (browserWin) {
++    return browserWin.BrowserViewSourceOfDocument({
++      URL: sourceURL,
++      lineNumber: sourceLine
++    });
++  }
++  let utils = toolbox.gViewSourceUtils;
++  utils.viewSource(sourceURL, null, toolbox.doc, sourceLine || 0);
++});
+diff --git a/devtools/client/webconsole/hudservice.js b/devtools/client/webconsole/hudservice.js
+index 30cb602..55051b5 100644
+--- a/devtools/client/webconsole/hudservice.js
++++ b/devtools/client/webconsole/hudservice.js
+@@ -16,17 +16,17 @@ var promise = require("promise");
+ 
+ loader.lazyGetter(this, "Telemetry", () => require("devtools/client/shared/telemetry"));
+ loader.lazyGetter(this, "WebConsoleFrame", () => require("devtools/client/webconsole/webconsole").WebConsoleFrame);
+ loader.lazyImporter(this, "gDevTools", "resource://devtools/client/framework/gDevTools.jsm");
+ loader.lazyImporter(this, "Services", "resource://gre/modules/Services.jsm");
+ loader.lazyRequireGetter(this, "DebuggerServer", "devtools/server/main", true);
+ loader.lazyRequireGetter(this, "DebuggerClient", "devtools/shared/client/main", true);
+ loader.lazyGetter(this, "showDoorhanger", () => require("devtools/client/shared/doorhanger").showDoorhanger);
+-loader.lazyRequireGetter(this, "sourceUtils", "devtools/client/shared/source-utils");
++loader.lazyRequireGetter(this, "viewSource", "devtools/client/shared/view-source");
+ 
+ const STRINGS_URI = "chrome://devtools/locale/webconsole.properties";
+ var l10n = new WebConsoleUtils.l10n(STRINGS_URI);
+ 
+ const BROWSER_CONSOLE_WINDOW_FEATURES = "chrome,titlebar,toolbar,centerscreen,resizable,dialog=no";
+ 
+ // The preference prefix for all of the Browser Console filters.
+ const BROWSER_CONSOLE_FILTER_PREFS_PREFIX = "devtools.browserconsole.filter.";
+@@ -497,17 +497,17 @@ WebConsole.prototype = {
+   /**
+    * Tries to open a JavaScript file related to the web page for the web console
+    * instance in the corresponding Scratchpad.
+    *
+    * @param string aSourceURL
+    *        The URL of the file which corresponds to a Scratchpad id.
+    */
+   viewSourceInScratchpad: function WC_viewSourceInScratchpad(aSourceURL, aSourceLine) {
+-    sourceUtils.viewSourceInScratchpad(aSourceURL, aSourceLine);
++    viewSource.viewSourceInScratchpad(aSourceURL, aSourceLine);
+   },
+ 
+   /**
+    * Retrieve information about the JavaScript debugger's stackframes list. This
+    * is used to allow the Web Console to evaluate code in the selected
+    * stackframe.
+    *
+    * @return object|null
+-- 
+2.3.1
+
