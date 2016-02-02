@@ -1,0 +1,211 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Thu, 21 Jan 2016 23:32:38 -0800
+Subject: Bug 1226319 - part 2 - move the common localized strings from the heap view into the frame component itself. Also make the frame component configurable to optionally display the function name and host, and handle scenarios where the column does not exist -- all in preparation for the JIT optimizations view. r=fitzgen
+
+diff --git a/devtools/client/locales/en-US/memory.properties b/devtools/client/locales/en-US/memory.properties
+index 5f1aa6f..d3b7b92 100644
+--- a/devtools/client/locales/en-US/memory.properties
++++ b/devtools/client/locales/en-US/memory.properties
+@@ -95,21 +95,16 @@ diff-snapshots=+/-
+ # LOCALIZATION NOTE (diff-snapshots.tooltip): The tooltip for the button that
+ # initiates selecting two snapshots to diff with each other.
+ diff-snapshots.tooltip=Compare snapshots
+ 
+ # LOCALIZATION NOTE (filter.placeholder): The placeholder text used for the
+ # memory tool's filter search box.
+ filter.placeholder=Filter
+ 
+-# LOCALIZATION NOTE (viewsourceindebugger): The label for the tooltip when hovering over
+-# a link in the heap tree to jump to the debugger view.
+-# %S represents the URL to match in the debugger.
+-viewsourceindebugger=View source in Debugger → %S
+-
+ # LOCALIZATION NOTE (tree-item.load-more): The label for the links to fetch the
+ # lazily loaded sub trees in the dominator tree view.
+ tree-item.load-more=Load more…
+ 
+ # LOCALIZATION NOTE (tree-item.rootlist): The label for the root of the
+ # dominator tree.
+ tree-item.rootlist=GC Roots
+ 
+@@ -270,13 +265,8 @@ heapview.field.count=Count
+ # LOCALIZATION NOTE (heapview.field.totalbytes): The name of the column in the heap view for total bytes.
+ heapview.field.totalbytes=Total Bytes
+ 
+ # LOCALIZATION NOTE (heapview.field.totalcount): The name of the column in the heap view for total count.
+ heapview.field.totalcount=Total Count
+ 
+ # LOCALIZATION NOTE (heapview.field.name): The name of the column in the heap view for name.
+ heapview.field.name=Name
+-
+-# LOCALIZATION NOTE (unknownSource): When we do not know the source filename of
+-# a frame in the allocation stack breakdown tree view, we use this string
+-# instead.
+-unknownSource=(unknown)
+diff --git a/devtools/client/locales/en-US/shared-components.properties b/devtools/client/locales/en-US/shared-components.properties
+new file mode 100644
+index 0000000..7afb713
+--- /dev/null
++++ b/devtools/client/locales/en-US/shared-components.properties
+@@ -0,0 +1,15 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++# LOCALIZATION NOTE These strings are used in the shared React components,
++# so files in `devtools/client/shared/components/*`.
++
++# LOCALIZATION NOTE (frame.unknownSource): When we do not know the source filename of
++# a frame, we use this string instead.
++frame.unknownSource=(unknown)
++
++# LOCALIZATION NOTE (viewsourceindebugger): The label for the tooltip when hovering over
++# a source link that links to the debugger.
++# %S represents the URL to match in the debugger.
++frame.viewsourceindebugger=View source in Debugger → %S
+diff --git a/devtools/client/memory/components/census-tree-item.js b/devtools/client/memory/components/census-tree-item.js
+index 77b106a..2cb3249 100644
+--- a/devtools/client/memory/components/census-tree-item.js
++++ b/devtools/client/memory/components/census-tree-item.js
+@@ -1,17 +1,16 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { isSavedFrame } = require("devtools/shared/DevToolsUtils");
+ const { DOM: dom, createClass, createFactory } = require("devtools/client/shared/vendor/react");
+ const { L10N, formatNumber, formatPercent } = require("../utils");
+ const Frame = createFactory(require("devtools/client/shared/components/frame"));
+-const unknownSourceString = L10N.getStr("unknownSource");
+ const { TREE_ROW_HEIGHT } = require("../constants");
+ 
+ const CensusTreeItem = module.exports = createClass({
+   displayName: "CensusTreeItem",
+ 
+   shouldComponentUpdate(nextProps, nextState) {
+     return this.props.item != nextProps.item
+       || this.props.depth != nextProps.depth
+@@ -63,23 +62,21 @@ const CensusTreeItem = module.exports = createClass({
+         arrow,
+         this.toLabel(item.name, onViewSourceInDebugger)
+       )
+     );
+   },
+ 
+   toLabel(name, linkToDebugger) {
+     if (isSavedFrame(name)) {
+-      let onClickTooltipString =
+-        L10N.getFormatStr("viewsourceindebugger",`${name.source}:${name.line}:${name.column}`);
+       return Frame({
+         frame: name,
+         onClick: () => linkToDebugger(name),
+-        onClickTooltipString,
+-        unknownSourceString
++        showFunctionName: true,
++        showHost: true,
+       });
+     }
+ 
+     if (name === null) {
+       return L10N.getStr("tree-item.root");
+     }
+ 
+     if (name === "noStack") {
+diff --git a/devtools/client/shared/components/frame.js b/devtools/client/shared/components/frame.js
+index 5d14407..9bbeef5 100644
+--- a/devtools/client/shared/components/frame.js
++++ b/devtools/client/shared/components/frame.js
+@@ -1,50 +1,74 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++const { Cu } = require("chrome");
++Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
++const STRINGS_URI = "chrome://devtools/locale/shared-components.properties";
++const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { getSourceNames } = require("devtools/client/shared/source-utils");
++const UNKNOWN_SOURCE_STRING = L10N.getStr("frame.unknownSource");
+ 
+ const Frame = module.exports = createClass({
+   displayName: "Frame",
+ 
+   propTypes: {
+-    // SavedFrame
+-    frame: PropTypes.object.isRequired,
++    // SavedFrame, or an object containing all the required properties.
++    frame: PropTypes.shape({
++      functionDisplayName: PropTypes.string,
++      source: PropTypes.string.isRequired,
++      line: PropTypes.number.isRequired,
++      column: PropTypes.number.isRequired,
++    }).isRequired,
+     // Clicking on the frame link -- probably should link to the debugger.
+     onClick: PropTypes.func.isRequired,
+-    // Tooltip to display when hovering over the link to the frame;
+-    // Something like "View source in debugger -> http://foo.com/file.js:100:2".
+-    onClickTooltipString: PropTypes.string.isRequired,
+-    // Source to display when cannot determine a good display name.
+-    // Something like "(unknown)".
+-    unknownSourceString: PropTypes.string.isRequired,
++    // Option to display a function name before the source link.
++    showFunctionName: PropTypes.bool,
++    // Option to display a host name after the source link.
++    showHost: PropTypes.bool,
+   },
+ 
+   render() {
+-    let { onClick, frame, onClickTooltipString, unknownSourceString } = this.props;
+-    const { short, long, host } = getSourceNames(frame.source, unknownSourceString);
++    let { onClick, frame, showFunctionName, showHost } = this.props;
+ 
+-    let func = frame.functionDisplayName || "";
+-    let tooltip = `${func} (${long}:${frame.line}:${frame.column})`;
++    const { short, long, host } = getSourceNames(frame.source, UNKNOWN_SOURCE_STRING);
++
++    let tooltip = `${long}:${frame.line}`;
++    if (frame.column) {
++      tooltip += `:${frame.column}`;
++    }
++
++    let sourceString = `${frame.source}:${frame.line}`;
++    if (frame.column) {
++      sourceString += `:${frame.column}`;
++    }
++
++    let onClickTooltipString = L10N.getFormatStr("frame.viewsourceindebugger", sourceString);
+ 
+     let fields = [
+-      dom.span({ className: "frame-link-function-display-name" }, func),
+       dom.a({
+         className: "frame-link-filename",
+         onClick,
+         title: onClickTooltipString
+       }, short),
+       dom.span({ className: "frame-link-colon" }, ":"),
+       dom.span({ className: "frame-link-line" }, frame.line),
+-      dom.span({ className: "frame-link-colon" }, ":"),
+-      dom.span({ className: "frame-link-column" }, frame.column)
+     ];
+ 
+-    if (host) {
++    if (frame.column != null) {
++      fields.push(dom.span({ className: "frame-link-colon" }, ":"));
++      fields.push(dom.span({ className: "frame-link-column" }, frame.column));
++    }
++
++    if (showFunctionName && frame.functionDisplayName) {
++      fields.unshift(dom.span({ className: "frame-link-function-display-name" }, frame.functionDisplayName));
++    }
++
++    if (showHost && host) {
+       fields.push(dom.span({ className: "frame-link-host" }, host));
+     }
+ 
+     return dom.span({ className: "frame-link", title: tooltip }, ...fields);
+   }
+ });
+-- 
+2.3.1
+

@@ -1,0 +1,838 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 29 Jan 2016 16:32:38 -0800
+Subject: Bug 1176056 - Tests for the JITOptimizations react component. r=fitzgen
+
+diff --git a/devtools/client/performance/components/optimizations-item.js b/devtools/client/performance/components/jit-optimizations-item.js
+similarity index 86%
+rename from devtools/client/performance/components/optimizations-item.js
+rename to devtools/client/performance/components/jit-optimizations-item.js
+index bdb08e6..8ee3c3b 100644
+--- a/devtools/client/performance/components/optimizations-item.js
++++ b/devtools/client/performance/components/jit-optimizations-item.js
+@@ -1,29 +1,33 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { Cu } = require("chrome");
+ Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ const STRINGS_URI = "chrome://devtools/locale/jit-optimizations.properties";
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
++const { PluralForm } = require("resource://gre/modules/PluralForm.jsm");
+ const { DOM: dom, PropTypes, createClass, createFactory } = require("devtools/client/shared/vendor/react");
++const {
++  JITOptimizations, hasSuccessfulOutcome, isSuccessfulOutcome
++} = require("devtools/client/performance/modules/logic/jit");
+ const Frame = createFactory(require("devtools/client/shared/components/frame"));
+ const OPTIMIZATION_FAILURE = L10N.getStr("jit.optimizationFailure");
+ const JIT_SAMPLES = L10N.getStr("jit.samples");
+ const JIT_EMPTY_TEXT = L10N.getStr("jit.empty");
+ const PROPNAME_MAX_LENGTH = 4;
+ // If TREE_ROW_HEIGHT changes, be sure to change `var(--jit-tree-row-height)`
+ // in `devtools/client/themes/jit-optimizations.css`
+ const TREE_ROW_HEIGHT = 14;
+ 
+ const OPTIMIZATION_ITEM_TYPES = ["site", "attempts", "types", "attempt", "type", "observedtype"];
+-const OptimizationsItem = module.exports = createClass({
+-  displayName: "OptimizationsItem",
++const JITOptimizationsItem = module.exports = createClass({
++  displayName: "JITOptimizationsItem",
+ 
+   propTypes: {
+     onViewSourceInDebugger: PropTypes.func.isRequired,
+     frameData: PropTypes.object.isRequired,
+     type: PropTypes.oneOf(OPTIMIZATION_ITEM_TYPES).isRequired,
+   },
+ 
+   render() {
+@@ -68,28 +72,31 @@ const OptimizationsItem = module.exports = createClass({
+       if (propertyName.length > PROPNAME_MAX_LENGTH) {
+         propString = ` (.${propertyName.substr(0, PROPNAME_MAX_LENGTH)}…)`;
+       } else {
+         propString = ` (.${propertyName})`;
+       }
+     }
+ 
+     let sampleString = PluralForm.get(site.samples, JIT_SAMPLES).replace("#1", site.samples);
+-    let text = `${lastStrategy}${propString} – (${sampleString})`;
++    let text = dom.span(
++      { className: "optimization-site-title" },
++      `${lastStrategy}${propString} – (${sampleString})`
++    );
+     let frame = Frame({
+       onClick: () => onViewSourceInDebugger(frameData.url, site.data.line),
+       frame: {
+         source: frameData.url,
+-        line: site.data.line,
++        line: +site.data.line,
+         column: site.data.column,
+       }
+     })
+     let children = [text, frame];
+ 
+-    if (!site.hasSuccessfulOutcome()) {
++    if (!hasSuccessfulOutcome(site)) {
+       children.unshift(dom.span({ className: "opt-icon warning" }));
+     }
+ 
+     return dom.span({ className: "optimization-site" }, ...children);
+   },
+ 
+   _renderAttempts({ item: attempts }) {
+     return dom.span({ className: "optimization-attempts" },
+@@ -99,32 +106,33 @@ const OptimizationsItem = module.exports = createClass({
+ 
+   _renderTypes({ item: types }) {
+     return dom.span({ className: "optimization-types" },
+       `Types (${types.length})`
+     );
+   },
+ 
+   _renderAttempt({ item: attempt }) {
+-    let success = JITOptimizations.isSuccessfulOutcome(attempt.outcome);
++    let success = isSuccessfulOutcome(attempt.outcome);
+     let { strategy, outcome } = attempt;
+     return dom.span({ className: "optimization-attempt" },
+       dom.span({ className: "optimization-strategy" }, strategy),
+       " → ",
+       dom.span({ className: `optimization-outcome ${success ? "success" : "failure"}` }, outcome)
+     );
+   },
+ 
+   _renderType({ item: type }) {
+     return dom.span({ className: "optimization-ion-type" }, `${type.site}:${type.mirType}`);
+   },
+ 
+   _renderObservedType({ onViewSourceInDebugger, item: type }) {
+     let children = [
+-      `${type.keyedBy}${type.name ? ` → ${type.name}` : ""}`
++      dom.span({ className: "optimization-observed-type-keyed" },
++        `${type.keyedBy}${type.name ? ` → ${type.name}` : ""}`)
+     ];
+ 
+     // If we have a line and location, make a link to the debugger
+     if (type.location && type.line) {
+       children.push(
+         Frame({
+           onClick: () => onViewSourceInDebugger(type.location, type.line),
+           frame: {
+diff --git a/devtools/client/performance/components/optimizations.js b/devtools/client/performance/components/jit-optimizations.js
+similarity index 81%
+rename from devtools/client/performance/components/optimizations.js
+rename to devtools/client/performance/components/jit-optimizations.js
+index 2490110..0be0aad 100644
+--- a/devtools/client/performance/components/optimizations.js
++++ b/devtools/client/performance/components/jit-optimizations.js
+@@ -4,43 +4,77 @@
+ 
+ const { Cu } = require("chrome");
+ Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ const STRINGS_URI = "chrome://devtools/locale/jit-optimizations.properties";
+ const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const { assert } = require("devtools/shared/DevToolsUtils");
+ const { DOM: dom, createClass, createFactory, PropTypes } = require("devtools/client/shared/vendor/react");
+ const Tree = createFactory(require("../../shared/components/tree"));
+-const OptimizationsItem = createFactory(require("./optimizations-item"));
++const OptimizationsItem = createFactory(require("./jit-optimizations-item"));
+ const FrameView = createFactory(require("../../shared/components/frame"));
+ 
+ const onClickTooltipString = frame =>
+   L10N.getFormatStr("viewsourceindebugger",`${frame.source}:${frame.line}:${frame.column}`);
+ const JIT_TITLE = L10N.getStr("jit.title");
+ // If TREE_ROW_HEIGHT changes, be sure to change `var(--jit-tree-row-height)`
+ // in `devtools/client/themes/jit-optimizations.css`
+ const TREE_ROW_HEIGHT = 14;
+ 
+-const Optimizations = module.exports = createClass({
+-  displayName: "Optimizations",
++const optimizationAttemptModel = {
++  id: PropTypes.number.isRequired,
++  strategy: PropTypes.string.isRequired,
++  outcome: PropTypes.string.isRequired,
++};
++
++const optimizationObservedTypeModel = {
++  keyedBy: PropTypes.string.isRequired,
++  name: PropTypes.string,
++  location: PropTypes.string,
++  line: PropTypes.string,
++};
++
++const optimizationIonTypeModel = {
++  id: PropTypes.number.isRequired,
++  typeset: PropTypes.arrayOf(optimizationObservedTypeModel),
++  site: PropTypes.number.isRequired,
++  mirType: PropTypes.number.isRequired,
++};
++
++const optimizationSiteModel = {
++  id: PropTypes.number.isRequired,
++  propertyName: PropTypes.string,
++  line: PropTypes.number.isRequired,
++  column: PropTypes.number.isRequired,
++  data: PropTypes.shape({
++    attempts: PropTypes.arrayOf(optimizationAttemptModel).isRequired,
++    types: PropTypes.arrayOf(optimizationIonTypeModel).isRequired,
++  }).isRequired,
++};
++
++const JITOptimizations = module.exports = createClass({
++  displayName: "JITOptimizations",
+ 
+   propTypes: {
+     onViewSourceInDebugger: PropTypes.func.isRequired,
+     frameData: PropTypes.object.isRequired,
+-    optimizationSites: PropTypes.array.isRequired,
++    optimizationSites: PropTypes.arrayOf(optimizationSiteModel).isRequired,
++    autoExpandDepth: PropTypes.number,
+   },
+ 
+   getInitialState() {
+     return {
+       expanded: new Set()
+     };
+   },
+ 
+   getDefaultProps() {
+-    return {};
++    return {
++      autoExpandDepth: 0
++    };
+   },
+ 
+   render() {
+     let header = this._createHeader(this.props);
+     let tree = this._createTree(this.props);
+ 
+     return dom.div({}, header, tree);
+   },
+@@ -77,17 +111,17 @@ const Optimizations = module.exports = createClass({
+     return dom.div({ className: "optimization-header" },
+       dom.span({ className: "header-title" }, JIT_TITLE),
+       dom.span({ className: "header-function-name" }, name),
+       frameComponent
+     );
+   },
+ 
+   _createTree(props) {
+-    let { frameData, onViewSourceInDebugger, optimizationSites: sites } = this.props;
++    let { autoExpandDepth, frameData, onViewSourceInDebugger, optimizationSites: sites } = this.props;
+ 
+     let getSite = id => sites.find(site => site.id === id);
+     let getIonTypeForObserved = type =>
+       getSite(type.id).data.types.find(iontype => (iontype.typeset || []).indexOf(type) !== -1);
+     let isSite = site => getSite(site.id) === site;
+     let isAttempts = attempts => getSite(attempts.id).data.attempts === attempts;
+     let isAttempt = attempt => getSite(attempt.id).data.attempts.indexOf(attempt) !== -1;
+     let isTypes = types => getSite(types.id).data.types === types;
+@@ -119,17 +153,17 @@ const Optimizations = module.exports = createClass({
+         return `${node.id}-A-${site.data.attempts.indexOf(node)}`;
+       } else if (isObservedType(node)) {
+         let iontype = getIonTypeForObserved(node);
+         return `${getKey(iontype)}-O-${iontype.typeset.indexOf(node)}`;
+       }
+     };
+ 
+     return Tree({
+-      autoExpandDepth: 0,
++      autoExpandDepth,
+       getParent: node => {
+         let site = getSite(node.id);
+         let parent;
+         if (isAttempts(node) || isTypes(node)) {
+           parent = site;
+         } else if (isType(node)) {
+           parent = site.data.types;
+         } else if (isAttempt(node)) {
+diff --git a/devtools/client/performance/components/moz.build b/devtools/client/performance/components/moz.build
+index 8c62201..38bc607 100644
+--- a/devtools/client/performance/components/moz.build
++++ b/devtools/client/performance/components/moz.build
+@@ -1,9 +1,11 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+-    'optimizations-item.js',
+-    'optimizations.js',
++    'jit-optimizations-item.js',
++    'jit-optimizations.js',
+ )
++
++MOCHITEST_CHROME_MANIFESTS += ['test/chrome.ini']
+diff --git a/devtools/client/performance/components/test/chrome.ini b/devtools/client/performance/components/test/chrome.ini
+new file mode 100644
+index 0000000..5ba24a9
+--- /dev/null
++++ b/devtools/client/performance/components/test/chrome.ini
+@@ -0,0 +1,5 @@
++[DEFAULT]
++support-files =
++  head.js
++
++[test_jit_optimizations_01.html]
+diff --git a/devtools/client/performance/components/test/head.js b/devtools/client/performance/components/test/head.js
+new file mode 100644
+index 0000000..545298c
+--- /dev/null
++++ b/devtools/client/performance/components/test/head.js
+@@ -0,0 +1,181 @@
++/* Any copyright is dedicated to the Public Domain.
++    yield new Promise(function(){});
++   http://creativecommons.org/publicdomain/zero/1.0/ */
++"use strict";
++
++var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
++
++Cu.import("resource://testing-common/Assert.jsm");
++Cu.import("resource://gre/modules/Task.jsm");
++var { Promise: promise } = Cu.import("resource://gre/modules/Promise.jsm", {});
++var { require } = Cu.import("resource://gre/modules/devtools/shared/Loader.jsm", {});
++var { BrowserLoader } = Cu.import("resource://devtools/client/shared/browser-loader.js", {});
++var DevToolsUtils = require("devtools/shared/DevToolsUtils");
++var { TargetFactory } = require("devtools/client/framework/target");
++var { Toolbox } = require("devtools/client/framework/toolbox");
++
++DevToolsUtils.testing = true;
++var { require: browserRequire } = BrowserLoader("resource://devtools/client/performance/", this);
++
++var $ = (selector, scope=document) => scope.querySelector(selector);
++var $$ = (selector, scope=document) => scope.querySelectorAll(selector);
++
++function forceRender(comp) {
++  return setState(comp, {})
++    .then(() => setState(comp, {}));
++}
++
++// All tests are asynchronous.
++SimpleTest.waitForExplicitFinish();
++
++function onNextAnimationFrame(fn) {
++  return () =>
++    requestAnimationFrame(() =>
++      requestAnimationFrame(fn));
++}
++
++function setState(component, newState) {
++  var deferred = promise.defer();
++  component.setState(newState, onNextAnimationFrame(deferred.resolve));
++  return deferred.promise;
++}
++
++function setProps(component, newState) {
++  var deferred = promise.defer();
++  component.setProps(newState, onNextAnimationFrame(deferred.resolve));
++  return deferred.promise;
++}
++
++function dumpn(msg) {
++  dump(`PERFORMANCE-COMPONENT-TEST: ${msg}\n`);
++}
++
++/**
++ * Default opts data for testing. First site has a simple IonType,
++ * and an IonType with an ObservedType, and a successful outcome.
++ * Second site does not have a successful outcome.
++ */
++let OPTS_DATA_GENERAL = [{
++  id: 1,
++  propertyName: "my property name",
++  line: 100,
++  column: 200,
++  samples: 90,
++  data: {
++    attempts: [
++      { id: 1, strategy: "GetElem_TypedObject", outcome: "AccessNotTypedObject" },
++      { id: 1, strategy: "GetElem_Dense", outcome: "AccessNotDense" },
++      { id: 1, strategy: "GetElem_TypedStatic", outcome: "Disabled" },
++      { id: 1, strategy: "GetElem_TypedArray", outcome: "GenericSuccess" },
++    ],
++    types: [{
++      id: 1,
++      site: "Receiver",
++      mirType: "Object",
++      typeset: [{
++        id: 1,
++        keyedBy: "constructor",
++        name: "MyView",
++        location: "http://internet.com/file.js",
++        line: "123",
++      }]
++    }, {
++      id: 1,
++      typeset: void 0,
++      site: "Index",
++      mirType: "Int32",
++    }]
++  }
++}, {
++  id: 2,
++  propertyName: void 0,
++  line: 50,
++  column: 51,
++  samples: 100,
++  data: {
++    attempts: [
++      { id: 2, strategy: "Call_Inline", outcome: "CantInlineBigData" }
++    ],
++    types: [{
++      id: 2,
++      site: "Call_Target",
++      mirType: "Object",
++      typeset: [
++        { id: 2, keyedBy: "primitive" },
++        { id: 2, keyedBy: "constructor", name: "B", location: "http://mypage.com/file.js", line: "2" }, 
++        { id: 2, keyedBy: "constructor", name: "C", location: "http://mypage.com/file.js", line: "3" }, 
++        { id: 2, keyedBy: "constructor", name: "D", location: "http://mypage.com/file.js", line: "4" }, 
++      ],
++    }]
++  }
++}];
++OPTS_DATA_GENERAL.forEach(site => {
++  site.data.types.forEach(type => {
++    if (type.typeset) {
++      type.typeset.id = site.id;
++    }
++  });
++  site.data.attempts.id = site.id;
++  site.data.types.id = site.id;
++});
++
++
++function checkOptimizationHeader (name, file, line) {
++  is($(".optimization-header .header-function-name").textContent, name,
++    "correct optimization header function name");
++  is($(".optimization-header .frame-link-filename").textContent, file,
++    "correct optimization header file name");
++  is($(".optimization-header .frame-link-line").textContent, line,
++    "correct optimization header line");
++}
++
++function checkOptimizationTree (rowData) {
++  let rows = $$(".tree .tree-node");
++
++  for (let i = 0; i < rowData.length; i++) {
++    let row = rows[i];
++    let expected = rowData[i];
++
++    switch (expected.type) {
++      case "site":
++        is($(".optimization-site-title", row).textContent,
++          `${expected.strategy} – (${expected.samples} samples)`,
++          `row ${i}th: correct optimization site row`);
++
++        is(!!$(".opt-icon.warning", row), !!expected.failureIcon,
++          `row ${i}th: expected visibility of failure icon for unsuccessful outcomes`);
++        break;
++      case "types":
++        is($(".optimization-types", row).textContent,
++          `Types (${expected.count})`,
++          `row ${i}th: correct types row`);
++        break;
++      case "attempts":
++        is($(".optimization-attempts", row).textContent,
++          `Attempts (${expected.count})`,
++          `row ${i}th: correct attempts row`);
++        break;
++      case "type":
++        is($(".optimization-ion-type", row).textContent,
++          `${expected.site}:${expected.mirType}`,
++          `row ${i}th: correct ion type row`);
++        break;
++      case "observedtype":
++        is($(".optimization-observed-type-keyed", row).textContent,
++          expected.name ?
++            `${expected.keyedBy} → ${expected.name}` :
++            expected.keyedBy,
++          `row ${i}th: correct observed type row`);
++        break;
++      case "attempt":
++        is($(".optimization-strategy", row).textContent, expected.strategy,
++          `row ${i}th: correct attempt row, attempt item`);
++        is($(".optimization-outcome", row).textContent, expected.outcome,
++          `row ${i}th: correct attempt row, outcome item`);
++        ok($(".optimization-outcome", row).classList.contains(expected.success ? "success" : "failure"),
++          `row ${i}th: correct attempt row, failure/success status`);
++        break;
++    }
++  }
++}
++
+diff --git a/devtools/client/performance/components/test/test_jit_optimizations_01.html b/devtools/client/performance/components/test/test_jit_optimizations_01.html
+new file mode 100644
+index 0000000..edc9c34
+--- /dev/null
++++ b/devtools/client/performance/components/test/test_jit_optimizations_01.html
+@@ -0,0 +1,70 @@
++<!DOCTYPE HTML>
++<html>
++<!--
++Test the rendering of the JIT Optimizations tree. Tests when jit data has observed types, multiple observed types, multiple sites, a site with a successful strategy, site with no successful strategy.
++-->
++<head>
++  <meta charset="utf-8">
++  <title>JITOptimizations component test</title>
++  <script type="application/javascript" src="chrome://mochikit/content/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" type="text/css" href="chrome://mochikit/content/tests/SimpleTest/test.css">
++</head>
++<body style="height: 10000px;">
++<pre id="test">
++<script src="head.js" type="application/javascript;version=1.8"></script>
++<script type="application/javascript;version=1.8">
++window.onload = Task.async(function* () {
++  try {
++    let ReactDOM = browserRequire("devtools/client/shared/vendor/react-dom");
++    let React = browserRequire("devtools/client/shared/vendor/react");
++    let JITOptimizations = React.createFactory(browserRequire("devtools/client/performance/components/jit-optimizations"));
++    ok(JITOptimizations, "Should get JITOptimizations");
++    let opts;
++
++    opts = ReactDOM.render(JITOptimizations({
++      onViewSourceInDebugger: function(){},
++      frameData: {
++        isMetaCategory: false,
++        url: "http://internet.com/file.js",
++        line: 1,
++        functionName: "myfunc",
++      },
++      optimizationSites: OPTS_DATA_GENERAL,
++      autoExpandDepth: 1000,
++    }), window.document.body);
++    yield forceRender(opts);
++
++    checkOptimizationHeader("myfunc", "file.js", "1");
++
++    checkOptimizationTree([
++      { type: "site", strategy: "GetElem_TypedArray", samples: "90" },
++      { type: "types", count: "2" },
++      { type: "type", site: "Receiver", mirType: "Object" },
++      { type: "observedtype", keyedBy: "constructor", name: "MyView" },
++      { type: "type", site: "Index", mirType: "Int32" },
++      { type: "attempts", count: "4" },
++      { type: "attempt", strategy: "GetElem_TypedObject", outcome: "AccessNotTypedObject" },
++      { type: "attempt", strategy: "GetElem_Dense", outcome: "AccessNotDense" },
++      { type: "attempt", strategy: "GetElem_TypedStatic", outcome: "Disabled" },
++      { type: "attempt", strategy: "GetElem_TypedArray", outcome: "GenericSuccess", success: true },
++      { type: "site", strategy: "Call_Inline", samples: "100", failureIcon: true },
++      { type: "types", count: "1" },
++      { type: "type", site: "Call_Target", mirType: "Object" },
++      { type: "observedtype", keyedBy: "primitive" },
++      { type: "observedtype", keyedBy: "constructor", name: "B" },
++      { type: "observedtype", keyedBy: "constructor", name: "C" },
++      { type: "observedtype", keyedBy: "constructor", name: "D" },
++      { type: "attempts", count: "1" },
++      { type: "attempt", strategy: "Call_Inline", outcome: "CantInlineBigData" },
++    ]);
++
++  } catch(e) {
++    ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
++  } finally {
++    SimpleTest.finish();
++  }
++});
++</script>
++</pre>
++</body>
++</html>
+diff --git a/devtools/client/performance/modules/logic/jit.js b/devtools/client/performance/modules/logic/jit.js
+index a567d43..d59e998 100644
+--- a/devtools/client/performance/modules/logic/jit.js
++++ b/devtools/client/performance/modules/logic/jit.js
+@@ -116,51 +116,16 @@ const SUCCESSFUL_OUTCOMES = [
+ 
+ const OptimizationSite = function (id, opts) {
+   this.id = id;
+   this.data = opts;
+   this.samples = 1;
+ };
+ 
+ /**
+- * Returns a boolean indicating if the passed in OptimizationSite
+- * has a "good" outcome at the end of its attempted strategies.
+- *
+- * @param {Array<string>} stringTable
+- * @return {boolean}
+- */
+-
+-OptimizationSite.prototype.hasSuccessfulOutcome = function () {
+-  let attempts = this.getAttempts();
+-  let lastOutcome = attempts[attempts.length - 1].outcome;
+-  return OptimizationSite.isSuccessfulOutcome(lastOutcome);
+-};
+-
+-/**
+- * Returns the last attempted OptimizationAttempt for this OptimizationSite.
+- *
+- * @return {Array<OptimizationAttempt>}
+- */
+-
+-OptimizationSite.prototype.getAttempts = function () {
+-  return this.data.attempts;
+-};
+-
+-/**
+- * Returns all IonTypes in this OptimizationSite.
+- *
+- * @return {Array<IonType>}
+- */
+-
+-OptimizationSite.prototype.getIonTypes = function () {
+-  return this.data.types;
+-};
+-
+-
+-/**
+  * Constructor for JITOptimizations. A collection of OptimizationSites for a frame.
+  *
+  * @constructor
+  * @param {Array<RawOptimizationSite>} rawSites
+  *                                     Array of raw optimization sites.
+  * @param {Array<string>} stringTable
+  *                        Array of strings from the profiler used to inflate
+  *                        JIT optimizations. Do not modify this!
+@@ -235,20 +200,34 @@ JITOptimizations.prototype = {
+ 
+ /**
+  * Takes an "outcome" string from an OptimizationAttempt and returns
+  * a boolean indicating whether or not its a successful outcome.
+  *
+  * @return {boolean}
+  */
+ 
+-OptimizationSite.isSuccessfulOutcome = JITOptimizations.isSuccessfulOutcome = function (outcome) {
++function isSuccessfulOutcome (outcome) {
+   return !!~SUCCESSFUL_OUTCOMES.indexOf(outcome);
+ };
+ 
++/**
++ * Takes an OptimizationSite. Returns a boolean indicating if the passed
++ * in OptimizationSite has a "good" outcome at the end of its attempted strategies.
++ *
++ * @param {OptimizationSite} optimizationSite
++ * @return {boolean}
++ */
++
++function hasSuccessfulOutcome (optimizationSite) {
++  let attempts = optimizationSite.data.attempts;
++  let lastOutcome = attempts[attempts.length - 1].outcome;
++  return isSuccessfulOutcome(lastOutcome);
++};
++
+ function maybeString(stringTable, index) {
+   return index ? stringTable[index] : undefined;
+ }
+ 
+ function maybeTypeset(typeset, stringTable) {
+   if (!typeset) {
+     return undefined;
+   }
+@@ -350,8 +329,11 @@ function createTierGraphDataFromFrameNode (frameNode, sampleTimes, bucketSize) {
+   }
+ 
+   return output;
+ }
+ 
+ exports.createTierGraphDataFromFrameNode = createTierGraphDataFromFrameNode;
+ exports.OptimizationSite = OptimizationSite;
+ exports.JITOptimizations = JITOptimizations;
++exports.hasSuccessfulOutcome = hasSuccessfulOutcome;
++exports.isSuccessfulOutcome = isSuccessfulOutcome;
++exports.SUCCESSFUL_OUTCOMES = SUCCESSFUL_OUTCOMES;
+diff --git a/devtools/client/performance/performance-controller.js b/devtools/client/performance/performance-controller.js
+index 577d559a..6b5738f 100644
+--- a/devtools/client/performance/performance-controller.js
++++ b/devtools/client/performance/performance-controller.js
+@@ -15,17 +15,17 @@ var EVENTS = require("devtools/client/performance/events");
+ Object.defineProperty(this, "EVENTS", {
+   value: EVENTS,
+   enumerable: true,
+   writable: false
+ });
+ 
+ var React = require("devtools/client/shared/vendor/react");
+ var ReactDOM = require("devtools/client/shared/vendor/react-dom");
+-var Optimizations = React.createFactory(require("devtools/client/performance/components/optimizations"));
++var JITOptimizationsView = React.createFactory(require("devtools/client/performance/components/jit-optimizations"));
+ var Services = require("Services");
+ var promise = require("promise");
+ var EventEmitter = require("devtools/shared/event-emitter");
+ var DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ var system = require("devtools/shared/system");
+ 
+ // Logic modules
+ 
+@@ -38,27 +38,25 @@ var { WaterfallHeader } = require("devtools/client/performance/modules/widgets/w
+ var { MarkerView } = require("devtools/client/performance/modules/widgets/marker-view");
+ var { MarkerDetails } = require("devtools/client/performance/modules/widgets/marker-details");
+ var MarkerUtils = require("devtools/client/performance/modules/logic/marker-utils");
+ var WaterfallUtils = require("devtools/client/performance/modules/logic/waterfall-utils");
+ var FrameUtils = require("devtools/client/performance/modules/logic/frame-utils");
+ var { CallView } = require("devtools/client/performance/modules/widgets/tree-view");
+ var { ThreadNode } = require("devtools/client/performance/modules/logic/tree-model");
+ var { FrameNode } = require("devtools/client/performance/modules/logic/tree-model");
+-var { JITOptimizations } = require("devtools/client/performance/modules/logic/jit");
+ 
+ // Widgets modules
+ 
+ var { OptionsView } = require("devtools/client/shared/options-view");
+ var { FlameGraph, FlameGraphUtils } = require("devtools/client/shared/widgets/FlameGraph");
+ var { TreeWidget } = require("devtools/client/shared/widgets/TreeWidget");
+ 
+ var { SideMenuWidget } = require("resource://devtools/client/shared/widgets/SideMenuWidget.jsm");
+ var { setNamedTimeout, clearNamedTimeout } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+-var { PluralForm } = require("resource://gre/modules/PluralForm.jsm");
+ 
+ var BRANCH_NAME = "devtools.performance.ui.";
+ 
+ /**
+  * The current target, toolbox and PerformanceFront, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront;
+ 
+diff --git a/devtools/client/performance/test/unit/test_jit-model-02.js b/devtools/client/performance/test/unit/test_jit-model-02.js
+index e66b0d2..2dbde89 100644
+--- a/devtools/client/performance/test/unit/test_jit-model-02.js
++++ b/devtools/client/performance/test/unit/test_jit-model-02.js
+@@ -1,52 +1,59 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
+ /**
+  * Tests that JITOptimizations create OptimizationSites, and the underlying
+- * OptimizationSites methods work as expected.
++ * hasSuccessfulOutcome/isSuccessfulOutcome work as intended.
+  */
+ 
+ function run_test() {
+   run_next_test();
+ }
+ 
+ add_task(function test() {
+-  let { JITOptimizations, OptimizationSite } = require("devtools/client/performance/modules/logic/jit");
++  let {
++    JITOptimizations, hasSuccessfulOutcome, isSuccessfulOutcome, SUCCESSFUL_OUTCOMES
++  } = require("devtools/client/performance/modules/logic/jit");
+ 
+   let rawSites = [];
+   rawSites.push(gRawSite2);
+   rawSites.push(gRawSite2);
+   rawSites.push(gRawSite1);
+   rawSites.push(gRawSite1);
+   rawSites.push(gRawSite2);
+   rawSites.push(gRawSite3);
+ 
+   let jit = new JITOptimizations(rawSites, gStringTable.stringTable);
+   let sites = jit.optimizationSites;
+ 
+   let [first, second, third] = sites;
+ 
+   /* hasSuccessfulOutcome */
+-  equal(first.hasSuccessfulOutcome(), false, "optSite.hasSuccessfulOutcome() returns expected (1)");
+-  equal(second.hasSuccessfulOutcome(), true, "optSite.hasSuccessfulOutcome() returns expected (2)");
+-  equal(third.hasSuccessfulOutcome(), true, "optSite.hasSuccessfulOutcome() returns expected (3)");
++  equal(hasSuccessfulOutcome(first), false, "hasSuccessfulOutcome() returns expected (1)");
++  equal(hasSuccessfulOutcome(second), true, "hasSuccessfulOutcome() returns expected (2)");
++  equal(hasSuccessfulOutcome(third), true, "hasSuccessfulOutcome() returns expected (3)");
+ 
+-  /* getAttempts */
+-  equal(first.getAttempts().length, 2, "optSite.getAttempts() has the correct amount of attempts (1)");
+-  equal(second.getAttempts().length, 5, "optSite.getAttempts() has the correct amount of attempts (2)");
+-  equal(third.getAttempts().length, 3, "optSite.getAttempts() has the correct amount of attempts (3)");
++  /* .data.attempts */
++  equal(first.data.attempts.length, 2, "optSite.data.attempts has the correct amount of attempts (1)");
++  equal(second.data.attempts.length, 5, "optSite.data.attempts has the correct amount of attempts (2)");
++  equal(third.data.attempts.length, 3, "optSite.data.attempts has the correct amount of attempts (3)");
+ 
+-  /* getIonTypes */
+-  equal(first.getIonTypes().length, 1, "optSite.getIonTypes() has the correct amount of IonTypes (1)");
+-  equal(second.getIonTypes().length, 2, "optSite.getIonTypes() has the correct amount of IonTypes (2)");
+-  equal(third.getIonTypes().length, 1, "optSite.getIonTypes() has the correct amount of IonTypes (3)");
+-});
++  /* .data.types */
++  equal(first.data.types.length, 1, "optSite.data.types has the correct amount of IonTypes (1)");
++  equal(second.data.types.length, 2, "optSite.data.types has the correct amount of IonTypes (2)");
++  equal(third.data.types.length, 1, "optSite.data.types has the correct amount of IonTypes (3)");
+ 
++  /* isSuccessfulOutcome */
++  ok(SUCCESSFUL_OUTCOMES.length, "Have some successful outcomes in SUCCESSFUL_OUTCOMES");
++  SUCCESSFUL_OUTCOMES.forEach(outcome =>
++    ok(isSuccessfulOutcome(outcome),
++      `${outcome} considered a successful outcome via isSuccessfulOutcome()`));
++});
+ 
+ var gStringTable = new RecordingUtils.UniqueStrings();
+ 
+ function uniqStr(s) {
+   return gStringTable.getOrAddStringIndex(s);
+ }
+ 
+ var gRawSite1 = {
+diff --git a/devtools/client/performance/views/details-js-call-tree.js b/devtools/client/performance/views/details-js-call-tree.js
+index 68d0552..a0355e6 100644
+--- a/devtools/client/performance/views/details-js-call-tree.js
++++ b/devtools/client/performance/views/details-js-call-tree.js
+@@ -89,17 +89,17 @@ var JsCallTreeView = Heritage.extend(DetailsSubview, {
+       return;
+     }
+ 
+     let frameData = frameNode.getInfo();
+     let optimizationSites = frameNode.hasOptimizations()
+                             ? frameNode.getOptimizations().optimizationSites
+                             : [];
+ 
+-    let optimizations = Optimizations({
++    let optimizations = JITOptimizationsView({
+       frameData,
+       optimizationSites,
+       onViewSourceInDebugger: (url, line) => {
+         gToolbox.viewSourceInDebugger(url, line).then(success => {
+           if (success) {
+             this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER);
+           } else {
+             this.emit(EVENTS.SOURCE_NOT_FOUND_IN_JS_DEBUGGER);
+diff --git a/devtools/client/shared/components/tree.js b/devtools/client/shared/components/tree.js
+index 8d714a6..bf441ad 100644
+--- a/devtools/client/shared/components/tree.js
++++ b/devtools/client/shared/components/tree.js
+@@ -193,16 +193,17 @@ const Tree = module.exports = createClass({
+   },
+ 
+   componentWillUnmount() {
+     window.removeEventListener("resize", this._updateHeight);
+   },
+ 
+   componentWillReceiveProps(nextProps) {
+     this._autoExpand();
++    this._updateHeight();
+   },
+ 
+   _autoExpand() {
+     if (!this.props.autoExpandDepth) {
+       return;
+     }
+ 
+     // Automatically expand the first autoExpandDepth levels for new items. Do
+@@ -213,17 +214,17 @@ const Tree = module.exports = createClass({
+           this.state.seen.has(item)) {
+         return;
+       }
+ 
+       this.props.onExpand(item);
+       this.state.seen.add(item);
+ 
+       for (let child of this.props.getChildren(item)) {
+-        autoExpand(item, currentDepth + 1);
++        autoExpand(child, currentDepth + 1);
+       }
+     };
+ 
+     for (let root of this.props.getRoots()) {
+       autoExpand(root, 0);
+     }
+   },
+ 
+-- 
+2.3.1
+

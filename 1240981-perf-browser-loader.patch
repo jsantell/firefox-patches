@@ -1,0 +1,1098 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 20 Jan 2016 18:57:39 -0800
+Subject: Bug 1240981 - Make performance tools use BrowserLoader. r=fitzgen
+
+diff --git a/devtools/client/performance/legacy/actors.js b/devtools/client/performance/legacy/actors.js
+index 96e4a45..a43c223 100644
+--- a/devtools/client/performance/legacy/actors.js
++++ b/devtools/client/performance/legacy/actors.js
+@@ -1,29 +1,23 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ 
+-loader.lazyRequireGetter(this, "promise");
+-loader.lazyRequireGetter(this, "EventEmitter",
+-  "devtools/shared/event-emitter");
+-loader.lazyRequireGetter(this, "Poller",
+-  "devtools/client/shared/poller", true);
+-
+-loader.lazyRequireGetter(this, "CompatUtils",
+-  "devtools/client/performance/legacy/compatibility");
+-loader.lazyRequireGetter(this, "RecordingUtils",
+-  "devtools/shared/performance/recording-utils");
+-loader.lazyRequireGetter(this, "TimelineFront",
+-  "devtools/server/actors/timeline", true);
+-loader.lazyRequireGetter(this, "ProfilerFront",
+-  "devtools/server/actors/profiler", true);
++const promise = require("promise");
++const EventEmitter = require("devtools/shared/event-emitter");
++const { Poller } = require("devtools/client/shared/poller");
++
++const CompatUtils = require("devtools/client/performance/legacy/compatibility");
++const RecordingUtils = require("devtools/shared/performance/recording-utils");
++const { TimelineFront } = require("devtools/server/actors/timeline");
++const { ProfilerFront } = require("devtools/server/actors/profiler");
+ 
+ // how often do we check the status of the profiler's circular buffer
+ const PROFILER_CHECK_TIMER = 5000; // ms
+ 
+ const TIMELINE_ACTOR_METHODS = [
+   "start", "stop",
+ ];
+ 
+diff --git a/devtools/client/performance/legacy/compatibility.js b/devtools/client/performance/legacy/compatibility.js
+index 8a707a9..26f50e9 100644
+--- a/devtools/client/performance/legacy/compatibility.js
++++ b/devtools/client/performance/legacy/compatibility.js
+@@ -1,16 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-loader.lazyRequireGetter(this, "promise");
+-loader.lazyRequireGetter(this, "EventEmitter",
+-  "devtools/shared/event-emitter");
++const promise = require("promise");
++const EventEmitter = require("devtools/shared/event-emitter");
+ 
+ /**
+  * A dummy front decorated with the provided methods.
+  *
+  * @param array blueprint
+  *        A list of [funcName, retVal] describing the class.
+  */
+ function MockFront (blueprint) {
+diff --git a/devtools/client/performance/legacy/front.js b/devtools/client/performance/legacy/front.js
+index 4a47d87..c9a6d62 100644
+--- a/devtools/client/performance/legacy/front.js
++++ b/devtools/client/performance/legacy/front.js
+@@ -1,41 +1,30 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cu } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ 
+-loader.lazyRequireGetter(this, "Services");
+-loader.lazyRequireGetter(this, "promise");
+-loader.lazyRequireGetter(this, "extend",
+-  "sdk/util/object", true);
+-
+-loader.lazyRequireGetter(this, "Actors",
+-  "devtools/client/performance/legacy/actors");
+-loader.lazyRequireGetter(this, "LegacyPerformanceRecording",
+-  "devtools/client/performance/legacy/recording", true);
+-loader.lazyRequireGetter(this, "importRecording",
+-  "devtools/client/performance/legacy/recording", true);
+-loader.lazyRequireGetter(this, "normalizePerformanceFeatures",
+-  "devtools/shared/performance/recording-utils", true);
+-loader.lazyRequireGetter(this, "DevToolsUtils",
+-  "devtools/shared/DevToolsUtils");
+-loader.lazyRequireGetter(this, "getDeviceFront",
+-  "devtools/server/actors/device", true);
+-loader.lazyRequireGetter(this, "getSystemInfo",
+-  "devtools/shared/system", true);
+-loader.lazyRequireGetter(this, "events",
+-  "sdk/event/core");
+-loader.lazyRequireGetter(this, "EventTarget",
+-  "sdk/event/target", true);
+-loader.lazyRequireGetter(this, "Class",
+-  "sdk/core/heritage", true);
++const Services = require("Services");
++const promise = require("promise");
++const { extend } = require("sdk/util/object");
++
++const Actors = require("devtools/client/performance/legacy/actors");
++const { LegacyPerformanceRecording } = require("devtools/client/performance/legacy/recording");
++const { importRecording } = require("devtools/client/performance/legacy/recording");
++const { normalizePerformanceFeatures } = require("devtools/shared/performance/recording-utils");
++const DevToolsUtils = require("devtools/shared/DevToolsUtils");
++const { getDeviceFront } = require("devtools/server/actors/device");
++const { getSystemInfo } = require("devtools/shared/system");
++const events = require("sdk/event/core");
++const { EventTarget } = require("sdk/event/target");
++const { Class } = require("sdk/core/heritage");
+ 
+ /**
+  * A connection to underlying actors (profiler, framerate, etc.)
+  * shared by all tools in a target.
+  */
+ const LegacyPerformanceFront = Class({
+   extends: EventTarget,
+ 
+diff --git a/devtools/client/performance/legacy/recording.js b/devtools/client/performance/legacy/recording.js
+index ceff81f..bb8b46a 100644
+--- a/devtools/client/performance/legacy/recording.js
++++ b/devtools/client/performance/legacy/recording.js
+@@ -1,23 +1,20 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ 
+-loader.lazyRequireGetter(this, "PerformanceIO",
+-  "devtools/client/performance/modules/io");
+-loader.lazyRequireGetter(this, "RecordingUtils",
+-  "devtools/shared/performance/recording-utils");
+-loader.lazyRequireGetter(this, "PerformanceRecordingCommon",
+-  "devtools/shared/performance/recording-common", true);
+-loader.lazyRequireGetter(this, "merge", "sdk/util/object", true);
++const PerformanceIO = require("devtools/client/performance/modules/io");
++const RecordingUtils = require("devtools/shared/performance/recording-utils");
++const { PerformanceRecordingCommon } = require("devtools/shared/performance/recording-common");
++const { merge } = require("sdk/util/object");
+ 
+ /**
+  * Model for a wholistic profile, containing the duration, profiling data,
+  * frames data, timeline (marker, tick, memory) data, and methods to mark
+  * a recording as 'in progress' or 'finished'.
+  */
+ const LegacyPerformanceRecording = function (options={}) {
+   this._label = options.label || "";
+diff --git a/devtools/client/performance/modules/global.js b/devtools/client/performance/modules/global.js
+index 67738de..86f82f6 100644
+--- a/devtools/client/performance/modules/global.js
++++ b/devtools/client/performance/modules/global.js
+@@ -11,29 +11,31 @@ const { ViewHelpers } = require("resource://devtools/client/shared/widgets/ViewH
+ const L10N = new ViewHelpers.MultiL10N([
+   "chrome://devtools/locale/markers.properties",
+   "chrome://devtools/locale/performance.properties"
+ ]);
+ 
+ /**
+  * A list of preferences for this tool. The values automatically update
+  * if somebody edits edits about:config or the prefs change somewhere else.
++ *
++ * This needs to be registered and unregistered when used; the PerformanceController
++ * handles this automatically, but if you just use this module in a test independently,
++ * ensure you call `registerObserver()` and `unregisterUnobserver()`.
+  */
+ const PREFS = new ViewHelpers.Prefs("devtools.performance", {
+   "show-triggers-for-gc-types": ["Char", "ui.show-triggers-for-gc-types"],
+   "show-platform-data": ["Bool", "ui.show-platform-data"],
+   "hidden-markers": ["Json", "timeline.hidden-markers"],
+   "memory-sample-probability": ["Float", "memory.sample-probability"],
+   "memory-max-log-length": ["Int", "memory.max-log-length"],
+   "profiler-buffer-size": ["Int", "profiler.buffer-size"],
+   "profiler-sample-frequency": ["Int", "profiler.sample-frequency-khz"],
+   // TODO re-enable once we flame charts via bug 1148663
+   "enable-memory-flame": ["Bool", "ui.enable-memory-flame"],
+-}, {
+-  monitorChanges: true
+ });
+ 
+ /**
+  * Details about each profile entry cateogry.
+  * @see CATEGORY_MAPPINGS.
+  */
+ const CATEGORIES = [{
+   color: "#5e88b0",
+diff --git a/devtools/client/performance/modules/io.js b/devtools/client/performance/modules/io.js
+index ca07c96..3302915 100644
+--- a/devtools/client/performance/modules/io.js
++++ b/devtools/client/performance/modules/io.js
+@@ -1,24 +1,19 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ 
+-loader.lazyRequireGetter(this, "Services");
+-loader.lazyRequireGetter(this, "promise");
+-loader.lazyRequireGetter(this, "RecordingUtils",
+-  "devtools/shared/performance/recording-utils");
+-
+-loader.lazyImporter(this, "FileUtils",
+-  "resource://gre/modules/FileUtils.jsm");
+-loader.lazyImporter(this, "NetUtil",
+-  "resource://gre/modules/NetUtil.jsm");
++const promise = require("promise");
++const RecordingUtils = require("devtools/shared/performance/recording-utils");
++const { FileUtils } = require("resource://gre/modules/FileUtils.jsm");
++const { NetUtil } = require("resource://gre/modules/NetUtil.jsm");
+ 
+ // This identifier string is used to tentatively ascertain whether or not
+ // a JSON loaded from disk is actually something generated by this tool.
+ // It isn't, of course, a definitive verification, but a Good Enough™
+ // approximation before continuing the import. Don't localize this.
+ const PERF_TOOL_SERIALIZER_IDENTIFIER = "Recorded Performance Data";
+ const PERF_TOOL_SERIALIZER_LEGACY_VERSION = 1;
+ const PERF_TOOL_SERIALIZER_CURRENT_VERSION = 2;
+diff --git a/devtools/client/performance/modules/logic/frame-utils.js b/devtools/client/performance/modules/logic/frame-utils.js
+index 1445595..edff9a7 100644
+--- a/devtools/client/performance/modules/logic/frame-utils.js
++++ b/devtools/client/performance/modules/logic/frame-utils.js
+@@ -1,16 +1,14 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-loader.lazyRequireGetter(this, "Services");
+-loader.lazyRequireGetter(this, "global",
+-  "devtools/client/performance/modules/global");
++const global = require("devtools/client/performance/modules/global");
+ const demangle = require("devtools/client/shared/demangle");
+ const { isChromeScheme, isContentScheme, parseURL } =
+   require("devtools/client/shared/source-utils");
+ 
+ // Character codes used in various parsing helper functions.
+ const CHAR_CODE_R = "r".charCodeAt(0);
+ const CHAR_CODE_0 = "0".charCodeAt(0);
+ const CHAR_CODE_9 = "9".charCodeAt(0);
+diff --git a/devtools/client/performance/modules/logic/marker-formatters.js b/devtools/client/performance/modules/logic/marker-formatters.js
+new file mode 100644
+index 0000000..4c5dc36
+--- /dev/null
++++ b/devtools/client/performance/modules/logic/marker-formatters.js
+@@ -0,0 +1,144 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++/**
++ * This file contains utilities for creating elements for markers to be displayed,
++ * and parsing out the blueprint to generate correct values for markers.
++ */
++const { Ci } = require("chrome");
++const Services = require("Services");
++const { L10N } = require("devtools/client/performance/modules/global");
++const PLATFORM_DATA_PREF = "devtools.performance.ui.show-platform-data";
++
++// String used to fill in platform data when it should be hidden.
++const GECKO_SYMBOL = "(Gecko)";
++
++/**
++ * Mapping of JS marker causes to a friendlier form. Only
++ * markers that are considered "from content" should be labeled here.
++ */
++const JS_MARKER_MAP = {
++  "<script> element":          L10N.getStr("marker.label.javascript.scriptElement"),
++  "promise callback":          L10N.getStr("marker.label.javascript.promiseCallback"),
++  "promise initializer":       L10N.getStr("marker.label.javascript.promiseInit"),
++  "Worker runnable":           L10N.getStr("marker.label.javascript.workerRunnable"),
++  "javascript: URI":           L10N.getStr("marker.label.javascript.jsURI"),
++  // The difference between these two event handler markers are differences
++  // in their WebIDL implementation, so distinguishing them is not necessary.
++  "EventHandlerNonNull":       L10N.getStr("marker.label.javascript.eventHandler"),
++  "EventListener.handleEvent": L10N.getStr("marker.label.javascript.eventHandler"),
++  // These markers do not get L10N'd because they're JS names.
++  "setInterval handler":       "setInterval",
++  "setTimeout handler":        "setTimeout",
++  "FrameRequestCallback":      "requestAnimationFrame",
++};
++
++/**
++ * A series of formatters used by the blueprint.
++ */
++const Formatters = {
++  /**
++   * Uses the marker name as the label for markers that do not have
++   * a blueprint entry. Uses "Other" in the marker filter menu.
++   */
++  UnknownLabel: function (marker={}) {
++    return marker.name || L10N.getStr("marker.label.unknown");
++  },
++
++  GCLabel: function (marker) {
++    if (!marker) {
++      return L10N.getStr("marker.label.garbageCollection2");
++    }
++    // Only if a `nonincrementalReason` exists, do we want to label
++    // this as a non incremental GC event.
++    if ("nonincrementalReason" in marker) {
++      return L10N.getStr("marker.label.garbageCollection.nonIncremental");
++    }
++    return L10N.getStr("marker.label.garbageCollection.incremental");
++  },
++
++  JSLabel: function (marker={}) {
++    let generic = L10N.getStr("marker.label.javascript");
++    if ("causeName" in marker) {
++      return JS_MARKER_MAP[marker.causeName] || generic;
++    }
++    return generic;
++  },
++
++  DOMJSLabel: function (marker={}) {
++    return `Event (${marker.type})`;
++  },
++
++  /**
++   * Returns a hash for computing a fields object for a JS marker. If the cause
++   * is considered content (so an entry exists in the JS_MARKER_MAP), do not display it
++   * since it's redundant with the label. Otherwise for Gecko code, either display
++   * the cause, or "(Gecko)", depending on if "show-platform-data" is set.
++   */
++  JSFields: function (marker) {
++    if ("causeName" in marker && !JS_MARKER_MAP[marker.causeName]) {
++      let cause = Services.prefs.getBoolPref(PLATFORM_DATA_PREF) ? marker.causeName : GECKO_SYMBOL;
++      return {
++        [L10N.getStr("marker.field.causeName")]: cause
++      };
++    }
++  },
++
++  GCFields: function (marker) {
++    let fields = Object.create(null);
++    let cause = marker.causeName;
++    let label = L10N.getStr(`marker.gcreason.label.${cause}`) || cause;
++
++    fields[L10N.getStr("marker.field.causeName")] = label;
++
++    if ("nonincrementalReason" in marker) {
++      fields[L10N.getStr("marker.field.nonIncrementalCause")] = marker.nonincrementalReason;
++    }
++
++    return fields;
++  },
++
++  DOMEventFields: function (marker) {
++    let fields = Object.create(null);
++    if ("type" in marker) {
++      fields[L10N.getStr("marker.field.DOMEventType")] = marker.type;
++    }
++    if ("eventPhase" in marker) {
++      let phase;
++      if (marker.eventPhase === Ci.nsIDOMEvent.AT_TARGET) {
++        phase = L10N.getStr("marker.value.DOMEventTargetPhase");
++      } else if (marker.eventPhase === Ci.nsIDOMEvent.CAPTURING_PHASE) {
++        phase = L10N.getStr("marker.value.DOMEventCapturingPhase");
++      } else if (marker.eventPhase === Ci.nsIDOMEvent.BUBBLING_PHASE) {
++        phase = L10N.getStr("marker.value.DOMEventBubblingPhase");
++      }
++      fields[L10N.getStr("marker.field.DOMEventPhase")] = phase;
++    }
++    return fields;
++  },
++
++  StylesFields: function (marker) {
++    if ("restyleHint" in marker) {
++      return {
++        [L10N.getStr("marker.field.restyleHint")]: marker.restyleHint.replace(/eRestyle_/g, "")
++      };
++    }
++  },
++
++  CycleCollectionFields: function (marker) {
++    return {
++      [L10N.getStr("marker.field.type")]: marker.name.replace(/nsCycleCollector::/g, "")
++    };
++  },
++
++  WorkerFields: function(marker) {
++    return {
++      [L10N.getStr("marker.field.type")]:
++        L10N.getStr(`marker.worker.${marker.workerOperation}`)
++    };
++  }
++};
++
++exports.Formatters = Formatters;
+diff --git a/devtools/client/performance/modules/logic/marker-utils.js b/devtools/client/performance/modules/logic/marker-utils.js
+index 195331e..53409e4 100644
+--- a/devtools/client/performance/modules/logic/marker-utils.js
++++ b/devtools/client/performance/modules/logic/marker-utils.js
+@@ -5,27 +5,21 @@
+ 
+ /**
+  * This file contains utilities for creating elements for markers to be displayed,
+  * and parsing out the blueprint to generate correct values for markers.
+  */
+ 
+ const { Cu, Ci } = require("chrome");
+ 
+-loader.lazyRequireGetter(this, "L10N",
+-  "devtools/client/performance/modules/global", true);
+-loader.lazyRequireGetter(this, "PREFS",
+-  "devtools/client/performance/modules/global", true);
+-loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+-  "devtools/client/performance/modules/markers", true);
+-loader.lazyRequireGetter(this, "WebConsoleUtils",
+-  "devtools/shared/webconsole/utils");
+-
+-// String used to fill in platform data when it should be hidden.
+-const GECKO_SYMBOL = "(Gecko)";
++const Services = require("Services");
++const { L10N } = require("devtools/client/performance/modules/global");
++const { TIMELINE_BLUEPRINT } = require("devtools/client/performance/modules/markers");
++const WebConsoleUtils = require("devtools/shared/webconsole/utils");
++const SHOW_TRIGGER_FOR_GC_TYPES_PREF = "devtools.performance.ui.show-triggers-for-gc-types";
+ 
+ /**
+  * Takes a marker, blueprint, and filter list and
+  * determines if this marker should be filtered or not.
+  */
+ function isMarkerValid (marker, filter) {
+   if (!filter || filter.length === 0) {
+     return true;
+@@ -318,142 +312,16 @@ const DOM = {
+       elements.push(hbox);
+     }
+ 
+     return elements;
+   },
+ };
+ 
+ /**
+- * Mapping of JS marker causes to a friendlier form. Only
+- * markers that are considered "from content" should be labeled here.
+- */
+-const JS_MARKER_MAP = {
+-  "<script> element":          L10N.getStr("marker.label.javascript.scriptElement"),
+-  "promise callback":          L10N.getStr("marker.label.javascript.promiseCallback"),
+-  "promise initializer":       L10N.getStr("marker.label.javascript.promiseInit"),
+-  "Worker runnable":           L10N.getStr("marker.label.javascript.workerRunnable"),
+-  "javascript: URI":           L10N.getStr("marker.label.javascript.jsURI"),
+-  // The difference between these two event handler markers are differences
+-  // in their WebIDL implementation, so distinguishing them is not necessary.
+-  "EventHandlerNonNull":       L10N.getStr("marker.label.javascript.eventHandler"),
+-  "EventListener.handleEvent": L10N.getStr("marker.label.javascript.eventHandler"),
+-  // These markers do not get L10N'd because they're JS names.
+-  "setInterval handler":       "setInterval",
+-  "setTimeout handler":        "setTimeout",
+-  "FrameRequestCallback":      "requestAnimationFrame",
+-};
+-
+-/**
+- * A series of formatters used by the blueprint.
+- */
+-const Formatters = {
+-  /**
+-   * Uses the marker name as the label for markers that do not have
+-   * a blueprint entry. Uses "Other" in the marker filter menu.
+-   */
+-  UnknownLabel: function (marker={}) {
+-    return marker.name || L10N.getStr("marker.label.unknown");
+-  },
+-
+-  GCLabel: function (marker) {
+-    if (!marker) {
+-      return L10N.getStr("marker.label.garbageCollection2");
+-    }
+-    // Only if a `nonincrementalReason` exists, do we want to label
+-    // this as a non incremental GC event.
+-    if ("nonincrementalReason" in marker) {
+-      return L10N.getStr("marker.label.garbageCollection.nonIncremental");
+-    }
+-    return L10N.getStr("marker.label.garbageCollection.incremental");
+-  },
+-
+-  JSLabel: function (marker={}) {
+-    let generic = L10N.getStr("marker.label.javascript");
+-    if ("causeName" in marker) {
+-      return JS_MARKER_MAP[marker.causeName] || generic;
+-    }
+-    return generic;
+-  },
+-
+-  DOMJSLabel: function (marker={}) {
+-    return `Event (${marker.type})`;
+-  },
+-
+-  /**
+-   * Returns a hash for computing a fields object for a JS marker. If the cause
+-   * is considered content (so an entry exists in the JS_MARKER_MAP), do not display it
+-   * since it's redundant with the label. Otherwise for Gecko code, either display
+-   * the cause, or "(Gecko)", depending on if "show-platform-data" is set.
+-   */
+-  JSFields: function (marker) {
+-    if ("causeName" in marker && !JS_MARKER_MAP[marker.causeName]) {
+-      let cause = PREFS["show-platform-data"] ? marker.causeName : GECKO_SYMBOL;
+-      return {
+-        [L10N.getStr("marker.field.causeName")]: cause
+-      };
+-    }
+-  },
+-
+-  GCFields: function (marker) {
+-    let fields = Object.create(null);
+-    let cause = marker.causeName;
+-    let label = L10N.getStr(`marker.gcreason.label.${cause}`) || cause;
+-
+-    fields[L10N.getStr("marker.field.causeName")] = label;
+-
+-    if ("nonincrementalReason" in marker) {
+-      fields[L10N.getStr("marker.field.nonIncrementalCause")] = marker.nonincrementalReason;
+-    }
+-
+-    return fields;
+-  },
+-
+-  DOMEventFields: function (marker) {
+-    let fields = Object.create(null);
+-    if ("type" in marker) {
+-      fields[L10N.getStr("marker.field.DOMEventType")] = marker.type;
+-    }
+-    if ("eventPhase" in marker) {
+-      let phase;
+-      if (marker.eventPhase === Ci.nsIDOMEvent.AT_TARGET) {
+-        phase = L10N.getStr("marker.value.DOMEventTargetPhase");
+-      } else if (marker.eventPhase === Ci.nsIDOMEvent.CAPTURING_PHASE) {
+-        phase = L10N.getStr("marker.value.DOMEventCapturingPhase");
+-      } else if (marker.eventPhase === Ci.nsIDOMEvent.BUBBLING_PHASE) {
+-        phase = L10N.getStr("marker.value.DOMEventBubblingPhase");
+-      }
+-      fields[L10N.getStr("marker.field.DOMEventPhase")] = phase;
+-    }
+-    return fields;
+-  },
+-
+-  StylesFields: function (marker) {
+-    if ("restyleHint" in marker) {
+-      return {
+-        [L10N.getStr("marker.field.restyleHint")]: marker.restyleHint.replace(/eRestyle_/g, "")
+-      };
+-    }
+-  },
+-
+-  CycleCollectionFields: function (marker) {
+-    return {
+-      [L10N.getStr("marker.field.type")]: marker.name.replace(/nsCycleCollector::/g, "")
+-    };
+-  },
+-
+-  WorkerFields: function(marker) {
+-    return {
+-      [L10N.getStr("marker.field.type")]:
+-        L10N.getStr(`marker.worker.${marker.workerOperation}`)
+-    };
+-  }
+-};
+-
+-/**
+  * Takes a marker and returns the definition for that marker type,
+  * falling back to the UNKNOWN definition if undefined.
+  *
+  * @param {Marker} marker
+  * @return {object}
+  */
+ function getBlueprintFor (marker) {
+   return TIMELINE_BLUEPRINT[marker.name] || TIMELINE_BLUEPRINT.UNKNOWN;
+@@ -463,18 +331,18 @@ function getBlueprintFor (marker) {
+  * Takes a marker and determines if this marker should display
+  * the allocations trigger button.
+  *
+  * @param {Marker} marker
+  * @return {boolean}
+  */
+ function showAllocationsTrigger (marker) {
+   return marker.name === "GarbageCollection" &&
+-         PREFS["show-triggers-for-gc-types"].split(" ").indexOf(marker.causeName) !== -1;
++         Services.prefs.getCharPref(SHOW_TRIGGER_FOR_GC_TYPES_PREF)
++         .split(" ").indexOf(marker.causeName) !== -1;
+ }
+ 
+ exports.isMarkerValid = isMarkerValid;
+ exports.getMarkerLabel = getMarkerLabel;
+ exports.getMarkerClassName = getMarkerClassName;
+ exports.getMarkerFields = getMarkerFields;
+ exports.DOM = DOM;
+-exports.Formatters = Formatters;
+ exports.getBlueprintFor = getBlueprintFor;
+diff --git a/devtools/client/performance/modules/logic/moz.build b/devtools/client/performance/modules/logic/moz.build
+index ee3535a..3d97de2 100644
+--- a/devtools/client/performance/modules/logic/moz.build
++++ b/devtools/client/performance/modules/logic/moz.build
+@@ -1,13 +1,14 @@
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ DevToolsModules(
+     'frame-utils.js',
+     'jit.js',
++    'marker-formatters.js',
+     'marker-utils.js',
+     'telemetry.js',
+     'tree-model.js',
+     'waterfall-utils.js',
+ )
+diff --git a/devtools/client/performance/modules/logic/telemetry.js b/devtools/client/performance/modules/logic/telemetry.js
+index 7559076d..8556c00 100644
+--- a/devtools/client/performance/modules/logic/telemetry.js
++++ b/devtools/client/performance/modules/logic/telemetry.js
+@@ -1,21 +1,16 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-loader.lazyRequireGetter(this, "Telemetry",
+-  "devtools/client/shared/telemetry");
+-loader.lazyRequireGetter(this, "Services",
+-  "resource://gre/modules/Services.jsm", true);
+-loader.lazyRequireGetter(this, "DevToolsUtils",
+-  "devtools/shared/DevToolsUtils");
+-loader.lazyRequireGetter(this, "EVENTS",
+-  "devtools/client/performance/events");
++const Telemetry = require("devtools/client/shared/telemetry");
++const DevToolsUtils = require("devtools/shared/DevToolsUtils");
++const EVENTS = require("devtools/client/performance/events");
+ 
+ const EVENT_MAP_FLAGS = new Map([
+   [EVENTS.RECORDING_IMPORTED, "DEVTOOLS_PERFTOOLS_RECORDING_IMPORT_FLAG"],
+   [EVENTS.RECORDING_EXPORTED, "DEVTOOLS_PERFTOOLS_RECORDING_EXPORT_FLAG"],
+ ]);
+ 
+ const RECORDING_FEATURES = [
+   "withMarkers", "withTicks", "withMemory", "withAllocations", "withJITOptimizations"
+diff --git a/devtools/client/performance/modules/logic/tree-model.js b/devtools/client/performance/modules/logic/tree-model.js
+index 190dc6c..e634d0d 100644
+--- a/devtools/client/performance/modules/logic/tree-model.js
++++ b/devtools/client/performance/modules/logic/tree-model.js
+@@ -1,19 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+-const { Cc, Ci, Cu, Cr } = require("chrome");
+-
+-loader.lazyRequireGetter(this, "JITOptimizations",
+-  "devtools/client/performance/modules/logic/jit", true);
+-loader.lazyRequireGetter(this, "FrameUtils",
+-  "devtools/client/performance/modules/logic/frame-utils");
++const { JITOptimizations } = require("devtools/client/performance/modules/logic/jit");
++const FrameUtils = require("devtools/client/performance/modules/logic/frame-utils");
+ 
+ /**
+  * A call tree for a thread. This is essentially a linkage between all frames
+  * of all samples into a single tree structure, with additional information
+  * on each node, like the time spent (in milliseconds) and samples count.
+  *
+  * @param object thread
+  *        The raw thread object received from the backend. Contains samples,
+diff --git a/devtools/client/performance/modules/logic/waterfall-utils.js b/devtools/client/performance/modules/logic/waterfall-utils.js
+index 77393e5..1de3bb6 100644
+--- a/devtools/client/performance/modules/logic/waterfall-utils.js
++++ b/devtools/client/performance/modules/logic/waterfall-utils.js
+@@ -2,20 +2,18 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * Utility functions for collapsing markers into a waterfall.
+  */
+ 
+-loader.lazyRequireGetter(this, "extend",
+-  "sdk/util/object", true);
+-loader.lazyRequireGetter(this, "MarkerUtils",
+-  "devtools/client/performance/modules/logic/marker-utils");
++const { extend } = require("sdk/util/object");
++const MarkerUtils = require("devtools/client/performance/modules/logic/marker-utils");
+ 
+ /**
+  * Creates a parent marker, which functions like a regular marker,
+  * but is able to hold additional child markers.
+  *
+  * The marker is seeded with values from `marker`.
+  * @param object marker
+  * @return object
+diff --git a/devtools/client/performance/modules/markers.js b/devtools/client/performance/modules/markers.js
+index 0352d6b..2dbbe42 100644
+--- a/devtools/client/performance/modules/markers.js
++++ b/devtools/client/performance/modules/markers.js
+@@ -1,15 +1,15 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { L10N } = require("devtools/client/performance/modules/global");
+-const { Formatters } = require("devtools/client/performance/modules/logic/marker-utils");
++const { Formatters } = require("devtools/client/performance/modules/logic/marker-formatters");
+ 
+ /**
+  * A simple schema for mapping markers to the timeline UI. The keys correspond
+  * to marker names, while the values are objects with the following format:
+  *
+  * - group: The row index in the overview graph; multiple markers
+  *          can be added on the same row. @see <overview.js/buildGraphImage>
+  * - label: The label used in the waterfall to identify the marker. Can be a
+diff --git a/devtools/client/performance/modules/widgets/graphs.js b/devtools/client/performance/modules/widgets/graphs.js
+index fccc8ae..e352d96 100644
+--- a/devtools/client/performance/modules/widgets/graphs.js
++++ b/devtools/client/performance/modules/widgets/graphs.js
+@@ -10,32 +10,24 @@
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Task } = require("resource://gre/modules/Task.jsm");
+ const { Heritage } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ const LineGraphWidget = require("devtools/client/shared/widgets/LineGraphWidget");
+ const BarGraphWidget = require("devtools/client/shared/widgets/BarGraphWidget");
+ const MountainGraphWidget = require("devtools/client/shared/widgets/MountainGraphWidget");
+ const { CanvasGraphUtils } = require("devtools/client/shared/widgets/Graphs");
+ 
+-loader.lazyRequireGetter(this, "promise");
+-loader.lazyRequireGetter(this, "EventEmitter",
+-  "devtools/shared/event-emitter");
+-
+-loader.lazyRequireGetter(this, "colorUtils",
+-  "devtools/shared/css-color", true);
+-loader.lazyRequireGetter(this, "getColor",
+-  "devtools/client/shared/theme", true);
+-loader.lazyRequireGetter(this, "ProfilerGlobal",
+-  "devtools/client/performance/modules/global");
+-loader.lazyRequireGetter(this, "L10N",
+-  "devtools/client/performance/modules/global", true);
+-loader.lazyRequireGetter(this, "MarkersOverview",
+-  "devtools/client/performance/modules/widgets/markers-overview", true);
+-loader.lazyRequireGetter(this, "createTierGraphDataFromFrameNode",
+-  "devtools/client/performance/modules/logic/jit", true);
++const promise = require("promise");
++const EventEmitter = require("devtools/shared/event-emitter");
++
++const { colorUtils } = require("devtools/shared/css-color");
++const { getColor } = require("devtools/client/shared/theme");
++const ProfilerGlobal = require("devtools/client/performance/modules/global");
++const { MarkersOverview } = require("devtools/client/performance/modules/widgets/markers-overview");
++const { createTierGraphDataFromFrameNode } = require("devtools/client/performance/modules/logic/jit");
+ 
+ /**
+  * For line graphs
+  */
+ const HEIGHT = 35; // px
+ const STROKE_WIDTH = 1; // px
+ const DAMPEN_VALUES = 0.95;
+ const CLIPHEAD_LINE_COLOR = "#666";
+@@ -127,17 +119,17 @@ FramerateGraph.prototype = Heritage.extend(PerformanceGraph.prototype, {
+ 
+ /**
+  * Constructor for the memory graph. Inherits from PerformanceGraph.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the overview.
+  */
+ function MemoryGraph(parent) {
+-  PerformanceGraph.call(this, parent, L10N.getStr("graphs.memory"));
++  PerformanceGraph.call(this, parent, ProfilerGlobal.L10N.getStr("graphs.memory"));
+ }
+ 
+ MemoryGraph.prototype = Heritage.extend(PerformanceGraph.prototype, {
+   mainColor: MEMORY_GRAPH_COLOR_NAME,
+   setPerformanceData: function ({ duration, memory }) {
+     this.dataDuration = duration;
+     return this.setData(memory);
+   }
+diff --git a/devtools/client/performance/modules/widgets/marker-details.js b/devtools/client/performance/modules/widgets/marker-details.js
+index 066c851..3722365 100644
+--- a/devtools/client/performance/modules/widgets/marker-details.js
++++ b/devtools/client/performance/modules/widgets/marker-details.js
+@@ -4,20 +4,18 @@
+ "use strict";
+ 
+ /**
+  * This file contains the rendering code for the marker sidebar.
+  */
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ 
+-loader.lazyRequireGetter(this, "EventEmitter",
+-  "devtools/shared/event-emitter");
+-loader.lazyRequireGetter(this, "MarkerUtils",
+-  "devtools/client/performance/modules/logic/marker-utils");
++const EventEmitter = require("devtools/shared/event-emitter");
++const MarkerUtils = require("devtools/client/performance/modules/logic/marker-utils");
+ 
+ /**
+  * A detailed view for one single marker.
+  *
+  * @param nsIDOMNode parent
+  *        The parent node holding the view.
+  * @param nsIDOMNode splitter
+  *        The splitter node that the resize event is bound to.
+diff --git a/devtools/client/performance/modules/widgets/marker-view.js b/devtools/client/performance/modules/widgets/marker-view.js
+index c17404f..c3431ed 100644
+--- a/devtools/client/performance/modules/widgets/marker-view.js
++++ b/devtools/client/performance/modules/widgets/marker-view.js
+@@ -7,18 +7,17 @@
+  * This file contains the "marker" view, essentially a detailed list
+  * of all the markers in the timeline data.
+  */
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Heritage } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ const { AbstractTreeItem } = require("resource://devtools/client/shared/widgets/AbstractTreeItem.jsm");
+ 
+-loader.lazyRequireGetter(this, "MarkerUtils",
+-  "devtools/client/performance/modules/logic/marker-utils");
++const MarkerUtils = require("devtools/client/performance/modules/logic/marker-utils");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ 
+ const LEVEL_INDENT = 10; // px
+ const ARROW_NODE_OFFSET = -15; // px
+ const WATERFALL_MARKER_SIDEBAR_SAFE_BOUNDS = 20; // px
+ const WATERFALL_MARKER_SIDEBAR_WIDTH = 175; // px
+ const WATERFALL_MARKER_TIMEBAR_WIDTH_MIN = 5; // px
+diff --git a/devtools/client/performance/modules/widgets/markers-overview.js b/devtools/client/performance/modules/widgets/markers-overview.js
+index c82fd14..8bbd400 100644
+--- a/devtools/client/performance/modules/widgets/markers-overview.js
++++ b/devtools/client/performance/modules/widgets/markers-overview.js
+@@ -8,28 +8,22 @@
+  * the timeline data. Regions inside it may be selected, determining which
+  * markers are visible in the "waterfall".
+  */
+ 
+ const { Cc, Ci, Cu, Cr } = require("chrome");
+ const { Heritage } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ const { AbstractCanvasGraph } = require("devtools/client/shared/widgets/Graphs");
+ 
+-loader.lazyRequireGetter(this, "colorUtils",
+-  "devtools/shared/css-color", true);
+-loader.lazyRequireGetter(this, "getColor",
+-  "devtools/client/shared/theme", true);
+-loader.lazyRequireGetter(this, "L10N",
+-  "devtools/client/performance/modules/global", true);
+-loader.lazyRequireGetter(this, "TickUtils",
+-  "devtools/client/performance/modules/widgets/waterfall-ticks", true);
+-loader.lazyRequireGetter(this, "MarkerUtils",
+-  "devtools/client/performance/modules/logic/marker-utils");
+-loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+-  "devtools/client/performance/modules/markers", true);
++const { colorUtils } = require("devtools/shared/css-color");
++const { getColor } = require("devtools/client/shared/theme");
++const ProfilerGlobal = require("devtools/client/performance/modules/global");
++const MarkerUtils = require("devtools/client/performance/modules/logic/marker-utils");
++const { TickUtils } = require("devtools/client/performance/modules/widgets/waterfall-ticks");
++const { TIMELINE_BLUEPRINT } = require("devtools/client/performance/modules/markers");
+ 
+ const OVERVIEW_HEADER_HEIGHT = 14; // px
+ const OVERVIEW_ROW_HEIGHT = 11; // px
+ 
+ const OVERVIEW_SELECTION_LINE_COLOR = "#666";
+ const OVERVIEW_CLIPHEAD_LINE_COLOR = "#555";
+ 
+ const OVERVIEW_HEADER_TICKS_MULTIPLE = 100; // ms
+@@ -176,17 +170,17 @@ MarkersOverview.prototype = Heritage.extend(AbstractCanvasGraph.prototype, {
+     ctx.fillStyle = this.headerTextColor;
+     ctx.strokeStyle = this.headerTimelineStrokeColor;
+     ctx.beginPath();
+ 
+     for (let x = 0; x < canvasWidth; x += tickInterval) {
+       let lineLeft = x;
+       let textLeft = lineLeft + textPaddingLeft;
+       let time = Math.round(x / dataScale);
+-      let label = L10N.getFormatStr("timeline.tick", time);
++      let label = ProfilerGlobal.L10N.getFormatStr("timeline.tick", time);
+       ctx.fillText(label, textLeft, headerHeight / 2 + textPaddingTop);
+       ctx.moveTo(lineLeft, 0);
+       ctx.lineTo(lineLeft, canvasHeight);
+     }
+ 
+     ctx.stroke();
+ 
+     // Draw the timeline markers.
+diff --git a/devtools/client/performance/modules/widgets/waterfall-ticks.js b/devtools/client/performance/modules/widgets/waterfall-ticks.js
+index 3a32e93..8f96a53 100644
+--- a/devtools/client/performance/modules/widgets/waterfall-ticks.js
++++ b/devtools/client/performance/modules/widgets/waterfall-ticks.js
+@@ -3,20 +3,18 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ /**
+  * This file contains the "waterfall ticks" view, a header for the
+  * markers displayed in the waterfall.
+  */
+ 
+-loader.lazyRequireGetter(this, "L10N",
+-  "devtools/client/performance/modules/global", true);
+-loader.lazyRequireGetter(this, "WATERFALL_MARKER_SIDEBAR_WIDTH",
+-  "devtools/client/performance/modules/widgets/marker-view", true);
++const { L10N } = require("devtools/client/performance/modules/global");
++const { WATERFALL_MARKER_SIDEBAR_WIDTH } = require("devtools/client/performance/modules/widgets/marker-view");
+ 
+ const HTML_NS = "http://www.w3.org/1999/xhtml";
+ 
+ const FIND_OPTIMAL_TICK_INTERVAL_MAX_ITERS = 100;
+ 
+ const WATERFALL_HEADER_TICKS_MULTIPLE = 5; // ms
+ const WATERFALL_HEADER_TICKS_SPACING_MIN = 50; // px
+ const WATERFALL_HEADER_TEXT_PADDING = 3; // px
+diff --git a/devtools/client/performance/performance-controller.js b/devtools/client/performance/performance-controller.js
+index 6076a90..08aee39 100644
+--- a/devtools/client/performance/performance-controller.js
++++ b/devtools/client/performance/performance-controller.js
+@@ -1,92 +1,63 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ var { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
+-const { loader, require } = Cu.import("resource://devtools/shared/Loader.jsm", {});
+-
+-const { Task } = require("resource://gre/modules/Task.jsm");
+-const { Heritage, ViewHelpers, WidgetMethods } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
++var BrowserLoaderModule = {};
++Cu.import("resource://devtools/client/shared/browser-loader.js", BrowserLoaderModule);
++var { loader, require } = BrowserLoaderModule.BrowserLoader("resource://devtools/client/performance/", this);
++var { Task } = require("resource://gre/modules/Task.jsm");
++var { Heritage, ViewHelpers, WidgetMethods } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ 
+ // Events emitted by various objects in the panel.
+-const EVENTS = require("devtools/client/performance/events");
++var EVENTS = require("devtools/client/performance/events");
+ Object.defineProperty(this, "EVENTS", {
+   value: EVENTS,
+   enumerable: true,
+   writable: false
+ });
+ 
+-loader.lazyRequireGetter(this, "Services");
+-loader.lazyRequireGetter(this, "promise");
+-loader.lazyRequireGetter(this, "EventEmitter",
+-  "devtools/shared/event-emitter");
+-loader.lazyRequireGetter(this, "DevToolsUtils",
+-  "devtools/shared/DevToolsUtils");
+-loader.lazyRequireGetter(this, "system",
+-  "devtools/shared/system");
++var Services = require("Services");
++var promise = require("promise");
++var EventEmitter = require("devtools/shared/event-emitter");
++var DevToolsUtils = require("devtools/shared/DevToolsUtils");
++var system = require("devtools/shared/system");
+ 
+ // Logic modules
+ 
+-loader.lazyRequireGetter(this, "L10N",
+-  "devtools/client/performance/modules/global", true);
+-loader.lazyRequireGetter(this, "PerformanceTelemetry",
+-  "devtools/client/performance/modules/logic/telemetry", true);
+-loader.lazyRequireGetter(this, "TIMELINE_BLUEPRINT",
+-  "devtools/client/performance/modules/markers", true);
+-loader.lazyRequireGetter(this, "RecordingUtils",
+-  "devtools/shared/performance/recording-utils");
+-loader.lazyRequireGetter(this, "GraphsController",
+-  "devtools/client/performance/modules/widgets/graphs", true);
+-loader.lazyRequireGetter(this, "OptimizationsGraph",
+-  "devtools/client/performance/modules/widgets/graphs", true);
+-loader.lazyRequireGetter(this, "WaterfallHeader",
+-  "devtools/client/performance/modules/widgets/waterfall-ticks", true);
+-loader.lazyRequireGetter(this, "MarkerView",
+-  "devtools/client/performance/modules/widgets/marker-view", true);
+-loader.lazyRequireGetter(this, "MarkerDetails",
+-  "devtools/client/performance/modules/widgets/marker-details", true);
+-loader.lazyRequireGetter(this, "MarkerUtils",
+-  "devtools/client/performance/modules/logic/marker-utils");
+-loader.lazyRequireGetter(this, "WaterfallUtils",
+-  "devtools/client/performance/modules/logic/waterfall-utils");
+-loader.lazyRequireGetter(this, "FrameUtils",
+-  "devtools/client/performance/modules/logic/frame-utils");
+-loader.lazyRequireGetter(this, "CallView",
+-  "devtools/client/performance/modules/widgets/tree-view", true);
+-loader.lazyRequireGetter(this, "ThreadNode",
+-  "devtools/client/performance/modules/logic/tree-model", true);
+-loader.lazyRequireGetter(this, "FrameNode",
+-  "devtools/client/performance/modules/logic/tree-model", true);
+-loader.lazyRequireGetter(this, "JITOptimizations",
+-  "devtools/client/performance/modules/logic/jit", true);
++var { L10N } = require("devtools/client/performance/modules/global");
++var { PerformanceTelemetry } = require("devtools/client/performance/modules/logic/telemetry");
++var { TIMELINE_BLUEPRINT } = require("devtools/client/performance/modules/markers");
++var RecordingUtils = require("devtools/shared/performance/recording-utils");
++var { OptimizationsGraph, GraphsController } = require("devtools/client/performance/modules/widgets/graphs");
++var { WaterfallHeader } = require("devtools/client/performance/modules/widgets/waterfall-ticks");
++var { MarkerView } = require("devtools/client/performance/modules/widgets/marker-view");
++var { MarkerDetails } = require("devtools/client/performance/modules/widgets/marker-details");
++var MarkerUtils = require("devtools/client/performance/modules/logic/marker-utils");
++var WaterfallUtils = require("devtools/client/performance/modules/logic/waterfall-utils");
++var FrameUtils = require("devtools/client/performance/modules/logic/frame-utils");
++var { CallView } = require("devtools/client/performance/modules/widgets/tree-view");
++var { ThreadNode } = require("devtools/client/performance/modules/logic/tree-model");
++var { FrameNode } = require("devtools/client/performance/modules/logic/tree-model");
++var { JITOptimizations } = require("devtools/client/performance/modules/logic/jit");
+ 
+ // Widgets modules
+ 
+-loader.lazyRequireGetter(this, "OptionsView",
+-  "devtools/client/shared/options-view", true);
+-loader.lazyRequireGetter(this, "FlameGraphUtils",
+-  "devtools/client/shared/widgets/FlameGraph", true);
+-loader.lazyRequireGetter(this, "FlameGraph",
+-  "devtools/client/shared/widgets/FlameGraph", true);
+-loader.lazyRequireGetter(this, "TreeWidget",
+-  "devtools/client/shared/widgets/TreeWidget", true);
+-
+-loader.lazyImporter(this, "SideMenuWidget",
+-  "resource://devtools/client/shared/widgets/SideMenuWidget.jsm");
+-loader.lazyImporter(this, "setNamedTimeout",
+-  "resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+-loader.lazyImporter(this, "clearNamedTimeout",
+-  "resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+-loader.lazyImporter(this, "PluralForm",
+-  "resource://gre/modules/PluralForm.jsm");
+-
+-const BRANCH_NAME = "devtools.performance.ui.";
++var { OptionsView } = require("devtools/client/shared/options-view");
++var { FlameGraph, FlameGraphUtils } = require("devtools/client/shared/widgets/FlameGraph");
++var { TreeWidget } = require("devtools/client/shared/widgets/TreeWidget");
++
++var { SideMenuWidget } = require("resource://devtools/client/shared/widgets/SideMenuWidget.jsm");
++var { setNamedTimeout, clearNamedTimeout } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
++var { PluralForm } = require("resource://gre/modules/PluralForm.jsm");
++
++var BRANCH_NAME = "devtools.performance.ui.";
+ 
+ /**
+  * The current target, toolbox and PerformanceFront, set by this tool's host.
+  */
+ var gToolbox, gTarget, gFront;
+ 
+ /**
+  * Initializes the profiler controller and views.
+@@ -131,16 +102,17 @@ var PerformanceController = {
+     this._onFrontEvent = this._onFrontEvent.bind(this);
+     this._pipe = this._pipe.bind(this);
+ 
+     // Store data regarding if e10s is enabled.
+     this._e10s = Services.appinfo.browserTabsRemoteAutostart;
+     this._setMultiprocessAttributes();
+ 
+     this._prefs = require("devtools/client/performance/modules/global").PREFS;
++    this._prefs.registerObserver();
+     this._prefs.on("pref-changed", this._onPrefChanged);
+ 
+     ToolbarView.on(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.on(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.on(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.on(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.on(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.on(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+@@ -151,16 +123,17 @@ var PerformanceController = {
+   }),
+ 
+   /**
+    * Remove events handled by the PerformanceController
+    */
+   destroy: function() {
+     this._telemetry.destroy();
+     this._prefs.off("pref-changed", this._onPrefChanged);
++    this._prefs.unregisterObserver();
+ 
+     ToolbarView.off(EVENTS.PREF_CHANGED, this._onPrefChanged);
+     PerformanceView.off(EVENTS.UI_START_RECORDING, this.startRecording);
+     PerformanceView.off(EVENTS.UI_STOP_RECORDING, this.stopRecording);
+     PerformanceView.off(EVENTS.UI_IMPORT_RECORDING, this.importRecording);
+     PerformanceView.off(EVENTS.UI_CLEAR_RECORDINGS, this.clearRecordings);
+     RecordingsView.off(EVENTS.UI_EXPORT_RECORDING, this.exportRecording);
+     RecordingsView.off(EVENTS.RECORDING_SELECTED, this._onRecordingSelectFromView);
+-- 
+2.3.1
+
