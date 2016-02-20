@@ -1,44 +1,194 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Wed, 1 Jul 2015 15:09:17 -0700
-Subject: Bug 1177279 - Create SourceLocationController to handle
- updating of locations within devtools. r=jlong
+Date: Tue, 9 Feb 2016 16:03:30 -0800
+Subject: Bug 1177279 - Create a SourceLocationController to manage the state of updating sources for source mapping. r=jlong,jryans
 
-diff --git a/browser/devtools/framework/target.js b/browser/devtools/framework/target.js
-index 13c9177..240c26c 100644
---- a/browser/devtools/framework/target.js
-+++ b/browser/devtools/framework/target.js
-@@ -390,16 +390,30 @@ TabTarget.prototype = {
-   get isMultiProcess() {
-     return !this.window;
-   },
+diff --git a/devtools/client/framework/moz.build b/devtools/client/framework/moz.build
+index b86982d..a3e107e 100644
+--- a/devtools/client/framework/moz.build
++++ b/devtools/client/framework/moz.build
+@@ -9,15 +9,16 @@ TEST_HARNESS_FILES.xpcshell.devtools.client.framework.test += [
+     'test/shared-redux-head.js',
+ ]
  
-   get isThreadPaused() {
-     return !!this._isThreadPaused;
-   },
+ DevToolsModules(
+     'attach-thread.js',
+     'gDevTools.jsm',
+     'selection.js',
+     'sidebar.js',
++    'source-location.js',
+     'target.js',
+     'toolbox-highlighter-utils.js',
+     'toolbox-hosts.js',
+     'toolbox-options.js',
+     'toolbox.js',
+     'ToolboxProcess.jsm',
+ )
+diff --git a/devtools/client/framework/source-location.js b/devtools/client/framework/source-location.js
+new file mode 100644
+index 0000000..e35cd32
+--- /dev/null
++++ b/devtools/client/framework/source-location.js
+@@ -0,0 +1,137 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++const { Task } = require("resource://gre/modules/Task.jsm");
++const { assert } = require("devtools/shared/DevToolsUtils");
++
++/**
++ * A manager class that wraps a TabTarget and listens to source changes
++ * from source maps and resolves non-source mapped locations to the source mapped
++ * versions and back and forth, and creating smart elements with a location that
++ * auto-update when the source changes (from pretty printing, source maps loading, etc)
++ *
++ * @param {TabTarget} target
++ */
++function SourceLocationController(target) {
++  this.target = target;
++  this.locations = new Set();
++
++  this._onSourceUpdated = this._onSourceUpdated.bind(this);
++  this.reset = this.reset.bind(this);
++  this.destroy = this.destroy.bind(this);
++
++  target.on("source-updated", this._onSourceUpdated);
++  target.on("navigate", this.reset);
++  target.on("will-navigate", this.reset);
++  target.on("close", this.destroy);
++}
++
++SourceLocationController.prototype.reset = function() {
++  this.locations.clear();
++};
++
++SourceLocationController.prototype.destroy = function() {
++  this.locations.clear();
++  this.target.off("source-updated", this._onSourceUpdated);
++  this.target.off("navigate", this.reset);
++  this.target.off("will-navigate", this.reset);
++  this.target.off("close", this.destroy);
++  this.target = this.locations = null;
++};
++
++/**
++ * Add this `location` to be observed and register a callback
++ * whenever the underlying source is updated.
++ *
++ * @param {Object} location
++ *        An object with a {String} url, {Number} line, and optionally
++ *        a {Number} column.
++ * @param {Function} callback
++ */
++SourceLocationController.prototype.bindLocation = function(location, callback) {
++  assert(location.url, "Location must have a url.");
++  assert(location.line, "Location must have a line.");
++  this.locations.add({ location, callback });
++};
++
++/**
++ * Called when a new source occurs (a normal source, source maps) or an updated
++ * source (pretty print) occurs.
++ *
++ * @param {String} eventName
++ * @param {Object} sourceEvent
++ */
++SourceLocationController.prototype._onSourceUpdated = function(_, sourceEvent) {
++  let { type, source } = sourceEvent;
++  // If we get a new source, and it's not a source map, abort;
++  // we can ahve no actionable updates as this is just a new normal source.
++  // Also abort if there's no `url`, which means it's unsourcemappable anyway,
++  // like an eval script.
++  if (!source.url || type === "newSource" && !source.isSourceMapped) {
++    return;
++  }
++
++  for (let locationItem of this.locations) {
++    if (isSourceRelated(locationItem.location, source)) {
++      this._updateSource(locationItem);
++    }
++  }
++};
++
++SourceLocationController.prototype._updateSource = Task.async(function*(locationItem) {
++  let newLocation = yield resolveLocation(this.target, locationItem.location);
++  if (newLocation) {
++    let previousLocation = Object.assign({}, locationItem.location);
++    Object.assign(locationItem.location, newLocation);
++    locationItem.callback(previousLocation, newLocation);
++  }
++});
++
++/**
++ * Take a TabTarget and a location, containing a `url`, `line`, and `column`, resolve
++ * the location to the latest location (so a source mapped location, or if pretty print
++ * status has been updated)
++ *
++ * @param {TabTarget} target
++ * @param {Object} location
++ * @return {Promise<Object>}
++ */
++function resolveLocation(target, location) {
++  return Task.spawn(function*() {
++    let newLocation = yield target.resolveLocation({
++      url: location.url,
++      line: location.line,
++      column: location.column || Infinity
++    });
++
++    // Source or mapping not found, so don't do anything
++    if (newLocation.error) {
++      return null;
++    }
++
++    return newLocation;
++  });
++}
++
++/**
++ * Takes a serialized SourceActor form and returns a boolean indicating
++ * if this source is related to this location, like if a location is a generated source,
++ * and the source map is loaded subsequently, the new source mapped SourceActor
++ * will be considered related to this location. Same with pretty printing new sources.
++ *
++ * @param {Object} location
++ * @param {Object} source
++ * @return {Boolean}
++ */
++function isSourceRelated(location, source) {
++         // Mapping location to subsequently loaded source map
++  return source.generatedUrl === location.url ||
++         // Mapping source map loc to source map
++         source.url === location.url
++}
++
++exports.SourceLocationController = SourceLocationController;
++exports.resolveLocation = resolveLocation;
++exports.isSourceRelated = isSourceRelated;
+diff --git a/devtools/client/framework/target.js b/devtools/client/framework/target.js
+index 3ffe04c..51e15d3 100644
+--- a/devtools/client/framework/target.js
++++ b/devtools/client/framework/target.js
+@@ -389,16 +389,17 @@ TabTarget.prototype = {
+     let attachTab = () => {
+       this._client.attachTab(this._form.actor, (response, tabClient) => {
+         if (!tabClient) {
+           this._remote.reject("Unable to attach to the tab");
+           return;
+         }
+         this.activeTab = tabClient;
+         this.threadActor = response.threadActor;
++
+         attachConsole();
+       });
+     };
  
-+  resolveLocation: function (loc) {
-+    let deferred = promise.defer();
-+
-+    this.client.request({
-+      to: this.threadActor,
-+      type: "resolveLocation",
-+      line: loc.line,
-+      column: loc.column,
-+      url: loc.url
-+    }, deferred.resolve);
-+
-+    return deferred.promise;
-+  },
-+
-   /**
-    * Adds remote protocol capabilities to the target, so that it can be used
-    * for tools that support the Remote Debugging Protocol even for local
-    * connections.
-    */
-   makeRemote: function TabTarget_makeRemote() {
-     if (this._remote) {
-       return this._remote.promise;
-@@ -525,26 +539,35 @@ TabTarget.prototype = {
+     let onConsoleAttached = (response, consoleClient) => {
+       if (!consoleClient) {
+         this._remote.reject("Unable to attach to the console");
+         return;
+@@ -490,26 +491,32 @@ TabTarget.prototype = {
        }
      };
      this.client.addListener("tabNavigated", this._onTabNavigated);
@@ -48,256 +198,107 @@ index 13c9177..240c26c 100644
      };
      this.client.addListener("frameUpdate", this._onFrameUpdate);
 +
-+    this._onSourceChange = (name, source) => {
-+      this.emit("source-updated", source);
-+    };
-+
-+    this.client.addListener("updatedSource", this._onSourceChange);
-+    this.client.addListener("newSource", this._onSourceChange);
++    this._onSourceUpdated = (event, packet) => this.emit("source-updated", packet);
++    this.client.addListener("newSource", this._onSourceUpdated);
++    this.client.addListener("updatedSource", this._onSourceUpdated);
    },
  
    /**
     * Teardown listeners for remote debugging.
     */
-   _teardownRemoteListeners: function TabTarget__teardownRemoteListeners() {
+   _teardownRemoteListeners: function() {
      this.client.removeListener("closed", this.destroy);
      this.client.removeListener("tabNavigated", this._onTabNavigated);
      this.client.removeListener("tabDetached", this._onTabDetached);
      this.client.removeListener("frameUpdate", this._onFrameUpdate);
-+    this.client.removeListener("updatedSource", this._onSourceChange);
-+    this.client.removeListener("newSource", this._onSourceChange);
++    this.client.removeListener("newSource", this._onSourceUpdated);
++    this.client.removeListener("updatedSource", this._onSourceUpdated);
    },
  
    /**
     * Handle tabs events.
     */
-   handleEvent: function (event) {
+   handleEvent: function(event) {
      switch (event.type) {
        case "TabClose":
-diff --git a/browser/devtools/shared/moz.build b/browser/devtools/shared/moz.build
-index 75303ab..3a0e3fb 100644
---- a/browser/devtools/shared/moz.build
-+++ b/browser/devtools/shared/moz.build
-@@ -35,16 +35,17 @@ EXTRA_JS_MODULES.devtools.shared += [
-     'doorhanger.js',
-     'frame-script-utils.js',
-     'getjson.js',
-     'inplace-editor.js',
-     'node-attribute-parser.js',
-     'observable-object.js',
-     'options-view.js',
-     'poller.js',
-+    'source-location.js',
-     'source-utils.js',
-     'telemetry.js',
-     'theme-switching.js',
-     'theme.js',
-     'undo.js'
- ]
+@@ -595,16 +602,30 @@ TabTarget.prototype = {
+     this._remote = null;
+     this._root = null;
+   },
  
- EXTRA_JS_MODULES.devtools.shared.widgets += [
-diff --git a/browser/devtools/shared/source-location.js b/browser/devtools/shared/source-location.js
-new file mode 100644
-index 0000000..3eaed31
---- /dev/null
-+++ b/browser/devtools/shared/source-location.js
-@@ -0,0 +1,148 @@
-+/* This Source Code Form is subject to the terms of the Mozilla Public
-+ * License, v. 2.0. If a copy of the MPL was not distributed with this
-+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-+
-+"use strict";
-+
-+loader.lazyImporter(this, "Task", "resource://gre/modules/Task.jsm");
-+loader.lazyRequireGetter(this, "EventTarget", "sdk/event/target", true);
-+loader.lazyRequireGetter(this, "emit", "sdk/event/core", true);
-+loader.lazyRequireGetter(this, "Class", "sdk/core/heritage", true);
-+
-+/**
-+ * Takes a serialized SourceActor form and returns a boolean indicating if
-+ * this source is related to this location, like if a location is a generated
-+ * source, and the source map is loaded subsequently, the new source mapped SourceActor
-+ * will be considered related to this location. Same with pretty printing new sources.
-+ *
-+ * @param {object} location
-+ * @param {object} source
-+ */
-+function isSourceRelated (location, source) {
-+  // If a `generatedUrl` exists, the updated/new actor is source mapped;
-+  // check to see if the generatedUrl matches this location's url. In
-+  // the pretty print case, the `url` will be the same as this location.
-+  return source.generatedUrl || source.url === location.url;
-+}
-+
-+/**
-+ * Take a TabTarget and a location, containing a `url`, `line` and `column`,
-+ * resolve the location to the latest location (so a source mapped location, or
-+ * if pretty print status has been updated)
-+ *
-+ * @param {TabTarget} target
-+ * @param {object} location
-+ * @return {Promise<object>}
-+ */
-+function resolveLocation (target, location) {
-+  return Task.spawn(function*() {
-+    let newLocation = yield target.resolveLocation({
-+      url: location.url,
-+      line: location.line,
-+      column: location.column || Infinity
-+    });
-+
-+    // Source not found, or no mapping found, so don't do anything
-+    if (newLocation.status === "SOURCE_NOT_FOUND" || newLocation.status === "MAP_NOT_FOUND") {
-+      return null;
-+    }
-+
-+    return newLocation;
-+  });
-+}
-+
-+const SourceLocationController = exports.SourceLocationController = Class({
-+  extends: EventTarget,
-+  initialize: function (target) {
-+    this.target = target;
-+    this.locations = new Set();
-+    this._onSourcesUpdated = this._onSourcesUpdated.bind(this);
-+    this.reset = this.reset.bind(this);
-+    this.destroy = this.destroy.bind(this);
-+    target.on("source-updated", this._onSourcesUpdated);
-+    target.on("navigate", this.reset);
-+    target.on("will-navigate", this.reset);
-+    target.on("close", this.destroy);
-+  },
-+
-+  destroy: function () {
-+    this.locations.clear();
-+    this.target.off("source-updated", this._onSourcesUpdated);
-+    this.target.off("navigate", this.reset);
-+    this.target.off("will-navigate", this.reset);
-+    this.target.off("close", this.destroy);
-+    this.target = this.locations = null;
-+  },
-+
-+  reset: function () {
-+    this.locations.clear();
-+  },
+   toString: function() {
+     let id = this._tab ? this._tab : (this._form && this._form.actor);
+     return `TabTarget:${id}`;
+   },
 +
 +  /**
-+   * Add this `location` to be observed and register a callback whenever
-+   * the underlying source is updated.
-+   *
-+   * @param {object|string} loc
-+   *        - {string} url
-+   *        - {number} line
-+   *        - {number} column
++   * @see TabActor.prototype.onResolveLocation
 +   */
-+  bindLocation: function (location, update, target) {
-+    this.locations.add({ location, update, target });
++  resolveLocation(loc) {
++    let deferred = promise.defer();
++
++    this.client.request(Object.assign({
++      to: this._form.actor,
++      type: "resolveLocation",
++    }, loc), deferred.resolve);
++
++    return deferred.promise;
 +  },
-+
-+  bindLocationAsElement: function (loc, element, options={}) {
-+    this.bindLocation(loc, onUpdate, element);
-+  },
-+
-+  /**
-+   * Called when a new source occurs (a normal source, source maps) or
-+   * an updated source (pretty print) occurs.
-+   *
-+   * @param {string} eventName
-+   * @param {object} sourceEvent
-+   */
-+  _onSourcesUpdated: function (_, sourceEvent) {
-+    let { type, source } = sourceEvent;
-+    // If we get a new source, and it's not a source map, abort;
-+    // we can have no actionable updates as this is just a new normal source.
-+    // Also abort if there's no `url`, which means it's unsourcemappable anyway
-+    // (like an eval script)
-+    if (!source.url || type === "newSource" && !source.isSourceMapped) {
-+      return;
-+    }
-+
-+    for (let locationItem of this.locations) {
-+      if (isSourceRelated(locationItem.location, source)) {
-+        this._updateSource(locationItem);
-+      }
-+    }
-+
-+    // Pipe the event through this controller
-+    emit(this, "sources-updated", sourceEvent);
-+  },
-+
-+  /**
-+   * Called on a locationItem when its underlying source has changed
-+   * (or a source map for its location has been found)
-+   */
-+  _updateSource: Task.async(function *(locationItem) {
-+    let newLocation = yield resolveLocation(this.target, locationItem.location);
-+    if (newLocation) {
-+      let { url: prevUrl, line: prevLine, column: prevColumn } = locationItem.location;
-+      let { url, line, column } = newLocation;
-+      locationItem.location.url = url;
-+      locationItem.location.line = line;
-+      locationItem.location.column = column;
-+      locationItem.update(
-+        { url: prevUrl, line: prevLine, column: prevColumn },
-+        { url, line, column },
-+        locationItem.target
-+      );
-+    }
-+  }),
-+});
-+
-+SourceLocationController.ElementRenderer = function (element, loc) {
-+  element.innerHTML = `${loc.url}:${loc.line}:${line.column}`;
-+};
-diff --git a/browser/devtools/shared/test/browser.ini b/browser/devtools/shared/test/browser.ini
-index 8efd510..b243631 100644
---- a/browser/devtools/shared/test/browser.ini
-+++ b/browser/devtools/shared/test/browser.ini
-@@ -4,16 +4,17 @@ subsuite = devtools
+ };
+ 
+ /**
+  * WebProgressListener for TabTarget.
+  *
+  * @param object aTarget
+  *        The TabTarget instance to work with.
+  */
+diff --git a/devtools/client/framework/test/browser.ini b/devtools/client/framework/test/browser.ini
+index f5c99fd..4505432 100644
+--- a/devtools/client/framework/test/browser.ini
++++ b/devtools/client/framework/test/browser.ini
+@@ -2,16 +2,17 @@
+ tags = devtools
+ subsuite = devtools
  support-files =
-   browser_layoutHelpers.html
-   browser_layoutHelpers-getBoxQuads.html
-   browser_templater_basic.html
-   browser_toolbar_basic.html
-   browser_toolbar_webconsole_errors_count.html
-   browser_devices.json
-   doc_options-view.xul
+   browser_toolbox_options_disable_js.html
+   browser_toolbox_options_disable_js_iframe.html
+   browser_toolbox_options_disable_cache.sjs
+   browser_toolbox_sidebar_tool.xul
+   code_math.js
 +  code_ugly.js
    head.js
-   html-mdn-css-basic-testing.html
-   html-mdn-css-no-summary.html
-   html-mdn-css-no-summary-or-syntax.html
-   html-mdn-css-no-syntax.html
-   html-mdn-css-syntax-old-style.html
-   leakhunt.js
- 
-@@ -87,16 +88,18 @@ skip-if = e10s # Layouthelpers test should not run in a content page.
- [browser_observableobject.js]
- [browser_options-view-01.js]
- [browser_outputparser.js]
- skip-if = e10s # Test intermittently fails with e10s. Bug 1124162.
- [browser_poller.js]
- [browser_prefs-01.js]
- [browser_prefs-02.js]
- [browser_require_basic.js]
+   shared-head.js
+   shared-redux-head.js
+   helper_disable_cache.js
+   doc_theme.css
+   doc_viewsource.html
+   browser_toolbox_options_enable_serviceworkers_testing_frame_script.js
+   browser_toolbox_options_enable_serviceworkers_testing.html
+@@ -20,16 +21,18 @@ support-files =
+ [browser_devtools_api.js]
+ [browser_devtools_api_destroy.js]
+ [browser_dynamic_tool_enabling.js]
+ [browser_ignore_toolbox_network_requests.js]
+ [browser_keybindings_01.js]
+ [browser_keybindings_02.js]
+ [browser_keybindings_03.js]
+ [browser_new_activation_workflow.js]
 +[browser_source-location-01.js]
 +[browser_source-location-02.js]
- [browser_spectrum.js]
- [browser_theme.js]
- [browser_tableWidget_basic.js]
- [browser_tableWidget_keyboard_interaction.js]
- [browser_tableWidget_mouse_interaction.js]
- skip-if = buildapp == 'mulet'
- [browser_telemetry_button_eyedropper.js]
- [browser_telemetry_button_paintflashing.js]
-diff --git a/browser/devtools/shared/test/browser_source-location-01.js b/browser/devtools/shared/test/browser_source-location-01.js
+ [browser_target_events.js]
+ [browser_target_remote.js]
+ [browser_target_support.js]
+ [browser_toolbox_custom_host.js]
+ [browser_toolbox_dynamic_registration.js]
+ [browser_toolbox_getpanelwhenready.js]
+ [browser_toolbox_highlight.js]
+ [browser_toolbox_hosts.js]
+diff --git a/devtools/client/framework/test/browser_source-location-01.js b/devtools/client/framework/test/browser_source-location-01.js
 new file mode 100644
-index 0000000..482289e
+index 0000000..30ef3a7
 --- /dev/null
-+++ b/browser/devtools/shared/test/browser_source-location-01.js
++++ b/devtools/client/framework/test/browser_source-location-01.js
 @@ -0,0 +1,96 @@
-+/* vim: set ts=2 et sw=2 tw=80: */
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
@@ -307,22 +308,21 @@ index 0000000..482289e
 + * when tagging an already source mapped location initially.
 + */
 +
-+const ROOT = "http://example.com/browser/browser/devtools/debugger/test/";
++const DEBUGGER_ROOT = "http://example.com/browser/devtools/client/debugger/test/mochitest/";
 +// Empty page
-+const PAGE_URL = `${ROOT}doc_empty-tab-01.html`;
-+const JS_URL = `${ROOT}code_binary_search.js`;
-+const COFFEE_URL = `${ROOT}code_binary_search.coffee`;
-+const { SourceLocationController } = require("devtools/shared/source-location");
++const PAGE_URL = `${DEBUGGER_ROOT}doc_empty-tab-01.html`;
++const JS_URL = `${DEBUGGER_ROOT}code_binary_search.js`;
++const COFFEE_URL = `${DEBUGGER_ROOT}code_binary_search.coffee`;
++const { SourceLocationController } = require("devtools/client/framework/source-location");
 +
 +add_task(function*() {
-+  let { toolbox, target } = yield initTool(PAGE_URL, "jsdebugger");
-+  loadFrameScripts();
++  let toolbox = yield openNewTabAndToolbox(PAGE_URL, "jsdebugger");
 +
-+  let controller = new SourceLocationController(target);
++  let controller = new SourceLocationController(toolbox.target);
 +
 +  let aggregator = [];
 +
-+  function onUpdate (oldLoc, newLoc, target) {
++  function onUpdate (oldLoc, newLoc) {
 +    if (oldLoc.line === 6) {
 +      checkLoc1(oldLoc, newLoc);
 +    } else if (oldLoc.line === 8) {
@@ -332,16 +332,16 @@ index 0000000..482289e
 +    } else {
 +      throw new Error(`Unexpected location update: ${JSON.stringify(oldLoc)}`);
 +    }
-+    target.push(newLoc);
++    aggregator.push(newLoc);
 +  }
 +
 +  let loc1 = { url: JS_URL, line: 6 };
 +  let loc2 = { url: JS_URL, line: 8, column: 3 };
 +  let loc3 = { url: COFFEE_URL, line: 2, column: 0 };
 +
-+  controller.bindLocation(loc1, onUpdate, aggregator);
-+  controller.bindLocation(loc2, onUpdate, aggregator);
-+  controller.bindLocation(loc3, onUpdate, aggregator);
++  controller.bindLocation(loc1, onUpdate);
++  controller.bindLocation(loc2, onUpdate);
++  controller.bindLocation(loc3, onUpdate);
 +
 +  // Inject JS script
 +  yield createScript(JS_URL);
@@ -352,7 +352,6 @@ index 0000000..482289e
 +  ok(aggregator.find(i => i.url === COFFEE_URL && i.line === 6), "found second updated location");
 +  ok(aggregator.find(i => i.url === COFFEE_URL && i.line === 2), "found third updated location");
 +
-+  controller.destroy();
 +  yield toolbox.destroy();
 +  gBrowser.removeCurrentTab();
 +  finish();
@@ -386,46 +385,46 @@ index 0000000..482289e
 +}
 +
 +function createScript (url) {
++  info(`Creating script: ${url}`);
++  let mm = getFrameScript();
 +  let command = `
 +    let script = document.createElement("script");
 +    script.setAttribute("src", "${url}");
 +    document.body.appendChild(script);
++    null;
 +  `;
-+  return evalInDebuggee(command);
++  return evalInDebuggee(mm, command);
 +}
-diff --git a/browser/devtools/shared/test/browser_source-location-02.js b/browser/devtools/shared/test/browser_source-location-02.js
+diff --git a/devtools/client/framework/test/browser_source-location-02.js b/devtools/client/framework/test/browser_source-location-02.js
 new file mode 100644
-index 0000000..bca29fc
+index 0000000..244b1de
 --- /dev/null
-+++ b/browser/devtools/shared/test/browser_source-location-02.js
-@@ -0,0 +1,95 @@
++++ b/devtools/client/framework/test/browser_source-location-02.js
+@@ -0,0 +1,107 @@
 +/* vim: set ts=2 et sw=2 tw=80: */
 +/* Any copyright is dedicated to the Public Domain.
 +   http://creativecommons.org/publicdomain/zero/1.0/ */
 +
 +/**
-+ * Tests the SourceMapController updates generated sources when pretty printing
++ * Tests the SourceLocationController updates generated sources when pretty printing
 + * and un pretty printing.
 + */
 +
-+const ROOT = "http://example.com/browser/browser/devtools/debugger/test/";
-+const SHARED_ROOT = "http://example.com/browser/browser/devtools/shared/test/";
++const DEBUGGER_ROOT = "http://example.com/browser/devtools/client/debugger/test/mochitest/";
 +// Empty page
-+const PAGE_URL = `${ROOT}doc_empty-tab-01.html`;
-+const JS_URL = `${SHARED_ROOT}code_ugly.js`;
-+const { SourceLocationController } = require("devtools/shared/source-location");
++const PAGE_URL = `${DEBUGGER_ROOT}doc_empty-tab-01.html`;
++const JS_URL = `${URL_ROOT}code_ugly.js`;
++const { SourceLocationController } = require("devtools/client/framework/source-location");
 +
 +add_task(function*() {
-+  let { toolbox, panel, target } = yield initTool(PAGE_URL, "jsdebugger");
-+  loadFrameScripts();
++  let toolbox = yield openNewTabAndToolbox(PAGE_URL, "jsdebugger");
 +
-+  let controller = new SourceLocationController(target);
++  let controller = new SourceLocationController(toolbox.target);
 +
-+  let aggregator = [];
 +  let checkedPretty = false;
 +  let checkedUnpretty = false;
 +
-+  function onUpdate (oldLoc, newLoc, target) {
++  function onUpdate (oldLoc, newLoc) {
 +    if (oldLoc.line === 3) {
 +      checkPrettified(oldLoc, newLoc);
 +      checkedPretty = true;
@@ -435,34 +434,29 @@ index 0000000..bca29fc
 +    } else {
 +      throw new Error(`Unexpected location update: ${JSON.stringify(oldLoc)}`);
 +    }
-+    target.push(newLoc);
 +  }
 +
-+  controller.bindLocation({ url: JS_URL, line: 3 }, onUpdate, aggregator);
++  controller.bindLocation({ url: JS_URL, line: 3 }, onUpdate);
 +
 +  // Inject JS script
++  let sourceShown = waitForSourceShown(toolbox.getCurrentPanel(), "code_ugly.js");
 +  yield createScript(JS_URL);
++  yield sourceShown;
 +
-+  yield waitForSourceShown(panel, "code_ugly.js");
-+
-+  // Pretty print
-+  let prettified = waitForSourceShown(panel, "code_ugly.js");
-+  panel.panelWin.document.getElementById("pretty-print").click();
-+  yield prettified;
-+  yield waitUntil(() => aggregator.length === 1);
++  let ppButton = toolbox.getCurrentPanel().panelWin.document.getElementById("pretty-print");
++  sourceShown = waitForSourceShown(toolbox.getCurrentPanel(), "code_ugly.js");
++  ppButton.click();
++  yield sourceShown;
++  yield waitUntil(() => checkedPretty);
 +
 +  // TODO check unprettified change once bug 1177446 fixed
 +  /*
-+  let unprettified = waitForSourceShown(panel, "code_ugly.js");
-+  panel.panelWin.document.getElementById("pretty-print").click();
-+
-+  yield unprettified;
++  sourceShown = waitForSourceShown(toolbox.getCurrentPanel(), "code_ugly.js");
++  ppButton.click();
++  yield sourceShown;
 +  yield waitUntil(() => checkedUnpretty);
 +  */
 +
-+  yield waitUntil(() => checkedPretty);
-+
-+  controller.destroy();
 +  yield toolbox.destroy();
 +  gBrowser.removeCurrentTab();
 +  finish();
@@ -487,195 +481,144 @@ index 0000000..bca29fc
 +}
 +
 +function createScript (url) {
++  info(`Creating script: ${url}`);
++  let mm = getFrameScript();
 +  let command = `
 +    let script = document.createElement("script");
 +    script.setAttribute("src", "${url}");
 +    document.body.appendChild(script);
 +  `;
-+  return evalInDebuggee(command);
++  return evalInDebuggee(mm, command);
 +}
-diff --git a/browser/devtools/shared/test/code_ugly.js b/browser/devtools/shared/test/code_ugly.js
++
++function waitForSourceShown (debuggerPanel, url) {
++  let { panelWin } = debuggerPanel;
++  let deferred = promise.defer();
++
++  info(`Waiting for source ${url} to be shown in the debugger...`);
++  panelWin.on(panelWin.EVENTS.SOURCE_SHOWN, function onSourceShown (_, source) {
++    let sourceUrl = source.url || source.introductionUrl;
++
++    if (sourceUrl.includes(url)) {
++      panelWin.off(panelWin.EVENTS.SOURCE_SHOWN, onSourceShown);
++      info(`Source shown for ${url}`);
++      deferred.resolve(source);
++    }
++  });
++
++  return deferred.promise;
++}
+diff --git a/devtools/client/framework/test/code_ugly.js b/devtools/client/framework/test/code_ugly.js
 new file mode 100644
 index 0000000..ccf8d54
 --- /dev/null
-+++ b/browser/devtools/shared/test/code_ugly.js
++++ b/devtools/client/framework/test/code_ugly.js
 @@ -0,0 +1,3 @@
 +function foo() { var a=1; var b=2; bar(a, b); }
 +function bar(c, d) { return c - d; }
 +foo();
-diff --git a/browser/devtools/shared/test/head.js b/browser/devtools/shared/test/head.js
-index 9fb9dcc..9ecc218 100644
---- a/browser/devtools/shared/test/head.js
-+++ b/browser/devtools/shared/test/head.js
-@@ -1,28 +1,31 @@
- /* This Source Code Form is subject to the terms of the Mozilla Public
-  * License, v. 2.0. If a copy of the MPL was not distributed with this
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
- let {devtools} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
- let {TargetFactory, require} = devtools;
- let {console} = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
- let {gDevTools} = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
-+let {DebuggerServer} = Cu.import("resource://gre/modules/devtools/dbg-server.jsm", {});
- const {DOMHelpers} = Cu.import("resource:///modules/devtools/DOMHelpers.jsm", {});
- const {Hosts} = require("devtools/framework/toolbox-hosts");
- const {defer} = require("sdk/core/promise");
- const DevToolsUtils = require("devtools/toolkit/DevToolsUtils");
- 
- DevToolsUtils.testing = true;
- SimpleTest.registerCleanupFunction(() => {
-   DevToolsUtils.testing = false;
- });
- 
- const TEST_URI_ROOT = "http://example.com/browser/browser/devtools/shared/test/";
- const OPTIONS_VIEW_URL = TEST_URI_ROOT + "doc_options-view.xul";
-+const FRAME_SCRIPT_UTILS_URL = "chrome://browser/content/devtools/frame-script-utils.js";
-+let mm = null;
- 
- /**
-  * Open a new tab at a URL and call a callback on load
+diff --git a/devtools/client/framework/test/shared-head.js b/devtools/client/framework/test/shared-head.js
+index a00592d..b57e7fa 100644
+--- a/devtools/client/framework/test/shared-head.js
++++ b/devtools/client/framework/test/shared-head.js
+@@ -192,16 +192,17 @@ function waitForTick() {
+  * @param {String} hostType Optional. The type of toolbox host to be used.
+  * @return {Promise} Resolves with the toolbox, when it has been opened.
   */
- function addTab(aURL, aCallback)
- {
-   waitForExplicitFinish();
+ var openToolboxForTab = Task.async(function*(tab, toolId, hostType) {
+   info("Opening the toolbox");
  
-@@ -278,8 +281,131 @@ function waitUntil(predicate, interval = 10) {
-     return Promise.resolve(true);
-   }
-   return new Promise(resolve => {
-     setTimeout(function() {
-       waitUntil(predicate).then(() => resolve(true));
-     }, interval);
+   let toolbox;
+   let target = TargetFactory.forTab(tab);
++  yield target.makeRemote();
+ 
+   // Check if the toolbox is already loaded.
+   toolbox = gDevTools.getToolbox(target);
+   if (toolbox) {
+     if (!toolId || (toolId && toolbox.getPanel(toolId))) {
+       info("Toolbox is already opened");
+       return toolbox;
+     }
+@@ -237,8 +238,50 @@ var openNewTabAndToolbox = Task.async(function*(url, toolId, hostType) {
+  * @return {Promise} Resolves when the toolbox and tab have been destroyed and
+  * closed.
+  */
+ function closeToolboxAndTab(toolbox) {
+   return toolbox.destroy().then(function() {
+     gBrowser.removeCurrentTab();
    });
  }
 +
-+function initTool(aUrl, tool="jsdebugger") {
-+  info("Initializing a debugger panel.");
-+  waitForExplicitFinish();
-+
-+  if (!DebuggerServer.initialized) {
-+    DebuggerServer.init();
-+    DebuggerServer.addBrowserActors();
++/**
++ * Waits until a predicate returns true.
++ *
++ * @param function predicate
++ *        Invoked once in a while until it returns true.
++ * @param number interval [optional]
++ *        How often the predicate is invoked, in milliseconds.
++ */
++function waitUntil(predicate, interval = 10) {
++  if (predicate()) {
++    return Promise.resolve(true);
 +  }
-+
-+  return Task.spawn(function*() {
-+    let deferred = defer();
-+
-+    addTab(aUrl, function (_, tab) {
-+      deferred.resolve(tab);
-+    });
-+    let tab = yield deferred.promise;
-+    let target = TargetFactory.forTab(tab);
-+
-+    yield target.makeRemote();
-+
-+    let toolbox = yield gDevTools.showToolbox(target, tool);
-+    let panel = toolbox.getCurrentPanel();
-+    return { target, panel, toolbox };
++  return new Promise(resolve => {
++    setTimeout(function() {
++      waitUntil(predicate, interval).then(() => resolve(true));
++    }, interval);
 +  });
-+}
-+
-+function once(aTarget, aEventName, aUseCapture = false, spread = false) {
-+  info(`Waiting for event: '${aEventName}' on ${aTarget}`);
-+
-+  let deferred = defer();
-+
-+  for (let [add, remove] of [
-+    ["on", "off"], // Use event emitter before DOM events for consistency
-+    ["addEventListener", "removeEventListener"],
-+    ["addListener", "removeListener"]
-+  ]) {
-+    if ((add in aTarget) && (remove in aTarget)) {
-+      aTarget[add](aEventName, function onEvent(...aArgs) {
-+        info(`Received event: '${aEventName}' on ${aTarget}`);
-+        aTarget[remove](aEventName, onEvent, aUseCapture);
-+        deferred.resolve(spread ? aArgs : aArgs[0]);
-+      }, aUseCapture);
-+      break;
-+    }
-+  }
-+
-+  return deferred.promise;
-+}
-+
-+function reload(aTarget, aWaitForTargetEvent = "navigate") {
-+  aTarget.activeTab.reload();
-+  return once(aTarget, aWaitForTargetEvent);
 +}
 +
 +/**
 + * Takes a string `script` and evaluates it directly in the content
 + * in potentially a different process.
 + */
-+let MM_INC = 0;
-+function evalInDebuggee (script) {
-+  let deferred = defer();
++let MM_INC_ID = 0;
++function evalInDebuggee (mm, script) {
++  return new Promise(function (resolve, reject) {
++    let id = MM_INC_ID++;
++    mm.sendAsyncMessage("devtools:test:eval", { script, id });
++    mm.addMessageListener("devtools:test:eval:response", handler);
 +
-+  if (!mm) {
-+    throw new Error("`loadFrameScripts()` must be called when using MessageManager.");
-+  }
++    function handler ({ data }) {
++      if (id !== data.id) {
++        return;
++      }
 +
-+  let id = MM_INC++;
-+  mm.sendAsyncMessage("devtools:test:eval", { script: script, id: id });
-+  mm.addMessageListener("devtools:test:eval:response", handler);
-+
-+  function handler ({ data }) {
-+    if (id !== data.id) {
-+      return;
-+    }
-+
-+    mm.removeMessageListener("devtools:test:eval:response", handler);
-+    deferred.resolve(data.value);
-+  }
-+
-+  return deferred.promise;
-+}
-+
-+/**
-+ * Call manually in tests that use frame script utils after initializing.
-+ */
-+function loadFrameScripts () {
-+  mm = gBrowser.selectedBrowser.messageManager;
-+  mm.loadFrameScript(FRAME_SCRIPT_UTILS_URL, false);
-+}
-+
-+function waitForSourceShown(aPanel, aUrl) {
-+  return waitForDebuggerEvents(aPanel, aPanel.panelWin.EVENTS.SOURCE_SHOWN).then(aSource => {
-+    let sourceUrl = aSource.url || aSource.introductionUrl;
-+    info("Source shown: " + sourceUrl);
-+
-+    if (!sourceUrl.includes(aUrl)) {
-+      return waitForSourceShown(aPanel, aUrl);
-+    } else {
-+      ok(true, "The correct source has been shown.");
++      info(`Successfully evaled in debuggee: ${script}`);
++      mm.removeMessageListener("devtools:test:eval:response", handler);
++      resolve(data.value);
 +    }
 +  });
 +}
-+function waitForDebuggerEvents(aPanel, aEventName, aEventRepeat = 1) {
-+  info("Waiting for debugger event: '" + aEventName + "' to fire: " + aEventRepeat + " time(s).");
-+
-+  let deferred = defer();
-+  let panelWin = aPanel.panelWin;
-+  let count = 0;
-+
-+  panelWin.on(aEventName, function onEvent(aEventName, ...aArgs) {
-+    info("Debugger event '" + aEventName + "' fired: " + (++count) + " time(s).");
-+
-+    if (count == aEventRepeat) {
-+      ok(true, "Enough '" + aEventName + "' panel events have been fired.");
-+      panelWin.off(aEventName, onEvent);
-+      deferred.resolve.apply(deferred, aArgs);
-+    }
-+  });
-+
-+  return deferred.promise;
-+}
-+
-diff --git a/toolkit/devtools/server/actors/script.js b/toolkit/devtools/server/actors/script.js
-index a3c6d3f..ae4bf6f 100644
---- a/toolkit/devtools/server/actors/script.js
-+++ b/toolkit/devtools/server/actors/script.js
-@@ -424,17 +424,17 @@ function ThreadActor(aParent, aGlobal)
+diff --git a/devtools/client/shared/frame-script-utils.js b/devtools/client/shared/frame-script-utils.js
+index 472c123..efa8cd8 100644
+--- a/devtools/client/shared/frame-script-utils.js
++++ b/devtools/client/shared/frame-script-utils.js
+@@ -122,18 +122,17 @@ addMessageListener("devtools:test:profiler", function ({ data: { method, args, i
+   let result = nsIProfilerModule[method](...args);
+   sendAsyncMessage("devtools:test:profiler:response", {
+     data: result,
+     id: id
+   });
+ });
+ 
+ 
+-// To eval in content, look at `evalInDebuggee` in the head.js of canvasdebugger
+-// for an example.
++// To eval in content, look at `evalInDebuggee` in the shared-head.js.
+ addMessageListener("devtools:test:eval", function ({ data }) {
+   sendAsyncMessage("devtools:test:eval:response", {
+     value: content.eval(data.script),
+     id: data.id
+   });
+ });
+ 
+ addEventListener("load", function() {
+diff --git a/devtools/server/actors/script.js b/devtools/server/actors/script.js
+index 8a1a916..6aa10fa2 100644
+--- a/devtools/server/actors/script.js
++++ b/devtools/server/actors/script.js
+@@ -433,17 +433,17 @@ function ThreadActor(aParent, aGlobal)
    // A map of actorID -> actor for breakpoints created and managed by the
    // server.
    this._hiddenBreakpoints = new Map();
@@ -694,7 +637,7 @@ index a3c6d3f..ae4bf6f 100644
    this._onWindowReady = this._onWindowReady.bind(this);
    events.on(this._parent, "window-ready", this._onWindowReady);
    // Set a wrappedJSObject property so |this| can be sent via the observer svc
-@@ -570,16 +570,18 @@ ThreadActor.prototype = {
+@@ -579,16 +579,18 @@ ThreadActor.prototype = {
      }
  
      // Blow away our source actor ID store because those IDs are only
@@ -713,15 +656,15 @@ index a3c6d3f..ae4bf6f 100644
        this._prettyPrintWorker.destroy();
        this._prettyPrintWorker = null;
      }
-@@ -609,19 +611,18 @@ ThreadActor.prototype = {
-       return { error: "wrongState",
+@@ -619,19 +621,18 @@ ThreadActor.prototype = {
                 message: "Current state is " + this.state };
      }
  
      this._state = "attached";
+     this._debuggerSourcesSeen = new Set();
  
      update(this._options, aRequest.options || {});
-     this.sources.reconfigure(this._options);
+     this.sources.setOptions(this._options);
 -    this.sources.on('newSource', (name, source) => {
 -      this.onNewSource(source);
 -    });
@@ -735,80 +678,51 @@ index a3c6d3f..ae4bf6f 100644
        connection: this.conn,
        thread: this
      });
-@@ -1861,24 +1862,51 @@ ThreadActor.prototype = {
-     // inside _addScript, we can accidentally set a breakpoint in a top level
-     // script as a "closest match" because we wouldn't have added the child
-     // scripts to the ScriptStore yet.
-     this.scripts.addScripts(this.dbg.findScripts({ source: aScript.source }));
- 
+@@ -1883,22 +1884,39 @@ ThreadActor.prototype = {
+    *        The source script that has been loaded into a debuggee compartment.
+    * @param aGlobal Debugger.Object
+    *        A Debugger.Object instance whose referent is the global object.
+    */
+   onNewScript: function (aScript, aGlobal) {
      this._addSource(aScript.source);
    },
  
 -  onNewSource: function (aSource) {
-+  onSourceEvent: function (name, aSource) {
++  /**
++   * A function called when there's a new or updated source from a thread actor's
++   * sources. Emits `newSource` and `updatedSource` on the tab actor.
++   *
++   * @param {String} name
++   * @param {SourceActor} source
++   */
++  onSourceEvent: function (name, source) {
      this.conn.send({
-       from: this.actorID,
+-      from: this.actorID,
 -      type: "newSource",
+-      source: aSource.form()
++      from: this._parent.actorID,
 +      type: name,
-       source: aSource.form()
++      source: source.form()
      });
++
++    // For compatibility and debugger still using `newSource` on the thread client,
++    // still emit this event here. Clean up in bug 1247084
++    if (name === "newSource") {
++      this.conn.send({
++        from: this.actorID,
++        type: name,
++        source: source.form()
++      });
++    }
    },
  
-+  onResolveLocation: function (aRequest) {
-+    let url = aRequest.url;
-+    let line = aRequest.line;
-+    let column = aRequest.column || 0;
-+    let actor;
-+
-+    if (actor = this.sources.getSourceActorByURL(url)) {
-+      // Get the generated source actor if this is source mapped
-+      let generatedActor = actor.generatedSource ?
-+                           this.sources.createNonSourceMappedActor(actor.generatedSource) :
-+                           actor;
-+      return this.sources.getOriginalLocation(new GeneratedLocation(
-+        generatedActor,
-+        aRequest.line,
-+        aRequest.column || 0
-+      )).then(loc => {
-+        if (loc.originalLine == null) {
-+          return { from: this.actorID, type: "resolveLocation", status: "MAP_NOT_FOUND" };
-+        }
-+        loc = loc.toJSON();
-+        return { from: this.actorID, url: loc.source.url, column: loc.column, line: loc.line };
-+      });
-+    } else {
-+      return { from: this.actorID, type: "resolveLocation", status: "SOURCE_NOT_FOUND" };
-+    }
-+  },
-+
    /**
     * Restore any pre-existing breakpoints to the sources that we have access to.
     */
    _restoreBreakpoints: function () {
      if (this.breakpointActorMap.size === 0) {
        return;
-     }
- 
-@@ -1897,17 +1925,17 @@ ThreadActor.prototype = {
-   _addSource: function (aSource) {
-     if (!this.sources.allowSource(aSource)) {
-       return false;
-     }
- 
-     let sourceActor = this.sources.createNonSourceMappedActor(aSource);
- 
-     // Go ahead and establish the source actors for this script, which
--    // fetches sourcemaps if available and sends onNewSource
-+    // fetches sourcemaps if available and sends "newSource"
-     // notifications.
-     //
-     // We need to use synchronize here because if the page is being reloaded,
-     // this call will replace the previous set of source actors for this source
-     // with a new one. If the source actors have not been replaced by the time
-     // we try to reset the breakpoints below, their location objects will still
-     // point to the old set of source actors, which point to different scripts.
-     this.synchronize(this.sources.createSourceActors(aSource));
-@@ -1980,17 +2008,18 @@ ThreadActor.prototype.requestTypes = {
+@@ -2013,17 +2031,17 @@ ThreadActor.prototype.requestTypes = {
    "resume": ThreadActor.prototype.onResume,
    "clientEvaluate": ThreadActor.prototype.onClientEvaluate,
    "frames": ThreadActor.prototype.onFrames,
@@ -819,7 +733,6 @@ index a3c6d3f..ae4bf6f 100644
    "threadGrips": ThreadActor.prototype.onThreadGrips,
 -  "prototypesAndProperties": ThreadActor.prototype.onPrototypesAndProperties
 +  "prototypesAndProperties": ThreadActor.prototype.onPrototypesAndProperties,
-+  "resolveLocation": ThreadActor.prototype.onResolveLocation,
  };
  
  exports.ThreadActor = ThreadActor;
@@ -828,7 +741,7 @@ index a3c6d3f..ae4bf6f 100644
   * Creates a PauseActor.
   *
   * PauseActors exist for the lifetime of a given debuggee pause.  Used to
-@@ -2163,20 +2192,20 @@ SourceActor.prototype = {
+@@ -2196,20 +2214,20 @@ SourceActor.prototype = {
    actorPrefix: "source",
  
    _oldSourceMap: null,
@@ -851,7 +764,7 @@ index a3c6d3f..ae4bf6f 100644
  
    get threadActor() { return this._threadActor; },
    get sources() { return this._threadActor.sources; },
-@@ -2206,20 +2235,22 @@ SourceActor.prototype = {
+@@ -2239,20 +2257,22 @@ SourceActor.prototype = {
      let introductionUrl = null;
      if (source && source.introductionScript) {
        introductionUrl = source.introductionScript.source.url;
@@ -874,30 +787,11 @@ index a3c6d3f..ae4bf6f 100644
    disconnect: function () {
      if (this.registeredPool && this.registeredPool.sourceActors) {
        delete this.registeredPool.sourceActors[this.actorID];
-diff --git a/toolkit/devtools/server/actors/utils/TabSources.js b/toolkit/devtools/server/actors/utils/TabSources.js
-index d03022a..8e4969c 100644
---- a/toolkit/devtools/server/actors/utils/TabSources.js
-+++ b/toolkit/devtools/server/actors/utils/TabSources.js
-@@ -100,17 +100,16 @@ TabSources.prototype = {
-    * @param optional String contentType
-    *        The content type of the source, if immediately available.
-    * @returns a SourceActor representing the source or null.
-    */
-   source: function  ({ source, originalUrl, generatedSource,
-               isInlineSource, contentType }) {
-     dbg_assert(source || (originalUrl && generatedSource),
-                "TabSources.prototype.source needs an originalUrl or a source");
--
-     if (source) {
-       // If a source is passed, we are creating an actor for a real
-       // source, which may or may not be sourcemapped.
- 
-       if (!this.allowSource(source)) {
-         return null;
-       }
- 
-@@ -229,17 +228,17 @@ TabSources.prototype = {
-         }
+diff --git a/devtools/server/actors/utils/TabSources.js b/devtools/server/actors/utils/TabSources.js
+index 4020d71..9e34cf2 100644
+--- a/devtools/server/actors/utils/TabSources.js
++++ b/devtools/server/actors/utils/TabSources.js
+@@ -241,16 +241,17 @@ TabSources.prototype = {
        }
  
        if (url in this._sourceMappedSourceActors) {
@@ -905,7 +799,7 @@ index d03022a..8e4969c 100644
        }
      }
  
--    throw new Error('getSourceByURL: could not find source for ' + url);
+     throw new Error('getSourceByURL: could not find source for ' + url);
 +    return null;
    },
  
@@ -915,7 +809,7 @@ index d03022a..8e4969c 100644
     *
     * @param String aURL
     *        The URL to test.
-@@ -522,16 +521,17 @@ TabSources.prototype = {
+@@ -540,16 +541,17 @@ TabSources.prototype = {
        // just make a fake URL and stick the sourcemap there.
        url = "internal://sourcemap" + (this._anonSourceMapId++) + '/';
      }
@@ -933,6 +827,177 @@ index d03022a..8e4969c 100644
     *
     * @param Debugger.Frame aFrame
     *        The frame whose location we are getting.
+diff --git a/devtools/server/actors/webbrowser.js b/devtools/server/actors/webbrowser.js
+index 8d309ea..25c21e8 100644
+--- a/devtools/server/actors/webbrowser.js
++++ b/devtools/server/actors/webbrowser.js
+@@ -4,17 +4,19 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ "use strict";
+ 
+ var { Ci, Cu } = require("chrome");
+ var Services = require("Services");
+ var promise = require("promise");
+-var { ActorPool, createExtraActors, appendExtraActors } = require("devtools/server/actors/common");
++var {
++  ActorPool, createExtraActors, appendExtraActors, GeneratedLocation
++} = require("devtools/server/actors/common");
+ var { DebuggerServer } = require("devtools/server/main");
+ var DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ var { assert } = DevToolsUtils;
+ var { TabSources } = require("./utils/TabSources");
+ var makeDebugger = require("./utils/make-debugger");
+ 
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ 
+@@ -1887,30 +1889,68 @@ TabActor.prototype = {
+     if (aName in this._extraActors) {
+       const actor = this._extraActors[aName];
+       if (this._tabActorPool.has(actor)) {
+         this._tabActorPool.removeActor(actor);
+       }
+       delete this._extraActors[aName];
+     }
+   },
++
++  /**
++   * Takes a packet containing a url, line and column and returns
++   * the updated url, line and column based on the current source mapping
++   * (source mapped files, pretty prints).
++   *
++   * @param {String} request.url
++   * @param {Number} request.line
++   * @param {Number?} request.column
++   * @return {Promise<Object>}
++   */
++  onResolveLocation: function (request) {
++    let { url, line } = request;
++    let column = request.column || 0;
++    let actor;
++
++    if (actor = this.sources.getSourceActorByURL(url)) {
++      // Get the generated source actor if this is source mapped
++      let generatedActor = actor.generatedSource ?
++                           this.sources.createNonSourceMappedActor(actor.generatedSource) :
++                           actor;
++      let generatedLocation = new GeneratedLocation(generatedActor, line, column);
++
++      return this.sources.getOriginalLocation(generatedLocation).then(loc => {
++        // If no map found, return this packet
++        if (loc.originalLine == null) {
++          return { from: this.actorID, type: "resolveLocation", error: "MAP_NOT_FOUND" };
++        }
++
++        loc = loc.toJSON();
++        return { from: this.actorID, url: loc.source.url, column: loc.column, line: loc.line };
++      });
++    }
++
++    // Fall back to this packet when source is not found
++    return promise.resolve({ from: this.actorID, type: "resolveLocation", error: "SOURCE_NOT_FOUND" });
++  },
+ };
+ 
+ /**
+  * The request types this actor can handle.
+  */
+ TabActor.prototype.requestTypes = {
+   "attach": TabActor.prototype.onAttach,
+   "detach": TabActor.prototype.onDetach,
+   "reload": TabActor.prototype.onReload,
+   "navigateTo": TabActor.prototype.onNavigateTo,
+   "reconfigure": TabActor.prototype.onReconfigure,
+   "switchToFrame": TabActor.prototype.onSwitchToFrame,
+   "listFrames": TabActor.prototype.onListFrames,
+-  "listWorkers": TabActor.prototype.onListWorkers
++  "listWorkers": TabActor.prototype.onListWorkers,
++  "resolveLocation": TabActor.prototype.onResolveLocation
+ };
+ 
+ exports.TabActor = TabActor;
+ 
+ /**
+  * Creates a tab actor for handling requests to a single in-process
+  * <xul:browser> tab, or <html:iframe>.
+  * Most of the implementation comes from TabActor.
+diff --git a/devtools/shared/client/main.js b/devtools/shared/client/main.js
+index bad301d..4d05591 100644
+--- a/devtools/shared/client/main.js
++++ b/devtools/shared/client/main.js
+@@ -173,16 +173,18 @@ const UnsolicitedNotifications = {
+   "documentLoad": "documentLoad",
+   "enteredFrame": "enteredFrame",
+   "exitedFrame": "exitedFrame",
+   "appOpen": "appOpen",
+   "appClose": "appClose",
+   "appInstall": "appInstall",
+   "appUninstall": "appUninstall",
+   "evaluationResult": "evaluationResult",
++  "newSource": "newSource",
++  "updatedSource": "updatedSource",
+ };
+ 
+ /**
+  * Set of pause types that are sent by the server and not as an immediate
+  * response to a client request.
+  */
+ const UnsolicitedPauses = {
+   "resumeLimit": "resumeLimit",
+@@ -242,18 +244,18 @@ const DebuggerClient = exports.DebuggerClient = function (aTransport)
+  *        The function to call after the response is received. It is passed the
+  *        response, and the return value is considered the new response that
+  *        will be passed to the callback. The |this| context is the instance of
+  *        the client object we are defining a method for.
+  * @return Request
+  *         The `Request` object that is a Promise object and resolves once
+  *         we receive the response. (See request method for more details)
+  */
+-DebuggerClient.requester = function (aPacketSkeleton,
+-                                     { telemetry, before, after }) {
++DebuggerClient.requester = function (aPacketSkeleton, config={}) {
++  let { telemetry, before, after } = config;
+   return DevToolsUtils.makeInfallible(function (...args) {
+     let histogram, startTime;
+     if (telemetry) {
+       let transportType = this._transport.onOutputStreamReady === undefined
+         ? "LOCAL_"
+         : "REMOTE_";
+       let histogramId = "DEVTOOLS_DEBUGGER_RDP_"
+         + transportType + telemetry + "_MS";
+@@ -1363,17 +1365,30 @@ TabClient.prototype = {
+   listWorkers: DebuggerClient.requester({
+     type: "listWorkers"
+   }, {
+     telemetry: "LISTWORKERS"
+   }),
+ 
+   attachWorker: function (aWorkerActor, aOnResponse) {
+     this.client.attachWorker(aWorkerActor, aOnResponse);
+-  }
++  },
++
++  /**
++   * Resolve a location ({ url, line, column }) to its current
++   * source mapping location.
++   *
++   * @param {String} arg[0].url
++   * @param {Number} arg[0].line
++   * @param {Number?} arg[0].column
++   */
++  resolveLocation: DebuggerClient.requester({
++    type: "resolveLocation",
++    location: args(0)
++  }),
+ };
+ 
+ eventSource(TabClient.prototype);
+ 
+ function WorkerClient(aClient, aForm) {
+   this.client = aClient;
+   this._actor = aForm.from;
+   this._isClosed = false;
 -- 
-2.2.1
+2.3.1
 

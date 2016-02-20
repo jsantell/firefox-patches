@@ -1,0 +1,801 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 5 Feb 2016 11:04:33 -0800
+Subject: Bug 1243929 - Only show jit optimizations panel when pref is on and current selected frame has optimizations. r=vp
+
+diff --git a/devtools/client/performance/test/browser.ini b/devtools/client/performance/test/browser.ini
+index 0f8fe08..6bc2519 100644
+--- a/devtools/client/performance/test/browser.ini
++++ b/devtools/client/performance/test/browser.ini
+@@ -37,20 +37,16 @@ skip-if = true # Bug 1161817
+ [browser_perf-details-02.js]
+ [browser_perf-details-03.js]
+ [browser_perf-details-04.js]
+ [browser_perf-details-05.js]
+ [browser_perf-details-06.js]
+ [browser_perf-details-07.js]
+ [browser_perf-events-calltree.js]
+ [browser_perf-highlighted.js]
+-[browser_perf-jit-view-01.js]
+-skip-if = true # Bug 1176056
+-[browser_perf-jit-view-02.js]
+-skip-if = true # Bug 1176056
+ [browser_perf-legacy-front-01.js]
+ [browser_perf-legacy-front-02.js]
+ [browser_perf-legacy-front-03.js]
+ [browser_perf-legacy-front-04.js]
+ [browser_perf-legacy-front-05.js]
+ [browser_perf-legacy-front-06.js]
+ [browser_perf-legacy-front-07.js]
+ [browser_perf-legacy-front-08.js]
+diff --git a/devtools/client/performance/test/browser_perf-jit-view-01.js b/devtools/client/performance/test/browser_perf-jit-view-01.js
+deleted file mode 100644
+index 552f08c..0000000
+--- a/devtools/client/performance/test/browser_perf-jit-view-01.js
++++ /dev/null
+@@ -1,262 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-requestLongerTimeout(2);
+-
+-/**
+- * Tests that the JIT Optimizations view renders optimization data
+- * if on, and displays selected frames on focus.
+- */
+-
+-Services.prefs.setBoolPref(INVERT_PREF, false);
+-
+-function* spawnTest() {
+-  let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, $, $$, window, PerformanceController } = panel.panelWin;
+-  let { OverviewView, DetailsView, OptimizationsListView, JsCallTreeView, RecordingsView } = panel.panelWin;
+-
+-  let profilerData = { threads: [gThread] }
+-
+-  is(Services.prefs.getBoolPref(JIT_PREF), false, "record JIT Optimizations pref off by default");
+-  Services.prefs.setBoolPref(JIT_PREF, true);
+-  is(Services.prefs.getBoolPref(JIT_PREF), true, "toggle on record JIT Optimizations");
+-
+-  // Make two recordings, so we have one to switch to later, as the
+-  // second one will have fake sample data
+-  yield startRecording(panel);
+-  yield stopRecording(panel);
+-
+-  yield startRecording(panel);
+-  yield stopRecording(panel);
+-
+-  yield DetailsView.selectView("js-calltree");
+-
+-  yield injectAndRenderProfilerData();
+-
+-  // A is never a leaf, so it's optimizations should not be shown.
+-  yield checkFrame(1);
+-
+-  // gRawSite2 and gRawSite3 are both optimizations on B, so they'll have
+-  // indices in descending order of # of samples.
+-  yield checkFrame(2, [{ i: 0, opt: gRawSite2 }, { i: 1, opt: gRawSite3 }]);
+-
+-  // Leaf node (C) with no optimizations should not display any opts.
+-  yield checkFrame(3);
+-
+-  let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
+-  let reset = once(OptimizationsListView, EVENTS.OPTIMIZATIONS_RESET);
+-  RecordingsView.selectedIndex = 0;
+-  yield Promise.all([select, reset]);
+-  ok(true, "JITOptimizations view correctly reset when switching recordings.");
+-
+-  yield teardown(panel);
+-  finish();
+-
+-  function *injectAndRenderProfilerData() {
+-    // Get current recording and inject our mock data
+-    info("Injecting mock profile data");
+-    let recording = PerformanceController.getCurrentRecording();
+-    recording._profile = profilerData;
+-
+-    // Force a rerender
+-    let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-    JsCallTreeView.render(OverviewView.getTimeInterval());
+-    yield rendered;
+-
+-    is($("#jit-optimizations-view").hidden, false, "JIT Optimizations should be visible when pref is on");
+-    ok($("#jit-optimizations-view").classList.contains("empty"),
+-      "JIT Optimizations view has empty message when no frames selected.");
+-  }
+-
+-  function *checkFrame (frameIndex, expectedOpts=[]) {
+-    info(`Checking frame ${frameIndex}`);
+-    // Click the frame
+-    let rendered = once(OptimizationsListView, EVENTS.OPTIMIZATIONS_RENDERED);
+-    mousedown(window, $$(".call-tree-item")[frameIndex]);
+-    yield rendered;
+-    ok(true, "OptimizationsListView rendered when enabling with the current frame node selected");
+-
+-    let isEmpty = $("#jit-optimizations-view").classList.contains("empty");
+-    if (expectedOpts.length === 0) {
+-      ok(isEmpty, "JIT Optimizations view has an empty message when selecting a frame without opt data.");
+-      return;
+-    } else {
+-      ok(!isEmpty, "JIT Optimizations view has no empty message.");
+-    }
+-
+-    // Get the frame info for the first opt site, since all opt sites
+-    // share the same frame info
+-    let frameInfo = expectedOpts[0].opt._testFrameInfo;
+-
+-    let { $headerName, $headerLine, $headerFile } = OptimizationsListView;
+-    ok(!$headerName.hidden, "header function name should be shown");
+-    ok(!$headerLine.hidden, "header line should be shown");
+-    ok(!$headerFile.hidden, "header file should be shown");
+-    is($headerName.textContent, frameInfo.name, "correct header function name.");
+-    is($headerLine.textContent, frameInfo.line, "correct header line");
+-    is($headerFile.textContent, frameInfo.file, "correct header file");
+-
+-    // Need the value of the optimizations in its array, as its
+-    // an index used internally by the view to uniquely ID the opt
+-    for (let { i, opt } of expectedOpts) {
+-      let { types: ionTypes, attempts } = opt;
+-
+-      // Check attempts
+-      is($$(`.tree-widget-container li[data-id='["${i}","${i}-attempts"]'] .tree-widget-children .tree-widget-item`).length, attempts.data.length,
+-        `found ${attempts.data.length} attempts`);
+-
+-      for (let j = 0; j < ionTypes.length; j++) {
+-        ok($(`.tree-widget-container li[data-id='["${i}","${i}-types","${i}-types-${j}"]']`),
+-          "found an ion type row");
+-      }
+-
+-      // The second and third optimization should display optimization failures.
+-      let warningIcon = $(`.tree-widget-container li[data-id='["${i}"]'] .opt-icon[severity=warning]`);
+-      if (opt === gRawSite3 || opt === gRawSite1) {
+-        ok(warningIcon, "did find a warning icon for all strategies failing.");
+-      } else {
+-        ok(!warningIcon, "did not find a warning icon for no successful strategies");
+-      }
+-    }
+-  }
+-}
+-
+-var gUniqueStacks = new RecordingUtils.UniqueStacks();
+-
+-function uniqStr(s) {
+-  return gUniqueStacks.getOrAddStringIndex(s);
+-}
+-
+-// Since deflateThread doesn't handle deflating optimization info, use
+-// placeholder names A_O1, B_O2, and B_O3, which will be used to manually
+-// splice deduped opts into the profile.
+-var gThread = RecordingUtils.deflateThread({
+-  samples: [{
+-    time: 0,
+-    frames: [
+-      { location: "(root)" }
+-    ]
+-  }, {
+-    time: 5,
+-    frames: [
+-      { location: "(root)" },
+-      { location: "A_O1" },
+-      { location: "B_O2" },
+-      { location: "C (http://foo/bar/baz:56)" }
+-    ]
+-  }, {
+-    time: 5 + 1,
+-    frames: [
+-      { location: "(root)" },
+-      { location: "A (http://foo/bar/baz:12)" },
+-      { location: "B_O2" },
+-    ]
+-  }, {
+-    time: 5 + 1 + 2,
+-    frames: [
+-      { location: "(root)" },
+-      { location: "A_O1" },
+-      { location: "B_O3" },
+-    ]
+-  }, {
+-    time: 5 + 1 + 2 + 7,
+-    frames: [
+-      { location: "(root)" },
+-      { location: "A_O1" },
+-      { location: "E (http://foo/bar/baz:90)" },
+-      { location: "F (http://foo/bar/baz:99)" }
+-    ]
+-  }],
+-  markers: []
+-}, gUniqueStacks);
+-
+-// 3 RawOptimizationSites
+-var gRawSite1 = {
+-  _testFrameInfo: { name: "A", line: "12", file: "@baz" },
+-  line: 12,
+-  column: 2,
+-  types: [{
+-    mirType: uniqStr("Object"),
+-    site: uniqStr("A (http://foo/bar/bar:12)"),
+-    typeset: [{
+-        keyedBy: uniqStr("constructor"),
+-        name: uniqStr("Foo"),
+-        location: uniqStr("A (http://foo/bar/baz:12)")
+-    }, {
+-        keyedBy: uniqStr("primitive"),
+-        location: uniqStr("self-hosted")
+-    }]
+-  }],
+-  attempts: {
+-    schema: {
+-      outcome: 0,
+-      strategy: 1
+-    },
+-    data: [
+-      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+-      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
+-    ]
+-  }
+-};
+-
+-var gRawSite2 = {
+-  _testFrameInfo: { name: "B", line: "10", file: "@boo" },
+-  line: 40,
+-  types: [{
+-    mirType: uniqStr("Int32"),
+-    site: uniqStr("Receiver")
+-  }],
+-  attempts: {
+-    schema: {
+-      outcome: 0,
+-      strategy: 1
+-    },
+-    data: [
+-      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+-      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("Inlined"), uniqStr("SomeGetter3")]
+-    ]
+-  }
+-};
+-
+-var gRawSite3 = {
+-  _testFrameInfo: { name: "B", line: "10", file: "@boo" },
+-  line: 34,
+-  types: [{
+-    mirType: uniqStr("Int32"),
+-    site: uniqStr("Receiver")
+-  }],
+-  attempts: {
+-    schema: {
+-      outcome: 0,
+-      strategy: 1
+-    },
+-    data: [
+-      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+-      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
+-    ]
+-  }
+-};
+-
+-gThread.frameTable.data.forEach((frame) => {
+-  const LOCATION_SLOT = gThread.frameTable.schema.location;
+-  const OPTIMIZATIONS_SLOT = gThread.frameTable.schema.optimizations;
+-
+-  let l = gThread.stringTable[frame[LOCATION_SLOT]];
+-  switch (l) {
+-  case "A_O1":
+-    frame[LOCATION_SLOT] = uniqStr("A (http://foo/bar/baz:12)");
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite1;
+-    break;
+-  case "B_O2":
+-    frame[LOCATION_SLOT] = uniqStr("B (http://foo/bar/boo:10)");
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite2;
+-    break;
+-  case "B_O3":
+-    frame[LOCATION_SLOT] = uniqStr("B (http://foo/bar/boo:10)");
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite3;
+-    break;
+-  }
+-});
+diff --git a/devtools/client/performance/test/browser_perf-jit-view-02.js b/devtools/client/performance/test/browser_perf-jit-view-02.js
+deleted file mode 100644
+index cd9b095..0000000
+--- a/devtools/client/performance/test/browser_perf-jit-view-02.js
++++ /dev/null
+@@ -1,159 +0,0 @@
+-/* Any copyright is dedicated to the Public Domain.
+-   http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-/**
+- * Tests that the OptimizationsListView does not display information
+- * for meta nodes when viewing "content only".
+- */
+-
+-Services.prefs.setBoolPref(INVERT_PREF, false);
+-Services.prefs.setBoolPref(PLATFORM_DATA_PREF, false);
+-var { CATEGORY_MASK } = require("devtools/client/performance/modules/global");
+-
+-function* spawnTest() {
+-  let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, $, $$, window, PerformanceController } = panel.panelWin;
+-  let { OverviewView, DetailsView, OptimizationsListView, JsCallTreeView, RecordingsView } = panel.panelWin;
+-
+-  let profilerData = { threads: [gThread] };
+-
+-  Services.prefs.setBoolPref(JIT_PREF, true);
+-
+-  // Make two recordings, so we have one to switch to later, as the
+-  // second one will have fake sample data
+-  yield startRecording(panel);
+-  yield stopRecording(panel);
+-
+-  yield startRecording(panel);
+-  yield stopRecording(panel);
+-
+-  yield DetailsView.selectView("js-calltree");
+-
+-  yield injectAndRenderProfilerData();
+-
+-  // Click the frame
+-  let rendered = once(OptimizationsListView, EVENTS.OPTIMIZATIONS_RENDERED);
+-  mousedown(window, $$(".call-tree-item")[2]);
+-  yield rendered;
+-
+-  ok($("#jit-optimizations-view").classList.contains("empty"),
+-    "platform meta frame shows as empty");
+-
+-  let { $headerName, $headerLine, $headerFile } = OptimizationsListView;
+-  ok(!$headerName.hidden, "header function name should be shown");
+-  ok($headerLine.hidden, "header line should be hidden");
+-  ok($headerFile.hidden, "header file should be hidden");
+-  is($headerName.textContent, "JIT", "correct header function name.");
+-  is($headerLine.textContent, "", "correct header line (empty string).");
+-  is($headerFile.textContent, "", "correct header file (empty string).");
+-
+-  yield teardown(panel);
+-  finish();
+-
+-  function *injectAndRenderProfilerData() {
+-    // Get current recording and inject our mock data
+-    info("Injecting mock profile data");
+-    let recording = PerformanceController.getCurrentRecording();
+-    recording._profile = profilerData;
+-
+-    // Force a rerender
+-    let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-    JsCallTreeView.render(OverviewView.getTimeInterval());
+-    yield rendered;
+-
+-    ok($("#jit-optimizations-view").classList.contains("empty"),
+-      "JIT Optimizations view has empty message when no frames selected.");
+-  }
+-}
+-
+-var gUniqueStacks = new RecordingUtils.UniqueStacks();
+-
+-function uniqStr(s) {
+-  return gUniqueStacks.getOrAddStringIndex(s);
+-}
+-
+-var gThread = RecordingUtils.deflateThread({
+-  samples: [{
+-    time: 0,
+-    frames: [
+-      { location: "(root)" }
+-    ]
+-  }, {
+-    time: 5,
+-    frames: [
+-      { location: "(root)" },
+-      { location: "A (http://foo/bar/baz:12)" }
+-    ]
+-  }, {
+-    time: 5 + 1,
+-    frames: [
+-      { location: "(root)" },
+-      { location: "A (http://foo/bar/baz:12)" },
+-      { location: "JS", category: CATEGORY_MASK("js") },
+-    ]
+-  }],
+-  markers: []
+-}, gUniqueStacks);
+-
+-// 3 RawOptimizationSites
+-var gRawSite1 = {
+-  line: 12,
+-  column: 2,
+-  types: [{
+-    mirType: uniqStr("Object"),
+-    site: uniqStr("A (http://foo/bar/bar:12)"),
+-    typeset: [{
+-        keyedBy: uniqStr("constructor"),
+-        name: uniqStr("Foo"),
+-        location: uniqStr("A (http://foo/bar/baz:12)")
+-    }, {
+-        keyedBy: uniqStr("primitive"),
+-        location: uniqStr("self-hosted")
+-    }]
+-  }],
+-  attempts: {
+-    schema: {
+-      outcome: 0,
+-      strategy: 1
+-    },
+-    data: [
+-      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+-      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("Inlined"), uniqStr("SomeGetter3")]
+-    ]
+-  }
+-};
+-
+-var gRawSite2 = {
+-  line: 22,
+-  types: [{
+-    mirType: uniqStr("Int32"),
+-    site: uniqStr("Receiver")
+-  }],
+-  attempts: {
+-    schema: {
+-      outcome: 0,
+-      strategy: 1
+-    },
+-    data: [
+-      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
+-      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
+-      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
+-    ]
+-  }
+-};
+-
+-gThread.frameTable.data.forEach((frame) => {
+-  const LOCATION_SLOT = gThread.frameTable.schema.location;
+-  const OPTIMIZATIONS_SLOT = gThread.frameTable.schema.optimizations;
+-
+-  let l = gThread.stringTable[frame[LOCATION_SLOT]];
+-  switch (l) {
+-  case "A (http://foo/bar/baz:12)":
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite1;
+-    break;
+-  case "JS":
+-    frame[OPTIMIZATIONS_SLOT] = gRawSite2;
+-    break;
+-  }
+-});
+diff --git a/devtools/client/performance/test/browser_perf-options-show-jit-optimizations.js b/devtools/client/performance/test/browser_perf-options-show-jit-optimizations.js
+index d2fec3c..ebb1c70 100644
+--- a/devtools/client/performance/test/browser_perf-options-show-jit-optimizations.js
++++ b/devtools/client/performance/test/browser_perf-options-show-jit-optimizations.js
+@@ -1,36 +1,257 @@
+ /* Any copyright is dedicated to the Public Domain.
+    http://creativecommons.org/publicdomain/zero/1.0/ */
+ 
++requestLongerTimeout(2);
++
+ /**
+- * Tests that the js call tree views get rerendered when toggling `show-jit-optimizations`
++ * Tests that the JIT Optimizations view renders optimization data
++ * if on, and displays selected frames on focus.
+  */
++
++Services.prefs.setBoolPref(INVERT_PREF, false);
++
+ function* spawnTest() {
+   let { panel } = yield initPerformance(SIMPLE_URL);
+-  let { EVENTS, $, DetailsView, JsCallTreeView } = panel.panelWin;
++  let { EVENTS, $, $$, window, PerformanceController } = panel.panelWin;
++  let { OverviewView, DetailsView, OptimizationsListView, JsCallTreeView, RecordingsView } = panel.panelWin;
+ 
++  let profilerData = { threads: [gThread] }
++
++  is(Services.prefs.getBoolPref(JIT_PREF), false, "record JIT Optimizations pref off by default");
+   Services.prefs.setBoolPref(JIT_PREF, true);
++  is(Services.prefs.getBoolPref(JIT_PREF), true, "toggle on record JIT Optimizations");
++
++  // Make two recordings, so we have one to switch to later, as the
++  // second one will have fake sample data
++  yield startRecording(panel);
++  yield stopRecording(panel);
+ 
+   yield startRecording(panel);
+   yield stopRecording(panel);
+ 
+-  let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+   yield DetailsView.selectView("js-calltree");
++
++  yield injectAndRenderProfilerData();
++
++  is($("#jit-optimizations-view").classList.contains("hidden"), true,
++    "JIT Optimizations should be hidden when pref is on, but no frame selected");
++
++  // A is never a leaf, so it's optimizations should not be shown.
++  yield checkFrame(1);
++
++  // gRawSite2 and gRawSite3 are both optimizations on B, so they'll have
++  // indices in descending order of # of samples.
++  yield checkFrame(2, true);
++
++  // Leaf node (C) with no optimizations should not display any opts.
++  yield checkFrame(3);
++
++  // Select the node with optimizations and change to a new recording
++  // to ensure the opts view is cleared
++  let rendered = once(JsCallTreeView, "focus");
++  mousedown(window, $$(".call-tree-item")[2]);
+   yield rendered;
++  let isHidden = $("#jit-optimizations-view").classList.contains("hidden");
++  ok(!isHidden, "opts view should be visible when selecting a frame with opts");
+ 
+-  ok(!$("#jit-optimizations-view").classList.contains("hidden"), "JIT Optimizations shown");
++  let select = once(PerformanceController, EVENTS.RECORDING_SELECTED);
++  rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++  RecordingsView.selectedIndex = 0;
++  yield Promise.all([select, rendered]);
++
++  isHidden = $("#jit-optimizations-view").classList.contains("hidden");
++  ok(isHidden, "opts view is hidden when switching recordings");
+ 
+   rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-  Services.prefs.setBoolPref(JIT_PREF, false);
++  RecordingsView.selectedIndex = 1;
++  yield rendered;
++
++  rendered = once(JsCallTreeView, "focus");
++  mousedown(window, $$(".call-tree-item")[2]);
+   yield rendered;
+-  ok(true, "JsCallTreeView rerendered when toggling off show-jit-optimizations.");
+-  ok($("#jit-optimizations-view").classList.contains("hidden"), "JIT Optimizations hidden");
++  isHidden = $("#jit-optimizations-view").classList.contains("hidden");
++  ok(!isHidden, "opts view should be visible when selecting a frame with opts");
+ 
+   rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
+-  Services.prefs.setBoolPref(JIT_PREF, true);
++  Services.prefs.setBoolPref(JIT_PREF, false);
+   yield rendered;
+-  ok(true, "JsCallTreeView rerendered when toggling off show-jit-optimizations.");
+-  ok(!$("#jit-optimizations-view").classList.contains("hidden"), "JIT Optimizations shown");
++  ok(true, "call tree rerendered when JIT pref changes");
++  isHidden = $("#jit-optimizations-view").classList.contains("hidden");
++  ok(isHidden, "opts view hidden when toggling off jit pref");
++
++  rendered = once(JsCallTreeView, "focus");
++  mousedown(window, $$(".call-tree-item")[2]);
++  yield rendered;
++  isHidden = $("#jit-optimizations-view").classList.contains("hidden");
++  ok(isHidden, "opts view hidden when jit pref off and selecting a frame with opts");
+ 
+   yield teardown(panel);
+   finish();
++
++  function *injectAndRenderProfilerData() {
++    // Get current recording and inject our mock data
++    info("Injecting mock profile data");
++    let recording = PerformanceController.getCurrentRecording();
++    recording._profile = profilerData;
++
++    // Force a rerender
++    let rendered = once(JsCallTreeView, EVENTS.JS_CALL_TREE_RENDERED);
++    JsCallTreeView.render(OverviewView.getTimeInterval());
++    yield rendered;
++  }
++
++  function *checkFrame (frameIndex, hasOpts) {
++    info(`Checking frame ${frameIndex}`);
++    // Click the frame
++    let rendered = once(JsCallTreeView, "focus");
++    mousedown(window, $$(".call-tree-item")[frameIndex]);
++    yield rendered;
++
++    let isHidden = $("#jit-optimizations-view").classList.contains("hidden");
++    if (hasOpts) {
++      ok(!isHidden, "JIT Optimizations view is not hidden if current frame has opts.");
++    } else {
++      ok(isHidden, "JIT Optimizations view is hidden if current frame does not have opts");
++    }
++  }
+ }
++
++var gUniqueStacks = new RecordingUtils.UniqueStacks();
++
++function uniqStr(s) {
++  return gUniqueStacks.getOrAddStringIndex(s);
++}
++
++// Since deflateThread doesn't handle deflating optimization info, use
++// placeholder names A_O1, B_O2, and B_O3, which will be used to manually
++// splice deduped opts into the profile.
++var gThread = RecordingUtils.deflateThread({
++  samples: [{
++    time: 0,
++    frames: [
++      { location: "(root)" }
++    ]
++  }, {
++    time: 5,
++    frames: [
++      { location: "(root)" },
++      { location: "A_O1" },
++      { location: "B_O2" },
++      { location: "C (http://foo/bar/baz:56)" }
++    ]
++  }, {
++    time: 5 + 1,
++    frames: [
++      { location: "(root)" },
++      { location: "A (http://foo/bar/baz:12)" },
++      { location: "B_O2" },
++    ]
++  }, {
++    time: 5 + 1 + 2,
++    frames: [
++      { location: "(root)" },
++      { location: "A_O1" },
++      { location: "B_O3" },
++    ]
++  }, {
++    time: 5 + 1 + 2 + 7,
++    frames: [
++      { location: "(root)" },
++      { location: "A_O1" },
++      { location: "E (http://foo/bar/baz:90)" },
++      { location: "F (http://foo/bar/baz:99)" }
++    ]
++  }],
++  markers: []
++}, gUniqueStacks);
++
++// 3 RawOptimizationSites
++var gRawSite1 = {
++  _testFrameInfo: { name: "A", line: "12", file: "@baz" },
++  line: 12,
++  column: 2,
++  types: [{
++    mirType: uniqStr("Object"),
++    site: uniqStr("A (http://foo/bar/bar:12)"),
++    typeset: [{
++        keyedBy: uniqStr("constructor"),
++        name: uniqStr("Foo"),
++        location: uniqStr("A (http://foo/bar/baz:12)")
++    }, {
++        keyedBy: uniqStr("primitive"),
++        location: uniqStr("self-hosted")
++    }]
++  }],
++  attempts: {
++    schema: {
++      outcome: 0,
++      strategy: 1
++    },
++    data: [
++      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
++      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
++      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
++    ]
++  }
++};
++
++var gRawSite2 = {
++  _testFrameInfo: { name: "B", line: "10", file: "@boo" },
++  line: 40,
++  types: [{
++    mirType: uniqStr("Int32"),
++    site: uniqStr("Receiver")
++  }],
++  attempts: {
++    schema: {
++      outcome: 0,
++      strategy: 1
++    },
++    data: [
++      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
++      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
++      [uniqStr("Inlined"), uniqStr("SomeGetter3")]
++    ]
++  }
++};
++
++var gRawSite3 = {
++  _testFrameInfo: { name: "B", line: "10", file: "@boo" },
++  line: 34,
++  types: [{
++    mirType: uniqStr("Int32"),
++    site: uniqStr("Receiver")
++  }],
++  attempts: {
++    schema: {
++      outcome: 0,
++      strategy: 1
++    },
++    data: [
++      [uniqStr("Failure1"), uniqStr("SomeGetter1")],
++      [uniqStr("Failure2"), uniqStr("SomeGetter2")],
++      [uniqStr("Failure3"), uniqStr("SomeGetter3")]
++    ]
++  }
++};
++
++gThread.frameTable.data.forEach((frame) => {
++  const LOCATION_SLOT = gThread.frameTable.schema.location;
++  const OPTIMIZATIONS_SLOT = gThread.frameTable.schema.optimizations;
++
++  let l = gThread.stringTable[frame[LOCATION_SLOT]];
++  switch (l) {
++  case "A_O1":
++    frame[LOCATION_SLOT] = uniqStr("A (http://foo/bar/baz:12)");
++    frame[OPTIMIZATIONS_SLOT] = gRawSite1;
++    break;
++  case "B_O2":
++    frame[LOCATION_SLOT] = uniqStr("B (http://foo/bar/boo:10)");
++    frame[OPTIMIZATIONS_SLOT] = gRawSite2;
++    break;
++  case "B_O3":
++    frame[LOCATION_SLOT] = uniqStr("B (http://foo/bar/boo:10)");
++    frame[OPTIMIZATIONS_SLOT] = gRawSite3;
++    break;
++  }
++});
+diff --git a/devtools/client/performance/views/details-js-call-tree.js b/devtools/client/performance/views/details-js-call-tree.js
+index 93e8f73..1f593f2 100644
+--- a/devtools/client/performance/views/details-js-call-tree.js
++++ b/devtools/client/performance/views/details-js-call-tree.js
+@@ -59,47 +59,48 @@ var JsCallTreeView = Heritage.extend(DetailsSubview, {
+       contentOnly: !PerformanceController.getOption("show-platform-data"),
+       invertTree: PerformanceController.getOption("invert-call-tree"),
+       flattenRecursion: PerformanceController.getOption("flatten-tree-recursion"),
+       showOptimizationHint: showOptimizations
+     };
+     let threadNode = this.threadNode = this._prepareCallTree(profile, interval, options);
+     this._populateCallTree(threadNode, options);
+ 
+-    if (showOptimizations) {
+-      this.showOptimizations();
+-    } else {
+-      this.hideOptimizations();
+-    }
++    // For better or worse, re-rendering loses frame selection,
++    // so we should always hide opts on rerender
++    this.hideOptimizations();
+ 
+     this.emit(EVENTS.JS_CALL_TREE_RENDERED);
+   },
+ 
+   showOptimizations: function () {
+     this.optimizationsElement.classList.remove("hidden");
+   },
+ 
+   hideOptimizations: function () {
+     this.optimizationsElement.classList.add("hidden");
+   },
+ 
+   _onFocus: function (_, treeItem) {
++    let showOptimizations = PerformanceController.getOption("show-jit-optimizations");
+     let recording = PerformanceController.getCurrentRecording();
+     let frameNode = treeItem.frame;
++    let optimizationSites = frameNode && frameNode.hasOptimizations()
++                            ? frameNode.getOptimizations().optimizationSites
++                            : [];
+ 
+-    if (!frameNode) {
+-      console.warn("No frame found!");
++    if (!showOptimizations || !frameNode || optimizationSites.length === 0) {
++      this.hideOptimizations();
++      this.emit("focus", treeItem);
+       return;
+     }
+ 
+-    let frameData = frameNode.getInfo();
+-    let optimizationSites = frameNode.hasOptimizations()
+-                            ? frameNode.getOptimizations().optimizationSites
+-                            : [];
++    this.showOptimizations();
+ 
++    let frameData = frameNode.getInfo();
+     let optimizations = JITOptimizationsView({
+       frameData,
+       optimizationSites,
+       onViewSourceInDebugger: (url, line) => {
+         gToolbox.viewSourceInDebugger(url, line).then(success => {
+           if (success) {
+             this.emit(EVENTS.SOURCE_SHOWN_IN_JS_DEBUGGER);
+           } else {
+-- 
+2.3.1
+

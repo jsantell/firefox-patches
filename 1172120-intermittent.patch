@@ -1,77 +1,124 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Fri, 5 Jun 2015 14:08:28 -0700
-Subject: Bug 1172120 - Fix intermittent in marker details test.
+Date: Sat, 6 Feb 2016 12:20:14 -0800
+Subject: Bug 1172120 - Filter out uninteresting markers and bars in a test failing on linux/e10s consistently for marker details. r=vp
 
-diff --git a/browser/devtools/performance/test/browser_perf-marker-details-01.js b/browser/devtools/performance/test/browser_perf-marker-details-01.js
-index 990933f..12cbc9d 100644
---- a/browser/devtools/performance/test/browser_perf-marker-details-01.js
-+++ b/browser/devtools/performance/test/browser_perf-marker-details-01.js
-@@ -4,17 +4,16 @@
- /**
-  * Tests if the Marker Details view renders all properties expected
-  * for each marker.
-  */
- 
- function* spawnTest() {
-   let { target, panel } = yield initPerformance(MARKERS_URL);
-   let { $, $$, EVENTS, PerformanceController, OverviewView, WaterfallView } = panel.panelWin;
--  let { L10N } = devtools.require("devtools/performance/global");
- 
-   // Hijack the markers massaging part of creating the waterfall view,
+diff --git a/devtools/client/performance/test/browser.ini b/devtools/client/performance/test/browser.ini
+index 0f8fe08..0276d6b 100644
+--- a/devtools/client/performance/test/browser.ini
++++ b/devtools/client/performance/test/browser.ini
+@@ -53,17 +53,16 @@ skip-if = true # Bug 1176056
+ [browser_perf-legacy-front-05.js]
+ [browser_perf-legacy-front-06.js]
+ [browser_perf-legacy-front-07.js]
+ [browser_perf-legacy-front-08.js]
+ [browser_perf-legacy-front-09.js]
+ [browser_perf-loading-01.js]
+ [browser_perf-loading-02.js]
+ [browser_perf-marker-details-01.js]
+-skip-if = e10s || os == 'linux' # Bug 1172120
+ [browser_perf-markers-docload.js]
+ [browser_perf-options-01.js]
+ [browser_perf-options-02.js]
+ [browser_perf-options-03.js]
+ [browser_perf-options-invert-call-tree-01.js]
+ [browser_perf-options-invert-call-tree-02.js]
+ [browser_perf-options-invert-flame-graph-01.js]
+ [browser_perf-options-invert-flame-graph-02.js]
+diff --git a/devtools/client/performance/test/browser_perf-marker-details-01.js b/devtools/client/performance/test/browser_perf-marker-details-01.js
+index 6b69465..7105fab 100644
+--- a/devtools/client/performance/test/browser_perf-marker-details-01.js
++++ b/devtools/client/performance/test/browser_perf-marker-details-01.js
+@@ -14,17 +14,17 @@ function* spawnTest() {
    // to prevent collapsing markers and allowing this test to verify
    // everything individually. A better solution would be to just expand
    // all markers first and then skip the meta nodes, but I'm lazy.
    WaterfallView._prepareWaterfallTree = markers => {
      return { submarkers: markers };
    };
-@@ -40,19 +39,19 @@ function* spawnTest() {
-   let bars = $$(".waterfall-marker-bar");
-   let markers = PerformanceController.getCurrentRecording().getMarkers();
+ 
+   const MARKER_TYPES = [
+-    "Styles", "Reflow", "Paint", "ConsoleTime", "TimeStamp"
++    "Styles", "Reflow", "ConsoleTime", "TimeStamp"
+   ];
+ 
+   yield startRecording(panel);
+   ok(true, "Recording has started.");
+ 
+   yield waitUntil(() => {
+     // Wait until we get all the different markers.
+     let markers = PerformanceController.getCurrentRecording().getMarkers();
+@@ -32,26 +32,37 @@ function* spawnTest() {
+   });
+ 
+   yield stopRecording(panel);
+   ok(true, "Recording has ended.");
+ 
+   info("No need to select everything in the timeline.");
+   info("All the markers should be displayed by default.");
+ 
+-  let bars = $$(".waterfall-marker-bar");
+-  let markers = PerformanceController.getCurrentRecording().getMarkers();
++  let bars = Array.prototype.filter.call($$(".waterfall-marker-bar"),
++             (bar) => MARKER_TYPES.indexOf(bar.getAttribute("type")) !== -1);
++  let markers = PerformanceController.getCurrentRecording().getMarkers()
++                .filter(m => MARKER_TYPES.indexOf(m.name) !== -1);
+ 
+   info(`Got ${bars.length} bars and ${markers.length} markers.`);
+   info("Markers types from datasrc: " + Array.map(markers, e => e.name));
+   info("Markers names from sidebar: " + Array.map(bars, e => e.parentNode.parentNode.querySelector(".waterfall-marker-name").getAttribute("value")));
  
    ok(bars.length >= MARKER_TYPES.length, `Got at least ${MARKER_TYPES.length} markers (1)`);
    ok(markers.length >= MARKER_TYPES.length, `Got at least ${MARKER_TYPES.length} markers (2)`);
  
++  // Sanity check that markers are in chronologically ascending order
++  markers.reduce((previous, m) => {
++    if (m.start <= previous) {
++      ok(false, "Markers are not in order");
++      info(markers);
++    }
++    return m.start;
++  }, 0);
++
    const tests = {
      ConsoleTime: function (marker) {
--      shouldHaveLabel($, L10N.getStr("timeline.markerDetail.consoleTimerName"), "!!!", marker);
+       info("Got `ConsoleTime` marker with data: " + JSON.stringify(marker));
        shouldHaveStack($, "startStack", marker);
        shouldHaveStack($, "endStack", marker);
-+      shouldHaveLabel($, "Timer Name:", "!!!", marker);
+       shouldHaveLabel($, "Timer Name:", "!!!", marker);
        return true;
      },
-     TimeStamp: function (marker) {
-       shouldHaveLabel($, "Label:", "go", marker);
-       shouldHaveStack($, "stack", marker);
-       return true;
-     },
-     Styles: function (marker) {
-@@ -78,20 +77,22 @@ function* spawnTest() {
-   let testsDone = [];
-   let TOTAL_TESTS = 4;
- 
-   for (let i = 0; i < bars.length; i++) {
-     let bar = bars[i];
-     let m = markers[i];
-     EventUtils.sendMouseEvent({ type: "mousedown" }, bar);
- 
--    if (testsDone.indexOf(m.name) === -1 && tests[m.name]) {
--      let fullTestComplete = tests[m.name](m);
--      if (fullTestComplete) {
--        testsDone.push(m.name);
-+    if (tests[m.name]) {
-+      if (testsDone.indexOf(m.name) === -1) {
-+        let fullTestComplete = tests[m.name](m);
-+        if (fullTestComplete) {
-+          testsDone.push(m.name);
-+        }
+@@ -93,30 +104,29 @@ function* spawnTest() {
+     if (tests[m.name]) {
+       if (testsDone.indexOf(m.name) === -1) {
+         let fullTestComplete = tests[m.name](m);
+         if (fullTestComplete) {
+           testsDone.push(m.name);
+         }
        }
      } else {
-       info(`TODO: Need to add marker details tests for ${m.name}`);
+-      info(`TODO: Need to add marker details tests for ${m.name}`);
++      throw new Error(`No tests for ${m.name} -- should be filtered out.`);
      }
  
-     if (testsDone.length === TOTAL_TESTS) {
+     if (testsDone.length === Object.keys(tests).length) {
        break;
      }
+   }
+ 
+   yield teardown(panel);
+   finish();
+ }
+ 
+ function shouldHaveStack ($, type, marker) {
+   ok($(`#waterfall-details .marker-details-stack[type=${type}]`), `${marker.name} has a stack: ${type}`);
+ }
+ 
+ function shouldHaveLabel ($, name, value, marker) {
+-  info(name);
+   let $name = $(`#waterfall-details .marker-details-labelcontainer .marker-details-labelname[value="${name}"]`);
+   let $value = $name.parentNode.querySelector(".marker-details-labelvalue");
+   is($value.getAttribute("value"), value, `${marker.name} has correct label for ${name}:${value}`);
+ }
 -- 
-2.2.1
+2.3.1
 
