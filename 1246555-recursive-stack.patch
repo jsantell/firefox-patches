@@ -1,0 +1,75 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Sat, 20 Feb 2016 15:34:05 -0800
+Subject: Bug 1246555 - Abort infinite loop when a marker has a recursive stack trace in the marker details view. r=vp
+
+diff --git a/devtools/client/performance/modules/logic/marker-utils.js b/devtools/client/performance/modules/logic/marker-utils.js
+index 53409e4..0edf5c2 100644
+--- a/devtools/client/performance/modules/logic/marker-utils.js
++++ b/devtools/client/performance/modules/logic/marker-utils.js
+@@ -207,18 +207,27 @@ const DOM = {
+     let container = doc.createElement("vbox");
+     let labelName = doc.createElement("label");
+     labelName.className = "plain marker-details-labelname";
+     labelName.setAttribute("value", L10N.getStr(`marker.field.${type}`));
+     container.setAttribute("type", type);
+     container.className = "marker-details-stack";
+     container.appendChild(labelName);
+ 
++    // Workaround for profiles that have looping stack traces.  See
++    // bug 1246555.
+     let wasAsyncParent = false;
++    let seen = new Set();
++
+     while (frameIndex > 0) {
++      if (seen.has(frameIndex)) {
++        break;
++      }
++      seen.add(frameIndex);
++
+       let frame = frames[frameIndex];
+       let url = frame.source;
+       let displayName = frame.functionDisplayName;
+       let line = frame.line;
+ 
+       // If the previous frame had an async parent, then the async
+       // cause is in this frame and should be displayed.
+       if (wasAsyncParent) {
+diff --git a/devtools/client/performance/test/browser_perf-marker-details-01.js b/devtools/client/performance/test/browser_perf-marker-details-01.js
+index 7105fab..8a95481 100644
+--- a/devtools/client/performance/test/browser_perf-marker-details-01.js
++++ b/devtools/client/performance/test/browser_perf-marker-details-01.js
+@@ -53,19 +53,31 @@ function* spawnTest() {
+   markers.reduce((previous, m) => {
+     if (m.start <= previous) {
+       ok(false, "Markers are not in order");
+       info(markers);
+     }
+     return m.start;
+   }, 0);
+ 
++  // Override the timestamp marker's stack with our own recursive stack, which
++  // can happen for unknown reasons (bug 1246555); we should not cause a crash
++  // when attempting to render a recursive stack trace
++  let timestampMarker = markers.find(m => m.name === "ConsoleTime");
++  ok(typeof timestampMarker.stack === "number", "ConsoleTime marker has a stack before overwriting.");
++  let frames = PerformanceController.getCurrentRecording().getFrames();
++  let frameIndex = timestampMarker.stack = frames.length;
++  frames.push({ line: 1, column: 1, source: "file.js", functionDisplayName: "test", parent: frameIndex + 1});
++  frames.push({ line: 1, column: 1, source: "file.js", functionDisplayName: "test", parent: frameIndex + 2 });
++  frames.push({ line: 1, column: 1, source: "file.js", functionDisplayName: "test", parent: frameIndex });
++
+   const tests = {
+     ConsoleTime: function (marker) {
+       info("Got `ConsoleTime` marker with data: " + JSON.stringify(marker));
++      ok(marker.stack === frameIndex, "Should have the ConsoleTime marker with recursive stack");
+       shouldHaveStack($, "startStack", marker);
+       shouldHaveStack($, "endStack", marker);
+       shouldHaveLabel($, "Timer Name:", "!!!", marker);
+       return true;
+     },
+     TimeStamp: function (marker) {
+       info("Got `TimeStamp` marker with data: " + JSON.stringify(marker));
+       shouldHaveLabel($, "Label:", "go", marker);
+-- 
+2.3.1
+

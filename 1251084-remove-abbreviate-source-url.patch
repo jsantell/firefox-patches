@@ -1,0 +1,799 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Fri, 26 Feb 2016 09:36:43 -0800
+Subject: Bug 1251084 - Remove WebConsoleUtils.abbreviateSourceURL with source-utils function. r=linclark
+
+diff --git a/devtools/client/locales/en-US/webconsole.properties b/devtools/client/locales/en-US/webconsole.properties
+index 13448d2..17ace43 100644
+--- a/devtools/client/locales/en-US/webconsole.properties
++++ b/devtools/client/locales/en-US/webconsole.properties
+@@ -93,21 +93,16 @@ reflow.messageLinkText=function %1$S, %2$S line %3$S
+ # anonymous. Test console.trace() in the webconsole.
+ stacktrace.anonymousFunction=<anonymous>
+ 
+ # LOCALIZATION NOTE (stacktrace.asyncStack): this string is used to
+ # indicate that a given stack frame has an async parent.
+ # %S is the "Async Cause" of the frame.
+ stacktrace.asyncStack=(Async: %S)
+ 
+-# LOCALIZATION NOTE (unknownLocation): this string is used to
+-# display messages with sources that have an unknown location, eg. from
+-# console.trace() calls.
+-unknownLocation=<unknown>
+-
+ # LOCALIZATION NOTE (timerStarted): this string is used to display the result
+ # of the console.time() call. Parameters: %S is the name of the timer.
+ timerStarted=%S: timer started
+ 
+ # LOCALIZATION NOTE (timeEnd): this string is used to display the result of
+ # the console.timeEnd() call. Parameters: %1$S is the name of the timer, %2$S
+ # is the number of milliseconds.
+ timeEnd=%1$S: %2$Sms
+diff --git a/devtools/client/memory/components/shortest-paths.js b/devtools/client/memory/components/shortest-paths.js
+index 4b154f7..ee984ce 100644
+--- a/devtools/client/memory/components/shortest-paths.js
++++ b/devtools/client/memory/components/shortest-paths.js
+@@ -7,38 +7,33 @@ const {
+   DOM: dom,
+   createClass,
+   PropTypes,
+ } = require("devtools/client/shared/vendor/react");
+ const { isSavedFrame } = require("devtools/shared/DevToolsUtils");
+ const { getSourceNames } = require("devtools/client/shared/source-utils");
+ const { L10N } = require("../utils");
+ 
+-const { ViewHelpers } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+-const COMPONENTS_STRINGS_URI = "chrome://devtools/locale/components.properties";
+-const componentsL10N = new ViewHelpers.L10N(COMPONENTS_STRINGS_URI);
+-const UNKNOWN_SOURCE_STRING = componentsL10N.getStr("frame.unknownSource");
+-
+ const GRAPH_DEFAULTS = {
+   translate: [20, 20],
+   scale: 1
+ };
+ 
+ const NO_STACK = "noStack";
+ const NO_FILENAME = "noFilename";
+ const ROOT_LIST = "JS::ubi::RootList";
+ 
+ function stringifyLabel(label, id) {
+   const sanitized = [];
+ 
+   for (let i = 0, length = label.length; i < length; i++) {
+     const piece = label[i];
+ 
+     if (isSavedFrame(piece)) {
+-      const { short } = getSourceNames(piece.source, UNKNOWN_SOURCE_STRING);
++      const { short } = getSourceNames(piece.source);
+       sanitized[i] = `${piece.functionDisplayName} @ ${short}:${piece.line}:${piece.column}`;
+     } else if (piece === NO_STACK) {
+       sanitized[i] = L10N.getStr("tree-item.nostack");
+     } else if (piece === NO_FILENAME) {
+       sanitized[i] = L10N.getStr("tree-item.nofilename");
+     } else if (piece === ROOT_LIST) {
+       // Don't use the usual labeling machinery for root lists: replace it
+       // with the "GC Roots" string.
+diff --git a/devtools/client/performance/modules/logic/marker-utils.js b/devtools/client/performance/modules/logic/marker-utils.js
+index 0edf5c2..b2a67bc 100644
+--- a/devtools/client/performance/modules/logic/marker-utils.js
++++ b/devtools/client/performance/modules/logic/marker-utils.js
+@@ -8,17 +8,17 @@
+  * and parsing out the blueprint to generate correct values for markers.
+  */
+ 
+ const { Cu, Ci } = require("chrome");
+ 
+ const Services = require("Services");
+ const { L10N } = require("devtools/client/performance/modules/global");
+ const { TIMELINE_BLUEPRINT } = require("devtools/client/performance/modules/markers");
+-const WebConsoleUtils = require("devtools/shared/webconsole/utils");
++const { getSourceNames } = require("devtools/client/shared/source-utils");
+ const SHOW_TRIGGER_FOR_GC_TYPES_PREF = "devtools.performance.ui.show-triggers-for-gc-types";
+ 
+ /**
+  * Takes a marker, blueprint, and filter list and
+  * determines if this marker should be filtered or not.
+  */
+ function isMarkerValid (marker, filter) {
+   if (!filter || filter.length === 0) {
+@@ -254,17 +254,17 @@ const DOM = {
+         let aNode = doc.createElement("a");
+         aNode.className = "waterfall-marker-location devtools-source-link";
+         aNode.href = url;
+         aNode.draggable = false;
+         aNode.setAttribute("title", url);
+ 
+         let urlNode = doc.createElement("label");
+         urlNode.className = "filename";
+-        urlNode.setAttribute("value", WebConsoleUtils.Utils.abbreviateSourceURL(url));
++        urlNode.setAttribute("value", getSourceNames(url).short);
+         let lineNode = doc.createElement("label");
+         lineNode.className = "line-number";
+         lineNode.setAttribute("value", `:${line}`);
+ 
+         aNode.appendChild(urlNode);
+         aNode.appendChild(lineNode);
+         hbox.appendChild(aNode);
+ 
+diff --git a/devtools/client/shared/components/frame.js b/devtools/client/shared/components/frame.js
+index b3d3e5f..334689d 100644
+--- a/devtools/client/shared/components/frame.js
++++ b/devtools/client/shared/components/frame.js
+@@ -1,19 +1,16 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-const { Cu } = require("chrome");
+-Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+-const STRINGS_URI = "chrome://devtools/locale/components.properties";
+-const L10N = new ViewHelpers.L10N(STRINGS_URI);
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+ const { getSourceNames } = require("devtools/client/shared/source-utils");
+-const UNKNOWN_SOURCE_STRING = L10N.getStr("frame.unknownSource");
++const { L10N } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm").ViewHelpers;
++const l10n = new L10N("chrome://devtools/locale/components.properties");
+ 
+ const Frame = module.exports = createClass({
+   displayName: "Frame",
+ 
+   getDefaultProps() {
+     return {
+       showFunctionName: false,
+       showHost: false,
+@@ -34,29 +31,29 @@ const Frame = module.exports = createClass({
+     showFunctionName: PropTypes.bool,
+     // Option to display a host name after the source link.
+     showHost: PropTypes.bool,
+   },
+ 
+   render() {
+     let { onClick, frame, showFunctionName, showHost } = this.props;
+ 
+-    const { short, long, host } = getSourceNames(frame.source, UNKNOWN_SOURCE_STRING);
++    const { short, long, host } = getSourceNames(frame.source);
+ 
+     let tooltip = `${long}:${frame.line}`;
+     if (frame.column) {
+       tooltip += `:${frame.column}`;
+     }
+ 
+     let sourceString = `${long}:${frame.line}`;
+     if (frame.column) {
+       sourceString += `:${frame.column}`;
+     }
+ 
+-    let onClickTooltipString = L10N.getFormatStr("frame.viewsourceindebugger", sourceString);
++    let onClickTooltipString = l10n.getFormatStr("frame.viewsourceindebugger", sourceString);
+ 
+     let fields = [
+       dom.a({
+         className: "frame-link-filename",
+         onClick,
+         title: onClickTooltipString
+       }, short),
+       dom.span({ className: "frame-link-colon" }, ":"),
+diff --git a/devtools/client/shared/source-utils.js b/devtools/client/shared/source-utils.js
+index 7401168..575dcbe 100644
+--- a/devtools/client/shared/source-utils.js
++++ b/devtools/client/shared/source-utils.js
+@@ -1,18 +1,24 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+ 
+ const { URL } = require("sdk/url");
++const { Cu } = require("chrome");
++Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
++const STRINGS_URI = "chrome://devtools/locale/components.properties";
++const L10N = new ViewHelpers.L10N(STRINGS_URI);
++const UNKNOWN_SOURCE_STRING = L10N.getStr("frame.unknownSource");
+ 
+ // Character codes used in various parsing helper functions.
+ const CHAR_CODE_A = "a".charCodeAt(0);
+ const CHAR_CODE_C = "c".charCodeAt(0);
++const CHAR_CODE_D = "d".charCodeAt(0);
+ const CHAR_CODE_E = "e".charCodeAt(0);
+ const CHAR_CODE_F = "f".charCodeAt(0);
+ const CHAR_CODE_H = "h".charCodeAt(0);
+ const CHAR_CODE_I = "i".charCodeAt(0);
+ const CHAR_CODE_J = "j".charCodeAt(0);
+ const CHAR_CODE_L = "l".charCodeAt(0);
+ const CHAR_CODE_M = "m".charCodeAt(0);
+ const CHAR_CODE_O = "o".charCodeAt(0);
+@@ -21,16 +27,18 @@ const CHAR_CODE_R = "r".charCodeAt(0);
+ const CHAR_CODE_S = "s".charCodeAt(0);
+ const CHAR_CODE_T = "t".charCodeAt(0);
+ const CHAR_CODE_U = "u".charCodeAt(0);
+ const CHAR_CODE_COLON = ":".charCodeAt(0);
+ const CHAR_CODE_SLASH = "/".charCodeAt(0);
+ 
+ // The cache used in the `nsIURL` function.
+ const gURLStore = new Map();
++// The cache used in the `getSourceNames` function.
++const gSourceNamesStore = new Map();
+ 
+ /**
+  * Takes a string and returns an object containing all the properties
+  * available on an URL instance, with additional properties (fileName),
+  * Leverages caching.
+  *
+  * @TODO If loaded through Browser Loader, we can use the web API URL
+  * directly, giving us the same interface without needing the SDK --
+@@ -76,61 +84,106 @@ function parseURL(location) {
+   }
+ }
+ 
+ /**
+  * Parse a source into a short and long name as well as a host name.
+  *
+  * @param {String} source
+  *        The source to parse. Can be a URI or names like "(eval)" or "self-hosted".
+- * @param {String} unknownSourceString
+- *        The string to use if no valid source name can be generated.
+  * @return {Object}
+  *         An object with the following properties:
+  *           - {String} short: A short name for the source.
+- *           - {String} long: The full, long name for the source.
++ *             - "http://page.com/test.js#go?q=query" -> "test.js"
++ *           - {String} long: The full, long name for the source, with hash/query stripped.
++ *             - "http://page.com/test.js#go?q=query" -> "http://page.com/test.js"
+  *           - {String?} host: If available, the host name for the source.
++ *             - "http://page.com/test.js#go?q=query" -> "page.com"
+  */
+-function getSourceNames (source, unknownSourceString) {
++function getSourceNames (source) {
++  let data = gSourceNamesStore.get(source);
++
++  if (data) {
++    return data;
++  }
++
+   let short, long, host;
+   const sourceStr = source ? String(source) : "";
++
++  // If `data:...` uri
++  if (isDataScheme(sourceStr)) {
++    let commaIndex = sourceStr.indexOf(",");
++    if (commaIndex > -1) {
++      // The `short` name for a data URI becomes `data:` followed by the actual
++      // encoded content, omitting the MIME type, and charset.
++      let short = `data:${sourceStr.substring(commaIndex + 1)}`.slice(0, 100);
++      let result = { short, long: sourceStr };
++      gSourceNamesStore.set(source, result);
++      return result;
++    }
++  }
++
+   const parsedUrl = parseURL(sourceStr);
+ 
+   if (!parsedUrl) {
+     // Malformed URI.
+     long = sourceStr;
+     short = sourceStr.slice(0, 100);
+   } else {
+-    short = parsedUrl.fileName;
+-    long = parsedUrl.href;
+     host = parsedUrl.host;
++
++    long = parsedUrl.href;
++    if (parsedUrl.hash) {
++      long = long.replace(parsedUrl.hash, "");
++    }
++    if (parsedUrl.search) {
++      long = long.replace(parsedUrl.search, "");
++    }
++
++    short = parsedUrl.fileName;
++    // If `short` is just a slash, and we actually have a path,
++    // strip the slash and parse again to get a more useful short name.
++    // e.g. "http://foo.com/bar/" -> "bar", rather than "/"
++    if (short === "/" && parsedUrl.pathname !== "/") {
++      short = parseURL(long.replace(/\/$/, "")).fileName;
++    }
+   }
+ 
+   if (!short) {
+     if (!long) {
+-      long = unknownSourceString;
++      long = UNKNOWN_SOURCE_STRING;
+     }
+     short = long.slice(0, 100);
+   }
+ 
+-  return { short, long, host };
++  let result = { short, long, host };
++  gSourceNamesStore.set(source, result);
++  return result;
+ }
+ 
+ // For the functions below, we assume that we will never access the location
+ // argument out of bounds, which is indeed the vast majority of cases.
+ //
+ // They are written this way because they are hot. Each frame is checked for
+ // being content or chrome when processing the profile.
+ 
+ function isColonSlashSlash(location, i=0) {
+   return location.charCodeAt(++i) === CHAR_CODE_COLON &&
+          location.charCodeAt(++i) === CHAR_CODE_SLASH &&
+          location.charCodeAt(++i) === CHAR_CODE_SLASH;
+ }
+ 
++function isDataScheme(location, i=0) {
++  return location.charCodeAt(i)   === CHAR_CODE_D &&
++         location.charCodeAt(++i) === CHAR_CODE_A &&
++         location.charCodeAt(++i) === CHAR_CODE_T &&
++         location.charCodeAt(++i) === CHAR_CODE_A &&
++         location.charCodeAt(++i) === CHAR_CODE_COLON;
++}
++
+ function isContentScheme(location, i=0) {
+   let firstChar = location.charCodeAt(i);
+ 
+   switch (firstChar) {
+   case CHAR_CODE_H: // "http://" or "https://"
+     if (location.charCodeAt(++i) === CHAR_CODE_T &&
+         location.charCodeAt(++i) === CHAR_CODE_T &&
+         location.charCodeAt(++i) === CHAR_CODE_P) {
+@@ -203,8 +256,9 @@ function isChromeScheme(location, i=0) {
+     return false;
+   }
+ }
+ 
+ exports.parseURL = parseURL;
+ exports.getSourceNames = getSourceNames;
+ exports.isChromeScheme = isChromeScheme;
+ exports.isContentScheme = isContentScheme;
++exports.isDataScheme = isDataScheme;
+diff --git a/devtools/client/shared/test/unit/test_source-utils.js b/devtools/client/shared/test/unit/test_source-utils.js
+index ea92ce3..c31af83 100644
+--- a/devtools/client/shared/test/unit/test_source-utils.js
++++ b/devtools/client/shared/test/unit/test_source-utils.js
+@@ -52,26 +52,94 @@ add_task(function* () {
+   for (let url of CHROME_URLS) {
+     ok(sourceUtils.isChromeScheme(url), `${url} correctly identified as chrome scheme`);
+   }
+   for (let url of CONTENT_URLS) {
+     ok(!sourceUtils.isChromeScheme(url), `${url} correctly identified as not chrome scheme`);
+   }
+ });
+ 
++// Test `sourceUtils.isDataScheme`.
++add_task(function* () {
++  let dataURI = "data:text/html;charset=utf-8,<!DOCTYPE html></html>";
++  ok(sourceUtils.isDataScheme(dataURI), `${dataURI} correctly identified as data scheme`);
++
++  for (let url of CHROME_URLS) {
++    ok(!sourceUtils.isDataScheme(url), `${url} correctly identified as not data scheme`);
++  }
++  for (let url of CONTENT_URLS) {
++    ok(!sourceUtils.isDataScheme(url), `${url} correctly identified as not data scheme`);
++  }
++});
++
+ // Test `sourceUtils.getSourceNames`.
+ add_task(function* () {
+-  const url = "http://example.com:8888/foo/bar/baz.js";
+-  let results = sourceUtils.getSourceNames(url);
+-  equal(results.short, "baz.js");
+-  equal(results.long, url);
+-  equal(results.host, "example.com:8888");
+-
+-  results = sourceUtils.getSourceNames("self-hosted");
+-  equal(results.short, "self-hosted");
+-  equal(results.long, "self-hosted");
+-  equal(results.host, undefined);
+-
+-  results = sourceUtils.getSourceNames("", "<unknown>");
+-  equal(results.short, "<unknown>");
+-  equal(results.long, "<unknown>");
+-  equal(results.host, undefined);
++
++  // Check length
++  let longMalformedURL = `example.com${new Array(100).fill("/a").join("")}/file.js`;
++  ok(sourceUtils.getSourceNames(longMalformedURL).short.length <= 100,
++    "`short` names are capped at 100 characters");
++
++  testAbbreviation("self-hosted", "self-hosted", "self-hosted");
++  testAbbreviation("", "(unknown)", "(unknown)");
++
++  // Test shortening data URIs, stripping mime/charset
++  testAbbreviation("data:text/html;charset=utf-8,<!DOCTYPE html></html>",
++                   "data:<!DOCTYPE html></html>",
++                   "data:text/html;charset=utf-8,<!DOCTYPE html></html>");
++
++  let longDataURI = `data:image/png;base64,${new Array(100).fill("a").join("")}`;
++  let longDataURIShort = sourceUtils.getSourceNames(longDataURI).short;
++
++  // Test shortening data URIs and that the `short` result is capped
++  ok(longDataURIShort.length <= 100,
++    "`short` names are capped at 100 characters for data URIs");
++  equal(longDataURIShort.substr(0, 10), "data:aaaaa",
++    "truncated data URI short names still have `data:...`");
++
++  testAbbreviation("http://example.com/foo/bar/baz/boo.js",
++                   "boo.js",
++                   "http://example.com/foo/bar/baz/boo.js",
++                   "example.com");
++
++  // Check query and hash and port
++  testAbbreviation("http://example.com:8888/foo/bar/baz.js?q=query#go",
++                   "baz.js",
++                   "http://example.com:8888/foo/bar/baz.js",
++                   "example.com:8888");
++
++  // Trailing "/" with nothing beyond host
++  testAbbreviation("http://example.com/",
++                   "/",
++                   "http://example.com/",
++                   "example.com");
++
++  // Trailing "/"
++  testAbbreviation("http://example.com/foo/bar/",
++                   "bar",
++                   "http://example.com/foo/bar/",
++                   "example.com");
++
++  // Non-extension ending
++  testAbbreviation("http://example.com/bar",
++                   "bar",
++                   "http://example.com/bar",
++                   "example.com");
++
++  // Check query
++  testAbbreviation("http://example.com/foo.js?bar=1&baz=2",
++                   "foo.js",
++                   "http://example.com/foo.js",
++                   "example.com");
++
++  // Check query with trailing slash
++  testAbbreviation("http://example.com/foo/?bar=1&baz=2",
++                   "foo",
++                   "http://example.com/foo/",
++                   "example.com");
++
++  function testAbbreviation(source, short, long, host) {
++    let results = sourceUtils.getSourceNames(source);
++    equal(results.short, short, `${source} has correct "short" name`);
++    equal(results.long, long, `${source} has correct "long" name`);
++    equal(results.host, host, `${source} has correct "host" name`);
++  }
+ });
+diff --git a/devtools/client/shared/widgets/VariablesView.jsm b/devtools/client/shared/widgets/VariablesView.jsm
+index 7dfdafe..e8b79ac 100644
+--- a/devtools/client/shared/widgets/VariablesView.jsm
++++ b/devtools/client/shared/widgets/VariablesView.jsm
+@@ -19,16 +19,17 @@ const ITEM_FLASH_DURATION = 300 // ms
+ 
+ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+ Cu.import("resource://devtools/client/shared/widgets/ViewHelpers.jsm");
+ Cu.import("resource://devtools/shared/event-emitter.js");
+ Cu.import("resource://gre/modules/Task.jsm");
+ const { require } = Cu.import("resource://devtools/shared/Loader.jsm", {});
+ const DevToolsUtils = require("devtools/shared/DevToolsUtils");
+ const Services = require("Services");
++const { getSourceNames } = require("devtools/client/shared/source-utils");
+ const promise = require("promise");
+ 
+ XPCOMUtils.defineLazyModuleGetter(this, "PluralForm",
+   "resource://gre/modules/PluralForm.jsm");
+ 
+ XPCOMUtils.defineLazyServiceGetter(this, "clipboardHelper",
+   "@mozilla.org/widget/clipboardhelper;1",
+   "nsIClipboardHelper");
+@@ -3606,18 +3607,17 @@ VariablesView.stringifiers.byObjectKind = {
+ 
+     return aGrip.class + " " + VariablesView.getString(aGrip.preview.text);
+   },
+ 
+   ObjectWithURL: function(aGrip, {concise}) {
+     let result = aGrip.class;
+     let url = aGrip.preview.url;
+     if (!VariablesView.isFalsy({ value: url })) {
+-      result += " \u2192 " + WebConsoleUtils.abbreviateSourceURL(url,
+-                             { onlyCropQuery: !concise });
++      result += ` \u2192 ${getSourceNames(url)[concise ? "short" : "long"]}`;
+     }
+     return result;
+   },
+ 
+   // Stringifier for any kind of object.
+   Object: function(aGrip, {concise}) {
+     if (concise) {
+       return aGrip.class;
+@@ -3744,19 +3744,17 @@ VariablesView.stringifiers.byObjectKind = {
+ 
+   DOMNode: function(aGrip, {concise}) {
+     let {preview} = aGrip;
+ 
+     switch (preview.nodeType) {
+       case Ci.nsIDOMNode.DOCUMENT_NODE: {
+         let result = aGrip.class;
+         if (preview.location) {
+-          let location = WebConsoleUtils.abbreviateSourceURL(preview.location,
+-                                                            { onlyCropQuery: !concise });
+-          result += " \u2192 " + location;
++          result += ` \u2192 ${getSourceNames(preview.location)[concise ? "short" : "long"]}`;
+         }
+ 
+         return result;
+       }
+ 
+       case Ci.nsIDOMNode.ATTRIBUTE_NODE: {
+         let value = VariablesView.getString(preview.value, { noStringQuotes: true });
+         return preview.nodeName + '="' + escapeHTML(value) + '"';
+diff --git a/devtools/client/webconsole/console-output.js b/devtools/client/webconsole/console-output.js
+index 9b8c90f..d1318e1 100644
+--- a/devtools/client/webconsole/console-output.js
++++ b/devtools/client/webconsole/console-output.js
+@@ -22,16 +22,17 @@ loader.lazyRequireGetter(this, "ObjectClient", "devtools/shared/client/main", tr
+ 
+ const Heritage = require("sdk/core/heritage");
+ const URI = Cc["@mozilla.org/network/io-service;1"].getService(Ci.nsIIOService);
+ const XHTML_NS = "http://www.w3.org/1999/xhtml";
+ const XUL_NS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
+ const STRINGS_URI = "chrome://devtools/locale/webconsole.properties";
+ 
+ const WebConsoleUtils = require("devtools/shared/webconsole/utils").Utils;
++const { getSourceNames } = require("devtools/client/shared/source-utils");
+ const l10n = new WebConsoleUtils.L10n(STRINGS_URI);
+ 
+ const MAX_STRING_GRIP_LENGTH = 36;
+ const ELLIPSIS = Services.prefs.getComplexValue("intl.ellipsis", Ci.nsIPrefLocalizedString).data;
+ 
+ // Constants for compatibility with the Web Console output implementation before
+ // bug 778766.
+ // TODO: remove these once bug 778766 is fixed.
+@@ -2943,19 +2944,17 @@ Widgets.ObjectRenderers.add({
+ 
+     this._anchor(objectActor.class, {
+       className: "cm-variable",
+       appendTo: container,
+     });
+ 
+     if (!VariablesView.isFalsy({ value: url })) {
+       this._text(" \u2192 ", container);
+-      let shortUrl = WebConsoleUtils.abbreviateSourceURL(url, {
+-        onlyCropQuery: !this.options.concise
+-      });
++      let shortUrl = getSourceNames(url)[this.options.concise ? "short" : "long"];
+       this._anchor(shortUrl, { href: url, appendTo: container });
+     }
+ 
+     return container;
+   },
+ }); // Widgets.ObjectRenderers.byKind.ObjectWithURL
+ 
+ /**
+diff --git a/devtools/client/webconsole/test/browser.ini b/devtools/client/webconsole/test/browser.ini
+index 4963863..58efd92 100644
+--- a/devtools/client/webconsole/test/browser.ini
++++ b/devtools/client/webconsole/test/browser.ini
+@@ -189,17 +189,16 @@ skip-if = e10s # Bug 1042253 - webconsole tests disabled with e10s
+ [browser_jsterm_inspect.js]
+ skip-if = e10s && debug && os == 'win'
+ [browser_longstring_hang.js]
+ [browser_output_breaks_after_console_dir_uninspectable.js]
+ [browser_output_longstring_expand.js]
+ [browser_repeated_messages_accuracy.js]
+ [browser_result_format_as_string.js]
+ [browser_warn_user_about_replaced_api.js]
+-[browser_webconsole_abbreviate_source_url.js]
+ [browser_webconsole_allow_mixedcontent_securityerrors.js]
+ tags = mcb
+ [browser_webconsole_assert.js]
+ [browser_webconsole_block_mixedcontent_securityerrors.js]
+ tags = mcb
+ [browser_webconsole_bug_579412_input_focus.js]
+ [browser_webconsole_bug_580001_closing_after_completion.js]
+ [browser_webconsole_bug_580030_errors_after_page_reload.js]
+diff --git a/devtools/client/webconsole/test/browser_webconsole_abbreviate_source_url.js b/devtools/client/webconsole/test/browser_webconsole_abbreviate_source_url.js
+deleted file mode 100644
+index 67a49fb..0000000
+--- a/devtools/client/webconsole/test/browser_webconsole_abbreviate_source_url.js
++++ /dev/null
+@@ -1,25 +0,0 @@
+-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
+-/* vim: set ft=javascript ts=2 et sw=2 tw=80: */
+-/* Any copyright is dedicated to the Public Domain.
+- * http://creativecommons.org/publicdomain/zero/1.0/ */
+-
+-// Tests that source URLs are abbreviated properly for display on the right-
+-// hand side of the Web Console.
+-
+-"use strict";
+-
+-function test() {
+-  testAbbreviation("http://example.com/x.js", "x.js");
+-  testAbbreviation("http://example.com/foo/bar/baz/boo.js", "boo.js");
+-  testAbbreviation("http://example.com/foo/bar/", "bar");
+-  testAbbreviation("http://example.com/foo.js?bar=1&baz=2", "foo.js");
+-  testAbbreviation("http://example.com/foo/?bar=1&baz=2", "foo");
+-
+-  finishTest();
+-}
+-
+-function testAbbreviation(aFullURL, aAbbreviatedURL) {
+-  is(WebConsoleUtils.abbreviateSourceURL(aFullURL), aAbbreviatedURL, aFullURL +
+-     " is abbreviated to " + aAbbreviatedURL);
+-}
+-
+diff --git a/devtools/client/webconsole/test/test-console-output-dom-elements.html b/devtools/client/webconsole/test/test-console-output-dom-elements.html
+index c0605ae..0d101f9 100644
+--- a/devtools/client/webconsole/test/test-console-output-dom-elements.html
++++ b/devtools/client/webconsole/test/test-console-output-dom-elements.html
+@@ -1,22 +1,30 @@
+ <!DOCTYPE HTML>
+ <html dir="ltr" lang="en-US">
+ <head>
+   <meta charset="utf-8">
+-  <title>Test the web console output - 05</title>
++  <title>Test the web console output - 04</title>
+   <!--
+   - Any copyright is dedicated to the Public Domain.
+   - http://creativecommons.org/publicdomain/zero/1.0/
+   -->
+ </head>
+ <body class="body-class" id="body-id">
+   <p some-attribute="some-value">hello world!</p>
+   <p id="lots-of-attributes" a b c d e f g h i j k l m n></p>
+-  <iframe src="data:text/html,<p>hello from iframe</p>"></iframe>
++  <!--
++    Be sure we have a charset in our iframe's data URI, otherwise we get the following extra
++    console output message:
++    "The character encoding of a framed document was not declared. The document may appear different if viewed without the document framing it."
++    This wouldn't be a big deal, but when we look for a "<p>" in our `waitForMessage` helper,
++    this extra encoding warning line contains the data URI source, returning a message
++    that was unexpected
++  -->
++  <iframe src="data:text/html;charset=US-ASCII,<p>hello from iframe</p>"></iframe>
+   <div class="some       classname      here      with       more classnames here"></div>
+   <script type="text/javascript">
+ function testBodyNode() {
+   return document.body;
+ }
+ 
+ function testDocumentElement() {
+   return document.documentElement;
+diff --git a/devtools/client/webconsole/webconsole.js b/devtools/client/webconsole/webconsole.js
+index 0d71519..153dba6 100644
+--- a/devtools/client/webconsole/webconsole.js
++++ b/devtools/client/webconsole/webconsole.js
+@@ -5,16 +5,17 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ "use strict";
+ 
+ const {Cc, Ci, Cu} = require("chrome");
+ 
+ const {Utils: WebConsoleUtils, CONSOLE_WORKER_IDS} =
+   require("devtools/shared/webconsole/utils");
++const { getSourceNames } = require("devtools/client/shared/source-utils");
+ const promise = require("promise");
+ const Debugger = require("Debugger");
+ const Services = require("Services");
+ 
+ loader.lazyServiceGetter(this, "clipboardHelper",
+                          "@mozilla.org/widget/clipboardhelper;1",
+                          "nsIClipboardHelper");
+ loader.lazyRequireGetter(this, "EventEmitter", "devtools/shared/event-emitter");
+@@ -1741,17 +1742,17 @@ WebConsoleFrame.prototype = {
+     let duration = Math.round((end - start) * 100) / 100;
+     let node = this.document.createElementNS(XHTML_NS, "span");
+     if (sourceURL) {
+       node.textContent =
+         l10n.getFormatStr("reflow.messageWithLink", [duration]);
+       let a = this.document.createElementNS(XHTML_NS, "a");
+       a.href = "#";
+       a.draggable = "false";
+-      let filename = WebConsoleUtils.abbreviateSourceURL(sourceURL);
++      let filename = getSourceNames(sourceURL).short;
+       let functionName = message.functionName ||
+                          l10n.getStr("stacktrace.anonymousFunction");
+       a.textContent = l10n.getFormatStr("reflow.messageLinkText",
+                          [functionName, filename, sourceLine]);
+       this._addMessageLinkCallback(a, () => {
+         this.owner.viewSourceInDebugger(sourceURL, sourceLine);
+       });
+       node.appendChild(a);
+@@ -2500,22 +2501,21 @@ WebConsoleFrame.prototype = {
+     let isScratchpad = false;
+ 
+     if (/^Scratchpad\/\d+$/.test(url)) {
+       filename = url;
+       fullURL = url;
+       isScratchpad = true;
+     } else {
+       fullURL = url.split(" -> ").pop();
+-      filename = WebConsoleUtils.abbreviateSourceURL(fullURL);
++      filename = getSourceNames(fullURL).short;
+     }
+ 
+     filenameNode.className = "filename";
+-    filenameNode.textContent =
+-      " " + (filename || l10n.getStr("unknownLocation"));
++    filenameNode.textContent = ` ${filename}`;
+     locationNode.appendChild(filenameNode);
+ 
+     locationNode.href = isScratchpad || !fullURL ? "#" : fullURL;
+     locationNode.draggable = false;
+     if (target) {
+       locationNode.target = target;
+     }
+     locationNode.setAttribute("title", url);
+diff --git a/devtools/shared/webconsole/utils.js b/devtools/shared/webconsole/utils.js
+index 37380dc..cf6b50c 100644
+--- a/devtools/shared/webconsole/utils.js
++++ b/devtools/shared/webconsole/utils.js
+@@ -176,68 +176,16 @@ var WebConsoleUtils = {
+    */
+   getOuterWindowId: function WCU_getOuterWindowId(aWindow)
+   {
+     return aWindow.QueryInterface(Ci.nsIInterfaceRequestor).
+            getInterface(Ci.nsIDOMWindowUtils).outerWindowID;
+   },
+ 
+   /**
+-   * Abbreviates the given source URL so that it can be displayed flush-right
+-   * without being too distracting.
+-   *
+-   * @param string aSourceURL
+-   *        The source URL to shorten.
+-   * @param object [aOptions]
+-   *        Options:
+-   *        - onlyCropQuery: boolean that tells if the URL abbreviation function
+-   *        should only remove the query parameters and the hash fragment from
+-   *        the given URL.
+-   * @return string
+-   *         The abbreviated form of the source URL.
+-   */
+-  abbreviateSourceURL:
+-  function WCU_abbreviateSourceURL(aSourceURL, aOptions = {})
+-  {
+-    if (!aOptions.onlyCropQuery && aSourceURL.substr(0, 5) == "data:") {
+-      let commaIndex = aSourceURL.indexOf(",");
+-      if (commaIndex > -1) {
+-        aSourceURL = "data:" + aSourceURL.substring(commaIndex + 1);
+-      }
+-    }
+-
+-    // Remove any query parameters.
+-    let hookIndex = aSourceURL.indexOf("?");
+-    if (hookIndex > -1) {
+-      aSourceURL = aSourceURL.substring(0, hookIndex);
+-    }
+-
+-    // Remove any hash fragments.
+-    let hashIndex = aSourceURL.indexOf("#");
+-    if (hashIndex > -1) {
+-      aSourceURL = aSourceURL.substring(0, hashIndex);
+-    }
+-
+-    // Remove a trailing "/".
+-    if (aSourceURL[aSourceURL.length - 1] == "/") {
+-      aSourceURL = aSourceURL.replace(/\/+$/, "");
+-    }
+-
+-    // Remove all but the last path component.
+-    if (!aOptions.onlyCropQuery) {
+-      let slashIndex = aSourceURL.lastIndexOf("/");
+-      if (slashIndex > -1) {
+-        aSourceURL = aSourceURL.substring(slashIndex + 1);
+-      }
+-    }
+-
+-    return aSourceURL;
+-  },
+-
+-  /**
+    * Tells if the given function is native or not.
+    *
+    * @param function aFunction
+    *        The function you want to check if it is native or not.
+    * @return boolean
+    *         True if the given function is native, false otherwise.
+    */
+   isNativeFunction: function WCU_isNativeFunction(aFunction)
+-- 
+2.3.1
+
