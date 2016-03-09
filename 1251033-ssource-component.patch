@@ -1378,7 +1378,7 @@ index cccce69..8448798 100644
 +  } : null;
 +}
 diff --git a/devtools/client/webconsole/webconsole.js b/devtools/client/webconsole/webconsole.js
-index 153dba6..3fa8a94 100644
+index 153dba6..7deeaf2 100644
 --- a/devtools/client/webconsole/webconsole.js
 +++ b/devtools/client/webconsole/webconsole.js
 @@ -6,16 +6,19 @@
@@ -1401,7 +1401,18 @@ index 153dba6..3fa8a94 100644
                           "@mozilla.org/widget/clipboardhelper;1",
                           "nsIClipboardHelper");
  loader.lazyRequireGetter(this, "EventEmitter", "devtools/shared/event-emitter");
-@@ -224,16 +227,25 @@ function WebConsoleFrame(webConsoleOwner) {
+@@ -214,26 +217,36 @@ function WebConsoleFrame(webConsoleOwner) {
+   this._repeatNodes = {};
+   this._outputQueue = [];
+   this._itemDestroyQueue = [];
+   this._pruneCategoriesQueue = {};
+   this.filterPrefs = {};
+ 
+   this.output = new ConsoleOutput(this);
+ 
++  this.unmountMessage = this.unmountMessage.bind(this);
+   this._toggleFilter = this._toggleFilter.bind(this);
+   this.resize = this.resize.bind(this);
    this._onPanelSelected = this._onPanelSelected.bind(this);
    this._flushMessageQueue = this._flushMessageQueue.bind(this);
    this._onToolboxPrefChanged = this._onToolboxPrefChanged.bind(this);
@@ -1427,7 +1438,80 @@ index 153dba6..3fa8a94 100644
    /**
     * The WebConsole instance that owns this frame.
     * @see hudservice.js::WebConsole
-@@ -2473,90 +2485,66 @@ WebConsoleFrame.prototype = {
+@@ -1157,16 +1170,20 @@ WebConsoleFrame.prototype = {
+         lastMessage.getElementsByClassName("message-repeats")[0];
+       if (lastRepeatNode && lastRepeatNode._uid == uid) {
+         dupeNode = lastMessage;
+       }
+     }
+ 
+     if (dupeNode) {
+       this.mergeFilteredMessageNode(dupeNode);
++      // Even though this node was never rendered, we create the location
++      // nodes before rendering, so we still have to clean up any
++      // React components
++      this.unmountMessage(node);
+       return dupeNode;
+     }
+ 
+     return null;
+   },
+ 
+   /**
+    * Display cached messages that may have been collected before the UI is
+@@ -2266,16 +2283,32 @@ WebConsoleFrame.prototype = {
+                methodOrNode == this._reportLogMessage) {
+       if (WebConsoleUtils.isActorGrip(args[0].message)) {
+         this._releaseObject(args[0].message.actor);
+       }
+     }
+   },
+ 
+   /**
++   * Cleans up a message via a node that may or may not
++   * have actually been rendered in the DOM. Currently, only
++   * cleans up React components.
++   *
++   * @param nsIDOMNode node
++   *        The message node you want to clean up.
++   */
++  unmountMessage(node) {
++    // Select all `.message-location` within this node to ensure we get
++    // messages of stacktraces, which contain multiple location nodes.
++    for (let locationNode of node.querySelectorAll(".message-location")) {
++      this.ReactDOM.unmountComponentAtNode(locationNode);
++    }
++  },
++
++  /**
+    * Ensures that the number of message nodes of type category don't exceed that
+    * category's line limit by removing old messages as needed.
+    *
+    * @param integer category
+    *        The category of message nodes to prune if needed.
+    * @return number
+    *         The number of removed nodes.
+    */
+@@ -2319,16 +2352,18 @@ WebConsoleFrame.prototype = {
+     } else if (node.classList.contains("inlined-variables-view")) {
+       let view = node._variablesView;
+       if (view) {
+         view.controller.releaseActors();
+       }
+       node._variablesView = null;
+     }
+ 
++    this.unmountMessage(node);
++
+     node.remove();
+   },
+ 
+   /**
+    * Given a category and message body, creates a DOM node to represent an
+    * incoming message. The timestamp is automatically added.
+    *
+    * @param number category
+@@ -2473,90 +2508,66 @@ WebConsoleFrame.prototype = {
  
      return node;
    },
@@ -1552,7 +1636,27 @@ index 153dba6..3fa8a94 100644
     * Adjusts the category and severity of the given message.
     *
     * @param nsIDOMNode messageNode
-@@ -2797,16 +2785,18 @@ WebConsoleFrame.prototype = {
+@@ -2783,30 +2794,38 @@ WebConsoleFrame.prototype = {
+     this._repeatNodes = {};
+     this._outputQueue.forEach(this._destroyItem, this);
+     this._outputQueue = [];
+     this._itemDestroyQueue.forEach(this._destroyItem, this);
+     this._itemDestroyQueue = [];
+     this._pruneCategoriesQueue = {};
+     this.webConsoleClient.clearNetworkRequests();
+ 
++    // Unmount any currently living frame components in DOM, since
++    // currently we only clean up messages in `this.removeOutputMessage`,
++    // via `this.pruneOutputIfNecessary`.
++    let liveMessages = this.outputNode.querySelectorAll(".message");
++    Array.prototype.forEach.call(liveMessages, this.unmountMessage);
++
+     if (this._outputTimerInitialized) {
+       this._outputTimerInitialized = false;
+       this._outputTimer.cancel();
+     }
+     this._outputTimer = null;
+     if (this.jsterm) {
        this.jsterm.off("sidebar-opened", this.resize);
        this.jsterm.off("sidebar-closed", this.resize);
        this.jsterm.destroy();
