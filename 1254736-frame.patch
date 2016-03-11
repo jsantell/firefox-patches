@@ -1,0 +1,386 @@
+From: Jordan Santell <jsantell@mozilla.com>
+Date: Wed, 9 Mar 2016 14:11:13 -0800
+Subject: Bug 1254736 - Do not link to unlinkable frames in Frame component. r=fitzgen
+
+diff --git a/devtools/client/shared/components/frame.js b/devtools/client/shared/components/frame.js
+index df4cba5..c1e03e7 100644
+--- a/devtools/client/shared/components/frame.js
++++ b/devtools/client/shared/components/frame.js
+@@ -1,16 +1,16 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ "use strict";
+ 
+ const { DOM: dom, createClass, PropTypes } = require("devtools/client/shared/vendor/react");
+-const { getSourceNames } = require("devtools/client/shared/source-utils");
++const { getSourceNames, parseURL } = require("devtools/client/shared/source-utils");
+ const { L10N } = require("resource://devtools/client/shared/widgets/ViewHelpers.jsm").ViewHelpers;
+ const l10n = new L10N("chrome://devtools/locale/components.properties");
+ 
+ module.exports = createClass({
+   propTypes: {
+     // SavedFrame, or an object containing all the required properties.
+     frame: PropTypes.shape({
+       functionDisplayName: PropTypes.string,
+@@ -33,64 +33,77 @@ module.exports = createClass({
+     };
+   },
+ 
+   displayName: "Frame",
+ 
+   render() {
+     let { onClick, frame, showFunctionName, showHost } = this.props;
+     const { short, long, host } = getSourceNames(frame.source);
++    // Reparse the URL to determine if we should link this; `getSourceNames`
++    // has already cached this indirectly. We don't want to attempt to
++    // link to "self-hosted" and "(unknown)".
++    const isLinkable = !!parseURL(frame.source);
++    const elements = [];
+ 
+     let tooltip = long;
+     // Exclude all falsy values, including `0`, as even
+     // a number 0 for line doesn't make sense, and should not be displayed.
+-    if (frame.line) {
++    // If source isn't linkable, don't attempt to append line and column
++    // info, as this probably doesn't make sense.
++    if (isLinkable && frame.line) {
+       tooltip += `:${frame.line}`;
+       // Intentionally exclude 0
+       if (frame.column) {
+         tooltip += `:${frame.column}`;
+       }
+     }
+ 
+     let onClickTooltipString = l10n.getFormatStr("frame.viewsourceindebugger", tooltip);
+     let attributes = {
+       "data-url": long,
+       className: "frame-link",
+       title: tooltip,
+     };
+ 
+-    let fields = [
+-      dom.a({
++    if (isLinkable) {
++      elements.push(dom.a({
+         className: "frame-link-filename",
+         onClick,
+         title: onClickTooltipString
+-      }, short)
+-    ];
++      }, short));
++    } else {
++      // If source is not a URL (self-hosted, eval, etc.), don't make
++      // it an anchor link, as we can't link to it.
++      elements.push(dom.span({
++        className: "frame-link-filename"
++      }, short));
++    }
+ 
+-    // Intentionally exclude 0
+-    if (frame.line) {
+-      fields.push(dom.span({ className: "frame-link-colon" }, ":"));
+-      fields.push(dom.span({ className: "frame-link-line" }, frame.line));
++    // If source is linkable, and we have a line number > 0
++    if (isLinkable && frame.line) {
++      elements.push(dom.span({ className: "frame-link-colon" }, ":"));
++      elements.push(dom.span({ className: "frame-link-line" }, frame.line));
+       // Intentionally exclude 0
+       if (frame.column) {
+-        fields.push(dom.span({ className: "frame-link-colon" }, ":"));
+-        fields.push(dom.span({ className: "frame-link-column" }, frame.column));
++        elements.push(dom.span({ className: "frame-link-colon" }, ":"));
++        elements.push(dom.span({ className: "frame-link-column" }, frame.column));
+         // Add `data-column` attribute for testing
+         attributes["data-column"] = frame.column;
+       }
+ 
+       // Add `data-line` attribute for testing
+       attributes["data-line"] = frame.line;
+     }
+ 
+     if (showFunctionName && frame.functionDisplayName) {
+-      fields.unshift(
++      elements.unshift(
+         dom.span({ className: "frame-link-function-display-name" }, frame.functionDisplayName)
+       );
+     }
+ 
+     if (showHost && host) {
+-      fields.push(dom.span({ className: "frame-link-host" }, host));
++      elements.push(dom.span({ className: "frame-link-host" }, host));
+     }
+ 
+-    return dom.span(attributes, ...fields);
++    return dom.span(attributes, ...elements);
+   }
+ });
+diff --git a/devtools/client/shared/components/test/mochitest/head.js b/devtools/client/shared/components/test/mochitest/head.js
+index f58bce3..ff12058 100644
+--- a/devtools/client/shared/components/test/mochitest/head.js
++++ b/devtools/client/shared/components/test/mochitest/head.js
+@@ -132,38 +132,44 @@ var TEST_TREE = {
+     O: "N"
+   },
+   expanded: new Set(),
+ };
+ 
+ /**
+  * Frame
+  */
+-function checkFrameString (component, file, line, column) {
+-  let el = component.getDOMNode();
++function checkFrameString({ frame, file, line, column, shouldLink }) {
++  let el = frame.getDOMNode();
+   let $ = selector => el.querySelector(selector);
+ 
+   let $line = $(".frame-link-line");
+   let $column = $(".frame-link-column");
+ 
+   is($(".frame-link-filename").textContent, file);
+ 
+   is(el.getAttribute("data-line"), line ? `${line}` : null, "Expected `data-line` found");
+   is(el.getAttribute("data-column"), column ? `${column}` : null, "Expected `data-column` found");
+ 
++  if (shouldLink) {
++    ok($("a.frame-link-filename"), "Should have a linkable filename");
++  } else {
++    ok(!$("a.frame-link-filename"), "Should not have a linkable filename");
++  }
++
+   if (line != null) {
+     is(+$line.textContent, +line);
+   } else {
+     ok(!$line, "Should not have an element for `line`");
+   }
+ 
+   if (column != null) {
+     is(+$column.textContent, +column);
+   } else {
+     ok(!$column, "Should not have an element for `column`");
+   }
+ }
+ 
+ function checkFrameTooltips (component, mainTooltip, linkTooltip) {
+   let el = component.getDOMNode();
+   is(el.getAttribute("title"), mainTooltip);
+-  is(el.querySelector("a.frame-link-filename").getAttribute("title"), linkTooltip);
++  is(el.querySelector(".frame-link-filename").getAttribute("title"), linkTooltip);
+ }
+diff --git a/devtools/client/shared/components/test/mochitest/test_frame_01.html b/devtools/client/shared/components/test/mochitest/test_frame_01.html
+index 998f3be..bb4d1a4 100644
+--- a/devtools/client/shared/components/test/mochitest/test_frame_01.html
++++ b/devtools/client/shared/components/test/mochitest/test_frame_01.html
+@@ -27,86 +27,120 @@ window.onload = Task.async(function* () {
+       frame: {
+         source: "http://myfile.com/mahscripts.js",
+         line: 55,
+         column: 10,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+-    checkFrameString(frame, "mahscripts.js", 55, 10);
++    checkFrameString({
++      frame,
++      file: "mahscripts.js",
++      line: 55,
++      column: 10,
++      shouldLink: true,
++    });
+ 
+     // Check when there's no column
+     frame = ReactDOM.render(Frame({
+       frame: {
+         source: "http://myfile.com/mahscripts.js",
+         line: 55,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+-    checkFrameString(frame, "mahscripts.js", 55);
++    checkFrameString({
++      frame,
++      file: "mahscripts.js",
++      line: 55,
++      shouldLink: true,
++    });
+ 
+     // Check when column === 0
+     frame = ReactDOM.render(Frame({
+       frame: {
+         source: "http://myfile.com/mahscripts.js",
+         line: 55,
+         column: 0,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+-    checkFrameString(frame, "mahscripts.js", 55);
++    checkFrameString({
++      frame,
++      file: "mahscripts.js",
++      line: 55,
++      shouldLink: true,
++    });
+ 
+-    // Check when there's no parseable URL source
++    // Check when there's no parseable URL source;
++    // should not render line/columns
+     frame = ReactDOM.render(Frame({
+       frame: {
+         source: "self-hosted",
+         line: 1,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+-    checkFrameString(frame, "self-hosted",1);
++    checkFrameString({
++      frame,
++      file: "self-hosted",
++      shouldLink: false,
++    });
+ 
+-    // Check when there's no source
++    // Check when there's no source;
++    // should not render line/columns
+     frame = ReactDOM.render(Frame({
+       frame: {
+         line: 1,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+-    checkFrameString(frame, "(unknown)",1);
++    checkFrameString({
++      frame,
++      file: "(unknown)",
++      shouldLink: false,
++    });
+ 
+     // Check when there's a column, but no number;
+     // no line/column info should render
+     frame = ReactDOM.render(Frame({
+       frame: {
+         source: "http://myfile.com/mahscripts.js",
+         column: 55,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+-    checkFrameString(frame, "mahscripts.js");
++    checkFrameString({
++      frame,
++      file: "mahscripts.js",
++      shouldLink: true,
++    });
+ 
+     // Check when line is 0; this should be an invalid
+     // line option, so don't render line/column
+     frame = ReactDOM.render(Frame({
+       frame: {
+         source: "http://myfile.com/mahscripts.js",
+         line: 0,
+         column: 55,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+-    checkFrameString(frame, "mahscripts.js");
++    checkFrameString({
++      frame,
++      file: "mahscripts.js",
++      shouldLink: true,
++    });
+ 
+   } catch (e) {
+     ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
+   } finally {
+     SimpleTest.finish();
+   }
+ });
+ </script>
+diff --git a/devtools/client/shared/components/test/mochitest/test_frame_02.html b/devtools/client/shared/components/test/mochitest/test_frame_02.html
+index 830f087..a14656a 100644
+--- a/devtools/client/shared/components/test/mochitest/test_frame_02.html
++++ b/devtools/client/shared/components/test/mochitest/test_frame_02.html
+@@ -53,30 +53,30 @@ window.onload = Task.async(function* () {
+       frame: {
+         source: "self-hosted",
+         line: 1,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+     checkFrameTooltips(frame,
+-      "self-hosted:1",
+-      "View source in Debugger → self-hosted:1");
++      "self-hosted",
++      null);
+ 
+     // Check when there's no source
+     frame = ReactDOM.render(Frame({
+       frame: {
+         line: 1,
+       },
+       onClick: ()=>{},
+     }), window.document.body);
+     yield forceRender(frame);
+     checkFrameTooltips(frame,
+-      "(unknown):1",
+-      "View source in Debugger → (unknown):1");
++      "(unknown)",
++      null);
+ 
+   } catch(e) {
+     ok(false, "Got an error: " + DevToolsUtils.safeErrorString(e));
+   } finally {
+     SimpleTest.finish();
+   }
+ });
+ </script>
+diff --git a/devtools/client/themes/components-frame.css b/devtools/client/themes/components-frame.css
+index d81b04a..c2ebab7 100644
+--- a/devtools/client/themes/components-frame.css
++++ b/devtools/client/themes/components-frame.css
+@@ -16,29 +16,30 @@
+ .focused .frame-link-filename,
+ .focused .frame-link-column,
+ .focused .frame-link-line,
+ .focused .frame-link-host,
+ .focused .frame-link-colon {
+   color: var(--theme-selection-color);
+ }
+ 
+-.frame-link a.frame-link-filename {
+-  color: var(--theme-highlight-blue);
+-  cursor: pointer;
++.frame-link .frame-link-filename {
+   text-overflow: ellipsis;
+   overflow: hidden;
+   flex: 1;
+   text-align: right;
+   /* overrides styling some tools have with anchors */
+   text-decoration: none;
+   font-style: normal;
+ }
+-
+-.frame-link .frame-link-filename:hover {
++.frame-link a.frame-link-filename {
++  cursor: pointer;
++  color: var(--theme-highlight-blue);
++}
++.frame-link a.frame-link-filename:hover {
+   text-decoration: underline;
+ }
+ 
+ .frame-link .frame-link-host {
+   margin-inline-start: 5px;
+   font-size: 90%;
+   color: var(--theme-content-color2);
+ }
+-- 
+2.3.1
+
