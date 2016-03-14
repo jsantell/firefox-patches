@@ -1,17 +1,17 @@
 From: Jordan Santell <jsantell@mozilla.com>
-Date: Tue, 9 Feb 2016 16:03:30 -0800
+Date: Mon, 14 Mar 2016 15:17:38 -0700
 Subject: Bug 1177279 - Create a SourceLocationController to manage the state of updating sources for source mapping. r=jlong,jryans
 
 diff --git a/devtools/client/framework/moz.build b/devtools/client/framework/moz.build
-index b86982d..a3e107e 100644
+index b5d645d..e825fbc 100644
 --- a/devtools/client/framework/moz.build
 +++ b/devtools/client/framework/moz.build
-@@ -9,15 +9,16 @@ TEST_HARNESS_FILES.xpcshell.devtools.client.framework.test += [
-     'test/shared-redux-head.js',
- ]
+@@ -11,15 +11,16 @@ TEST_HARNESS_FILES.xpcshell.devtools.client.framework.test += [
  
  DevToolsModules(
      'attach-thread.js',
+     'devtools-browser.js',
+     'devtools.js',
      'gDevTools.jsm',
      'selection.js',
      'sidebar.js',
@@ -167,10 +167,10 @@ index 0000000..e35cd32
 +exports.resolveLocation = resolveLocation;
 +exports.isSourceRelated = isSourceRelated;
 diff --git a/devtools/client/framework/target.js b/devtools/client/framework/target.js
-index 3ffe04c..51e15d3 100644
+index b8f96b6..84037a0 100644
 --- a/devtools/client/framework/target.js
 +++ b/devtools/client/framework/target.js
-@@ -389,16 +389,17 @@ TabTarget.prototype = {
+@@ -392,16 +392,17 @@ TabTarget.prototype = {
      let attachTab = () => {
        this._client.attachTab(this._form.actor, (response, tabClient) => {
          if (!tabClient) {
@@ -188,7 +188,7 @@ index 3ffe04c..51e15d3 100644
        if (!consoleClient) {
          this._remote.reject("Unable to attach to the console");
          return;
-@@ -490,26 +491,32 @@ TabTarget.prototype = {
+@@ -493,26 +494,32 @@ TabTarget.prototype = {
        }
      };
      this.client.addListener("tabNavigated", this._onTabNavigated);
@@ -221,7 +221,7 @@ index 3ffe04c..51e15d3 100644
    handleEvent: function(event) {
      switch (event.type) {
        case "TabClose":
-@@ -595,16 +602,30 @@ TabTarget.prototype = {
+@@ -598,16 +605,30 @@ TabTarget.prototype = {
      this._remote = null;
      this._root = null;
    },
@@ -253,7 +253,7 @@ index 3ffe04c..51e15d3 100644
   *        The TabTarget instance to work with.
   */
 diff --git a/devtools/client/framework/test/browser.ini b/devtools/client/framework/test/browser.ini
-index f5c99fd..4505432 100644
+index bdcb18d..b53abeb 100644
 --- a/devtools/client/framework/test/browser.ini
 +++ b/devtools/client/framework/test/browser.ini
 @@ -2,16 +2,17 @@
@@ -274,7 +274,7 @@ index f5c99fd..4505432 100644
    doc_viewsource.html
    browser_toolbox_options_enable_serviceworkers_testing_frame_script.js
    browser_toolbox_options_enable_serviceworkers_testing.html
-@@ -20,16 +21,18 @@ support-files =
+@@ -21,16 +22,18 @@ support-files =
  [browser_devtools_api.js]
  [browser_devtools_api_destroy.js]
  [browser_dynamic_tool_enabling.js]
@@ -518,10 +518,10 @@ index 0000000..ccf8d54
 +function bar(c, d) { return c - d; }
 +foo();
 diff --git a/devtools/client/framework/test/shared-head.js b/devtools/client/framework/test/shared-head.js
-index a00592d..b57e7fa 100644
+index 6c9ad61..04a4fba 100644
 --- a/devtools/client/framework/test/shared-head.js
 +++ b/devtools/client/framework/test/shared-head.js
-@@ -192,16 +192,17 @@ function waitForTick() {
+@@ -213,16 +213,17 @@ function waitForTick() {
   * @param {String} hostType Optional. The type of toolbox host to be used.
   * @return {Promise} Resolves with the toolbox, when it has been opened.
   */
@@ -539,7 +539,7 @@ index a00592d..b57e7fa 100644
        info("Toolbox is already opened");
        return toolbox;
      }
-@@ -237,8 +238,50 @@ var openNewTabAndToolbox = Task.async(function*(url, toolId, hostType) {
+@@ -258,8 +259,50 @@ var openNewTabAndToolbox = Task.async(function*(url, toolId, hostType) {
   * @return {Promise} Resolves when the toolbox and tab have been destroyed and
   * closed.
   */
@@ -591,10 +591,10 @@ index a00592d..b57e7fa 100644
 +  });
 +}
 diff --git a/devtools/client/shared/frame-script-utils.js b/devtools/client/shared/frame-script-utils.js
-index 472c123..efa8cd8 100644
+index f6abce9..494fb37 100644
 --- a/devtools/client/shared/frame-script-utils.js
 +++ b/devtools/client/shared/frame-script-utils.js
-@@ -122,18 +122,17 @@ addMessageListener("devtools:test:profiler", function ({ data: { method, args, i
+@@ -119,18 +119,17 @@ addMessageListener("devtools:test:profiler", function ({ data: { method, args, i
    let result = nsIProfilerModule[method](...args);
    sendAsyncMessage("devtools:test:profiler:response", {
      data: result,
@@ -615,10 +615,10 @@ index 472c123..efa8cd8 100644
  
  addEventListener("load", function() {
 diff --git a/devtools/server/actors/script.js b/devtools/server/actors/script.js
-index 8a1a916..6aa10fa2 100644
+index c2fe9c6..77e2878 100644
 --- a/devtools/server/actors/script.js
 +++ b/devtools/server/actors/script.js
-@@ -433,17 +433,17 @@ function ThreadActor(aParent, aGlobal)
+@@ -432,17 +432,17 @@ function ThreadActor(aParent, aGlobal)
    // A map of actorID -> actor for breakpoints created and managed by the
    // server.
    this._hiddenBreakpoints = new Map();
@@ -637,7 +637,7 @@ index 8a1a916..6aa10fa2 100644
    this._onWindowReady = this._onWindowReady.bind(this);
    events.on(this._parent, "window-ready", this._onWindowReady);
    // Set a wrappedJSObject property so |this| can be sent via the observer svc
-@@ -579,16 +579,18 @@ ThreadActor.prototype = {
+@@ -578,16 +578,18 @@ ThreadActor.prototype = {
      }
  
      // Blow away our source actor ID store because those IDs are only
@@ -656,7 +656,7 @@ index 8a1a916..6aa10fa2 100644
        this._prettyPrintWorker.destroy();
        this._prettyPrintWorker = null;
      }
-@@ -619,19 +621,18 @@ ThreadActor.prototype = {
+@@ -618,19 +620,18 @@ ThreadActor.prototype = {
                 message: "Current state is " + this.state };
      }
  
@@ -678,7 +678,7 @@ index 8a1a916..6aa10fa2 100644
        connection: this.conn,
        thread: this
      });
-@@ -1883,22 +1884,39 @@ ThreadActor.prototype = {
+@@ -1889,22 +1890,39 @@ ThreadActor.prototype = {
     *        The source script that has been loaded into a debuggee compartment.
     * @param aGlobal Debugger.Object
     *        A Debugger.Object instance whose referent is the global object.
@@ -722,7 +722,7 @@ index 8a1a916..6aa10fa2 100644
    _restoreBreakpoints: function () {
      if (this.breakpointActorMap.size === 0) {
        return;
-@@ -2013,17 +2031,17 @@ ThreadActor.prototype.requestTypes = {
+@@ -2019,17 +2037,17 @@ ThreadActor.prototype.requestTypes = {
    "resume": ThreadActor.prototype.onResume,
    "clientEvaluate": ThreadActor.prototype.onClientEvaluate,
    "frames": ThreadActor.prototype.onFrames,
@@ -741,13 +741,17 @@ index 8a1a916..6aa10fa2 100644
   * Creates a PauseActor.
   *
   * PauseActors exist for the lifetime of a given debuggee pause.  Used to
-@@ -2196,20 +2214,20 @@ SourceActor.prototype = {
-   actorPrefix: "source",
- 
-   _oldSourceMap: null,
-   _init: null,
-   _addonID: null,
-   _addonPath: null,
+diff --git a/devtools/server/actors/source.js b/devtools/server/actors/source.js
+index bfc1856..f8eec67 100644
+--- a/devtools/server/actors/source.js
++++ b/devtools/server/actors/source.js
+@@ -164,20 +164,20 @@ let SourceActor = ActorClass({
+         DevToolsUtils.reportException("SourceActor", error);
+       });
+     } else {
+       this._init = null;
+     }
+   },
  
    get isSourceMapped() {
 -    return !this.isInlineSource && (
@@ -764,7 +768,8 @@ index 8a1a916..6aa10fa2 100644
  
    get threadActor() { return this._threadActor; },
    get sources() { return this._threadActor.sources; },
-@@ -2239,20 +2257,22 @@ SourceActor.prototype = {
+@@ -206,21 +206,23 @@ let SourceActor = ActorClass({
+     // that doesn't have either
      let introductionUrl = null;
      if (source && source.introductionScript) {
        introductionUrl = source.introductionScript.source.url;
@@ -772,8 +777,8 @@ index 8a1a916..6aa10fa2 100644
  
      return {
        actor: this.actorID,
-       url: this.url ? this.url.split(" -> ").pop() : null,
 +      generatedUrl: this.generatedSource ? this.generatedSource.url : null,
+       url: this.url ? this.url.split(" -> ").pop() : null,
        addonID: this._addonID,
        addonPath: this._addonPath,
        isBlackBoxed: this.threadActor.sources.isBlackBoxed(this.url),
@@ -788,7 +793,7 @@ index 8a1a916..6aa10fa2 100644
      if (this.registeredPool && this.registeredPool.sourceActors) {
        delete this.registeredPool.sourceActors[this.actorID];
 diff --git a/devtools/server/actors/utils/TabSources.js b/devtools/server/actors/utils/TabSources.js
-index 4020d71..9e34cf2 100644
+index 98790ac..e8d80a7d 100644
 --- a/devtools/server/actors/utils/TabSources.js
 +++ b/devtools/server/actors/utils/TabSources.js
 @@ -241,16 +241,17 @@ TabSources.prototype = {
@@ -809,7 +814,7 @@ index 4020d71..9e34cf2 100644
     *
     * @param String aURL
     *        The URL to test.
-@@ -540,16 +541,17 @@ TabSources.prototype = {
+@@ -552,16 +553,17 @@ TabSources.prototype = {
        // just make a fake URL and stick the sourcemap there.
        url = "internal://sourcemap" + (this._anonSourceMapId++) + '/';
      }
@@ -828,7 +833,7 @@ index 4020d71..9e34cf2 100644
     * @param Debugger.Frame aFrame
     *        The frame whose location we are getting.
 diff --git a/devtools/server/actors/webbrowser.js b/devtools/server/actors/webbrowser.js
-index 8d309ea..25c21e8 100644
+index d035b76..0642d4d 100644
 --- a/devtools/server/actors/webbrowser.js
 +++ b/devtools/server/actors/webbrowser.js
 @@ -4,17 +4,19 @@
@@ -852,7 +857,7 @@ index 8d309ea..25c21e8 100644
  
  Cu.import("resource://gre/modules/XPCOMUtils.jsm");
  
-@@ -1887,30 +1889,68 @@ TabActor.prototype = {
+@@ -1898,31 +1900,69 @@ TabActor.prototype = {
      if (aName in this._extraActors) {
        const actor = this._extraActors[aName];
        if (this._tabActorPool.has(actor)) {
@@ -906,6 +911,7 @@ index 8d309ea..25c21e8 100644
  TabActor.prototype.requestTypes = {
    "attach": TabActor.prototype.onAttach,
    "detach": TabActor.prototype.onDetach,
+   "focus": TabActor.prototype.onFocus,
    "reload": TabActor.prototype.onReload,
    "navigateTo": TabActor.prototype.onNavigateTo,
    "reconfigure": TabActor.prototype.onReconfigure,
@@ -923,7 +929,7 @@ index 8d309ea..25c21e8 100644
   * <xul:browser> tab, or <html:iframe>.
   * Most of the implementation comes from TabActor.
 diff --git a/devtools/shared/client/main.js b/devtools/shared/client/main.js
-index bad301d..4d05591 100644
+index ee0429a..812e5a2 100644
 --- a/devtools/shared/client/main.js
 +++ b/devtools/shared/client/main.js
 @@ -173,16 +173,18 @@ const UnsolicitedNotifications = {
@@ -966,7 +972,7 @@ index bad301d..4d05591 100644
          : "REMOTE_";
        let histogramId = "DEVTOOLS_DEBUGGER_RDP_"
          + transportType + telemetry + "_MS";
-@@ -1363,17 +1365,30 @@ TabClient.prototype = {
+@@ -1370,17 +1372,30 @@ TabClient.prototype = {
    listWorkers: DebuggerClient.requester({
      type: "listWorkers"
    }, {
